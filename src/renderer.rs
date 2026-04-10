@@ -6,8 +6,10 @@ use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
-use crate::font::{FontSystem, RasterizedGlyph};
-use crate::terminal::{Color, Terminal};
+use crate::font::FontSystem;
+use crate::font::RasterizedGlyph;
+use crate::terminal::Color;
+use crate::terminal::Terminal;
 
 const ATLAS_SIZE: u32 = 1024;
 

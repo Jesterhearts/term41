@@ -5,16 +5,20 @@ mod terminal;
 
 use std::sync::Arc;
 
-use winit::application::ApplicationHandler;
-use winit::event::{ElementState, WindowEvent};
-use winit::event_loop::{ActiveEventLoop, ControlFlow, EventLoop};
-use winit::keyboard::{Key, NamedKey};
-use winit::window::{Window, WindowId};
-
 use font::FontSystem;
 use pty::Pty;
 use renderer::Renderer;
 use terminal::Terminal;
+use winit::application::ApplicationHandler;
+use winit::event::ElementState;
+use winit::event::WindowEvent;
+use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::ControlFlow;
+use winit::event_loop::EventLoop;
+use winit::keyboard::Key;
+use winit::keyboard::NamedKey;
+use winit::window::Window;
+use winit::window::WindowId;
 
 const INITIAL_COLS: u16 = 80;
 const INITIAL_ROWS: u16 = 24;

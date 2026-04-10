@@ -1,6 +1,16 @@
-use harfrust::{Direction, FontRef, ShaperData, UnicodeBuffer};
+use harfrust::Direction;
+use harfrust::FontRef;
+use harfrust::ShaperData;
+use harfrust::UnicodeBuffer;
+use raqote::DrawOptions;
+use raqote::DrawTarget;
+use raqote::PathBuilder;
+use raqote::SolidSource;
+use raqote::Source;
 use read_fonts::TableProvider;
-use read_fonts::tables::glyf::{CurvePoint, Glyph, SimpleGlyph};
+use read_fonts::tables::glyf::CurvePoint;
+use read_fonts::tables::glyf::Glyph;
+use read_fonts::tables::glyf::SimpleGlyph;
 use read_fonts::types::GlyphId;
 
 /// The embedded Fairfax HD font.
@@ -186,20 +196,70 @@ fn charmap_lookup(
 }
 
 // ---------------------------------------------------------------------------
-// Outline extraction: TrueType contours → line segments
+// Rasterization via raqote
 // ---------------------------------------------------------------------------
 
-struct Segment {
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
-}
-
-fn extract_segments(
+fn rasterize_simple_glyph(
     simple: &SimpleGlyph,
     scale: f32,
-) -> Vec<Segment> {
+) -> RasterizedGlyph {
+    // Snap bounding box to pixel grid.
+    let x_min = (simple.x_min() as f32 * scale).floor();
+    let y_min = (simple.y_min() as f32 * scale).floor();
+    let x_max = (simple.x_max() as f32 * scale).ceil();
+    let y_max = (simple.y_max() as f32 * scale).ceil();
+
+    // Pixel dimensions with 1px padding.
+    let width = (x_max - x_min) as i32 + 2;
+    let height = (y_max - y_min) as i32 + 2;
+
+    if width <= 0 || height <= 0 {
+        return RasterizedGlyph {
+            bitmap: vec![],
+            width: 0,
+            height: 0,
+            bearing_x: 0,
+            bearing_y: 0,
+        };
+    }
+
+    // Build a raqote path from the TrueType contours.
+    let path = build_path(simple, scale, x_min, y_max);
+
+    // Rasterize with raqote.
+    let mut dt = DrawTarget::new(width, height);
+    dt.fill(
+        &path,
+        &Source::Solid(SolidSource::from_unpremultiplied_argb(255, 255, 255, 255)),
+        &DrawOptions::default(),
+    );
+
+    // Extract alpha channel from raqote's ARGB output.
+    let pixels = dt.get_data();
+    let mut bitmap = vec![0u8; (width * height) as usize];
+    for (i, &pixel) in pixels.iter().enumerate() {
+        bitmap[i] = (pixel >> 24) as u8;
+    }
+
+    RasterizedGlyph {
+        bitmap,
+        width: width as u32,
+        height: height as u32,
+        bearing_x: x_min as i32,
+        bearing_y: y_max as i32,
+    }
+}
+
+/// Build a raqote Path from TrueType glyph contours.
+///
+/// Translates from font coordinates (Y-up) to bitmap coordinates (Y-down),
+/// offset so the glyph sits within the bitmap with 1px padding.
+fn build_path(
+    simple: &SimpleGlyph,
+    scale: f32,
+    x_min: f32,
+    y_max: f32,
+) -> raqote::Path {
     let points: Vec<CurvePoint> = simple.points().collect();
     let contour_ends: Vec<usize> = simple
         .end_pts_of_contours()
@@ -207,42 +267,49 @@ fn extract_segments(
         .map(|e| e.get() as usize)
         .collect();
 
-    let mut segments = Vec::new();
+    let mut pb = PathBuilder::new();
     let mut contour_start = 0;
 
     for &contour_end in &contour_ends {
         let contour = &points[contour_start..=contour_end];
-        flatten_contour(contour, scale, &mut segments);
+        add_contour_to_path(&mut pb, contour, scale, x_min, y_max);
         contour_start = contour_end + 1;
     }
 
-    segments
+    pb.finish()
 }
 
-fn flatten_contour(
+/// Convert a single TrueType contour into raqote path commands.
+fn add_contour_to_path(
+    pb: &mut PathBuilder,
     contour: &[CurvePoint],
     scale: f32,
-    segments: &mut Vec<Segment>,
+    x_min: f32,
+    y_max: f32,
 ) {
     if contour.is_empty() {
         return;
     }
 
+    // Transform a font-coordinate point to bitmap coordinates.
+    let tx = |p: &CurvePoint| -> (f32, f32) {
+        let x = p.x as f32 * scale - x_min + 1.0;
+        let y = y_max - p.y as f32 * scale + 1.0;
+        (x, y)
+    };
+
     // TrueType contours: on-curve points are endpoints, off-curve points are
     // quadratic Bézier control points. Two consecutive off-curve points imply
     // an on-curve point at their midpoint.
 
-    // Build an expanded point list with implicit on-curve points inserted.
+    // Build expanded point list with implicit on-curve midpoints inserted.
     let mut expanded: Vec<(f32, f32, bool)> = Vec::new();
-    for i in 0..contour.len() {
-        let p = contour[i];
-        let px = p.x as f32 * scale;
-        let py = p.y as f32 * scale;
+    for p in contour {
+        let (px, py) = tx(p);
 
         if !expanded.is_empty() && !p.on_curve {
             let (_, _, prev_on) = *expanded.last().unwrap();
             if !prev_on {
-                // Two consecutive off-curve: insert implicit on-curve midpoint.
                 let (lx, ly, _) = *expanded.last().unwrap();
                 expanded.push(((lx + px) / 2.0, (ly + py) / 2.0, true));
             }
@@ -254,8 +321,7 @@ fn flatten_contour(
         return;
     }
 
-    // Handle wrap-around: the contour is closed, so we may need an implicit
-    // midpoint between the last and first points.
+    // Handle wrap-around between last and first points.
     let (fx, fy, first_on) = expanded[0];
     let (lx, ly, last_on) = *expanded.last().unwrap();
     if !last_on && !first_on {
@@ -266,201 +332,25 @@ fn flatten_contour(
     let start_idx = expanded.iter().position(|p| p.2).unwrap_or(0);
     let n = expanded.len();
 
-    let mut cur_x = expanded[start_idx].0;
-    let mut cur_y = expanded[start_idx].1;
-    let mut i = 1;
+    let (sx, sy, _) = expanded[start_idx];
+    pb.move_to(sx, sy);
 
+    let mut i = 1;
     while i < n {
         let idx = (start_idx + i) % n;
         let (px, py, on_curve) = expanded[idx];
 
         if on_curve {
-            // Line segment.
-            segments.push(Segment {
-                x0: cur_x,
-                y0: cur_y,
-                x1: px,
-                y1: py,
-            });
-            cur_x = px;
-            cur_y = py;
+            pb.line_to(px, py);
             i += 1;
         } else {
-            // Quadratic Bézier: current point → off-curve → next on-curve.
+            // Quadratic Bézier: off-curve control point → next on-curve endpoint.
             let next_idx = (start_idx + i + 1) % n;
             let (nx, ny, _) = expanded[next_idx];
-            flatten_quad(cur_x, cur_y, px, py, nx, ny, segments);
-            cur_x = nx;
-            cur_y = ny;
+            pb.quad_to(px, py, nx, ny);
             i += 2;
         }
     }
 
-    // Close the contour.
-    let (sx, sy, _) = expanded[start_idx];
-    if (cur_x - sx).abs() > 0.01 || (cur_y - sy).abs() > 0.01 {
-        segments.push(Segment {
-            x0: cur_x,
-            y0: cur_y,
-            x1: sx,
-            y1: sy,
-        });
-    }
-}
-
-/// Flatten a quadratic Bézier curve into line segments.
-fn flatten_quad(
-    x0: f32,
-    y0: f32,
-    cx: f32,
-    cy: f32,
-    x1: f32,
-    y1: f32,
-    segments: &mut Vec<Segment>,
-) {
-    // Adaptive subdivision: split until flat enough.
-    const TOLERANCE: f32 = 0.25;
-
-    // Flatness test: distance from control point to midpoint of the line.
-    let mx = (x0 + x1) * 0.5;
-    let my = (y0 + y1) * 0.5;
-    let dx = cx - mx;
-    let dy = cy - my;
-
-    if dx * dx + dy * dy <= TOLERANCE * TOLERANCE {
-        segments.push(Segment { x0, y0, x1, y1 });
-        return;
-    }
-
-    // De Casteljau subdivision at t=0.5.
-    let mid_cx0 = (x0 + cx) * 0.5;
-    let mid_cy0 = (y0 + cy) * 0.5;
-    let mid_cx1 = (cx + x1) * 0.5;
-    let mid_cy1 = (cy + y1) * 0.5;
-    let mid_x = (mid_cx0 + mid_cx1) * 0.5;
-    let mid_y = (mid_cy0 + mid_cy1) * 0.5;
-
-    flatten_quad(x0, y0, mid_cx0, mid_cy0, mid_x, mid_y, segments);
-    flatten_quad(mid_x, mid_y, mid_cx1, mid_cy1, x1, y1, segments);
-}
-
-// ---------------------------------------------------------------------------
-// Coverage-based rasterizer
-// ---------------------------------------------------------------------------
-
-fn rasterize_simple_glyph(
-    simple: &SimpleGlyph,
-    scale: f32,
-) -> RasterizedGlyph {
-    // Snap bounding box to pixel grid so the rasterized outline aligns with
-    // the same integer coordinates the renderer will use for placement.
-    let x_min = (simple.x_min() as f32 * scale).floor();
-    let y_min = (simple.y_min() as f32 * scale).floor();
-    let x_max = (simple.x_max() as f32 * scale).ceil();
-    let y_max = (simple.y_max() as f32 * scale).ceil();
-
-    // Pixel dimensions with 1px padding.
-    let width = (x_max - x_min) as u32 + 2;
-    let height = (y_max - y_min) as u32 + 2;
-
-    if width == 0 || height == 0 {
-        return RasterizedGlyph {
-            bitmap: vec![],
-            width: 0,
-            height: 0,
-            bearing_x: 0,
-            bearing_y: 0,
-        };
-    }
-
-    let segments = extract_segments(simple, scale);
-
-    // Coverage buffer: one f32 per pixel, accumulates signed area contributions.
-    let mut coverage = vec![0.0f32; (width * height) as usize];
-
-    // For each segment, compute per-pixel coverage contributions.
-    // x_min/y_max are already snapped to integers, so the outline lands on
-    // pixel boundaries consistently with the bearing values below.
-    for seg in &segments {
-        // Transform to bitmap coordinates (flip Y: font Y-up → bitmap Y-down).
-        let sx0 = seg.x0 - x_min + 1.0;
-        let sy0 = (y_max - seg.y0) + 1.0;
-        let sx1 = seg.x1 - x_min + 1.0;
-        let sy1 = (y_max - seg.y1) + 1.0;
-
-        rasterize_edge(&mut coverage, width, height, sx0, sy0, sx1, sy1);
-    }
-
-    // Accumulate coverage left-to-right and convert to alpha.
-    let mut bitmap = vec![0u8; (width * height) as usize];
-    for y in 0..height {
-        let row_start = (y * width) as usize;
-        let mut accum = 0.0f32;
-        for x in 0..width {
-            accum += coverage[row_start + x as usize];
-            let alpha = accum.abs().min(1.0);
-            bitmap[row_start + x as usize] = (alpha * 255.0) as u8;
-        }
-    }
-
-    RasterizedGlyph {
-        bitmap,
-        width,
-        height,
-        bearing_x: x_min as i32,
-        bearing_y: y_max as i32,
-    }
-}
-
-/// Rasterize a single edge into the coverage buffer using signed area.
-fn rasterize_edge(
-    coverage: &mut [f32],
-    width: u32,
-    height: u32,
-    x0: f32,
-    y0: f32,
-    x1: f32,
-    y1: f32,
-) {
-    // Skip horizontal edges — they don't contribute to coverage.
-    if (y1 - y0).abs() < 1e-6 {
-        return;
-    }
-
-    // Ensure we iterate top-to-bottom (increasing y in bitmap space).
-    let (x0, y0, x1, y1, dir) = if y0 <= y1 {
-        (x0, y0, x1, y1, 1.0f32)
-    } else {
-        (x1, y1, x0, y0, -1.0f32)
-    };
-
-    let dxdy = (x1 - x0) / (y1 - y0);
-    let row_start = (y0.floor() as i32).max(0) as u32;
-    let row_end = (y1.ceil() as i32).min(height as i32) as u32;
-
-    for row in row_start..row_end {
-        let ry = row as f32;
-
-        // Clamp the edge to this row's vertical span [ry, ry+1].
-        let ey0 = y0.max(ry);
-        let ey1 = y1.min(ry + 1.0);
-        if ey1 <= ey0 {
-            continue;
-        }
-
-        let dy = ey1 - ey0;
-
-        // X coordinates at the clamped y positions.
-        let ex0 = x0 + (ey0 - y0) * dxdy;
-        let ex1 = x0 + (ey1 - y0) * dxdy;
-
-        // The x range this edge fragment covers within the row.
-        let x_mid = (ex0 + ex1) * 0.5;
-
-        let col = x_mid.floor() as i32;
-        if col >= 0 && (col as u32) < width {
-            let idx = row * width + col as u32;
-            coverage[idx as usize] += dir * dy;
-        }
-    }
+    pb.close();
 }

@@ -1,6 +1,8 @@
 use std::ffi::CString;
 use std::io;
-use std::os::fd::{FromRawFd, OwnedFd, RawFd};
+use std::os::fd::FromRawFd;
+use std::os::fd::OwnedFd;
+use std::os::fd::RawFd;
 
 /// A pseudo-terminal connected to a child shell process.
 pub struct Pty {
@@ -23,7 +25,8 @@ impl Pty {
 
         let mut master_fd: RawFd = -1;
 
-        // Safety: forkpty is a well-defined POSIX call. We immediately exec in the child.
+        // Safety: forkpty is a well-defined POSIX call. We immediately exec in the
+        // child.
         let pid = unsafe {
             libc::forkpty(
                 &mut master_fd,
