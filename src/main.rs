@@ -51,7 +51,7 @@ impl App {
     }
 
     fn read_pty_output(&mut self) {
-        let mut buf = [0u8; 4096];
+        let mut buf = [0u8; 128 * 1024];
         while let Ok(n) = self.pty.read(&mut buf) {
             if n == 0 {
                 break;

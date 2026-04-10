@@ -11,6 +11,9 @@ pub struct SixelParser {
     state: State,
     palette: [(u8, u8, u8); 256],
     current_color: u8,
+    /// Pre-packed RGBA pixel for the current color (avoids palette lookup per
+    /// byte).
+    current_pixel: u32,
     width: u32,
     height: u32,
     pixels: Vec<u8>,
@@ -49,10 +52,15 @@ impl SixelParser {
         // P2: background select. 1 = transparent, 0 or 2 = fill with background.
         let transparent_bg = p[1] == 1;
 
-        let mut parser = Self {
+        let mut palette = [(0u8, 0u8, 0u8); 256];
+        init_default_palette(&mut palette);
+        let (r, g, b) = palette[0];
+
+        let parser = Self {
             state: State::Data,
-            palette: [(0, 0, 0); 256],
+            palette,
             current_color: 0,
+            current_pixel: u32::from_ne_bytes([r, g, b, 255]),
             width: 0,
             height: 0,
             pixels: Vec::new(),
@@ -65,8 +73,6 @@ impl SixelParser {
             transparent_bg,
             raster_seen: false,
         };
-
-        init_default_palette(&mut parser.palette);
 
         Some(parser)
     }
@@ -113,10 +119,16 @@ impl SixelParser {
         }
     }
 
+    #[inline(always)]
     fn process_data(
         &mut self,
         byte: u8,
     ) {
+        // Data bytes are the hot path — check first.
+        if byte >= 0x3F && byte <= 0x7E {
+            self.write_sixel(byte, 1);
+            return;
+        }
         match byte {
             b'"' => {
                 self.param_buf.clear();
@@ -131,20 +143,13 @@ impl SixelParser {
                 self.state = State::RepeatCount;
             }
             b'$' => {
-                // Carriage return — same sixel band.
                 self.cursor_x = 0;
             }
             b'-' => {
-                // New line — advance to next 6-pixel band.
                 self.cursor_x = 0;
                 self.cursor_y += 6;
             }
-            0x3F..=0x7E => {
-                self.write_sixel(byte, 1);
-            }
-            _ => {
-                // Ignore unknown bytes.
-            }
+            _ => {}
         }
     }
 
@@ -217,8 +222,10 @@ impl SixelParser {
                     self.palette[idx] = (r, g, b);
                 }
             }
-            // Always select the color.
+            // Always select the color and cache the pixel value.
             self.current_color = idx as u8;
+            let (r, g, b) = self.palette[idx];
+            self.current_pixel = u32::from_ne_bytes([r, g, b, 255]);
         }
 
         self.state = State::Data;
@@ -255,35 +262,42 @@ impl SixelParser {
         count: u32,
     ) {
         let value = byte - 0x3F;
-        let (r, g, b) = self.palette[self.current_color as usize];
-
-        for _ in 0..count {
-            // Ensure buffer is large enough.
-            let needed_x = self.cursor_x + 1;
-            let needed_y = self.cursor_y + 6;
-            if needed_x > self.width || needed_y > self.height {
-                self.grow_buffer(needed_x, needed_y);
-            }
-
-            // Write 6 vertical pixels.
-            for bit in 0..6u32 {
-                if value & (1 << bit) != 0 {
-                    let px = self.cursor_x;
-                    let py = self.cursor_y + bit;
-                    if px < self.width && py < self.height {
-                        let idx = ((py * self.width + px) * 4) as usize;
-                        self.pixels[idx] = r;
-                        self.pixels[idx + 1] = g;
-                        self.pixels[idx + 2] = b;
-                        self.pixels[idx + 3] = 255;
-                    }
-                }
-            }
-
-            self.cursor_x += 1;
-            self.max_x = self.max_x.max(self.cursor_x);
-            self.max_y = self.max_y.max(self.cursor_y + 6);
+        if value == 0 {
+            // All pixels off — just advance cursor.
+            self.cursor_x += count;
+            return;
         }
+
+        let pixel = self.current_pixel;
+        let end_x = self.cursor_x + count;
+        let end_y = self.cursor_y + 6;
+
+        // Ensure buffer fits the entire repeat span.
+        if !self.raster_seen || end_x > self.width || end_y > self.height {
+            if end_x > self.width || end_y > self.height {
+                self.grow_buffer(end_x, end_y);
+            }
+        }
+
+        let stride = self.width as usize;
+        let cx = self.cursor_x as usize;
+        let cy = self.cursor_y as usize;
+        let count = count as usize;
+        let pixels: &mut [u32] = bytemuck::cast_slice_mut(&mut self.pixels);
+
+        // For each set bit, write a horizontal run of `count` pixels.
+        for bit in 0..6usize {
+            if value & (1 << bit) == 0 {
+                continue;
+            }
+            let row = cy + bit;
+            let start = row * stride + cx;
+            pixels[start..start + count].fill(pixel);
+        }
+
+        self.cursor_x = end_x as u32;
+        self.max_x = self.max_x.max(end_x as u32);
+        self.max_y = self.max_y.max(end_y as u32);
     }
 
     fn grow_buffer(

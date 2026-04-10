@@ -95,6 +95,7 @@ pub struct Renderer {
     image_atlas_texture: wgpu::Texture,
     image_bind_group: wgpu::BindGroup,
 
+    char_to_glyph: HashMap<char, u16>,
     glyph_cache: HashMap<u16, AtlasEntry>,
     atlas_cursor_x: u32,
     atlas_cursor_y: u32,
@@ -501,6 +502,7 @@ impl Renderer {
             atlas_bind_group,
             image_atlas_texture,
             image_bind_group,
+            char_to_glyph: HashMap::new(),
             glyph_cache: HashMap::new(),
             atlas_cursor_x: 0,
             atlas_cursor_y: 0,
@@ -519,7 +521,7 @@ impl Renderer {
 
         // Pre-cache printable ASCII.
         for ch in ' '..='~' {
-            renderer.cache_glyph(font_system, ch);
+            renderer.lookup_glyph(font_system, ch);
         }
 
         renderer
@@ -549,16 +551,27 @@ impl Renderer {
         );
     }
 
-    fn cache_glyph(
+    /// Look up a glyph for a character. Uses char→glyph_index cache to skip
+    /// shaping on subsequent frames. Only calls FontSystem on first encounter.
+    fn lookup_glyph(
         &mut self,
         font_system: &FontSystem,
         ch: char,
     ) -> Option<AtlasEntry> {
-        let (glyph_index, glyph) = font_system.rasterize_char(ch);
-
-        if self.glyph_cache.contains_key(&glyph_index) {
+        // Fast path: char already mapped to a glyph index.
+        if let Some(&glyph_index) = self.char_to_glyph.get(&ch) {
             return self.glyph_cache.get(&glyph_index).copied();
         }
+
+        // Slow path: shape + rasterize + cache.
+        let glyph_index = font_system.shape_char(ch);
+        self.char_to_glyph.insert(ch, glyph_index);
+
+        if let Some(entry) = self.glyph_cache.get(&glyph_index).copied() {
+            return Some(entry);
+        }
+
+        let glyph = font_system.rasterize_glyph(glyph_index);
 
         if glyph.width == 0 || glyph.height == 0 {
             let entry = AtlasEntry {
@@ -736,13 +749,9 @@ impl Renderer {
                     continue;
                 }
 
-                let (glyph_index, _) = font_system.rasterize_char(cell.ch);
-                let entry = match self.glyph_cache.get(&glyph_index).copied() {
+                let entry = match self.lookup_glyph(font_system, cell.ch) {
                     Some(e) => e,
-                    None => match self.cache_glyph(font_system, cell.ch) {
-                        Some(e) => e,
-                        None => continue,
-                    },
+                    None => continue,
                 };
 
                 if entry.width == 0 || entry.height == 0 {

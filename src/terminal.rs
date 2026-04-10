@@ -1,3 +1,7 @@
+use std::collections::VecDeque;
+
+use crate::sixel;
+
 /// A single cell in the terminal grid.
 #[derive(Clone, Copy)]
 pub struct Cell {
@@ -76,8 +80,6 @@ fn ansi_color(index: u8) -> Color {
     }
 }
 
-use crate::sixel;
-
 /// A sixel image placed at a specific position in the terminal grid.
 pub struct PlacedImage {
     pub id: u64,
@@ -91,7 +93,7 @@ pub struct PlacedImage {
 pub struct Terminal {
     pub cols: u16,
     pub rows: u16,
-    pub cells: Vec<Cell>,
+    grid: VecDeque<Vec<Cell>>,
     pub cursor_col: u16,
     pub cursor_row: u16,
     fg: Color,
@@ -104,17 +106,24 @@ pub struct Terminal {
     cell_height: u32,
 }
 
+fn new_row(cols: u16) -> Vec<Cell> {
+    vec![Cell::default(); cols as usize]
+}
+
 impl Terminal {
     pub fn new(
         cols: u16,
         rows: u16,
         cell_height: u32,
     ) -> Self {
-        let size = cols as usize * rows as usize;
+        let mut grid = VecDeque::with_capacity(rows as usize);
+        for _ in 0..rows {
+            grid.push_back(new_row(cols));
+        }
         Self {
             cols,
             rows,
-            cells: vec![Cell::default(); size],
+            grid,
             cursor_col: 0,
             cursor_row: 0,
             fg: Color::default_fg(),
@@ -133,20 +142,20 @@ impl Terminal {
         cols: u16,
         rows: u16,
     ) {
-        let mut new_cells = vec![Cell::default(); cols as usize * rows as usize];
-        let copy_cols = self.cols.min(cols) as usize;
-        let copy_rows = self.rows.min(rows) as usize;
-
-        for row in 0..copy_rows {
-            let src_start = row * self.cols as usize;
-            let dst_start = row * cols as usize;
-            new_cells[dst_start..dst_start + copy_cols]
-                .copy_from_slice(&self.cells[src_start..src_start + copy_cols]);
+        // Adjust columns in existing rows.
+        for row in &mut self.grid {
+            row.resize(cols as usize, Cell::default());
+        }
+        // Add or remove rows.
+        while self.grid.len() < rows as usize {
+            self.grid.push_back(new_row(cols));
+        }
+        while self.grid.len() > rows as usize {
+            self.grid.pop_back();
         }
 
         self.cols = cols;
         self.rows = rows;
-        self.cells = new_cells;
         self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
         self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
     }
@@ -156,7 +165,7 @@ impl Terminal {
         col: u16,
         row: u16,
     ) -> &Cell {
-        &self.cells[row as usize * self.cols as usize + col as usize]
+        &self.grid[row as usize][col as usize]
     }
 
     fn cell_mut(
@@ -164,7 +173,7 @@ impl Terminal {
         col: u16,
         row: u16,
     ) -> &mut Cell {
-        &mut self.cells[row as usize * self.cols as usize + col as usize]
+        &mut self.grid[row as usize][col as usize]
     }
 
     /// Process raw bytes from the PTY through the vte parser.
@@ -172,9 +181,6 @@ impl Terminal {
         &mut self,
         data: &[u8],
     ) {
-        // vte::Parser borrows self mutably, but Perform callbacks also need
-        // mutable access to the terminal state. We work around this by
-        // temporarily taking the parser out.
         let mut parser = std::mem::replace(&mut self.parser, vte::Parser::new());
         parser.advance(self, data);
         self.parser = parser;
@@ -193,8 +199,7 @@ impl Terminal {
             }
         }
 
-        let idx = self.cursor_row as usize * self.cols as usize + self.cursor_col as usize;
-        self.cells[idx] = Cell {
+        self.grid[self.cursor_row as usize][self.cursor_col as usize] = Cell {
             ch,
             fg: self.fg,
             bg: self.bg,
@@ -203,11 +208,14 @@ impl Terminal {
     }
 
     fn scroll_up(&mut self) {
-        let cols = self.cols as usize;
-        self.cells.drain(0..cols);
-        self.cells
-            .extend(std::iter::repeat_n(Cell::default(), cols));
+        self.grid.pop_front();
+        self.grid.push_back(new_row(self.cols));
         self.scroll_count += 1;
+    }
+
+    fn scroll_down(&mut self) {
+        self.grid.pop_back();
+        self.grid.push_front(new_row(self.cols));
     }
 
     /// Remove images that have scrolled entirely off the top of the screen.
@@ -222,14 +230,6 @@ impl Terminal {
                 (img.image.height as i64 + cell_height as i64 - 1) / cell_height as i64;
             effective_row + image_rows > 0
         });
-    }
-
-    fn scroll_down(&mut self) {
-        let cols = self.cols as usize;
-        let len = self.cells.len();
-        self.cells.truncate(len - cols);
-        let new_row = vec![Cell::default(); cols];
-        self.cells.splice(0..0, new_row);
     }
 
     fn erase_in_display(
@@ -250,7 +250,9 @@ impl Terminal {
                 self.erase_in_line(1);
             }
             2 | 3 => {
-                self.cells.fill(Cell::default());
+                for row in &mut self.grid {
+                    row.fill(Cell::default());
+                }
             }
             _ => {}
         }
@@ -283,9 +285,7 @@ impl Terminal {
         &mut self,
         row: u16,
     ) {
-        let start = row as usize * self.cols as usize;
-        let end = start + self.cols as usize;
-        self.cells[start..end].fill(Cell::default());
+        self.grid[row as usize].fill(Cell::default());
     }
 
     fn erase_chars(
@@ -294,12 +294,8 @@ impl Terminal {
     ) {
         let row = self.cursor_row as usize;
         let col = self.cursor_col as usize;
-        let cols = self.cols as usize;
-        let end = (col + n).min(cols);
-        let base = row * cols;
-        for c in col..end {
-            self.cells[base + c] = Cell::default();
-        }
+        let end = (col + n).min(self.cols as usize);
+        self.grid[row][col..end].fill(Cell::default());
     }
 
     fn insert_lines(
@@ -307,17 +303,15 @@ impl Terminal {
         n: usize,
     ) {
         let row = self.cursor_row as usize;
-        let cols = self.cols as usize;
         let rows = self.rows as usize;
         let n = n.min(rows - row);
 
-        for r in (row + n..rows).rev() {
-            let src = (r - n) * cols;
-            let dst = r * cols;
-            self.cells.copy_within(src..src + cols, dst);
+        // Remove n rows from the bottom, insert n blank rows at cursor.
+        for _ in 0..n {
+            self.grid.pop_back();
         }
-        for r in row..row + n {
-            self.clear_row(r as u16);
+        for _ in 0..n {
+            self.grid.insert(row, new_row(self.cols));
         }
     }
 
@@ -326,17 +320,15 @@ impl Terminal {
         n: usize,
     ) {
         let row = self.cursor_row as usize;
-        let cols = self.cols as usize;
         let rows = self.rows as usize;
         let n = n.min(rows - row);
 
-        for r in row..rows - n {
-            let src = (r + n) * cols;
-            let dst = r * cols;
-            self.cells.copy_within(src..src + cols, dst);
+        // Remove n rows at cursor, add n blank rows at the bottom.
+        for i in (0..n).rev() {
+            self.grid.remove(row + i);
         }
-        for r in (rows - n)..rows {
-            self.clear_row(r as u16);
+        for _ in 0..n {
+            self.grid.push_back(new_row(self.cols));
         }
     }
 
@@ -344,34 +336,26 @@ impl Terminal {
         &mut self,
         n: usize,
     ) {
-        let row = self.cursor_row as usize;
+        let row = &mut self.grid[self.cursor_row as usize];
         let col = self.cursor_col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - col);
-        let base = row * cols;
 
-        self.cells
-            .copy_within(base + col + n..base + cols, base + col);
-        for c in (cols - n)..cols {
-            self.cells[base + c] = Cell::default();
-        }
+        row.copy_within(col + n..cols, col);
+        row[cols - n..].fill(Cell::default());
     }
 
     fn insert_chars(
         &mut self,
         n: usize,
     ) {
-        let row = self.cursor_row as usize;
+        let row = &mut self.grid[self.cursor_row as usize];
         let col = self.cursor_col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - col);
-        let base = row * cols;
 
-        self.cells
-            .copy_within(base + col..base + cols - n, base + col + n);
-        for c in col..col + n {
-            self.cells[base + c] = Cell::default();
-        }
+        row.copy_within(col..cols - n, col + n);
+        row[col..col + n].fill(Cell::default());
     }
 
     fn handle_sgr(
@@ -440,16 +424,13 @@ impl vte::Perform for Terminal {
                 self.cursor_col = 0;
             }
             0x08 => {
-                // Backspace.
                 self.cursor_col = self.cursor_col.saturating_sub(1);
             }
             b'\t' => {
                 let next = (self.cursor_col / 8 + 1) * 8;
                 self.cursor_col = next.min(self.cols - 1);
             }
-            0x07 | 0x00 => {
-                // Bell, Null — ignore.
-            }
+            0x07 | 0x00 => {}
             _ => {}
         }
     }
@@ -461,13 +442,9 @@ impl vte::Perform for Terminal {
         _ignore: bool,
         action: char,
     ) {
-        // DEC private modes (intermediates contains '?').
         if intermediates.contains(&b'?') {
-            // Cursor visibility, alt screen, etc. — ignore for now.
             return;
         }
-
-        // Other prefixed sequences we don't handle (e.g. '>' for DA2).
         if !intermediates.is_empty() {
             return;
         }
@@ -476,27 +453,22 @@ impl vte::Perform for Terminal {
 
         match action {
             'A' => {
-                // CUU — cursor up.
                 let n = p.first().copied().unwrap_or(1).max(1);
                 self.cursor_row = self.cursor_row.saturating_sub(n);
             }
             'B' => {
-                // CUD — cursor down.
                 let n = p.first().copied().unwrap_or(1).max(1);
                 self.cursor_row = (self.cursor_row + n).min(self.rows - 1);
             }
             'C' => {
-                // CUF — cursor forward.
                 let n = p.first().copied().unwrap_or(1).max(1);
                 self.cursor_col = (self.cursor_col + n).min(self.cols - 1);
             }
             'D' => {
-                // CUB — cursor back.
                 let n = p.first().copied().unwrap_or(1).max(1);
                 self.cursor_col = self.cursor_col.saturating_sub(n);
             }
             'H' | 'f' => {
-                // CUP — cursor position.
                 let row = p.first().copied().unwrap_or(1).max(1) - 1;
                 let col = p.get(1).copied().unwrap_or(1).max(1) - 1;
                 self.cursor_row = row.min(self.rows - 1);
@@ -514,12 +486,10 @@ impl vte::Perform for Terminal {
                 self.handle_sgr(params);
             }
             'd' => {
-                // VPA — line position absolute.
                 let row = p.first().copied().unwrap_or(1).max(1) - 1;
                 self.cursor_row = row.min(self.rows - 1);
             }
             'G' => {
-                // CHA — cursor character absolute.
                 let col = p.first().copied().unwrap_or(1).max(1) - 1;
                 self.cursor_col = col.min(self.cols - 1);
             }
@@ -555,9 +525,7 @@ impl vte::Perform for Terminal {
                     self.scroll_down();
                 }
             }
-            'r' | 'n' | 'c' => {
-                // DECSTBM, DSR, DA — ignore for now.
-            }
+            'r' | 'n' | 'c' => {}
             _ => {}
         }
     }
@@ -568,32 +536,25 @@ impl vte::Perform for Terminal {
         _ignore: bool,
         byte: u8,
     ) {
-        // Character set designation — ignore.
         if intermediates.first().is_some_and(|&b| b"()*+".contains(&b)) {
             return;
         }
 
         match byte {
             b'c' => {
-                // RIS — full reset.
                 let cols = self.cols;
                 let rows = self.rows;
                 *self = Terminal::new(cols, rows, self.cell_height);
             }
             b'M' => {
-                // RI — reverse index.
                 if self.cursor_row == 0 {
                     self.scroll_down();
                 } else {
                     self.cursor_row -= 1;
                 }
             }
-            b'7' | b'8' => {
-                // DECSC / DECRC — save/restore cursor. Ignore for now.
-            }
-            b'=' | b'>' => {
-                // DECKPAM / DECKPNM — keypad modes. Ignore.
-            }
+            b'7' | b'8' => {}
+            b'=' | b'>' => {}
             _ => {}
         }
     }
@@ -603,7 +564,6 @@ impl vte::Perform for Terminal {
         _params: &[&[u8]],
         _bell_terminated: bool,
     ) {
-        // OSC sequences (window title, etc.) — ignore for now.
     }
 
     fn hook(
@@ -629,7 +589,6 @@ impl vte::Perform for Terminal {
         if let Some(parser) = self.sixel_parser.take() {
             let image = parser.finish();
             if image.width > 0 && image.height > 0 {
-                // Advance cursor below the image.
                 let image_rows = image.height / self.cell_height;
                 let placed = PlacedImage {
                     id: self.next_image_id,
