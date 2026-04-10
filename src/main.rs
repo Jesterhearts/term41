@@ -109,8 +109,10 @@ impl ApplicationHandler for App {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size);
                     let (cols, rows) = self.font_system.grid_dimensions(size.width, size.height);
-                    self.terminal.resize(cols, rows);
-                    self.pty.resize(cols, rows);
+                    if cols != self.terminal.cols || rows != self.terminal.rows {
+                        self.terminal.resize(cols, rows);
+                        self.pty.resize(cols, rows);
+                    }
                 }
             }
 
