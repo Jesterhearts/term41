@@ -119,6 +119,10 @@ impl Row {
 }
 
 /// Terminal state: a grid of rows plus cursor position and attributes.
+///
+/// The grid contains both scrollback history and the visible area.
+/// Visible rows are the last `rows` entries in the grid. Scrollback
+/// rows sit before them, capped at `scrollback_limit`.
 pub struct Terminal {
     pub cols: u16,
     pub rows: u16,
@@ -133,6 +137,10 @@ pub struct Terminal {
     pub scroll_count: u64,
     next_image_id: u64,
     cell_height: u32,
+    scrollback_limit: u32,
+    /// How many rows the viewport is scrolled back from the bottom.
+    /// 0 = viewing the live terminal. Positive = scrolled into history.
+    pub viewport_offset: u32,
 }
 
 impl Terminal {
@@ -140,8 +148,9 @@ impl Terminal {
         cols: u16,
         rows: u16,
         cell_height: u32,
+        scrollback_limit: u32,
     ) -> Self {
-        let mut grid = VecDeque::with_capacity(rows as usize);
+        let mut grid = VecDeque::with_capacity(rows as usize + scrollback_limit as usize);
         for _ in 0..rows {
             grid.push_back(Row::new(cols));
         }
@@ -159,7 +168,50 @@ impl Terminal {
             scroll_count: 0,
             next_image_id: 0,
             cell_height,
+            scrollback_limit,
+            viewport_offset: 0,
         }
+    }
+
+    /// The number of scrollback rows currently stored.
+    pub fn scrollback_len(&self) -> usize {
+        self.grid.len().saturating_sub(self.rows as usize)
+    }
+
+    /// Returns the visible row at the given screen position (0 = top of
+    /// viewport).
+    pub fn visible_row(
+        &self,
+        screen_row: u16,
+    ) -> &Row {
+        let base = self.grid.len() - self.rows as usize - self.viewport_offset as usize;
+        &self.grid[base + screen_row as usize]
+    }
+
+    /// Scroll the viewport up (into history). Returns actual lines scrolled.
+    pub fn scroll_viewport_up(
+        &mut self,
+        lines: u32,
+    ) -> u32 {
+        let max = self.scrollback_len() as u32;
+        let delta = lines.min(max - self.viewport_offset);
+        self.viewport_offset += delta;
+        delta
+    }
+
+    /// Scroll the viewport down (toward live). Returns actual lines scrolled.
+    pub fn scroll_viewport_down(
+        &mut self,
+        lines: u32,
+    ) -> u32 {
+        let delta = lines.min(self.viewport_offset);
+        self.viewport_offset -= delta;
+        delta
+    }
+
+    /// Reset viewport to the bottom (live terminal).
+    pub fn reset_viewport(&mut self) {
+        self.viewport_offset = 0;
     }
 
     pub fn resize(
@@ -193,6 +245,14 @@ impl Terminal {
         self.parser = parser;
     }
 
+    /// Convert a cursor row (0-based within visible area) to a grid index.
+    fn active_row_index(
+        &self,
+        cursor_row: u16,
+    ) -> usize {
+        self.grid.len() - self.rows as usize + cursor_row as usize
+    }
+
     fn put_char(
         &mut self,
         ch: char,
@@ -206,7 +266,10 @@ impl Terminal {
             }
         }
 
-        let r = self.cursor_row as usize;
+        // New output resets viewport to bottom.
+        self.viewport_offset = 0;
+
+        let r = self.active_row_index(self.cursor_row);
         let c = self.cursor_col as usize;
         self.grid[r].chars[c] = ch;
         self.grid[r].fg[c] = self.fg;
@@ -215,9 +278,15 @@ impl Terminal {
     }
 
     fn scroll_up(&mut self) {
-        self.grid.pop_front();
+        // The top visible row moves into scrollback (stays in grid).
         self.grid.push_back(Row::new(self.cols));
         self.scroll_count += 1;
+
+        // Trim scrollback if over the limit.
+        let max_grid = self.rows as usize + self.scrollback_limit as usize;
+        if self.grid.len() > max_grid {
+            self.grid.pop_front();
+        }
     }
 
     fn scroll_down(&mut self) {
@@ -256,9 +325,8 @@ impl Terminal {
                 self.erase_in_line(1);
             }
             2 | 3 => {
-                for row in &mut self.grid {
-                    let n = row.chars.len();
-                    row.clear_range(0..n);
+                for r in 0..self.rows {
+                    self.clear_row(r);
                 }
             }
             _ => {}
@@ -269,7 +337,7 @@ impl Terminal {
         &mut self,
         mode: u16,
     ) {
-        let r = self.cursor_row as usize;
+        let r = self.active_row_index(self.cursor_row);
         match mode {
             0 => {
                 let start = self.cursor_col as usize;
@@ -291,15 +359,16 @@ impl Terminal {
         &mut self,
         row: u16,
     ) {
+        let r = self.active_row_index(row);
         let n = self.cols as usize;
-        self.grid[row as usize].clear_range(0..n);
+        self.grid[r].clear_range(0..n);
     }
 
     fn erase_chars(
         &mut self,
         n: usize,
     ) {
-        let r = self.cursor_row as usize;
+        let r = self.active_row_index(self.cursor_row);
         let col = self.cursor_col as usize;
         let end = (col + n).min(self.cols as usize);
         self.grid[r].clear_range(col..end);
@@ -309,15 +378,18 @@ impl Terminal {
         &mut self,
         n: usize,
     ) {
-        let row = self.cursor_row as usize;
+        let grid_row = self.active_row_index(self.cursor_row);
         let rows = self.rows as usize;
-        let n = n.min(rows - row);
+        let n = n.min(rows - self.cursor_row as usize);
 
-        for _ in 0..n {
-            self.grid.pop_back();
+        // Remove n rows from the bottom of visible area.
+        let bottom = self.grid.len();
+        for i in (0..n).rev() {
+            self.grid.remove(bottom - 1 - i);
         }
+        // Insert n blank rows at cursor position.
         for _ in 0..n {
-            self.grid.insert(row, Row::new(self.cols));
+            self.grid.insert(grid_row, Row::new(self.cols));
         }
     }
 
@@ -325,12 +397,12 @@ impl Terminal {
         &mut self,
         n: usize,
     ) {
-        let row = self.cursor_row as usize;
+        let grid_row = self.active_row_index(self.cursor_row);
         let rows = self.rows as usize;
-        let n = n.min(rows - row);
+        let n = n.min(rows - self.cursor_row as usize);
 
         for i in (0..n).rev() {
-            self.grid.remove(row + i);
+            self.grid.remove(grid_row + i);
         }
         for _ in 0..n {
             self.grid.push_back(Row::new(self.cols));
@@ -341,7 +413,7 @@ impl Terminal {
         &mut self,
         n: usize,
     ) {
-        let r = self.cursor_row as usize;
+        let r = self.active_row_index(self.cursor_row);
         let col = self.cursor_col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - col);
@@ -354,7 +426,7 @@ impl Terminal {
         &mut self,
         n: usize,
     ) {
-        let r = self.cursor_row as usize;
+        let r = self.active_row_index(self.cursor_row);
         let col = self.cursor_col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - col);
@@ -549,7 +621,7 @@ impl vte::Perform for Terminal {
             b'c' => {
                 let cols = self.cols;
                 let rows = self.rows;
-                *self = Terminal::new(cols, rows, self.cell_height);
+                *self = Terminal::new(cols, rows, self.cell_height, self.scrollback_limit);
             }
             b'M' => {
                 if self.cursor_row == 0 {

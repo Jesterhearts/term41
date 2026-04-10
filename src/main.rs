@@ -32,6 +32,7 @@ struct App {
     font_system: FontSystem,
     pty: Pty,
     opacity: f32,
+    modifiers: winit::keyboard::ModifiersState,
 }
 
 impl App {
@@ -39,15 +40,22 @@ impl App {
         pty: Pty,
         opacity: f32,
         fonts_config: Option<&str>,
+        scrollback_lines: u32,
     ) -> Self {
         let font_system = FontSystem::new(fonts_config);
         Self {
             window: None,
             renderer: None,
-            terminal: Terminal::new(INITIAL_COLS, INITIAL_ROWS, font_system.cell_height),
+            terminal: Terminal::new(
+                INITIAL_COLS,
+                INITIAL_ROWS,
+                font_system.cell_height,
+                scrollback_lines,
+            ),
             font_system,
             pty,
             opacity,
+            modifiers: winit::keyboard::ModifiersState::default(),
         }
     }
 
@@ -118,9 +126,31 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+            }
+
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
+                }
+
+                // Shift+PageUp/Down for scrollback navigation.
+                if self.modifiers.shift_key() {
+                    if let Key::Named(named) = &event.logical_key {
+                        match named {
+                            NamedKey::PageUp => {
+                                self.terminal.scroll_viewport_up(self.terminal.rows as u32);
+                                return;
+                            }
+                            NamedKey::PageDown => {
+                                self.terminal
+                                    .scroll_viewport_down(self.terminal.rows as u32);
+                                return;
+                            }
+                            _ => {}
+                        }
+                    }
                 }
 
                 let bytes = match &event.logical_key {
@@ -130,6 +160,7 @@ impl ApplicationHandler for App {
                 };
 
                 if let Some(bytes) = bytes {
+                    self.terminal.reset_viewport();
                     let _ = self.pty.write(&bytes);
                 }
             }
@@ -187,6 +218,11 @@ fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(pty, config.opacity, config.fonts.as_deref());
+    let mut app = App::new(
+        pty,
+        config.opacity,
+        config.fonts.as_deref(),
+        config.scrollback_lines,
+    );
     event_loop.run_app(&mut app).expect("run event loop");
 }

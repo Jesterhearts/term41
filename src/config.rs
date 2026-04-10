@@ -2,15 +2,19 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+const DEFAULT_SCROLLBACK: u32 = 10_000;
+
 #[derive(Deserialize)]
 struct ConfigFile {
     opacity: Option<f32>,
     fonts: Option<String>,
+    scrollback_lines: Option<u32>,
 }
 
 pub struct Config {
     pub opacity: f32,
     pub fonts: Option<String>,
+    pub scrollback_lines: u32,
 }
 
 impl Default for Config {
@@ -18,6 +22,7 @@ impl Default for Config {
         Self {
             opacity: 1.0,
             fonts: None,
+            scrollback_lines: DEFAULT_SCROLLBACK,
         }
     }
 }
@@ -44,6 +49,7 @@ pub fn load() -> Config {
     Config {
         opacity: file.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
         fonts: file.fonts,
+        scrollback_lines: file.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
     }
 }
 

@@ -716,7 +716,7 @@ impl Renderer {
             let y = row as f32 * cell_h;
 
             // Background quads for the whole row.
-            let grid_row = &terminal.grid[row as usize];
+            let grid_row = terminal.visible_row(row);
             for col in 0..terminal.cols {
                 let x = col as f32 * cell_w;
                 let bg_color = pack_color(&grid_row.bg[col as usize], self.bg_alpha);
