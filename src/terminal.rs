@@ -77,6 +77,8 @@ pub struct Row {
     pub chars: Vec<char>,
     pub fg: Vec<Color>,
     pub bg: Vec<Color>,
+    /// True if this row is a continuation of the previous row (soft wrap).
+    pub wrapped: bool,
 }
 
 impl Row {
@@ -86,16 +88,8 @@ impl Row {
             chars: vec![' '; n],
             fg: vec![Color::default_fg(); n],
             bg: vec![Color::default_bg(); n],
+            wrapped: false,
         }
-    }
-
-    fn resize(
-        &mut self,
-        cols: usize,
-    ) {
-        self.chars.resize(cols, ' ');
-        self.fg.resize(cols, Color::default_fg());
-        self.bg.resize(cols, Color::default_bg());
     }
 
     fn clear_range(
@@ -141,6 +135,76 @@ pub struct Terminal {
     /// How many rows the viewport is scrolled back from the bottom.
     /// 0 = viewing the live terminal. Positive = scrolled into history.
     pub viewport_offset: u32,
+}
+
+/// A logical line: the joined content of one or more soft-wrapped rows.
+struct LogicalLine {
+    chars: Vec<char>,
+    fg: Vec<Color>,
+    bg: Vec<Color>,
+}
+
+/// Reflow a grid to a new column width.
+/// Joins soft-wrapped rows into logical lines, then re-wraps them.
+fn reflow_grid(
+    old_grid: VecDeque<Row>,
+    new_cols: usize,
+) -> VecDeque<Row> {
+    // Phase 1: collect logical lines by joining soft-wrapped rows.
+    let mut lines: Vec<LogicalLine> = Vec::new();
+    for row in old_grid {
+        if row.wrapped && !lines.is_empty() {
+            // Continuation — append to the previous logical line.
+            let last = lines.last_mut().unwrap();
+            last.chars.extend_from_slice(&row.chars);
+            last.fg.extend_from_slice(&row.fg);
+            last.bg.extend_from_slice(&row.bg);
+        } else {
+            // New logical line.
+            lines.push(LogicalLine {
+                chars: row.chars,
+                fg: row.fg,
+                bg: row.bg,
+            });
+        }
+    }
+
+    // Phase 2: trim trailing spaces from each logical line so we don't
+    // create spurious wrapped rows from padding.
+    for line in &mut lines {
+        while line.chars.last() == Some(&' ') && line.chars.len() > 1 {
+            line.chars.pop();
+            line.fg.pop();
+            line.bg.pop();
+        }
+    }
+
+    // Phase 3: re-wrap each logical line to the new width.
+    let mut new_grid = VecDeque::new();
+    for line in lines {
+        let len = line.chars.len();
+        if len == 0 {
+            new_grid.push_back(Row::new(new_cols as u16));
+            continue;
+        }
+
+        let mut offset = 0;
+        let mut first_chunk = true;
+        while offset < len {
+            let end = (offset + new_cols).min(len);
+            let mut row = Row::new(new_cols as u16);
+            let chunk_len = end - offset;
+            row.chars[..chunk_len].copy_from_slice(&line.chars[offset..end]);
+            row.fg[..chunk_len].copy_from_slice(&line.fg[offset..end]);
+            row.bg[..chunk_len].copy_from_slice(&line.bg[offset..end]);
+            row.wrapped = !first_chunk;
+            new_grid.push_back(row);
+            offset = end;
+            first_chunk = false;
+        }
+    }
+
+    new_grid
 }
 
 impl Terminal {
@@ -219,19 +283,40 @@ impl Terminal {
         cols: u16,
         rows: u16,
     ) {
-        for row in &mut self.grid {
-            row.resize(cols as usize);
-        }
-        // Ensure at least `rows` entries in the grid.
-        while self.grid.len() < rows as usize {
-            self.grid.push_back(Row::new(cols));
+        let old_cols = self.cols as usize;
+        let new_cols = cols as usize;
+
+        if new_cols != old_cols {
+            // Remember how far the cursor was from the bottom of the grid.
+            let old_distance_from_bottom = self
+                .grid
+                .len()
+                .saturating_sub(self.active_row_index(self.cursor_row) + 1);
+
+            // Reflow: join soft-wrapped rows into logical lines, then re-wrap.
+            let old_grid = std::mem::take(&mut self.grid);
+            self.grid = reflow_grid(old_grid, new_cols);
+
+            // Ensure at least `rows` entries in the grid after reflow.
+            while self.grid.len() < rows as usize {
+                self.grid.push_back(Row::new(cols));
+            }
+
+            // Restore cursor position relative to the bottom of the grid.
+            let new_abs = self.grid.len().saturating_sub(old_distance_from_bottom + 1);
+            let visible_start = self.grid.len().saturating_sub(rows as usize);
+            self.cursor_row = new_abs.saturating_sub(visible_start).min(rows as usize - 1) as u16;
+            self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
+        } else {
+            // Column count unchanged — just adjust row count.
+            while self.grid.len() < rows as usize {
+                self.grid.push_back(Row::new(cols));
+            }
+            self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
         }
 
         self.cols = cols;
         self.rows = rows;
-        self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
-        self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
-        // Clamp viewport offset to available scrollback.
         self.viewport_offset = self.viewport_offset.min(self.scrollback_len() as u32);
     }
 
@@ -258,12 +343,15 @@ impl Terminal {
         ch: char,
     ) {
         if self.cursor_col >= self.cols {
+            // Soft wrap: mark the next row as a continuation.
             self.cursor_col = 0;
             self.cursor_row += 1;
             if self.cursor_row >= self.rows {
                 self.scroll_up();
                 self.cursor_row = self.rows - 1;
             }
+            let r = self.active_row_index(self.cursor_row);
+            self.grid[r].wrapped = true;
         }
 
         // New output resets viewport to bottom.
