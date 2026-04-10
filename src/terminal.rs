@@ -222,17 +222,17 @@ impl Terminal {
         for row in &mut self.grid {
             row.resize(cols as usize);
         }
+        // Ensure at least `rows` entries in the grid.
         while self.grid.len() < rows as usize {
             self.grid.push_back(Row::new(cols));
-        }
-        while self.grid.len() > rows as usize {
-            self.grid.pop_back();
         }
 
         self.cols = cols;
         self.rows = rows;
         self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
         self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
+        // Clamp viewport offset to available scrollback.
+        self.viewport_offset = self.viewport_offset.min(self.scrollback_len() as u32);
     }
 
     /// Process raw bytes from the PTY through the vte parser.

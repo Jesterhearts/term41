@@ -126,6 +126,20 @@ impl ApplicationHandler for App {
                 }
             }
 
+            WindowEvent::MouseWheel { delta, .. } => {
+                let lines = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(_, y) => -y as i32,
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
+                        -(pos.y as i32) / self.font_system.cell_height as i32
+                    }
+                };
+                if lines < 0 {
+                    self.terminal.scroll_viewport_up(lines.unsigned_abs());
+                } else if lines > 0 {
+                    self.terminal.scroll_viewport_down(lines as u32);
+                }
+            }
+
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
             }
