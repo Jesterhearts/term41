@@ -21,8 +21,6 @@ use read_fonts::tables::glyf::SimpleGlyph;
 use read_fonts::tables::loca::Loca;
 use read_fonts::types::GlyphId;
 
-use crate::terminal::Cell;
-
 /// The embedded Fairfax HD font (ultimate fallback).
 static FAIRFAX_HD: &[u8] = include_bytes!("../resources/fonts/FairfaxHD.ttf");
 
@@ -165,21 +163,21 @@ impl FontSystem {
     }
 
     /// Shape an entire terminal row with font fallback and plan caching.
-    /// Returns shaped glyphs in column order.
+    /// Takes `&[char]` directly from the terminal's SoA storage.
     pub fn shape_row(
         &mut self,
-        row: &[Cell],
+        chars: &[char],
     ) -> Vec<ShapedGlyph> {
-        if row.is_empty() {
+        if chars.is_empty() {
             return vec![];
         }
 
         // Build the row string and byte-offset → column mapping.
         let mut row_text = String::new();
         let mut col_map: Vec<u16> = Vec::new();
-        for (col, cell) in row.iter().enumerate() {
+        for (col, &ch) in chars.iter().enumerate() {
             let start = row_text.len();
-            row_text.push(cell.ch);
+            row_text.push(ch);
             let added = row_text.len() - start;
             for _ in 0..added {
                 col_map.push(col as u16);
@@ -187,8 +185,8 @@ impl FontSystem {
         }
 
         // Track which columns still need a glyph (for fallback).
-        let mut has_glyph = vec![false; row.len()];
-        let mut result: Vec<ShapedGlyph> = Vec::with_capacity(row.len());
+        let mut has_glyph = vec![false; chars.len()];
+        let mut result: Vec<ShapedGlyph> = Vec::with_capacity(chars.len());
 
         for (font_idx, loaded) in self.fonts.iter().enumerate() {
             let font_ref = match FontRef::new(&loaded.data) {
@@ -262,7 +260,7 @@ impl FontSystem {
             let all_covered = has_glyph
                 .iter()
                 .enumerate()
-                .all(|(i, &has)| has || row[i].ch == ' ');
+                .all(|(i, &has)| has || chars[i] == ' ');
             if all_covered {
                 break;
             }

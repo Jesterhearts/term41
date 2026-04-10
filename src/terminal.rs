@@ -2,24 +2,6 @@ use std::collections::VecDeque;
 
 use crate::sixel;
 
-/// A single cell in the terminal grid.
-#[derive(Clone, Copy)]
-pub struct Cell {
-    pub ch: char,
-    pub fg: Color,
-    pub bg: Color,
-}
-
-impl Default for Cell {
-    fn default() -> Self {
-        Self {
-            ch: ' ',
-            fg: Color::default_fg(),
-            bg: Color::default_bg(),
-        }
-    }
-}
-
 /// RGB color.
 #[derive(Clone, Copy, PartialEq)]
 pub struct Color {
@@ -89,11 +71,58 @@ pub struct PlacedImage {
     pub image: sixel::SixelImage,
 }
 
-/// Terminal state: a grid of cells plus cursor position and attributes.
+/// A terminal row stored as struct-of-arrays for cache-friendly access.
+/// The renderer can borrow `&[char]` directly for shaping without copying.
+pub struct Row {
+    pub chars: Vec<char>,
+    pub fg: Vec<Color>,
+    pub bg: Vec<Color>,
+}
+
+impl Row {
+    fn new(cols: u16) -> Self {
+        let n = cols as usize;
+        Self {
+            chars: vec![' '; n],
+            fg: vec![Color::default_fg(); n],
+            bg: vec![Color::default_bg(); n],
+        }
+    }
+
+    fn resize(
+        &mut self,
+        cols: usize,
+    ) {
+        self.chars.resize(cols, ' ');
+        self.fg.resize(cols, Color::default_fg());
+        self.bg.resize(cols, Color::default_bg());
+    }
+
+    fn clear_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+    ) {
+        self.chars[range.clone()].fill(' ');
+        self.fg[range.clone()].fill(Color::default_fg());
+        self.bg[range].fill(Color::default_bg());
+    }
+
+    fn copy_within(
+        &mut self,
+        src: std::ops::Range<usize>,
+        dest: usize,
+    ) {
+        self.chars.copy_within(src.clone(), dest);
+        self.fg.copy_within(src.clone(), dest);
+        self.bg.copy_within(src, dest);
+    }
+}
+
+/// Terminal state: a grid of rows plus cursor position and attributes.
 pub struct Terminal {
     pub cols: u16,
     pub rows: u16,
-    grid: VecDeque<Vec<Cell>>,
+    pub grid: VecDeque<Row>,
     pub cursor_col: u16,
     pub cursor_row: u16,
     fg: Color,
@@ -106,10 +135,6 @@ pub struct Terminal {
     cell_height: u32,
 }
 
-fn new_row(cols: u16) -> Vec<Cell> {
-    vec![Cell::default(); cols as usize]
-}
-
 impl Terminal {
     pub fn new(
         cols: u16,
@@ -118,7 +143,7 @@ impl Terminal {
     ) -> Self {
         let mut grid = VecDeque::with_capacity(rows as usize);
         for _ in 0..rows {
-            grid.push_back(new_row(cols));
+            grid.push_back(Row::new(cols));
         }
         Self {
             cols,
@@ -142,13 +167,11 @@ impl Terminal {
         cols: u16,
         rows: u16,
     ) {
-        // Adjust columns in existing rows.
         for row in &mut self.grid {
-            row.resize(cols as usize, Cell::default());
+            row.resize(cols as usize);
         }
-        // Add or remove rows.
         while self.grid.len() < rows as usize {
-            self.grid.push_back(new_row(cols));
+            self.grid.push_back(Row::new(cols));
         }
         while self.grid.len() > rows as usize {
             self.grid.pop_back();
@@ -158,22 +181,6 @@ impl Terminal {
         self.rows = rows;
         self.cursor_col = self.cursor_col.min(cols.saturating_sub(1));
         self.cursor_row = self.cursor_row.min(rows.saturating_sub(1));
-    }
-
-    pub fn cell(
-        &self,
-        col: u16,
-        row: u16,
-    ) -> &Cell {
-        &self.grid[row as usize][col as usize]
-    }
-
-    fn cell_mut(
-        &mut self,
-        col: u16,
-        row: u16,
-    ) -> &mut Cell {
-        &mut self.grid[row as usize][col as usize]
     }
 
     /// Process raw bytes from the PTY through the vte parser.
@@ -199,26 +206,25 @@ impl Terminal {
             }
         }
 
-        self.grid[self.cursor_row as usize][self.cursor_col as usize] = Cell {
-            ch,
-            fg: self.fg,
-            bg: self.bg,
-        };
+        let r = self.cursor_row as usize;
+        let c = self.cursor_col as usize;
+        self.grid[r].chars[c] = ch;
+        self.grid[r].fg[c] = self.fg;
+        self.grid[r].bg[c] = self.bg;
         self.cursor_col += 1;
     }
 
     fn scroll_up(&mut self) {
         self.grid.pop_front();
-        self.grid.push_back(new_row(self.cols));
+        self.grid.push_back(Row::new(self.cols));
         self.scroll_count += 1;
     }
 
     fn scroll_down(&mut self) {
         self.grid.pop_back();
-        self.grid.push_front(new_row(self.cols));
+        self.grid.push_front(Row::new(self.cols));
     }
 
-    /// Remove images that have scrolled entirely off the top of the screen.
     pub fn prune_offscreen_images(
         &mut self,
         cell_height: u32,
@@ -251,7 +257,8 @@ impl Terminal {
             }
             2 | 3 => {
                 for row in &mut self.grid {
-                    row.fill(Cell::default());
+                    let n = row.chars.len();
+                    row.clear_range(0..n);
                 }
             }
             _ => {}
@@ -262,20 +269,19 @@ impl Terminal {
         &mut self,
         mode: u16,
     ) {
-        let row = self.cursor_row;
+        let r = self.cursor_row as usize;
         match mode {
             0 => {
-                for col in self.cursor_col..self.cols {
-                    *self.cell_mut(col, row) = Cell::default();
-                }
+                let start = self.cursor_col as usize;
+                let end = self.cols as usize;
+                self.grid[r].clear_range(start..end);
             }
             1 => {
-                for col in 0..=self.cursor_col.min(self.cols - 1) {
-                    *self.cell_mut(col, row) = Cell::default();
-                }
+                let end = (self.cursor_col as usize + 1).min(self.cols as usize);
+                self.grid[r].clear_range(0..end);
             }
             2 => {
-                self.clear_row(row);
+                self.clear_row(self.cursor_row);
             }
             _ => {}
         }
@@ -285,17 +291,18 @@ impl Terminal {
         &mut self,
         row: u16,
     ) {
-        self.grid[row as usize].fill(Cell::default());
+        let n = self.cols as usize;
+        self.grid[row as usize].clear_range(0..n);
     }
 
     fn erase_chars(
         &mut self,
         n: usize,
     ) {
-        let row = self.cursor_row as usize;
+        let r = self.cursor_row as usize;
         let col = self.cursor_col as usize;
         let end = (col + n).min(self.cols as usize);
-        self.grid[row][col..end].fill(Cell::default());
+        self.grid[r].clear_range(col..end);
     }
 
     fn insert_lines(
@@ -306,12 +313,11 @@ impl Terminal {
         let rows = self.rows as usize;
         let n = n.min(rows - row);
 
-        // Remove n rows from the bottom, insert n blank rows at cursor.
         for _ in 0..n {
             self.grid.pop_back();
         }
         for _ in 0..n {
-            self.grid.insert(row, new_row(self.cols));
+            self.grid.insert(row, Row::new(self.cols));
         }
     }
 
@@ -323,12 +329,11 @@ impl Terminal {
         let rows = self.rows as usize;
         let n = n.min(rows - row);
 
-        // Remove n rows at cursor, add n blank rows at the bottom.
         for i in (0..n).rev() {
             self.grid.remove(row + i);
         }
         for _ in 0..n {
-            self.grid.push_back(new_row(self.cols));
+            self.grid.push_back(Row::new(self.cols));
         }
     }
 
@@ -336,26 +341,26 @@ impl Terminal {
         &mut self,
         n: usize,
     ) {
-        let row = &mut self.grid[self.cursor_row as usize];
+        let r = self.cursor_row as usize;
         let col = self.cursor_col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - col);
 
-        row.copy_within(col + n..cols, col);
-        row[cols - n..].fill(Cell::default());
+        self.grid[r].copy_within(col + n..cols, col);
+        self.grid[r].clear_range(cols - n..cols);
     }
 
     fn insert_chars(
         &mut self,
         n: usize,
     ) {
-        let row = &mut self.grid[self.cursor_row as usize];
+        let r = self.cursor_row as usize;
         let col = self.cursor_col as usize;
         let cols = self.cols as usize;
         let n = n.min(cols - col);
 
-        row.copy_within(col..cols - n, col + n);
-        row[col..col + n].fill(Cell::default());
+        self.grid[r].copy_within(col..cols - n, col + n);
+        self.grid[r].clear_range(col..col + n);
     }
 
     fn handle_sgr(
