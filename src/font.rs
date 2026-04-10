@@ -1,7 +1,10 @@
+use std::collections::HashMap;
 use std::sync::Arc;
 
 use harfrust::Direction;
 use harfrust::FontRef;
+use harfrust::Script;
+use harfrust::ShapePlan;
 use harfrust::ShaperData;
 use harfrust::UnicodeBuffer;
 use raqote::DrawOptions;
@@ -18,6 +21,8 @@ use read_fonts::tables::glyf::SimpleGlyph;
 use read_fonts::tables::loca::Loca;
 use read_fonts::types::GlyphId;
 
+use crate::terminal::Cell;
+
 /// The embedded Fairfax HD font (ultimate fallback).
 static FAIRFAX_HD: &[u8] = include_bytes!("../resources/fonts/FairfaxHD.ttf");
 
@@ -30,6 +35,15 @@ pub struct RasterizedGlyph {
     pub bearing_y: i32,
 }
 
+/// A shaped glyph with its position info, ready for rendering.
+pub struct ShapedGlyph {
+    pub glyph_id: u16,
+    pub font_index: usize,
+    pub col: u16,
+    pub x_offset: f32,
+    pub y_offset: f32,
+}
+
 /// A loaded font with its shaping data and raw bytes.
 struct LoadedFont {
     data: Arc<Vec<u8>>,
@@ -37,9 +51,19 @@ struct LoadedFont {
     units_per_em: f32,
 }
 
-/// Font system: manages an ordered list of fonts with fallback.
+/// Key for the ShapePlan cache.
+#[derive(Clone, Copy, PartialEq, Eq, Hash)]
+struct PlanKey {
+    font_index: usize,
+    direction: Direction,
+    script: Script,
+}
+
+/// Font system: manages an ordered list of fonts with fallback and plan
+/// caching.
 pub struct FontSystem {
     fonts: Vec<LoadedFont>,
+    plan_cache: HashMap<PlanKey, ShapePlan>,
     pub cell_width: u32,
     pub cell_height: u32,
     pub font_size: f32,
@@ -107,6 +131,7 @@ impl FontSystem {
 
         Self {
             fonts,
+            plan_cache: HashMap::new(),
             cell_width,
             cell_height,
             font_size,
@@ -139,39 +164,114 @@ impl FontSystem {
         self.ascent
     }
 
-    /// Shape a character with font fallback.
-    /// Returns `(font_index, glyph_index)` from the first font that has
-    /// coverage.
-    pub fn shape_char_with_fallback(
-        &self,
-        ch: char,
-    ) -> (usize, u16) {
-        let s = ch.to_string();
+    /// Shape an entire terminal row with font fallback and plan caching.
+    /// Returns shaped glyphs in column order.
+    pub fn shape_row(
+        &mut self,
+        row: &[Cell],
+    ) -> Vec<ShapedGlyph> {
+        if row.is_empty() {
+            return vec![];
+        }
+
+        // Build the row string and byte-offset → column mapping.
+        let mut row_text = String::new();
+        let mut col_map: Vec<u16> = Vec::new();
+        for (col, cell) in row.iter().enumerate() {
+            let start = row_text.len();
+            row_text.push(cell.ch);
+            let added = row_text.len() - start;
+            for _ in 0..added {
+                col_map.push(col as u16);
+            }
+        }
+
+        // Track which columns still need a glyph (for fallback).
+        let mut has_glyph = vec![false; row.len()];
+        let mut result: Vec<ShapedGlyph> = Vec::with_capacity(row.len());
+
         for (font_idx, loaded) in self.fonts.iter().enumerate() {
             let font_ref = match FontRef::new(&loaded.data) {
                 Ok(f) => f,
                 Err(_) => continue,
             };
-            let shaper = loaded.shaper_data.shaper(&font_ref).build();
 
             let mut buffer = UnicodeBuffer::new();
-            buffer.push_str(&s);
-            buffer.set_direction(Direction::LeftToRight);
+            buffer.push_str(&row_text);
+            buffer.guess_segment_properties();
 
-            let output = shaper.shape(buffer, &[]);
-            let info = output.glyph_infos();
-            if !info.is_empty() {
-                let glyph_id = info[0].glyph_id as u16;
-                if glyph_id != 0 {
-                    return (font_idx, glyph_id);
+            let direction = buffer.direction();
+            let script = buffer.script();
+
+            let key = PlanKey {
+                font_index: font_idx,
+                direction,
+                script,
+            };
+
+            // Get or create cached plan.
+            if !self.plan_cache.contains_key(&key) {
+                let shaper = loaded.shaper_data.shaper(&font_ref).build();
+                let plan = ShapePlan::new(
+                    &shaper,
+                    direction,
+                    Some(script),
+                    buffer.language().as_ref(),
+                    &[],
+                );
+                self.plan_cache.insert(key, plan);
+            }
+            let plan = &self.plan_cache[&key];
+
+            let shaper = loaded.shaper_data.shaper(&font_ref).build();
+            let output = shaper.shape_with_plan(plan, buffer, &[]);
+
+            let infos = output.glyph_infos();
+            let positions = output.glyph_positions();
+            let scale = self.font_size / loaded.units_per_em;
+
+            for (info, pos) in infos.iter().zip(positions.iter()) {
+                let cluster = info.cluster as usize;
+                if cluster >= col_map.len() {
+                    continue;
                 }
+                let col = col_map[cluster];
+
+                // Skip if this column already has a glyph from a higher-priority font.
+                if has_glyph[col as usize] {
+                    continue;
+                }
+
+                let glyph_id = info.glyph_id as u16;
+                // glyph_id 0 is .notdef — try next font.
+                if glyph_id == 0 {
+                    continue;
+                }
+
+                has_glyph[col as usize] = true;
+                result.push(ShapedGlyph {
+                    glyph_id,
+                    font_index: font_idx,
+                    col,
+                    x_offset: pos.x_offset as f32 * scale,
+                    y_offset: pos.y_offset as f32 * scale,
+                });
+            }
+
+            // If all non-space columns are filled, stop trying fonts.
+            let all_covered = has_glyph
+                .iter()
+                .enumerate()
+                .all(|(i, &has)| has || row[i].ch == ' ');
+            if all_covered {
+                break;
             }
         }
-        (self.fonts.len() - 1, 0)
+
+        result
     }
 
     /// Rasterize a glyph from a specific font in the chain.
-    /// Supports both simple and composite glyphs.
     pub fn rasterize_glyph(
         &self,
         font_index: usize,
@@ -292,14 +392,11 @@ fn rasterize_composite_glyph(
     glyf: &read_fonts::tables::glyf::Glyf,
     scale: f32,
 ) -> RasterizedGlyph {
-    // Collect all simple glyph outlines from components into one path.
-    let mut pb = PathBuilder::new();
     let mut x_min_all = f32::MAX;
     let mut y_min_all = f32::MAX;
     let mut x_max_all = f32::MIN;
     let mut y_max_all = f32::MIN;
 
-    // First pass: compute the combined bounding box.
     for comp in composite.components() {
         let gid = GlyphId::new(comp.glyph.to_u32());
         let glyph = match loca.get_glyf(gid, glyf) {
@@ -314,16 +411,11 @@ fn rasterize_composite_glyph(
 
         match glyph {
             Glyph::Simple(simple) => {
-                let sx_min = simple.x_min() as f32 * scale + dx;
-                let sy_min = simple.y_min() as f32 * scale + dy;
-                let sx_max = simple.x_max() as f32 * scale + dx;
-                let sy_max = simple.y_max() as f32 * scale + dy;
-                x_min_all = x_min_all.min(sx_min);
-                y_min_all = y_min_all.min(sy_min);
-                x_max_all = x_max_all.max(sx_max);
-                y_max_all = y_max_all.max(sy_max);
+                x_min_all = x_min_all.min(simple.x_min() as f32 * scale + dx);
+                y_min_all = y_min_all.min(simple.y_min() as f32 * scale + dy);
+                x_max_all = x_max_all.max(simple.x_max() as f32 * scale + dx);
+                y_max_all = y_max_all.max(simple.y_max() as f32 * scale + dy);
             }
-            // Nested composites — skip for now.
             _ => {}
         }
     }
@@ -341,7 +433,7 @@ fn rasterize_composite_glyph(
         return empty_glyph();
     }
 
-    // Second pass: build the combined path with component offsets.
+    let mut pb = PathBuilder::new();
     for comp in composite.components() {
         let gid = GlyphId::new(comp.glyph.to_u32());
         let glyph = match loca.get_glyf(gid, glyf) {
@@ -380,7 +472,6 @@ fn rasterize_composite_glyph(
     }
 }
 
-/// Add a simple glyph's contours to an existing PathBuilder with an offset.
 fn add_simple_glyph_to_path(
     pb: &mut PathBuilder,
     simple: &SimpleGlyph,

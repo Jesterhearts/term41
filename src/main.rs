@@ -87,7 +87,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let renderer = pollster::block_on(Renderer::new(
             Arc::clone(&window),
-            &self.font_system,
+            &mut self.font_system,
             &self.terminal,
             self.opacity,
         ));
@@ -140,7 +140,7 @@ impl ApplicationHandler for App {
                     .prune_offscreen_images(self.font_system.cell_height);
 
                 if let Some(renderer) = &mut self.renderer {
-                    renderer.render(&self.font_system, &self.terminal);
+                    renderer.render(&mut self.font_system, &self.terminal);
                 }
 
                 self.request_redraw();

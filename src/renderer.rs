@@ -95,7 +95,6 @@ pub struct Renderer {
     image_atlas_texture: wgpu::Texture,
     image_bind_group: wgpu::BindGroup,
 
-    char_to_glyph: HashMap<char, (usize, u16)>,
     glyph_cache: HashMap<(usize, u16), AtlasEntry>,
     atlas_cursor_x: u32,
     atlas_cursor_y: u32,
@@ -111,7 +110,7 @@ pub struct Renderer {
 impl Renderer {
     pub async fn new(
         window: Arc<Window>,
-        font_system: &FontSystem,
+        font_system: &mut FontSystem,
         _terminal: &Terminal,
         opacity: f32,
     ) -> Self {
@@ -502,7 +501,6 @@ impl Renderer {
             atlas_bind_group,
             image_atlas_texture,
             image_bind_group,
-            char_to_glyph: HashMap::new(),
             glyph_cache: HashMap::new(),
             atlas_cursor_x: 0,
             atlas_cursor_y: 0,
@@ -519,9 +517,19 @@ impl Renderer {
 
         renderer.update_screen_size(size);
 
-        // Pre-cache printable ASCII.
-        for ch in ' '..='~' {
-            renderer.lookup_glyph(font_system, ch);
+        // Pre-cache printable ASCII glyphs.
+        {
+            use crate::terminal::Cell;
+            let ascii_row: Vec<Cell> = (' '..='~')
+                .map(|ch| Cell {
+                    ch,
+                    ..Cell::default()
+                })
+                .collect();
+            let shaped = font_system.shape_row(&ascii_row);
+            for sg in &shaped {
+                renderer.ensure_glyph_cached(font_system, sg.font_index, sg.glyph_id);
+            }
         }
 
         renderer
@@ -553,26 +561,20 @@ impl Renderer {
 
     /// Look up a glyph for a character. Uses char→glyph_index cache to skip
     /// shaping on subsequent frames. Only calls FontSystem on first encounter.
-    fn lookup_glyph(
+    /// Ensure a glyph is cached in the atlas. Rasterizes on first encounter.
+    fn ensure_glyph_cached(
         &mut self,
         font_system: &FontSystem,
-        ch: char,
+        font_index: usize,
+        glyph_id: u16,
     ) -> Option<AtlasEntry> {
-        // Fast path: char already mapped to a glyph index.
-        if let Some(&glyph_index) = self.char_to_glyph.get(&ch) {
-            return self.glyph_cache.get(&glyph_index).copied();
-        }
+        let key = (font_index, glyph_id);
 
-        // Slow path: shape with fallback + rasterize + cache.
-        let glyph_key = font_system.shape_char_with_fallback(ch);
-        self.char_to_glyph.insert(ch, glyph_key);
-
-        if let Some(entry) = self.glyph_cache.get(&glyph_key).copied() {
+        if let Some(entry) = self.glyph_cache.get(&key).copied() {
             return Some(entry);
         }
 
-        let (font_index, glyph_index) = glyph_key;
-        let glyph = font_system.rasterize_glyph(font_index, glyph_index);
+        let glyph = font_system.rasterize_glyph(font_index, glyph_id);
 
         if glyph.width == 0 || glyph.height == 0 {
             let entry = AtlasEntry {
@@ -583,7 +585,7 @@ impl Renderer {
                 bearing_x: glyph.bearing_x,
                 bearing_y: glyph.bearing_y,
             };
-            self.glyph_cache.insert(glyph_key, entry);
+            self.glyph_cache.insert(key, entry);
             return Some(entry);
         }
 
@@ -594,7 +596,7 @@ impl Renderer {
         }
 
         if self.atlas_cursor_y + glyph.height > ATLAS_SIZE {
-            log::warn!("glyph atlas full, cannot cache glyph for '{ch}'");
+            log::warn!("glyph atlas full, cannot cache glyph {glyph_id}");
             return None;
         }
 
@@ -611,7 +613,7 @@ impl Renderer {
 
         self.atlas_cursor_x += glyph.width;
         self.atlas_row_height = self.atlas_row_height.max(glyph.height);
-        self.glyph_cache.insert(glyph_key, entry);
+        self.glyph_cache.insert(key, entry);
 
         Some(entry)
     }
@@ -704,7 +706,7 @@ impl Renderer {
 
     pub fn render(
         &mut self,
-        font_system: &FontSystem,
+        font_system: &mut FontSystem,
         terminal: &Terminal,
     ) {
         let cell_w = font_system.cell_width as f32;
@@ -717,12 +719,12 @@ impl Renderer {
         let mut fg_indices: Vec<u32> = Vec::new();
 
         for row in 0..terminal.rows {
+            let y = row as f32 * cell_h;
+
+            // Background quads for the whole row.
             for col in 0..terminal.cols {
                 let cell = terminal.cell(col, row);
                 let x = col as f32 * cell_w;
-                let y = row as f32 * cell_h;
-
-                // Background quad.
                 let bg_color = pack_color(&cell.bg, self.bg_alpha);
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
@@ -744,13 +746,17 @@ impl Renderer {
                     },
                 ]);
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+            }
 
-                // Foreground glyph quad.
-                if cell.ch == ' ' {
-                    continue;
-                }
+            // Shape the entire row for foreground glyphs.
+            let row_cells: Vec<_> = (0..terminal.cols)
+                .map(|col| *terminal.cell(col, row))
+                .collect();
+            let shaped = font_system.shape_row(&row_cells);
 
-                let entry = match self.lookup_glyph(font_system, cell.ch) {
+            for sg in &shaped {
+                let entry = match self.ensure_glyph_cached(font_system, sg.font_index, sg.glyph_id)
+                {
                     Some(e) => e,
                     None => continue,
                 };
@@ -759,12 +765,12 @@ impl Renderer {
                     continue;
                 }
 
-                let gx = x + entry.bearing_x as f32;
-                let gy = y + baseline - entry.bearing_y as f32;
+                let gx = sg.col as f32 * cell_w + entry.bearing_x as f32 + sg.x_offset;
+                let gy = y + baseline - entry.bearing_y as f32 - sg.y_offset;
                 let gw = entry.width as f32;
                 let gh = entry.height as f32;
 
-                let fg_color = pack_color(&cell.fg, 255);
+                let fg_color = pack_color(&terminal.cell(sg.col, row).fg, 255);
                 let fi = fg_vertices.len() as u32;
                 fg_vertices.extend_from_slice(&[
                     FgVertex {
