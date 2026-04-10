@@ -1,0 +1,16 @@
+[package]
+name = "term41"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
+env_logger = "0.11.10"
+harfrust = "0.6.0"
+libc = "0.2.184"
+log = "0.4.29"
+pollster = "0.4.0"
+read-fonts = "0.39.1"
+vte = "0.15.0"
+wgpu = "29.0.1"
+winit = "0.30.13"
