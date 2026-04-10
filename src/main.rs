@@ -38,8 +38,9 @@ impl App {
     fn new(
         pty: Pty,
         opacity: f32,
+        fonts_config: Option<&str>,
     ) -> Self {
-        let font_system = FontSystem::new();
+        let font_system = FontSystem::new(fonts_config);
         Self {
             window: None,
             renderer: None,
@@ -186,6 +187,6 @@ fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(pty, config.opacity);
+    let mut app = App::new(pty, config.opacity, config.fonts.as_deref());
     event_loop.run_app(&mut app).expect("run event loop");
 }

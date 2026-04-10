@@ -95,8 +95,8 @@ pub struct Renderer {
     image_atlas_texture: wgpu::Texture,
     image_bind_group: wgpu::BindGroup,
 
-    char_to_glyph: HashMap<char, u16>,
-    glyph_cache: HashMap<u16, AtlasEntry>,
+    char_to_glyph: HashMap<char, (usize, u16)>,
+    glyph_cache: HashMap<(usize, u16), AtlasEntry>,
     atlas_cursor_x: u32,
     atlas_cursor_y: u32,
     atlas_row_height: u32,
@@ -563,15 +563,16 @@ impl Renderer {
             return self.glyph_cache.get(&glyph_index).copied();
         }
 
-        // Slow path: shape + rasterize + cache.
-        let glyph_index = font_system.shape_char(ch);
-        self.char_to_glyph.insert(ch, glyph_index);
+        // Slow path: shape with fallback + rasterize + cache.
+        let glyph_key = font_system.shape_char_with_fallback(ch);
+        self.char_to_glyph.insert(ch, glyph_key);
 
-        if let Some(entry) = self.glyph_cache.get(&glyph_index).copied() {
+        if let Some(entry) = self.glyph_cache.get(&glyph_key).copied() {
             return Some(entry);
         }
 
-        let glyph = font_system.rasterize_glyph(glyph_index);
+        let (font_index, glyph_index) = glyph_key;
+        let glyph = font_system.rasterize_glyph(font_index, glyph_index);
 
         if glyph.width == 0 || glyph.height == 0 {
             let entry = AtlasEntry {
@@ -582,7 +583,7 @@ impl Renderer {
                 bearing_x: glyph.bearing_x,
                 bearing_y: glyph.bearing_y,
             };
-            self.glyph_cache.insert(glyph_index, entry);
+            self.glyph_cache.insert(glyph_key, entry);
             return Some(entry);
         }
 
@@ -610,7 +611,7 @@ impl Renderer {
 
         self.atlas_cursor_x += glyph.width;
         self.atlas_row_height = self.atlas_row_height.max(glyph.height);
-        self.glyph_cache.insert(glyph_index, entry);
+        self.glyph_cache.insert(glyph_key, entry);
 
         Some(entry)
     }

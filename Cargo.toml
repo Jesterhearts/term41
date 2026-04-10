@@ -7,6 +7,7 @@ edition = "2024"
 bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
 dirs = "6.0.0"
 env_logger = "0.11.10"
+fontdb = "0.23.0"
 harfrust = "0.6.0"
 libc = "0.2.184"
 log = "0.4.29"
