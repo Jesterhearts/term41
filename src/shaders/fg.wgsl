@@ -38,7 +38,9 @@ fn vs_main(in: VsInput) -> VsOutput {
 
 @fragment
 fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
-    let alpha = textureSample(atlas_tex, atlas_sampler, in.uv).r;
+    let glyph_alpha = textureSample(atlas_tex, atlas_sampler, in.uv).r;
     let fg = unpack_color(in.color);
-    return vec4<f32>(fg.rgb, fg.a * alpha);
+    let a = fg.a * glyph_alpha;
+    // Pre-multiply RGB by alpha for compositor transparency.
+    return vec4<f32>(fg.rgb * a, a);
 }

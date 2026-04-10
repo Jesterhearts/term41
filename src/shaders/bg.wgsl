@@ -31,5 +31,7 @@ fn vs_main(in: VsInput) -> VsOutput {
 
 @fragment
 fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
-    return unpack_color(in.color);
+    let c = unpack_color(in.color);
+    // Pre-multiply RGB by alpha for compositor transparency.
+    return vec4<f32>(c.rgb * c.a, c.a);
 }

@@ -41,8 +41,11 @@ struct AtlasEntry {
     bearing_y: i32,
 }
 
-fn pack_color(c: &Color) -> u32 {
-    u32::from_be_bytes([c.r, c.g, c.b, 255])
+fn pack_color(
+    c: &Color,
+    alpha: u8,
+) -> u32 {
+    u32::from_be_bytes([c.r, c.g, c.b, alpha])
 }
 
 pub struct Renderer {
@@ -64,6 +67,7 @@ pub struct Renderer {
     atlas_cursor_x: u32,
     atlas_cursor_y: u32,
     atlas_row_height: u32,
+    bg_alpha: u8,
 }
 
 impl Renderer {
@@ -71,6 +75,7 @@ impl Renderer {
         window: Arc<Window>,
         font_system: &FontSystem,
         _terminal: &Terminal,
+        opacity: f32,
     ) -> Self {
         let size = window.inner_size();
 
@@ -90,12 +95,33 @@ impl Renderer {
             .expect("request device");
 
         let surface_caps = surface.get_capabilities(&adapter);
-        let surface_format = surface_caps
-            .formats
+        // Prefer a non-sRGB format with a full 8-bit alpha channel.
+        let preferred_formats = [
+            wgpu::TextureFormat::Bgra8Unorm,
+            wgpu::TextureFormat::Rgba8Unorm,
+        ];
+        let surface_format = preferred_formats
             .iter()
-            .find(|f| !f.is_srgb())
+            .find(|f| surface_caps.formats.contains(f))
             .copied()
             .unwrap_or(surface_caps.formats[0]);
+
+        let transparent = opacity < 1.0;
+        let alpha_mode = if transparent {
+            // Try transparent-capable modes in preference order.
+            let preferred = [
+                wgpu::CompositeAlphaMode::PreMultiplied,
+                wgpu::CompositeAlphaMode::PostMultiplied,
+                wgpu::CompositeAlphaMode::Inherit,
+                wgpu::CompositeAlphaMode::Auto,
+            ];
+            preferred
+                .into_iter()
+                .find(|m| surface_caps.alpha_modes.contains(m))
+                .unwrap_or(surface_caps.alpha_modes[0])
+        } else {
+            surface_caps.alpha_modes[0]
+        };
 
         let surface_config = wgpu::SurfaceConfiguration {
             usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
@@ -103,7 +129,7 @@ impl Renderer {
             width: size.width.max(1),
             height: size.height.max(1),
             present_mode: wgpu::PresentMode::Fifo,
-            alpha_mode: surface_caps.alpha_modes[0],
+            alpha_mode,
             view_formats: vec![],
             desired_maximum_frame_latency: 2,
         };
@@ -301,7 +327,7 @@ impl Renderer {
                 entry_point: Some("fs_main"),
                 targets: &[Some(wgpu::ColorTargetState {
                     format: surface_format,
-                    blend: Some(wgpu::BlendState::ALPHA_BLENDING),
+                    blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
                     write_mask: wgpu::ColorWrites::ALL,
                 })],
                 compilation_options: Default::default(),
@@ -331,6 +357,7 @@ impl Renderer {
             atlas_cursor_x: 0,
             atlas_cursor_y: 0,
             atlas_row_height: 0,
+            bg_alpha: (opacity.clamp(0.0, 1.0) * 255.0) as u8,
         };
 
         renderer.update_screen_size(size);
@@ -444,7 +471,7 @@ impl Renderer {
                 let y = row as f32 * cell_h;
 
                 // Background quad.
-                let bg_color = pack_color(&cell.bg);
+                let bg_color = pack_color(&cell.bg, self.bg_alpha);
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
                     BgVertex {
@@ -489,7 +516,7 @@ impl Renderer {
                 let gw = entry.width as f32;
                 let gh = entry.height as f32;
 
-                let fg_color = pack_color(&cell.fg);
+                let fg_color = pack_color(&cell.fg, 255);
                 let fi = fg_vertices.len() as u32;
                 fg_vertices.extend_from_slice(&[
                     FgVertex {
@@ -524,7 +551,7 @@ impl Renderer {
         {
             let cx = terminal.cursor_col as f32 * cell_w;
             let cy = terminal.cursor_row as f32 * cell_h;
-            let cursor_color = pack_color(&Color::default_fg());
+            let cursor_color = pack_color(&Color::default_fg(), 255);
             let bi = bg_vertices.len() as u32;
             bg_vertices.extend_from_slice(&[
                 BgVertex {
@@ -591,7 +618,12 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color::BLACK),
+                        load: wgpu::LoadOp::Clear(wgpu::Color {
+                            r: 0.0,
+                            g: 0.0,
+                            b: 0.0,
+                            a: self.bg_alpha as f64 / 255.0,
+                        }),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,

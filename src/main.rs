@@ -1,3 +1,4 @@
+mod config;
 mod font;
 mod pty;
 mod renderer;
@@ -29,10 +30,14 @@ struct App {
     terminal: Terminal,
     font_system: FontSystem,
     pty: Pty,
+    opacity: f32,
 }
 
 impl App {
-    fn new(pty: Pty) -> Self {
+    fn new(
+        pty: Pty,
+        opacity: f32,
+    ) -> Self {
         let font_system = FontSystem::new();
         Self {
             window: None,
@@ -40,6 +45,7 @@ impl App {
             terminal: Terminal::new(INITIAL_COLS, INITIAL_ROWS),
             font_system,
             pty,
+            opacity,
         }
     }
 
@@ -70,8 +76,10 @@ impl ApplicationHandler for App {
         }
 
         let (pixel_width, pixel_height) = self.font_system.grid_size(INITIAL_COLS, INITIAL_ROWS);
+        let transparent = self.opacity < 1.0;
         let attrs = Window::default_attributes()
             .with_title("term41")
+            .with_transparent(transparent)
             .with_inner_size(winit::dpi::PhysicalSize::new(pixel_width, pixel_height));
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
@@ -79,6 +87,7 @@ impl ApplicationHandler for App {
             Arc::clone(&window),
             &self.font_system,
             &self.terminal,
+            self.opacity,
         ));
 
         self.window = Some(window);
@@ -166,11 +175,12 @@ fn named_key_to_bytes(key: NamedKey) -> Option<Vec<u8>> {
 fn main() {
     env_logger::init();
 
+    let config = config::load();
     let pty = Pty::spawn(INITIAL_COLS, INITIAL_ROWS).expect("failed to spawn PTY");
 
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(pty);
+    let mut app = App::new(pty, config.opacity);
     event_loop.run_app(&mut app).expect("run event loop");
 }
