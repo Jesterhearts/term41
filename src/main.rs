@@ -2,6 +2,7 @@ mod config;
 mod font;
 mod pty;
 mod renderer;
+mod sixel;
 mod terminal;
 
 use std::sync::Arc;
@@ -42,7 +43,7 @@ impl App {
         Self {
             window: None,
             renderer: None,
-            terminal: Terminal::new(INITIAL_COLS, INITIAL_ROWS),
+            terminal: Terminal::new(INITIAL_COLS, INITIAL_ROWS, font_system.cell_height),
             font_system,
             pty,
             opacity,
@@ -134,6 +135,8 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 self.read_pty_output();
+                self.terminal
+                    .prune_offscreen_images(self.font_system.cell_height);
 
                 if let Some(renderer) = &mut self.renderer {
                     renderer.render(&self.font_system, &self.terminal);

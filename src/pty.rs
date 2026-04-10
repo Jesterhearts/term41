@@ -25,7 +25,7 @@ impl Pty {
 
         let mut master_fd: RawFd = -1;
 
-        // Safety: forkpty is a well-defined POSIX call. We immediately exec in the
+        // SAFETY: forkpty is a well-defined POSIX call. We immediately exec in the
         // child.
         let pid = unsafe {
             libc::forkpty(
@@ -61,7 +61,7 @@ impl Pty {
         buf: &mut [u8],
     ) -> io::Result<usize> {
         let fd = fd_raw(&self.master);
-        // Safety: buf is a valid slice, fd is owned by us.
+        // SAFETY: buf is a valid slice, fd is owned by us.
         let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
         if n < 0 {
             let err = io::Error::last_os_error();
@@ -79,7 +79,7 @@ impl Pty {
         data: &[u8],
     ) -> io::Result<usize> {
         let fd = fd_raw(&self.master);
-        // Safety: data is a valid slice, fd is owned by us.
+        // SAFETY: data is a valid slice, fd is owned by us.
         let n = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
         if n < 0 {
             return Err(io::Error::last_os_error());
@@ -100,7 +100,7 @@ impl Pty {
             ws_ypixel: 0,
         };
         let fd = fd_raw(&self.master);
-        // Safety: fd is valid, winsize is on the stack.
+        // SAFETY: fd is valid, winsize is on the stack.
         unsafe {
             libc::ioctl(fd, libc::TIOCSWINSZ, &winsize);
         }
@@ -122,7 +122,7 @@ fn fd_raw(fd: &OwnedFd) -> RawFd {
 
 fn set_nonblocking(fd: &OwnedFd) -> io::Result<()> {
     let raw = fd_raw(fd);
-    // Safety: standard fcntl usage on a valid fd.
+    // SAFETY: standard fcntl usage on a valid fd.
     let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
     if flags < 0 {
         return Err(io::Error::last_os_error());

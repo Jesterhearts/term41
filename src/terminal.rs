@@ -76,6 +76,17 @@ fn ansi_color(index: u8) -> Color {
     }
 }
 
+use crate::sixel;
+
+/// A sixel image placed at a specific position in the terminal grid.
+pub struct PlacedImage {
+    pub id: u64,
+    pub col: u16,
+    pub row_at_placement: u16,
+    pub scroll_at_placement: u64,
+    pub image: sixel::SixelImage,
+}
+
 /// Terminal state: a grid of cells plus cursor position and attributes.
 pub struct Terminal {
     pub cols: u16,
@@ -86,12 +97,18 @@ pub struct Terminal {
     fg: Color,
     bg: Color,
     parser: vte::Parser,
+    sixel_parser: Option<sixel::SixelParser>,
+    pub images: Vec<PlacedImage>,
+    pub scroll_count: u64,
+    next_image_id: u64,
+    cell_height: u32,
 }
 
 impl Terminal {
     pub fn new(
         cols: u16,
         rows: u16,
+        cell_height: u32,
     ) -> Self {
         let size = cols as usize * rows as usize;
         Self {
@@ -103,6 +120,11 @@ impl Terminal {
             fg: Color::default_fg(),
             bg: Color::default_bg(),
             parser: vte::Parser::new(),
+            sixel_parser: None,
+            images: Vec::new(),
+            scroll_count: 0,
+            next_image_id: 0,
+            cell_height,
         }
     }
 
@@ -185,6 +207,21 @@ impl Terminal {
         self.cells.drain(0..cols);
         self.cells
             .extend(std::iter::repeat_n(Cell::default(), cols));
+        self.scroll_count += 1;
+    }
+
+    /// Remove images that have scrolled entirely off the top of the screen.
+    pub fn prune_offscreen_images(
+        &mut self,
+        cell_height: u32,
+    ) {
+        self.images.retain(|img| {
+            let scroll_delta = self.scroll_count.saturating_sub(img.scroll_at_placement);
+            let effective_row = img.row_at_placement as i64 - scroll_delta as i64;
+            let image_rows =
+                (img.image.height as i64 + cell_height as i64 - 1) / cell_height as i64;
+            effective_row + image_rows > 0
+        });
     }
 
     fn scroll_down(&mut self) {
@@ -541,7 +578,7 @@ impl vte::Perform for Terminal {
                 // RIS — full reset.
                 let cols = self.cols;
                 let rows = self.rows;
-                *self = Terminal::new(cols, rows);
+                *self = Terminal::new(cols, rows, self.cell_height);
             }
             b'M' => {
                 // RI — reverse index.
@@ -571,22 +608,50 @@ impl vte::Perform for Terminal {
 
     fn hook(
         &mut self,
-        _params: &vte::Params,
+        params: &vte::Params,
         _intermediates: &[u8],
         _ignore: bool,
-        _action: char,
+        action: char,
     ) {
-        // DCS — ignore.
+        self.sixel_parser = sixel::SixelParser::new(params, action);
     }
 
     fn put(
         &mut self,
-        _byte: u8,
+        byte: u8,
     ) {
-        // DCS payload — ignore.
+        if let Some(parser) = &mut self.sixel_parser {
+            parser.put(byte);
+        }
     }
 
-    fn unhook(&mut self) {}
+    fn unhook(&mut self) {
+        if let Some(parser) = self.sixel_parser.take() {
+            let image = parser.finish();
+            if image.width > 0 && image.height > 0 {
+                // Advance cursor below the image.
+                let image_rows = image.height / self.cell_height;
+                let placed = PlacedImage {
+                    id: self.next_image_id,
+                    col: self.cursor_col,
+                    row_at_placement: self.cursor_row,
+                    scroll_at_placement: self.scroll_count,
+                    image,
+                };
+                self.next_image_id += 1;
+                self.images.push(placed);
+
+                self.cursor_col = 0;
+                for _ in 0..image_rows {
+                    self.cursor_row += 1;
+                    if self.cursor_row >= self.rows {
+                        self.scroll_up();
+                        self.cursor_row = self.rows - 1;
+                    }
+                }
+            }
+        }
+    }
 }
 
 fn parse_extended_color(
