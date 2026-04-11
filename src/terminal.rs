@@ -156,7 +156,7 @@ impl Row {
         dest_offset: usize,
     ) -> usize {
         let copy_len = ((other.content_len() as usize).saturating_sub(src_offset))
-            .min((self.content_len() as usize).saturating_sub(dest_offset));
+            .min((self.len() as usize).saturating_sub(dest_offset));
         self.chars[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.chars[src_offset..src_offset + copy_len]);
         self.fg[dest_offset..dest_offset + copy_len]
@@ -1509,7 +1509,7 @@ mod tests {
         // "ab" with trailing padding on a wrapped row, then "cd".
         let mut grid = make_grid(5, &[("ab   ", true), ("cd   ", false)]);
         grid.reflow(10);
-        assert_eq!(row_chars(&grid.rows[0]), "abcd      ");
+        assert_eq!(row_chars(&grid.rows[0]), "ab   cd   ");
         assert!(!grid.rows[0].wrapped);
         assert_eq!(grid.rows.len(), 1);
     }
