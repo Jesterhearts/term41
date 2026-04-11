@@ -99,6 +99,13 @@ impl Row {
         self.chars.len() as u32
     }
 
+    fn content_len(&self) -> u32 {
+        self.chars
+            .iter()
+            .rposition(|c| *c != ' ')
+            .map_or(0, |p| p + 1) as u32
+    }
+
     fn resize(
         &mut self,
         new_len: u32,
@@ -148,7 +155,8 @@ impl Row {
         src_offset: usize,
         dest_offset: usize,
     ) -> usize {
-        let copy_len = (other.chars.len() - src_offset).min(self.chars.len() - dest_offset);
+        let copy_len = ((other.content_len() as usize).saturating_sub(src_offset))
+            .min((self.content_len() as usize).saturating_sub(dest_offset));
         self.chars[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.chars[src_offset..src_offset + copy_len]);
         self.fg[dest_offset..dest_offset + copy_len]
@@ -385,12 +393,11 @@ impl Grid {
                 if self.rows[row].len() > new_width {
                     let was_wrapped = self.rows[row].wrapped;
 
-                    let has_overflow = was_wrapped
-                        || self.rows[row].chars[new_width as usize..]
-                            .iter()
-                            .any(|&c| c != ' ');
+                    let has_content_overflow = self.rows[row].chars[new_width as usize..]
+                        .iter()
+                        .any(|&c| c != ' ');
 
-                    if has_overflow {
+                    if has_content_overflow {
                         let overflow = Row {
                             chars: self.rows[row].chars.split_off(new_width as usize),
                             fg: self.rows[row].fg.split_off(new_width as usize),
@@ -499,6 +506,72 @@ pub struct Terminal {
     hook_action: Vec<char>,
 }
 
+/// Save image positions as logical-line anchors that survive reflow.
+///
+/// Each image is mapped to (id, logical_lines_below, row_offset_in_line).
+/// The count of hard line boundaries between the image and the grid end is
+/// invariant through reflow, so it can be used to relocate the image after.
+fn anchor_images(
+    rows: &VecDeque<Row>,
+    images: &BTreeMap<u64, PlacedImage>,
+) -> Vec<(u64, usize, usize)> {
+    images
+        .values()
+        .map(|img| {
+            let lines_below = (img.row + 1..rows.len())
+                .filter(|&r| !rows[r].wrapped)
+                .count();
+
+            let mut row_offset = 0;
+            let mut r = img.row;
+            while r > 0 && rows[r].wrapped {
+                row_offset += 1;
+                r -= 1;
+            }
+
+            (img.id, lines_below, row_offset)
+        })
+        .collect()
+}
+
+/// Restore image row positions from logical-line anchors produced by
+/// [`anchor_images`]. Images whose logical line was trimmed away are removed.
+fn restore_images(
+    rows: &VecDeque<Row>,
+    anchors: &[(u64, usize, usize)],
+    images: &mut BTreeMap<u64, PlacedImage>,
+) {
+    for &(id, lines_below, row_offset) in anchors {
+        let mut count = 0;
+        let mut found = None;
+        for r in (0..rows.len()).rev() {
+            if r == 0 || !rows[r].wrapped {
+                if count == lines_below {
+                    found = Some(r);
+                    break;
+                }
+                count += 1;
+            }
+        }
+
+        match found {
+            Some(start) => {
+                let mut end = start + 1;
+                while end < rows.len() && rows[end].wrapped {
+                    end += 1;
+                }
+                let new_row = start + row_offset.min(end - start - 1);
+                if let Some(img) = images.get_mut(&id) {
+                    img.row = new_row;
+                }
+            }
+            None => {
+                images.remove(&id);
+            }
+        }
+    }
+}
+
 impl Terminal {
     pub fn new(
         cols: u32,
@@ -598,14 +671,37 @@ impl Terminal {
         cols: u32,
         rows: u32,
     ) {
+        // Trim trailing empty rows that accumulated from padding in previous
+        // resizes, so content stays visible when the viewport shrinks.
+        let cursor_abs = self.grid.active_row_index(&self.cursor, &self.viewport);
+        while self.grid.rows.len() > cursor_abs + 1 {
+            if self
+                .grid
+                .rows
+                .back()
+                .map_or(false, |r| r.chars.iter().all(|&c| c == ' '))
+            {
+                self.grid.rows.pop_back();
+            } else {
+                break;
+            }
+        }
+        self.viewport.rows = self.viewport.rows.min(self.grid.rows.len() as u32);
+        let visible_start = self
+            .grid
+            .rows
+            .len()
+            .saturating_sub(self.viewport.rows as usize);
+        self.cursor.row = cursor_abs.saturating_sub(visible_start) as u32;
+
         let old_cols = self.viewport.cols as usize;
         let new_cols = cols as usize;
 
-        if new_cols != old_cols {
-            // Reflow invalidates image grid positions.
-            self.images.clear();
+        let max_rows = rows as usize + self.grid.scrollback_limit as usize;
 
-            // Remember how far the cursor was from the bottom of the grid.
+        if new_cols != old_cols {
+            let anchors = anchor_images(&self.grid.rows, &self.images);
+
             let old_distance_from_bottom = self
                 .grid
                 .rows
@@ -614,49 +710,55 @@ impl Terminal {
 
             self.grid.reflow(cols);
 
-            while self.grid.rows.len() > rows as usize {
+            while self.grid.rows.len() > max_rows {
                 self.grid.rows.pop_front();
             }
-            while self.grid.rows.len() < rows as usize {
-                self.grid.rows.push_front(Row::new(cols));
-            }
 
-            // Restore cursor position relative to the bottom of the grid.
+            // Restore images and compute cursor position before padding so
+            // that empty padding rows don't corrupt logical-line counts.
+            restore_images(&self.grid.rows, &anchors, &mut self.images);
+
             let new_abs = self
                 .grid
                 .rows
                 .len()
                 .saturating_sub(old_distance_from_bottom + 1);
+
+            // Pad at the back so content stays top-aligned when there is no
+            // scrollback to reveal.
+            while self.grid.rows.len() < rows as usize {
+                self.grid.rows.push_back(Row::new(cols));
+            }
+
             let visible_start = self.grid.rows.len().saturating_sub(rows as usize);
             self.cursor.row = new_abs.saturating_sub(visible_start).min(rows as usize - 1) as u32;
             self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         } else {
             let old_len = self.grid.rows.len();
+            let old_abs = self.grid.active_row_index(&self.cursor, &self.viewport);
 
-            while self.grid.rows.len() > rows as usize {
+            while self.grid.rows.len() > max_rows {
                 self.grid.rows.pop_front();
             }
+
+            let popped = old_len - self.grid.rows.len();
+
+            // Pad at the back so content stays top-aligned.
             while self.grid.rows.len() < rows as usize {
-                self.grid.rows.push_front(Row::new(cols));
+                self.grid.rows.push_back(Row::new(cols));
             }
 
-            let new_len = self.grid.rows.len();
-            if new_len > old_len {
-                // Rows pushed to front — shift image indices up.
-                let pushed = new_len - old_len;
-                for img in self.images.values_mut() {
-                    img.row += pushed;
-                }
-            } else if new_len < old_len {
-                // Rows popped from front — shift image indices down, prune.
-                let popped = old_len - new_len;
+            // Only front pops shift image indices; push_back is invisible.
+            if popped > 0 {
                 self.images.retain(|_, img| img.row >= popped);
                 for img in self.images.values_mut() {
                     img.row -= popped;
                 }
             }
 
-            self.cursor.row = self.cursor.row.min(rows.saturating_sub(1));
+            let new_abs = old_abs.saturating_sub(popped);
+            let visible_start = self.grid.rows.len().saturating_sub(rows as usize);
+            self.cursor.row = new_abs.saturating_sub(visible_start).min(rows as usize - 1) as u32;
         }
 
         self.viewport.cols = cols;
@@ -782,13 +884,12 @@ fn put_char(
     if cursor.col >= viewport.cols {
         // Soft wrap: mark the next row as a continuation.
         cursor.col = 0;
+        grid.rows[cursor.row as usize].wrapped = true;
         cursor.row += 1;
-        if cursor.row >= grid.rows.len() as u32 {
+        while cursor.row >= grid.rows.len() as u32 {
             grid.push_visible_row(&viewport);
             cursor.row = viewport.rows - 1;
         }
-        let r = grid.active_row_index(cursor, viewport);
-        grid.rows[r].wrapped = true;
     }
 
     // New output resets viewport to bottom.
@@ -1360,5 +1461,40 @@ mod tests {
         assert!(grid.rows[3].wrapped);
         assert!(!grid.rows[4].wrapped);
         assert_eq!(grid.rows.len(), 5);
+    }
+
+    // ── Reflow: trailing space stripping ────────────────────────────
+
+    #[test]
+    fn reflow_grow_strips_trailing_spaces() {
+        // "ab" with trailing padding on a wrapped row, then "cd".
+        let mut grid = make_grid(5, &[("ab   ", true), ("cd   ", false)]);
+        grid.reflow(10);
+        assert_eq!(row_chars(&grid.rows[0]), "abcd      ");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(grid.rows.len(), 1);
+    }
+
+    #[test]
+    fn reflow_shrink_drops_trailing_space_overflow() {
+        // Wrapped row where overflow portion is all spaces — no split needed.
+        let mut grid = make_grid(6, &[("abc   ", true), ("def   ", false)]);
+        grid.reflow(3);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
+    }
+
+    #[test]
+    fn reflow_shrink_grow_roundtrip_with_trailing_spaces() {
+        // Shrink then grow should recover original content, modulo trailing spaces.
+        let mut grid = make_grid(10, &[("hello     ", true), ("world     ", false)]);
+        grid.reflow(5);
+        grid.reflow(10);
+        assert_eq!(row_chars(&grid.rows[0]), "helloworld");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(grid.rows.len(), 1);
     }
 }
