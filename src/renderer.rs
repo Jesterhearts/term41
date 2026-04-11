@@ -3,14 +3,16 @@ use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
+use palette::Srgb;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::font::FontSystem;
 use crate::font::RasterizedGlyph;
-use crate::terminal::Color;
+use crate::sixel::SixelImage;
 use crate::terminal::Terminal;
+use crate::terminal::default_fg;
 
 const ATLAS_SIZE: u32 = 1024;
 const IMAGE_ATLAS_SIZE: u32 = 2048;
@@ -33,11 +35,12 @@ struct FgVertex {
     color: u32,
 }
 
-/// Packed vertex for image quads: position + UV + layer.
+/// Packed vertex for image quads: position + UV + layer + transparency flag.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageVertex {
     pos: [f32; 2],
+    /// xy = UV coords, z = atlas layer, w = 1.0 if image has transparent bg.
     uv_layer: [f32; 3],
 }
 
@@ -70,10 +73,10 @@ struct LayerState {
 }
 
 fn pack_color(
-    c: &Color,
+    c: &Srgb<u8>,
     alpha: u8,
 ) -> u32 {
-    u32::from_be_bytes([c.r, c.g, c.b, alpha])
+    u32::from_be_bytes([c.red, c.green, c.blue, alpha])
 }
 
 pub struct Renderer {
@@ -670,7 +673,7 @@ impl Renderer {
 
     fn upload_image(
         &self,
-        image: &crate::sixel::SixelImage,
+        image: &SixelImage,
         entry: &ImageAtlasEntry,
     ) {
         self.queue.write_texture(
@@ -712,12 +715,12 @@ impl Renderer {
         let mut fg_vertices: Vec<FgVertex> = Vec::new();
         let mut fg_indices: Vec<u32> = Vec::new();
 
-        for row in 0..terminal.rows {
+        for row in 0..terminal.viewport.rows {
             let y = row as f32 * cell_h;
 
             // Background quads for the whole row.
             let grid_row = terminal.visible_row(row);
-            for col in 0..terminal.cols {
+            for col in 0..terminal.viewport.cols {
                 let x = col as f32 * cell_w;
                 let bg_color = pack_color(&grid_row.bg[col as usize], self.bg_alpha);
                 let bi = bg_vertices.len() as u32;
@@ -793,10 +796,10 @@ impl Renderer {
         }
 
         // Cursor: draw an inverted cell (only when viewing the live terminal).
-        if terminal.viewport_offset == 0 {
-            let cx = terminal.cursor_col as f32 * cell_w;
-            let cy = terminal.cursor_row as f32 * cell_h;
-            let cursor_color = pack_color(&Color::default_fg(), 255);
+        if terminal.viewport.offset == 0 {
+            let cx = terminal.cursor.col as f32 * cell_w;
+            let cy = terminal.cursor.row as f32 * cell_h;
+            let cursor_color = pack_color(&default_fg(), 255);
             let bi = bg_vertices.len() as u32;
             bg_vertices.extend_from_slice(&[
                 BgVertex {
@@ -822,74 +825,58 @@ impl Renderer {
         // ---- Build image quads ----
         let mut image_vertices: Vec<ImageVertex> = Vec::new();
         let mut image_indices: Vec<u32> = Vec::new();
-        let screen_w = self.surface_config.width as f32;
-        let screen_h = self.surface_config.height as f32;
 
-        // Clean up entries for images that no longer exist in the terminal.
-        let live_ids: HashSet<u64> = terminal.images.iter().map(|i| i.id).collect();
-        self.uploaded_image_ids.retain(|id| live_ids.contains(id));
-        self.image_entries.retain(|id, _| live_ids.contains(id));
+        let mut live_ids = HashSet::<u64>::new();
+        for vis in terminal.visible_images() {
+            live_ids.insert(vis.id);
 
-        for placed in &terminal.images {
-            // Upload if needed.
-            if !self.uploaded_image_ids.contains(&placed.id) {
-                if let Some(entry) =
-                    self.allocate_image_slot(placed.image.width, placed.image.height)
-                {
-                    self.upload_image(&placed.image, &entry);
-                    self.image_entries.insert(placed.id, entry);
-                    self.uploaded_image_ids.insert(placed.id);
+            // Upload to atlas on first encounter.
+            if !self.uploaded_image_ids.contains(&vis.id) {
+                if let Some(entry) = self.allocate_image_slot(vis.image.width, vis.image.height) {
+                    self.upload_image(vis.image, &entry);
+                    self.image_entries.insert(vis.id, entry);
+                    self.uploaded_image_ids.insert(vis.id);
                 }
             }
 
-            let entry = match self.image_entries.get(&placed.id) {
-                Some(e) => *e,
-                None => continue,
-            };
+            if let Some(entry) = self.image_entries.get(&vis.id) {
+                let x = vis.screen_col as f32 * cell_w;
+                let y = vis.screen_row as f32 * cell_h;
+                let w = vis.image.width as f32;
+                let h = vis.image.height as f32;
 
-            // Compute screen position with scroll offset.
-            let scroll_delta = terminal
-                .scroll_count
-                .saturating_sub(placed.scroll_at_placement);
-            let effective_row = placed.row_at_placement as f32 - scroll_delta as f32;
+                let u0 = entry.x as f32 / IMAGE_ATLAS_SIZE as f32;
+                let v0 = entry.y as f32 / IMAGE_ATLAS_SIZE as f32;
+                let u1 = (entry.x + entry.width) as f32 / IMAGE_ATLAS_SIZE as f32;
+                let v1 = (entry.y + entry.height) as f32 / IMAGE_ATLAS_SIZE as f32;
+                let layer = entry.layer as f32;
 
-            let x = placed.col as f32 * cell_w;
-            let y = effective_row * cell_h;
-            let w = placed.image.width as f32;
-            let h = placed.image.height as f32;
-
-            // Frustum cull.
-            if y + h < 0.0 || y > screen_h || x + w < 0.0 || x > screen_w {
-                continue;
+                let ii = image_vertices.len() as u32;
+                image_vertices.extend_from_slice(&[
+                    ImageVertex {
+                        pos: [x, y],
+                        uv_layer: [u0, v0, layer],
+                    },
+                    ImageVertex {
+                        pos: [x + w, y],
+                        uv_layer: [u1, v0, layer],
+                    },
+                    ImageVertex {
+                        pos: [x, y + h],
+                        uv_layer: [u0, v1, layer],
+                    },
+                    ImageVertex {
+                        pos: [x + w, y + h],
+                        uv_layer: [u1, v1, layer],
+                    },
+                ]);
+                image_indices.extend_from_slice(&[ii, ii + 1, ii + 2, ii + 2, ii + 1, ii + 3]);
             }
-
-            let u0 = entry.x as f32 / IMAGE_ATLAS_SIZE as f32;
-            let v0 = entry.y as f32 / IMAGE_ATLAS_SIZE as f32;
-            let u1 = (entry.x + entry.width) as f32 / IMAGE_ATLAS_SIZE as f32;
-            let v1 = (entry.y + entry.height) as f32 / IMAGE_ATLAS_SIZE as f32;
-            let layer = entry.layer as f32;
-
-            let ii = image_vertices.len() as u32;
-            image_vertices.extend_from_slice(&[
-                ImageVertex {
-                    pos: [x, y],
-                    uv_layer: [u0, v0, layer],
-                },
-                ImageVertex {
-                    pos: [x + w, y],
-                    uv_layer: [u1, v0, layer],
-                },
-                ImageVertex {
-                    pos: [x, y + h],
-                    uv_layer: [u0, v1, layer],
-                },
-                ImageVertex {
-                    pos: [x + w, y + h],
-                    uv_layer: [u1, v1, layer],
-                },
-            ]);
-            image_indices.extend_from_slice(&[ii, ii + 1, ii + 2, ii + 2, ii + 1, ii + 3]);
         }
+
+        // Clean up atlas entries for images no longer in the terminal.
+        self.uploaded_image_ids.retain(|id| live_ids.contains(id));
+        self.image_entries.retain(|id, _| live_ids.contains(id));
 
         // ---- Acquire surface texture ----
         let frame = match self.surface.get_current_texture() {

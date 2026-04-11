@@ -1,21 +1,22 @@
 [package]
-name = "term41"
+name    = "term41"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-bytemuck = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
-dirs = "6.0.0"
+atoi       = "2.0.0"
+bytemuck   = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
+dirs       = "6.0.0"
 env_logger = "0.11.10"
-fontdb = "0.23.0"
-harfrust = "0.6.0"
-libc = "0.2.184"
-log = "0.4.29"
-pollster = "0.4.0"
-raqote = { version = "0.8.5", default-features = false }
+fontdb     = "0.23.0"
+harfrust   = "0.6.0"
+libc       = "0.2.184"
+log        = "0.4.29"
+palette    = { version = "0.7.6", default-features = false, features = ["std"] }
+pollster   = "0.4.0"
+raqote     = { version = "0.8.5", default-features = false }
 read-fonts = "0.39.1"
-serde = { version = "1.0.228", features = ["derive"] }
-toml = "1.1.2"
-vte = "0.15.0"
-wgpu = "29.0.1"
-winit = "0.30.13"
+serde      = { version = "1.0.228", features = ["derive"] }
+toml       = "1.1.2"
+wgpu       = "29.0.1"
+winit      = "0.30.13"

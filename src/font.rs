@@ -139,8 +139,8 @@ impl FontSystem {
 
     pub fn grid_size(
         &self,
-        cols: u16,
-        rows: u16,
+        cols: u32,
+        rows: u32,
     ) -> (u32, u32) {
         (
             cols as u32 * self.cell_width,
@@ -152,9 +152,9 @@ impl FontSystem {
         &self,
         pixel_width: u32,
         pixel_height: u32,
-    ) -> (u16, u16) {
-        let cols = (pixel_width / self.cell_width).max(1) as u16;
-        let rows = (pixel_height / self.cell_height).max(1) as u16;
+    ) -> (u32, u32) {
+        let cols = (pixel_width / self.cell_width).max(1) as u32;
+        let rows = (pixel_height / self.cell_height).max(1) as u32;
         (cols, rows)
     }
 
@@ -407,14 +407,11 @@ fn rasterize_composite_glyph(
             _ => (0.0, 0.0),
         };
 
-        match glyph {
-            Glyph::Simple(simple) => {
-                x_min_all = x_min_all.min(simple.x_min() as f32 * scale + dx);
-                y_min_all = y_min_all.min(simple.y_min() as f32 * scale + dy);
-                x_max_all = x_max_all.max(simple.x_max() as f32 * scale + dx);
-                y_max_all = y_max_all.max(simple.y_max() as f32 * scale + dy);
-            }
-            _ => {}
+        if let Glyph::Simple(simple) = glyph {
+            x_min_all = x_min_all.min(simple.x_min() as f32 * scale + dx);
+            y_min_all = y_min_all.min(simple.y_min() as f32 * scale + dy);
+            x_max_all = x_max_all.max(simple.x_max() as f32 * scale + dx);
+            y_max_all = y_max_all.max(simple.y_max() as f32 * scale + dy);
         }
     }
 

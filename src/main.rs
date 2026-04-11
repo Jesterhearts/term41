@@ -4,6 +4,7 @@ mod pty;
 mod renderer;
 mod sixel;
 mod terminal;
+mod vte;
 
 use std::sync::Arc;
 
@@ -22,8 +23,8 @@ use winit::keyboard::NamedKey;
 use winit::window::Window;
 use winit::window::WindowId;
 
-const INITIAL_COLS: u16 = 80;
-const INITIAL_ROWS: u16 = 24;
+const INITIAL_COLS: u32 = 80;
+const INITIAL_ROWS: u32 = 24;
 
 struct App {
     window: Option<Arc<Window>>,
@@ -49,8 +50,8 @@ impl App {
             terminal: Terminal::new(
                 INITIAL_COLS,
                 INITIAL_ROWS,
-                font_system.cell_height,
                 scrollback_lines,
+                font_system.cell_height,
             ),
             font_system,
             pty,
@@ -119,10 +120,8 @@ impl ApplicationHandler for App {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size);
                     let (cols, rows) = self.font_system.grid_dimensions(size.width, size.height);
-                    if cols != self.terminal.cols || rows != self.terminal.rows {
-                        self.terminal.resize(cols, rows);
-                        self.pty.resize(cols, rows);
-                    }
+                    self.terminal.resize(cols, rows);
+                    self.pty.resize(cols as u16, rows as u16);
                 }
             }
 
@@ -154,12 +153,13 @@ impl ApplicationHandler for App {
                     if let Key::Named(named) = &event.logical_key {
                         match named {
                             NamedKey::PageUp => {
-                                self.terminal.scroll_viewport_up(self.terminal.rows as u32);
+                                self.terminal
+                                    .scroll_viewport_up(self.terminal.viewport.rows as u32);
                                 return;
                             }
                             NamedKey::PageDown => {
                                 self.terminal
-                                    .scroll_viewport_down(self.terminal.rows as u32);
+                                    .scroll_viewport_down(self.terminal.viewport.rows as u32);
                                 return;
                             }
                             _ => {}
@@ -181,9 +181,6 @@ impl ApplicationHandler for App {
 
             WindowEvent::RedrawRequested => {
                 self.read_pty_output();
-                self.terminal
-                    .prune_offscreen_images(self.font_system.cell_height);
-
                 if let Some(renderer) = &mut self.renderer {
                     renderer.render(&mut self.font_system, &self.terminal);
                 }
@@ -227,7 +224,7 @@ fn main() {
     env_logger::init();
 
     let config = config::load();
-    let pty = Pty::spawn(INITIAL_COLS, INITIAL_ROWS).expect("failed to spawn PTY");
+    let pty = Pty::spawn(INITIAL_COLS as u16, INITIAL_ROWS as u16).expect("failed to spawn PTY");
 
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
