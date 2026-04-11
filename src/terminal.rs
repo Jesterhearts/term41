@@ -204,27 +204,6 @@ impl Grid {
         }
     }
 
-    pub fn insert_rows(
-        &mut self,
-        cursor: &Cursor,
-        viewport: &Viewport,
-        count: u32,
-    ) {
-        let active_row = self.active_row_index(cursor, viewport);
-
-        if self.rows.len() as u32 + count > self.scrollback_limit {
-            let n = self.rows.len() as u32 + count - self.scrollback_limit;
-            for _ in 0..n {
-                self.rows.pop_front();
-            }
-            self.total_popped += n as usize;
-        }
-
-        for _ in 0..count {
-            self.rows.insert(active_row, Row::new(viewport.cols));
-        }
-    }
-
     pub fn erase_in_display(
         &mut self,
         cursor: &Cursor,
@@ -287,24 +266,6 @@ impl Grid {
         }
     }
 
-    pub fn delete_lines(
-        &mut self,
-        cursor: &Cursor,
-        viewport: &Viewport,
-        n: u16,
-    ) {
-        let active = self.active_row_index(cursor, viewport);
-        let bottom = self.rows.len();
-        let count = (n as usize).min(bottom - active);
-
-        for _ in 0..count {
-            self.rows.remove(active);
-        }
-        for _ in 0..count {
-            self.rows.push_back(Row::new(viewport.cols));
-        }
-    }
-
     pub fn delete_chars(
         &mut self,
         cursor: &Cursor,
@@ -347,6 +308,44 @@ impl Grid {
         let end = (col + n as usize).min(cols);
 
         self.rows[active].clear_range(col..end);
+    }
+
+    /// Scroll content up within a region: remove line at `top`, insert blank
+    /// at `bottom`. Both are viewport-relative row indices.
+    fn scroll_up_in_region(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        bottom: u32,
+        n: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let abs_top = first_visible + top as usize;
+        let abs_bottom = first_visible + bottom as usize;
+        let n = (n as usize).min(abs_bottom - abs_top + 1);
+        for _ in 0..n {
+            self.rows.remove(abs_top);
+            self.rows.insert(abs_bottom, Row::new(viewport.cols));
+        }
+    }
+
+    /// Scroll content down within a region: insert blank at `top`, remove
+    /// line at `bottom`. Both are viewport-relative row indices.
+    fn scroll_down_in_region(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        bottom: u32,
+        n: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let abs_top = first_visible + top as usize;
+        let abs_bottom = first_visible + bottom as usize;
+        let n = (n as usize).min(abs_bottom - abs_top + 1);
+        for _ in 0..n {
+            self.rows.remove(abs_bottom);
+            self.rows.insert(abs_top, Row::new(viewport.cols));
+        }
     }
 
     pub fn active_row_index(
@@ -478,6 +477,10 @@ pub struct Viewport {
     /// How many rows the viewport is scrolled back from the bottom.
     /// 0 = viewing the live terminal. Positive = scrolled into history.
     pub offset: u32,
+    /// Top row of the scroll region (0-indexed, inclusive).
+    pub scroll_top: u32,
+    /// Bottom row of the scroll region (0-indexed, inclusive).
+    pub scroll_bottom: u32,
 }
 
 /// Terminal state: a grid of rows plus cursor position and attributes.
@@ -594,6 +597,8 @@ impl Terminal {
                 rows,
                 cols,
                 offset: 0,
+                scroll_top: 0,
+                scroll_bottom: rows - 1,
             },
             cursor: Cursor::default(),
             images: BTreeMap::new(),
@@ -767,6 +772,8 @@ impl Terminal {
             .viewport
             .offset
             .min(self.grid.scrollback_len(&self.viewport));
+        self.viewport.scroll_top = 0;
+        self.viewport.scroll_bottom = rows - 1;
     }
 
     /// Process raw bytes from the PTY through the VTE parser.
@@ -882,13 +889,18 @@ fn put_char(
     bg: Srgb<u8>,
 ) {
     if cursor.col >= viewport.cols {
-        // Soft wrap: mark the next row as a continuation.
+        // Soft wrap: mark the current row as a continuation.
         cursor.col = 0;
-        grid.rows[cursor.row as usize].wrapped = true;
-        cursor.row += 1;
-        while cursor.row >= grid.rows.len() as u32 {
-            grid.push_visible_row(&viewport);
-            cursor.row = viewport.rows - 1;
+        let r = grid.active_row_index(cursor, viewport);
+        grid.rows[r].wrapped = true;
+        if cursor.row == viewport.scroll_bottom {
+            if viewport.scroll_top == 0 && viewport.scroll_bottom == viewport.rows - 1 {
+                grid.push_visible_row(viewport);
+            } else {
+                grid.scroll_up_in_region(viewport, viewport.scroll_top, viewport.scroll_bottom, 1);
+            }
+        } else if cursor.row < viewport.rows - 1 {
+            cursor.row += 1;
         }
     }
 
@@ -911,10 +923,19 @@ fn execute(
 ) {
     match byte {
         b'\n' => {
-            cursor.row += 1;
-            if cursor.row >= viewport.rows {
-                grid.push_visible_row(&viewport);
-                cursor.row = viewport.rows - 1;
+            if cursor.row == viewport.scroll_bottom {
+                if viewport.scroll_top == 0 && viewport.scroll_bottom == viewport.rows - 1 {
+                    grid.push_visible_row(viewport);
+                } else {
+                    grid.scroll_up_in_region(
+                        viewport,
+                        viewport.scroll_top,
+                        viewport.scroll_bottom,
+                        1,
+                    );
+                }
+            } else if cursor.row < viewport.rows - 1 {
+                cursor.row += 1;
             }
         }
         b'\r' => {
@@ -994,11 +1015,15 @@ fn csi_dispatch(
         }
         'L' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            grid.insert_rows(&cursor, &viewport, n);
+            if cursor.row >= viewport.scroll_top && cursor.row <= viewport.scroll_bottom {
+                grid.scroll_down_in_region(viewport, cursor.row, viewport.scroll_bottom, n);
+            }
         }
         'M' => {
-            let n = p.first().copied().unwrap_or(1).max(1);
-            grid.delete_lines(cursor, viewport, n);
+            let n = p.first().copied().unwrap_or(1).max(1) as u32;
+            if cursor.row >= viewport.scroll_top && cursor.row <= viewport.scroll_bottom {
+                grid.scroll_up_in_region(viewport, cursor.row, viewport.scroll_bottom, n);
+            }
         }
         'P' => {
             let n = p.first().copied().unwrap_or(1).max(1);
@@ -1013,18 +1038,28 @@ fn csi_dispatch(
             grid.erase_chars(cursor, viewport, n);
         }
         'S' => {
-            let n = p.first().copied().unwrap_or(1).max(1);
-            for _ in 0..n {
-                grid.push_visible_row(&viewport);
+            let n = p.first().copied().unwrap_or(1).max(1) as u32;
+            if viewport.scroll_top == 0 && viewport.scroll_bottom == viewport.rows - 1 {
+                for _ in 0..n {
+                    grid.push_visible_row(viewport);
+                }
+            } else {
+                grid.scroll_up_in_region(viewport, viewport.scroll_top, viewport.scroll_bottom, n);
             }
         }
         'T' => {
-            let n = p.first().copied().unwrap_or(1).max(1);
-            for _ in 0..n {
-                viewport.offset += 1;
-            }
+            let n = p.first().copied().unwrap_or(1).max(1) as u32;
+            grid.scroll_down_in_region(viewport, viewport.scroll_top, viewport.scroll_bottom, n);
         }
-        'r' | 'n' | 'c' => {}
+        'r' => {
+            let top = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
+            let bottom = p.get(1).copied().unwrap_or(viewport.rows as u16).max(1) as u32 - 1;
+            viewport.scroll_top = top.min(viewport.rows - 1);
+            viewport.scroll_bottom = bottom.min(viewport.rows - 1).max(viewport.scroll_top);
+            cursor.row = 0;
+            cursor.col = 0;
+        }
+        'n' | 'c' => {}
         _ => {}
     }
 }
@@ -1045,10 +1080,14 @@ fn esc_dispatch(
             todo!()
         }
         b'M' => {
-            if cursor.row == 0 {
-                grid.push_visible_row(viewport);
-                viewport.offset = 0;
-            } else {
+            if cursor.row == viewport.scroll_top {
+                grid.scroll_down_in_region(
+                    viewport,
+                    viewport.scroll_top,
+                    viewport.scroll_bottom,
+                    1,
+                );
+            } else if cursor.row > 0 {
                 cursor.row -= 1;
             }
         }
