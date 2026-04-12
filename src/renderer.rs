@@ -796,9 +796,9 @@ impl Renderer {
         }
 
         // Cursor: draw an inverted cell (only when viewing the live terminal).
-        if terminal.viewport.offset == 0 {
-            let cx = terminal.cursor.col as f32 * cell_w;
-            let cy = terminal.cursor.row as f32 * cell_h;
+        if terminal.active.offset == 0 {
+            let cx = terminal.active.cursor.col as f32 * cell_w;
+            let cy = terminal.active.cursor.row as f32 * cell_h;
             let cursor_color = pack_color(&default_fg(), 255);
             let bi = bg_vertices.len() as u32;
             bg_vertices.extend_from_slice(&[

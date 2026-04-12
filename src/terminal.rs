@@ -176,10 +176,68 @@ impl Row {
     }
 }
 
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
     pub col: u32,
     pub row: u32,
+}
+
+/// Snapshot of cursor position and active colors, used by DECSC/DECRC
+/// (ESC 7 / ESC 8) and the `?1048`/`?1049` private modes.
+#[derive(Debug, Clone, Copy)]
+pub struct SavedCursor {
+    pub cursor: Cursor,
+    pub fg: Srgb<u8>,
+    pub bg: Srgb<u8>,
+}
+
+/// State for a single screen buffer (primary or alt). The terminal holds
+/// two of these — an `active` and a `stash` — and swaps between them with
+/// a single [`std::mem::swap`] on the alt-screen mode transitions.
+#[derive(Debug)]
+pub struct Screen {
+    pub grid: Grid,
+    pub cursor: Cursor,
+    pub fg: Srgb<u8>,
+    pub bg: Srgb<u8>,
+    /// Top row of the scroll region (0-indexed, inclusive).
+    pub scroll_top: u32,
+    /// Bottom row of the scroll region (0-indexed, inclusive).
+    pub scroll_bottom: u32,
+    /// Viewport scroll-back offset. 0 = viewing the live terminal,
+    /// positive = scrolled into history. Alt screens keep this at 0 since
+    /// their grid has no scrollback.
+    pub offset: u32,
+    pub images: BTreeMap<u64, PlacedImage>,
+    pub saved_cursor: Option<SavedCursor>,
+}
+
+impl Screen {
+    fn new(
+        cols: u32,
+        rows: u32,
+        scrollback_limit: u32,
+    ) -> Self {
+        let mut grid_rows = VecDeque::with_capacity(rows as usize + scrollback_limit as usize);
+        for _ in 0..rows {
+            grid_rows.push_back(Row::new(cols));
+        }
+        Self {
+            grid: Grid {
+                rows: grid_rows,
+                scrollback_limit,
+                total_popped: 0,
+            },
+            cursor: Cursor::default(),
+            fg: default_fg(),
+            bg: default_bg(),
+            scroll_top: 0,
+            scroll_bottom: rows.saturating_sub(1),
+            offset: 0,
+            images: BTreeMap::new(),
+            saved_cursor: None,
+        }
+    }
 }
 
 #[derive(Debug)]
@@ -527,33 +585,29 @@ impl Grid {
     }
 }
 
+/// Dimensions of the rendered terminal window, shared by both screens.
+/// Per-screen state (scroll region, scrollback offset) lives on [`Screen`].
 #[derive(Debug, Default)]
 pub struct Viewport {
     pub rows: u32,
     pub cols: u32,
-    /// How many rows the viewport is scrolled back from the bottom.
-    /// 0 = viewing the live terminal. Positive = scrolled into history.
-    pub offset: u32,
-    /// Top row of the scroll region (0-indexed, inclusive).
-    pub scroll_top: u32,
-    /// Bottom row of the scroll region (0-indexed, inclusive).
-    pub scroll_bottom: u32,
 }
 
-/// Terminal state: a grid of rows plus cursor position and attributes.
+/// Terminal state.
 ///
-/// The grid contains both scrollback history and the visible area.
-/// Visible rows are the last `rows` entries in the grid. Scrollback
-/// rows sit before them, capped at `scrollback_limit`.
+/// Holds two [`Screen`] buffers — the `active` one receives output and is
+/// rendered; the `stash` holds whichever screen isn't currently live.
+/// DECSET ?47 / ?1047 / ?1049 swap the two with a single [`std::mem::swap`].
 #[derive(Debug)]
 pub struct Terminal {
-    pub grid: Grid,
-    pub cursor: Cursor,
+    pub active: Screen,
+    pub stash: Screen,
     pub viewport: Viewport,
-    pub images: BTreeMap<u64, PlacedImage>,
 
-    pub fg: Srgb<u8>,
-    pub bg: Srgb<u8>,
+    /// `true` when the alt screen is active, `false` when the primary
+    /// screen is active. Initialized to `false`; `stash` starts as the alt
+    /// screen.
+    pub on_alt_screen: bool,
 
     /// Cell height in pixels, used to convert sixel image pixel height to rows.
     cell_height: u32,
@@ -639,28 +693,14 @@ impl Terminal {
         scrollback_limit: u32,
         cell_height: u32,
     ) -> Self {
-        let mut cells = VecDeque::with_capacity(rows as usize + scrollback_limit as usize);
-        for _ in 0..rows {
-            cells.push_back(Row::new(cols));
-        }
-
         Self {
-            grid: Grid {
-                rows: cells,
-                scrollback_limit,
-                total_popped: 0,
-            },
-            viewport: Viewport {
-                rows,
-                cols,
-                offset: 0,
-                scroll_top: 0,
-                scroll_bottom: rows - 1,
-            },
-            cursor: Cursor::default(),
-            images: BTreeMap::new(),
-            fg: default_fg(),
-            bg: default_bg(),
+            active: Screen::new(cols, rows, scrollback_limit),
+            // Stash starts as a blank alt screen (no scrollback). When the
+            // first ?1049h / ?47h arrives we simply swap `active` and
+            // `stash` — no lazy construction needed.
+            stash: Screen::new(cols, rows, 0),
+            viewport: Viewport { rows, cols },
+            on_alt_screen: false,
             cell_height,
             parser: vte::Parser::new(),
             next_image_id: 0,
@@ -677,8 +717,8 @@ impl Terminal {
         screen_row: u32,
     ) -> &Row {
         let base =
-            self.grid.rows.len() - self.viewport.rows as usize - self.viewport.offset as usize;
-        &self.grid.rows[base + screen_row as usize]
+            self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
+        &self.active.grid.rows[base + screen_row as usize]
     }
 
     /// Scroll the viewport up (into history). Returns actual lines scrolled.
@@ -686,9 +726,9 @@ impl Terminal {
         &mut self,
         lines: u32,
     ) -> u32 {
-        let max = self.grid.scrollback_len(&self.viewport);
-        let delta = lines.min(max.saturating_sub(self.viewport.offset));
-        self.viewport.offset += delta;
+        let max = self.active.grid.scrollback_len(&self.viewport);
+        let delta = lines.min(max.saturating_sub(self.active.offset));
+        self.active.offset += delta;
         delta
     }
 
@@ -697,24 +737,24 @@ impl Terminal {
         &mut self,
         lines: u32,
     ) -> u32 {
-        let delta = lines.min(self.viewport.offset);
-        self.viewport.offset -= delta;
+        let delta = lines.min(self.active.offset);
+        self.active.offset -= delta;
         delta
     }
 
     /// Reset viewport to the bottom (live terminal).
     pub fn reset_viewport(&mut self) {
-        self.viewport.offset = 0;
+        self.active.offset = 0;
     }
 
     /// Return images whose top-left falls within the current viewport,
     /// with screen-relative row/col positions.
     pub fn visible_images(&self) -> impl Iterator<Item = VisibleImage<'_>> {
         let viewport_top =
-            self.grid.rows.len() - self.viewport.rows as usize - self.viewport.offset as usize;
+            self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
         let viewport_bottom = viewport_top + self.viewport.rows as usize;
 
-        self.images.values().filter_map(move |img| {
+        self.active.images.values().filter_map(move |img| {
             if img.row >= viewport_top && img.row < viewport_bottom {
                 Some(VisibleImage {
                     image: &img.image,
@@ -733,99 +773,17 @@ impl Terminal {
         cols: u32,
         rows: u32,
     ) {
-        // Trim trailing empty rows that accumulated from padding in previous
-        // resizes, so content stays visible when the viewport shrinks.
-        let cursor_abs = self.grid.active_row_index(&self.cursor, &self.viewport);
-        while self.grid.rows.len() > cursor_abs + 1 {
-            if self.grid.rows.back().is_some_and(|r| r.content_len() == 0) {
-                self.grid.rows.pop_back();
-            } else {
-                break;
-            }
-        }
-        self.viewport.rows = self.viewport.rows.min(self.grid.rows.len() as u32);
-        let visible_start = self
-            .grid
-            .rows
-            .len()
-            .saturating_sub(self.viewport.rows as usize);
-        self.cursor.row = cursor_abs.saturating_sub(visible_start) as u32;
+        let old_cols = self.viewport.cols;
+        let old_rows = self.viewport.rows;
 
-        let old_cols = self.viewport.cols as usize;
-        let new_cols = cols as usize;
-
-        let max_rows = rows as usize + self.grid.scrollback_limit as usize;
-
-        if new_cols != old_cols {
-            let anchors = anchor_images(&self.grid.rows, &self.images);
-
-            let old_distance_from_bottom = self
-                .grid
-                .rows
-                .len()
-                .saturating_sub(self.grid.active_row_index(&self.cursor, &self.viewport) + 1);
-
-            self.grid.reflow(cols);
-
-            while self.grid.rows.len() > max_rows {
-                self.grid.rows.pop_front();
-            }
-
-            // Restore images and compute cursor position before padding so
-            // that empty padding rows don't corrupt logical-line counts.
-            restore_images(&self.grid.rows, &anchors, &mut self.images);
-
-            let new_abs = self
-                .grid
-                .rows
-                .len()
-                .saturating_sub(old_distance_from_bottom + 1);
-
-            // Pad at the back so content stays top-aligned when there is no
-            // scrollback to reveal.
-            while self.grid.rows.len() < rows as usize {
-                self.grid.rows.push_back(Row::new(cols));
-            }
-
-            let visible_start = self.grid.rows.len().saturating_sub(rows as usize);
-            self.cursor.row = new_abs.saturating_sub(visible_start).min(rows as usize - 1) as u32;
-            self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
-        } else {
-            let old_len = self.grid.rows.len();
-            let old_abs = self.grid.active_row_index(&self.cursor, &self.viewport);
-
-            while self.grid.rows.len() > max_rows {
-                self.grid.rows.pop_front();
-            }
-
-            let popped = old_len - self.grid.rows.len();
-
-            // Pad at the back so content stays top-aligned.
-            while self.grid.rows.len() < rows as usize {
-                self.grid.rows.push_back(Row::new(cols));
-            }
-
-            // Only front pops shift image indices; push_back is invisible.
-            if popped > 0 {
-                self.images.retain(|_, img| img.row >= popped);
-                for img in self.images.values_mut() {
-                    img.row -= popped;
-                }
-            }
-
-            let new_abs = old_abs.saturating_sub(popped);
-            let visible_start = self.grid.rows.len().saturating_sub(rows as usize);
-            self.cursor.row = new_abs.saturating_sub(visible_start).min(rows as usize - 1) as u32;
+        // Keep both screens sized to the new viewport so a swap after a
+        // resize doesn't land the cursor outside its own grid.
+        for screen in [&mut self.active, &mut self.stash] {
+            resize_screen(screen, old_cols, old_rows, cols, rows);
         }
 
         self.viewport.cols = cols;
         self.viewport.rows = rows;
-        self.viewport.offset = self
-            .viewport
-            .offset
-            .min(self.grid.scrollback_len(&self.viewport));
-        self.viewport.scroll_top = 0;
-        self.viewport.scroll_bottom = rows - 1;
     }
 
     /// Process raw bytes from the PTY through the VTE parser.
@@ -834,44 +792,46 @@ impl Terminal {
         data: &[u8],
     ) {
         for action in self.parser.parse(data) {
-            let popped_before = self.grid.total_popped;
+            let popped_before = self.active.grid.total_popped;
 
             match action {
-                vte::Action::Print(c) => put_char(
-                    &mut self.cursor,
-                    &mut self.grid,
-                    &mut self.viewport,
-                    c,
-                    self.fg,
-                    self.bg,
-                ),
-                vte::Action::Execute(byte) => {
-                    execute(&mut self.cursor, &mut self.grid, &self.viewport, byte)
-                }
+                vte::Action::Print(c) => put_char(&mut self.active, &self.viewport, c),
+                vte::Action::Execute(byte) => execute(&mut self.active, &self.viewport, byte),
                 vte::Action::CsiDispatch {
                     params,
                     intermediates,
                     action,
-                } => csi_dispatch(
-                    &mut self.cursor,
-                    &mut self.grid,
-                    &mut self.viewport,
-                    &mut self.fg,
-                    &mut self.bg,
-                    &params,
-                    intermediates.as_slice(),
-                    action,
-                ),
+                } => {
+                    let is = intermediates.as_slice();
+                    if is == b"?" && (action == 'h' || action == 'l') {
+                        let enable = action == 'h';
+                        for p in params.iter() {
+                            set_private_mode(
+                                p[0],
+                                enable,
+                                &mut self.active,
+                                &mut self.stash,
+                                &self.viewport,
+                                &mut self.on_alt_screen,
+                            );
+                        }
+                    } else {
+                        csi_dispatch(&mut self.active, &self.viewport, &params, is, action);
+                    }
+                }
                 vte::Action::EscDispatch {
                     intermediates,
                     byte,
-                } => esc_dispatch(
-                    &mut self.cursor,
-                    &mut self.grid,
-                    &mut self.viewport,
-                    intermediates.as_slice(),
-                    byte,
-                ),
+                } => {
+                    let is = intermediates.as_slice();
+                    if is.is_empty() && byte == b'7' {
+                        save_cursor_slot(&mut self.active);
+                    } else if is.is_empty() && byte == b'8' {
+                        restore_cursor_slot(&mut self.active, &self.viewport);
+                    } else {
+                        esc_dispatch(&mut self.active, &self.viewport, is, byte);
+                    }
+                }
                 vte::Action::OscDispatch => {}
                 vte::Action::Hook { params, action } => {
                     self.hook_bytes.push(vec![]);
@@ -891,36 +851,42 @@ impl Terminal {
                         let image = parse_sixel(params, bytes);
                         let id = self.next_image_id;
                         self.next_image_id += 1;
-                        let row = self.grid.active_row_index(&self.cursor, &self.viewport);
+                        let row = self
+                            .active
+                            .grid
+                            .active_row_index(&self.active.cursor, &self.viewport);
                         let image_rows = image.height.div_ceil(self.cell_height);
-                        self.images.insert(
+                        self.active.images.insert(
                             id,
                             PlacedImage {
                                 image,
                                 id,
                                 row,
-                                col: self.cursor.col,
+                                col: self.active.cursor.col,
                             },
                         );
 
                         // Advance cursor past the image, scrolling as needed.
                         for _ in 0..image_rows {
-                            self.cursor.row += 1;
-                            if self.cursor.row >= self.viewport.rows {
-                                self.grid.push_visible_row(&self.viewport);
-                                self.cursor.row = self.viewport.rows - 1;
+                            self.active.cursor.row += 1;
+                            if self.active.cursor.row >= self.viewport.rows {
+                                self.active.grid.push_visible_row(&self.viewport);
+                                self.active.cursor.row = self.viewport.rows - 1;
                             }
                         }
-                        self.cursor.col = 0;
-                        self.viewport.offset = 0;
+                        self.active.cursor.col = 0;
+                        self.active.offset = 0;
                     }
                 }
             }
 
-            let newly_popped = self.grid.total_popped - popped_before;
+            // Use saturating_sub: a screen swap during this iteration can
+            // reset `total_popped` to the other grid's value, which would
+            // underflow an unchecked subtraction.
+            let newly_popped = self.active.grid.total_popped.saturating_sub(popped_before);
             if newly_popped > 0 {
-                self.images.retain(|_, img| img.row >= newly_popped);
-                for img in self.images.values_mut() {
+                self.active.images.retain(|_, img| img.row >= newly_popped);
+                for img in self.active.images.values_mut() {
                     img.row -= newly_popped;
                 }
             }
@@ -928,73 +894,172 @@ impl Terminal {
     }
 }
 
-fn put_char(
-    cursor: &mut Cursor,
-    grid: &mut Grid,
-    viewport: &mut Viewport,
-    ch: char,
-    fg: Srgb<u8>,
-    bg: Srgb<u8>,
+/// Resize a single screen to new dimensions.
+///
+/// Reflows soft-wrapped lines when the column count changes, preserves
+/// image positions through the reflow via logical-line anchors, clamps
+/// the cursor into the new bounds, and resets the scroll region / offset
+/// to fit the new viewport.
+fn resize_screen(
+    screen: &mut Screen,
+    old_cols: u32,
+    old_rows: u32,
+    new_cols: u32,
+    new_rows: u32,
 ) {
-    if cursor.col >= viewport.cols {
-        // Soft wrap: mark the current row as a continuation.
-        cursor.col = 0;
-        let r = grid.active_row_index(cursor, viewport);
-        grid.rows[r].wrapped = true;
-        if cursor.row == viewport.scroll_bottom {
-            if viewport.scroll_top == 0 && viewport.scroll_bottom == viewport.rows - 1 {
-                grid.push_visible_row(viewport);
-            } else {
-                grid.scroll_up_in_region(viewport, viewport.scroll_top, viewport.scroll_bottom, 1);
+    let grid = &mut screen.grid;
+    let cursor = &mut screen.cursor;
+    let images = &mut screen.images;
+
+    // Trim trailing empty rows that accumulated from padding in previous
+    // resizes, so content stays visible when the viewport shrinks.
+    let cursor_abs = grid.rows.len() - old_rows as usize + cursor.row as usize;
+    while grid.rows.len() > cursor_abs + 1 {
+        if grid.rows.back().is_some_and(|r| r.content_len() == 0) {
+            grid.rows.pop_back();
+        } else {
+            break;
+        }
+    }
+    let effective_old_rows = (old_rows as usize).min(grid.rows.len());
+    let visible_start = grid.rows.len().saturating_sub(effective_old_rows);
+    cursor.row = cursor_abs.saturating_sub(visible_start) as u32;
+
+    let max_rows = new_rows as usize + grid.scrollback_limit as usize;
+
+    if new_cols as usize != old_cols as usize {
+        let anchors = anchor_images(&grid.rows, images);
+
+        let cursor_abs_now = grid.rows.len() - effective_old_rows + cursor.row as usize;
+        let old_distance_from_bottom = grid.rows.len().saturating_sub(cursor_abs_now + 1);
+
+        grid.reflow(new_cols);
+
+        while grid.rows.len() > max_rows {
+            grid.rows.pop_front();
+        }
+
+        restore_images(&grid.rows, &anchors, images);
+
+        let new_abs = grid.rows.len().saturating_sub(old_distance_from_bottom + 1);
+
+        while grid.rows.len() < new_rows as usize {
+            grid.rows.push_back(Row::new(new_cols));
+        }
+
+        let visible_start = grid.rows.len().saturating_sub(new_rows as usize);
+        cursor.row = new_abs
+            .saturating_sub(visible_start)
+            .min(new_rows as usize - 1) as u32;
+        cursor.col = cursor.col.min(new_cols.saturating_sub(1));
+    } else {
+        let old_len = grid.rows.len();
+        let old_abs = grid.rows.len() - effective_old_rows + cursor.row as usize;
+
+        while grid.rows.len() > max_rows {
+            grid.rows.pop_front();
+        }
+
+        let popped = old_len - grid.rows.len();
+
+        while grid.rows.len() < new_rows as usize {
+            grid.rows.push_back(Row::new(new_cols));
+        }
+
+        if popped > 0 {
+            images.retain(|_, img| img.row >= popped);
+            for img in images.values_mut() {
+                img.row -= popped;
             }
-        } else if cursor.row < viewport.rows - 1 {
-            cursor.row += 1;
+        }
+
+        let new_abs = old_abs.saturating_sub(popped);
+        let visible_start = grid.rows.len().saturating_sub(new_rows as usize);
+        cursor.row = new_abs
+            .saturating_sub(visible_start)
+            .min(new_rows as usize - 1) as u32;
+    }
+
+    screen.scroll_top = 0;
+    screen.scroll_bottom = new_rows.saturating_sub(1);
+    let scrollback = screen.grid.scrollback_len(&Viewport {
+        rows: new_rows,
+        cols: new_cols,
+    });
+    screen.offset = screen.offset.min(scrollback);
+}
+
+fn put_char(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    ch: char,
+) {
+    let fg = screen.fg;
+    let bg = screen.bg;
+
+    if screen.cursor.col >= viewport.cols {
+        // Soft wrap: mark the current row as a continuation.
+        screen.cursor.col = 0;
+        let r = screen.grid.active_row_index(&screen.cursor, viewport);
+        screen.grid.rows[r].wrapped = true;
+        if screen.cursor.row == screen.scroll_bottom {
+            if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
+                screen.grid.push_visible_row(viewport);
+            } else {
+                screen.grid.scroll_up_in_region(
+                    viewport,
+                    screen.scroll_top,
+                    screen.scroll_bottom,
+                    1,
+                );
+            }
+        } else if screen.cursor.row < viewport.rows - 1 {
+            screen.cursor.row += 1;
         }
     }
 
-    // New output resets viewport to bottom.
-    viewport.offset = 0;
+    // New output resets the viewport to the live edge.
+    screen.offset = 0;
 
-    let r = grid.active_row_index(cursor, viewport);
-    let c = cursor.col as usize;
-    grid.rows[r].chars[c] = ch;
-    grid.rows[r].fg[c] = fg;
-    grid.rows[r].bg[c] = bg;
-    cursor.col += 1;
+    let r = screen.grid.active_row_index(&screen.cursor, viewport);
+    let c = screen.cursor.col as usize;
+    screen.grid.rows[r].chars[c] = ch;
+    screen.grid.rows[r].fg[c] = fg;
+    screen.grid.rows[r].bg[c] = bg;
+    screen.cursor.col += 1;
 }
 
 fn execute(
-    cursor: &mut Cursor,
-    grid: &mut Grid,
+    screen: &mut Screen,
     viewport: &Viewport,
     byte: u8,
 ) {
     match byte {
         b'\n' => {
-            if cursor.row == viewport.scroll_bottom {
-                if viewport.scroll_top == 0 && viewport.scroll_bottom == viewport.rows - 1 {
-                    grid.push_visible_row(viewport);
+            if screen.cursor.row == screen.scroll_bottom {
+                if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
+                    screen.grid.push_visible_row(viewport);
                 } else {
-                    grid.scroll_up_in_region(
+                    screen.grid.scroll_up_in_region(
                         viewport,
-                        viewport.scroll_top,
-                        viewport.scroll_bottom,
+                        screen.scroll_top,
+                        screen.scroll_bottom,
                         1,
                     );
                 }
-            } else if cursor.row < viewport.rows - 1 {
-                cursor.row += 1;
+            } else if screen.cursor.row < viewport.rows - 1 {
+                screen.cursor.row += 1;
             }
         }
         b'\r' => {
-            cursor.col = 0;
+            screen.cursor.col = 0;
         }
         0x08 => {
-            cursor.col = cursor.col.saturating_sub(1);
+            screen.cursor.col = screen.cursor.col.saturating_sub(1);
         }
         b'\t' => {
-            let next = (cursor.col / 8 + 1) * 8;
-            cursor.col = next.min(viewport.cols - 1);
+            let next = (screen.cursor.col / 8 + 1) * 8;
+            screen.cursor.col = next.min(viewport.cols - 1);
         }
         0x07 | 0x00 => {}
         _ => {}
@@ -1002,24 +1067,18 @@ fn execute(
 }
 
 fn csi_dispatch(
-    cursor: &mut Cursor,
-    grid: &mut Grid,
-    viewport: &mut Viewport,
-    fg: &mut Srgb<u8>,
-    bg: &mut Srgb<u8>,
+    screen: &mut Screen,
+    viewport: &Viewport,
     params: &vte::Params,
     intermediates: &[u8],
     action: char,
 ) {
-    if intermediates.contains(&b'?') {
-        return;
-    }
-
     if !intermediates.is_empty() {
         return;
     }
 
     let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
+    let cursor = &mut screen.cursor;
 
     match action {
         'A' => {
@@ -1046,13 +1105,13 @@ fn csi_dispatch(
         }
         'J' => {
             let mode = p.first().copied().unwrap_or(0);
-            grid.erase_in_display(cursor, viewport, mode);
+            screen.grid.erase_in_display(&screen.cursor, viewport, mode);
         }
         'K' => {
             let mode = p.first().copied().unwrap_or(0);
-            grid.erase_in_line(cursor, viewport, mode);
+            screen.grid.erase_in_line(&screen.cursor, viewport, mode);
         }
-        'm' => apply_sgr(fg, bg, params),
+        'm' => apply_sgr(&mut screen.fg, &mut screen.bg, params),
         'd' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             cursor.row = row.min(viewport.rows - 1);
@@ -1063,49 +1122,60 @@ fn csi_dispatch(
         }
         'L' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            if cursor.row >= viewport.scroll_top && cursor.row <= viewport.scroll_bottom {
-                grid.scroll_down_in_region(viewport, cursor.row, viewport.scroll_bottom, n);
+            if cursor.row >= screen.scroll_top && cursor.row <= screen.scroll_bottom {
+                screen
+                    .grid
+                    .scroll_down_in_region(viewport, cursor.row, screen.scroll_bottom, n);
             }
         }
         'M' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            if cursor.row >= viewport.scroll_top && cursor.row <= viewport.scroll_bottom {
-                grid.scroll_up_in_region(viewport, cursor.row, viewport.scroll_bottom, n);
+            if cursor.row >= screen.scroll_top && cursor.row <= screen.scroll_bottom {
+                screen
+                    .grid
+                    .scroll_up_in_region(viewport, cursor.row, screen.scroll_bottom, n);
             }
         }
         'P' => {
             let n = p.first().copied().unwrap_or(1).max(1);
-            grid.delete_chars(cursor, viewport, n);
+            screen.grid.delete_chars(&screen.cursor, viewport, n);
         }
         '@' => {
             let n = p.first().copied().unwrap_or(1).max(1);
-            grid.insert_chars(cursor, viewport, n);
+            screen.grid.insert_chars(&screen.cursor, viewport, n);
         }
         'X' => {
             let n = p.first().copied().unwrap_or(1).max(1);
-            grid.erase_chars(cursor, viewport, n);
+            screen.grid.erase_chars(&screen.cursor, viewport, n);
         }
         'S' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            if viewport.scroll_top == 0 && viewport.scroll_bottom == viewport.rows - 1 {
+            if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
                 for _ in 0..n {
-                    grid.push_visible_row(viewport);
+                    screen.grid.push_visible_row(viewport);
                 }
             } else {
-                grid.scroll_up_in_region(viewport, viewport.scroll_top, viewport.scroll_bottom, n);
+                screen.grid.scroll_up_in_region(
+                    viewport,
+                    screen.scroll_top,
+                    screen.scroll_bottom,
+                    n,
+                );
             }
         }
         'T' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            grid.scroll_down_in_region(viewport, viewport.scroll_top, viewport.scroll_bottom, n);
+            screen
+                .grid
+                .scroll_down_in_region(viewport, screen.scroll_top, screen.scroll_bottom, n);
         }
         'r' => {
             let top = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             let bottom = p.get(1).copied().unwrap_or(viewport.rows as u16).max(1) as u32 - 1;
-            viewport.scroll_top = top.min(viewport.rows - 1);
-            viewport.scroll_bottom = bottom.min(viewport.rows - 1).max(viewport.scroll_top);
-            cursor.row = 0;
-            cursor.col = 0;
+            screen.scroll_top = top.min(viewport.rows - 1);
+            screen.scroll_bottom = bottom.min(viewport.rows - 1).max(screen.scroll_top);
+            screen.cursor.row = 0;
+            screen.cursor.col = 0;
         }
         'n' | 'c' => {}
         _ => {}
@@ -1113,9 +1183,8 @@ fn csi_dispatch(
 }
 
 fn esc_dispatch(
-    cursor: &mut Cursor,
-    grid: &mut Grid,
-    viewport: &mut Viewport,
+    screen: &mut Screen,
+    viewport: &Viewport,
     intermediates: &[u8],
     byte: u8,
 ) {
@@ -1128,19 +1197,132 @@ fn esc_dispatch(
             todo!()
         }
         b'M' => {
-            if cursor.row == viewport.scroll_top {
-                grid.scroll_down_in_region(
+            if screen.cursor.row == screen.scroll_top {
+                screen.grid.scroll_down_in_region(
                     viewport,
-                    viewport.scroll_top,
-                    viewport.scroll_bottom,
+                    screen.scroll_top,
+                    screen.scroll_bottom,
                     1,
                 );
-            } else if cursor.row > 0 {
-                cursor.row -= 1;
+            } else if screen.cursor.row > 0 {
+                screen.cursor.row -= 1;
             }
         }
-        b'7' | b'8' => {}
         b'=' | b'>' => {}
+        _ => {}
+    }
+}
+
+/// Save the active screen's cursor and colors into its DECSC slot
+/// (ESC 7 / `?1048h`).
+fn save_cursor_slot(screen: &mut Screen) {
+    screen.saved_cursor = Some(SavedCursor {
+        cursor: screen.cursor,
+        fg: screen.fg,
+        bg: screen.bg,
+    });
+}
+
+/// Restore the active screen's cursor and colors from its DECSC slot
+/// (ESC 8 / `?1048l`). If the slot is empty the cursor homes to (0, 0)
+/// without touching colors — DEC-terminal behavior for an un-saved state.
+fn restore_cursor_slot(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    match screen.saved_cursor {
+        Some(saved) => {
+            screen.cursor.row = saved.cursor.row.min(viewport.rows.saturating_sub(1));
+            screen.cursor.col = saved.cursor.col.min(viewport.cols.saturating_sub(1));
+            screen.fg = saved.fg;
+            screen.bg = saved.bg;
+        }
+        None => {
+            screen.cursor.row = 0;
+            screen.cursor.col = 0;
+        }
+    }
+}
+
+/// Clear every cell of the visible area. Leaves any scrollback untouched.
+fn clear_visible(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    let first_visible = screen
+        .grid
+        .rows
+        .len()
+        .saturating_sub(viewport.rows as usize);
+    for r in first_visible..screen.grid.rows.len() {
+        screen.grid.rows[r].clear();
+    }
+}
+
+/// Switch between the primary and alt screens. Idempotent: a no-op if the
+/// target screen is already active.
+fn switch_screen(
+    target_alt: bool,
+    active: &mut Screen,
+    stash: &mut Screen,
+    on_alt: &mut bool,
+) {
+    if *on_alt == target_alt {
+        return;
+    }
+    std::mem::swap(active, stash);
+    *on_alt = target_alt;
+    // Incoming screen's offset is preserved; most apps don't care, and it
+    // gives primary back its scroll position on 1049l if the user had
+    // scrolled back before the app hijacked the terminal.
+}
+
+/// Handle a DECSET/DECRST private mode. `enable` is true for `h` (set),
+/// false for `l` (reset). Only the alt-screen family (47/1047/1048/1049)
+/// is currently recognized; unknown modes are ignored.
+fn set_private_mode(
+    mode: u16,
+    enable: bool,
+    active: &mut Screen,
+    stash: &mut Screen,
+    viewport: &Viewport,
+    on_alt: &mut bool,
+) {
+    match mode {
+        47 => switch_screen(enable, active, stash, on_alt),
+        1047 => {
+            // xterm clears the alt buffer when leaving via 1047l so stale
+            // content isn't re-shown the next time it's entered.
+            if !enable && *on_alt {
+                clear_visible(active, viewport);
+            }
+            switch_screen(enable, active, stash, on_alt);
+        }
+        1048 => {
+            if enable {
+                save_cursor_slot(active);
+            } else {
+                restore_cursor_slot(active, viewport);
+            }
+        }
+        1049 => {
+            if enable {
+                // Save into primary's DECSC slot before swapping, so the
+                // slot rides with primary into the stash and is there for
+                // the round trip.
+                if !*on_alt {
+                    save_cursor_slot(active);
+                }
+                switch_screen(true, active, stash, on_alt);
+                clear_visible(active, viewport);
+            } else {
+                if *on_alt {
+                    clear_visible(active, viewport);
+                }
+                switch_screen(false, active, stash, on_alt);
+                restore_cursor_slot(active, viewport);
+            }
+        }
         _ => {}
     }
 }
@@ -1697,13 +1879,7 @@ mod tests {
         rows: u32,
         cols: u32,
     ) -> Viewport {
-        Viewport {
-            rows,
-            cols,
-            offset: 0,
-            scroll_top: 0,
-            scroll_bottom: rows - 1,
-        }
+        Viewport { rows, cols }
     }
 
     /// Build a grid with `scrollback` history rows + `visible` visible rows.
@@ -2292,5 +2468,116 @@ mod tests {
         // After roundtrip: 'g' should be back at col 6 with its red color.
         assert_eq!(grid.rows[0].chars[6], 'g');
         assert_eq!(grid.rows[0].fg[6], red);
+    }
+
+    // ── Alt-screen tests ────────────────────────────────────────────
+
+    fn visible_text(term: &Terminal) -> String {
+        let mut s = String::new();
+        for r in 0..term.viewport.rows {
+            let row = term.visible_row(r);
+            s.extend(row.chars.iter());
+            s.push('\n');
+        }
+        s
+    }
+
+    /// Like [`visible_text`] but with row boundaries removed, so assertions
+    /// can match logical content that crossed a soft-wrap.
+    fn visible_text_flat(term: &Terminal) -> String {
+        visible_text(term).replace('\n', "")
+    }
+
+    #[test]
+    fn alt_screen_1049_hides_primary_and_restores() {
+        let mut term = Terminal::new(8, 4, 100, 16);
+        term.process(b"hello");
+        term.process(b"\x1b[?1049h");
+
+        // Alt is active, blank, cursor at (0,0).
+        assert!(term.on_alt_screen);
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
+        assert!(
+            !visible_text(&term).contains("hello"),
+            "alt screen should be blank, got {:?}",
+            visible_text(&term)
+        );
+
+        term.process(b"WORLD");
+        assert!(visible_text(&term).contains("WORLD"));
+
+        term.process(b"\x1b[?1049l");
+
+        // Back on primary with saved cursor restored and original content visible.
+        assert!(!term.on_alt_screen);
+        assert!(visible_text(&term).contains("hello"));
+        assert_eq!(term.active.cursor.col, 5);
+        assert_eq!(term.active.cursor.row, 0);
+    }
+
+    #[test]
+    fn alt_screen_1049_resize_preserves_primary() {
+        let mut term = Terminal::new(10, 4, 100, 16);
+        term.process(b"primary-content");
+        term.process(b"\x1b[?1049h");
+        term.process(b"ALT");
+
+        // Resize while on alt — primary must survive with its content.
+        term.resize(12, 5);
+        term.process(b"\x1b[?1049l");
+
+        // After reflow, the primary text may straddle a soft-wrap boundary.
+        let flat = visible_text_flat(&term);
+        assert!(
+            flat.contains("primary-content"),
+            "primary content lost through resize: {:?}",
+            flat
+        );
+        assert_eq!(term.viewport.cols, 12);
+        assert_eq!(term.viewport.rows, 5);
+    }
+
+    #[test]
+    fn alt_screen_has_no_scrollback() {
+        let mut term = Terminal::new(8, 3, 100, 16);
+        term.process(b"\x1b[?1049h");
+
+        // Fill enough rows on alt to normally produce scrollback on primary.
+        for _ in 0..10 {
+            term.process(b"line\n");
+        }
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 0);
+    }
+
+    #[test]
+    fn decsc_decrc_restores_cursor_and_colors() {
+        let mut term = Terminal::new(10, 4, 100, 16);
+        term.process(b"\x1b[3;5H"); // move to row 3 col 5
+        term.process(b"\x1b[31m"); // red fg
+        term.process(b"\x1b7"); // DECSC
+        let saved_fg = term.active.fg;
+        term.process(b"\x1b[1;1H\x1b[32m"); // move + change color
+        term.process(b"\x1b8"); // DECRC
+
+        assert_eq!(term.active.cursor.row, 2);
+        assert_eq!(term.active.cursor.col, 4);
+        assert_eq!(term.active.fg, saved_fg);
+    }
+
+    #[test]
+    fn mode_47_does_not_save_cursor() {
+        let mut term = Terminal::new(8, 3, 100, 16);
+        term.process(b"\x1b[2;3H"); // row 2 col 3
+        term.process(b"\x1b[?47h");
+        term.process(b"\x1b[1;1H"); // move on alt
+        term.process(b"\x1b[?47l");
+
+        // ?47 doesn't save/restore cursor — we land wherever we left primary.
+        // Primary's cursor before the switch was (row=1, col=2); ?47 preserves
+        // the *primary screen's* cursor (untouched because we swapped away
+        // before moving), so we should be back at (1,2).
+        assert_eq!(term.active.cursor.row, 1);
+        assert_eq!(term.active.cursor.col, 2);
     }
 }
