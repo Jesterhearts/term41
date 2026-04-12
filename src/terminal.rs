@@ -1742,9 +1742,8 @@ fn handle_osc(
     pending_output: &mut Vec<u8>,
 ) {
     let (cmd, rest) = split_osc(payload);
-    match cmd {
-        b"52" => handle_osc_52(rest, clipboard, pending_output),
-        _ => {}
+    if cmd == b"52" {
+        handle_osc_52(rest, clipboard, pending_output)
     }
 }
 
