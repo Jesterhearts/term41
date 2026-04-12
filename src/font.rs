@@ -1,7 +1,6 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
-use crop::RopeSlice;
 use harfrust::Direction;
 use harfrust::FontRef;
 use harfrust::Script;
@@ -169,7 +168,7 @@ impl FontSystem {
     /// Takes `&[char]` directly from the terminal's SoA storage.
     pub fn shape_row(
         &mut self,
-        chars: RopeSlice,
+        chars: &[char],
     ) -> Vec<ShapedGlyph> {
         if chars.is_empty() {
             return vec![];
@@ -178,7 +177,7 @@ impl FontSystem {
         // Build the row string and byte-offset → column mapping.
         let mut row_text = String::new();
         let mut col_map: Vec<u16> = Vec::new();
-        for (col, ch) in chars.chars().enumerate() {
+        for (col, &ch) in chars.iter().enumerate() {
             let start = row_text.len();
             row_text.push(ch);
             let added = row_text.len() - start;
@@ -188,8 +187,8 @@ impl FontSystem {
         }
 
         // Track which columns still need a glyph (for fallback).
-        let mut has_glyph = vec![false; chars.byte_len()];
-        let mut result: Vec<ShapedGlyph> = Vec::with_capacity(chars.byte_len());
+        let mut has_glyph = vec![false; chars.len()];
+        let mut result: Vec<ShapedGlyph> = Vec::with_capacity(chars.len());
 
         for (font_idx, loaded) in self.fonts.iter().enumerate() {
             let font_ref = match FontRef::new(&loaded.data) {
@@ -231,7 +230,7 @@ impl FontSystem {
             let positions = output.glyph_positions();
             let scale = self.font_size / loaded.units_per_em;
 
-            for (i, (info, pos)) in infos.iter().zip(positions.iter()).enumerate() {
+            for (info, pos) in infos.iter().zip(positions.iter()) {
                 let cluster = info.cluster as usize;
                 if cluster >= col_map.len() {
                     continue;
@@ -249,22 +248,7 @@ impl FontSystem {
                     continue;
                 }
 
-                // Mark all columns consumed by this glyph. For ligatures
-                // (e.g. `::` → single glyph), the cluster gap between
-                // consecutive output glyphs tells us which input columns
-                // were merged. Without this, fallback fonts would place
-                // individual glyphs on top of the ligature.
-                let end_byte = if i + 1 < infos.len() {
-                    (infos[i + 1].cluster as usize).min(col_map.len())
-                } else {
-                    col_map.len()
-                };
-                for byte in cluster..end_byte {
-                    if byte < col_map.len() {
-                        has_glyph[col_map[byte] as usize] = true;
-                    }
-                }
-
+                has_glyph[col as usize] = true;
                 result.push(ShapedGlyph {
                     glyph_id,
                     font_index: font_idx,
@@ -278,7 +262,7 @@ impl FontSystem {
             let all_covered = has_glyph
                 .iter()
                 .enumerate()
-                .all(|(i, &has)| has || chars.byte(i) == b' ');
+                .all(|(i, &has)| has || chars[i] == ' ');
             if all_covered {
                 break;
             }

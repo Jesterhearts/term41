@@ -1,11 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
-use crop::Rope;
-use crop::RopeBuilder;
-use crop::RopeSlice;
 use palette::Srgb;
-use unicode_segmentation::UnicodeSegmentation;
 
 use crate::sixel::SixelImage;
 use crate::sixel::parse_sixel;
@@ -57,31 +53,6 @@ const fn ansi_color(index: u8) -> Srgb<u8> {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq)]
-pub struct CellColors {
-    pub fg: Srgb<u8>,
-    pub bg: Srgb<u8>,
-}
-
-impl Default for CellColors {
-    fn default() -> Self {
-        Self {
-            fg: default_fg(),
-            bg: default_bg(),
-        }
-    }
-}
-
-impl CellColors {
-    fn is_default(&self) -> bool {
-        self.fg == default_fg() && self.bg == default_bg()
-    }
-}
-
-pub struct Row<'a> {
-    pub chars: RopeSlice<'a>,
-}
-
 #[derive(Debug, Clone)]
 pub struct PlacedImage {
     pub image: SixelImage,
@@ -102,6 +73,101 @@ pub struct VisibleImage<'a> {
     pub screen_col: u32,
 }
 
+/// A terminal row stored as struct-of-arrays for cache-friendly access.
+/// The renderer can borrow `&[char]` directly for shaping without copying.
+#[derive(Debug, Default)]
+pub struct Row {
+    pub chars: Vec<char>,
+    pub fg: Vec<Srgb<u8>>,
+    pub bg: Vec<Srgb<u8>>,
+    /// True if this row is a continuation of the previous row (soft wrap).
+    pub wrapped: bool,
+}
+
+impl Row {
+    fn new(cols: u32) -> Self {
+        let n = cols as usize;
+        Self {
+            chars: vec![' '; n],
+            fg: vec![default_fg(); n],
+            bg: vec![default_bg(); n],
+            wrapped: false,
+        }
+    }
+
+    fn len(&self) -> u32 {
+        self.chars.len() as u32
+    }
+
+    fn content_len(&self) -> u32 {
+        self.chars
+            .iter()
+            .rposition(|c| *c != ' ')
+            .map_or(0, |p| p + 1) as u32
+    }
+
+    fn resize(
+        &mut self,
+        new_len: u32,
+    ) {
+        let new_len = new_len as usize;
+        self.chars.resize(new_len, ' ');
+        self.fg.resize(new_len, default_fg());
+        self.bg.resize(new_len, default_bg());
+    }
+
+    fn truncate(
+        &mut self,
+        new_len: u32,
+    ) {
+        let new_len = new_len as usize;
+        self.chars.truncate(new_len);
+        self.fg.truncate(new_len);
+        self.bg.truncate(new_len);
+    }
+
+    fn clear(&mut self) {
+        self.clear_range(0..self.chars.len())
+    }
+
+    fn clear_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+    ) {
+        self.chars[range.clone()].fill(' ');
+        self.fg[range.clone()].fill(default_fg());
+        self.bg[range].fill(default_bg());
+    }
+
+    fn copy_within(
+        &mut self,
+        src: std::ops::Range<usize>,
+        dest: usize,
+    ) {
+        self.chars.copy_within(src.clone(), dest);
+        self.fg.copy_within(src.clone(), dest);
+        self.bg.copy_within(src.clone(), dest);
+    }
+
+    fn copy_from(
+        &mut self,
+        other: &Self,
+        src_offset: usize,
+        dest_offset: usize,
+    ) -> usize {
+        let copy_len = ((other.content_len() as usize).saturating_sub(src_offset))
+            .min((self.len() as usize).saturating_sub(dest_offset));
+        self.chars[dest_offset..dest_offset + copy_len]
+            .copy_from_slice(&other.chars[src_offset..src_offset + copy_len]);
+        self.fg[dest_offset..dest_offset + copy_len]
+            .copy_from_slice(&other.fg[src_offset..src_offset + copy_len]);
+        self.bg[dest_offset..dest_offset + copy_len]
+            .copy_from_slice(&other.bg[src_offset..src_offset + copy_len]);
+
+        copy_len
+    }
+}
+
 #[derive(Debug, Default)]
 pub struct Cursor {
     pub col: u32,
@@ -110,122 +176,31 @@ pub struct Cursor {
 
 #[derive(Debug)]
 pub struct Grid {
-    pub rows: Rope,
-    pub wrapped: VecDeque<bool>,
+    pub rows: VecDeque<Row>,
     pub scrollback_limit: u32,
     /// Running count of rows popped from the front (for image position
     /// tracking).
     pub total_popped: usize,
-    /// Per-grapheme color map. Keys are absolute byte offsets
-    /// (`rope_byte_offset + bytes_popped`) so that scrollback trimming is
-    /// O(log n) via `split_off` instead of O(n) to shift every key.
-    pub colors: BTreeMap<usize, CellColors>,
-    /// Accumulated bytes deleted from the front of the rope by scrollback
-    /// trimming. Color map keys are absolute: `rope_offset + bytes_popped`.
-    bytes_popped: usize,
 }
 
 impl Grid {
-    /// Convert a rope byte offset to an absolute color-map key.
-    fn color_key(
-        &self,
-        rope_offset: usize,
-    ) -> usize {
-        rope_offset + self.bytes_popped
-    }
-
-    /// Store the color for a cell at `rope_offset`. Default colors are omitted
-    /// to keep the map sparse.
-    fn set_color(
-        &mut self,
-        rope_offset: usize,
-        colors: CellColors,
-    ) {
-        let key = self.color_key(rope_offset);
-        if colors.is_default() {
-            self.colors.remove(&key);
-        } else {
-            self.colors.insert(key, colors);
-        }
-    }
-
-    /// Look up the color at `rope_offset`, falling back to defaults.
-    fn get_color(
-        &self,
-        rope_offset: usize,
-    ) -> CellColors {
-        self.colors
-            .get(&self.color_key(rope_offset))
-            .copied()
-            .unwrap_or_default()
-    }
-
-    /// Remove all color entries whose rope byte offsets fall in `start..end`.
-    fn clear_colors(
-        &mut self,
-        start: usize,
-        end: usize,
-    ) {
-        let abs_start = self.color_key(start);
-        let abs_end = self.color_key(end);
-        let keys: Vec<usize> = self
-            .colors
-            .range(abs_start..abs_end)
-            .map(|(&k, _)| k)
-            .collect();
-        for k in keys {
-            self.colors.remove(&k);
-        }
-    }
-
-    /// Shift all color entries at rope byte offsets `>= from` by `delta`.
-    /// Used after insertions/deletions that change byte layout.
-    fn shift_colors(
-        &mut self,
-        from: usize,
-        delta: isize,
-    ) {
-        let abs_from = self.color_key(from);
-        let tail = self.colors.split_off(&abs_from);
-        for (k, v) in tail {
-            self.colors.insert((k as isize + delta) as usize, v);
-        }
-    }
-
-    /// Discard color entries for bytes that have been trimmed from the front
-    /// of the rope.
-    fn trim_colors_front(
-        &mut self,
-        bytes_deleted: usize,
-    ) {
-        self.bytes_popped += bytes_deleted;
-        let keep = self.colors.split_off(&self.bytes_popped);
-        self.colors = keep;
-    }
-
     pub fn scrollback_len(
         &self,
         viewport: &Viewport,
     ) -> u32 {
-        (self.rows.line_len() as u32).saturating_sub(viewport.rows)
+        (self.rows.len() as u32).saturating_sub(viewport.rows)
     }
 
     pub fn push_visible_row(
         &mut self,
         viewport: &Viewport,
     ) {
-        self.rows
-            .insert(self.rows.byte_len(), " ".repeat(viewport.cols as usize));
-        self.rows.insert(self.rows.byte_len(), "\n");
-        self.wrapped.push_back(false);
+        self.rows.push_back(Row::new(viewport.cols));
 
         let max_rows = viewport.rows as usize + self.scrollback_limit as usize;
-        if self.rows.line_len() > max_rows {
-            let eol = self.rows.byte_of_line(1);
-            self.rows.delete(0..eol);
-            self.wrapped.pop_front();
+        if self.rows.len() > max_rows {
+            self.rows.pop_front();
             self.total_popped += 1;
-            self.trim_colors_front(eol);
         }
     }
 
@@ -236,51 +211,35 @@ impl Grid {
         mode: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let first_visible = self.rows.line_len().saturating_sub(viewport.rows as usize);
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let col = cursor.col as usize;
 
         match mode {
             // Erase from cursor to end of screen.
             0 => {
-                self.erase_in_line(cursor, viewport, 0);
-                let empty = " ".repeat(viewport.cols as usize);
-                for r in (active + 1)..self.rows.line_len() {
-                    let start = self.rows.byte_of_line(r);
-                    let len = self.rows.line(r).byte_len();
-                    self.clear_colors(start, start + len);
-                    self.rows.replace(start..start + len, &empty);
+                let cols = self.rows[active].chars.len();
+                self.rows[active].clear_range(col..cols);
+                for r in (active + 1)..self.rows.len() {
+                    self.rows[r].clear();
                 }
             }
             // Erase from start of screen to cursor (inclusive).
             1 => {
-                let empty = " ".repeat(viewport.cols as usize);
                 for r in first_visible..active {
-                    let start = self.rows.byte_of_line(r);
-                    let len = self.rows.line(r).byte_len();
-                    self.clear_colors(start, start + len);
-                    self.rows.replace(start..start + len, &empty);
+                    self.rows[r].clear();
                 }
-
-                self.erase_in_line(cursor, viewport, 1);
+                self.rows[active].clear_range(0..col + 1);
             }
             // Erase entire screen.
             2 => {
-                let empty = " ".repeat(viewport.cols as usize);
-                for r in first_visible..self.rows.line_len() {
-                    let start = self.rows.byte_of_line(r);
-                    let len = self.rows.line(r).byte_len();
-                    self.clear_colors(start, start + len);
-                    self.rows.replace(start..start + len, &empty);
+                for r in first_visible..self.rows.len() {
+                    self.rows[r].clear();
                 }
             }
             // Erase scrollback buffer.
             3 => {
                 self.total_popped += first_visible;
-                let mut bytes = 0;
-                for r in 0..first_visible {
-                    bytes += self.rows.line(r).byte_len();
-                }
-                self.rows.delete(0..bytes);
-                self.trim_colors_front(bytes);
+                self.rows.drain(0..first_visible);
             }
             _ => {}
         }
@@ -293,48 +252,16 @@ impl Grid {
         mode: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
+        let cols = self.rows[active].chars.len();
         let col = cursor.col as usize;
-
-        let line_start = self.rows.byte_of_line(active);
-        let line_byte_len = self.rows.line(active).byte_len();
 
         match mode {
             // Erase from cursor to end of line.
-            0 => {
-                let col_start: usize = self
-                    .rows
-                    .line(active)
-                    .graphemes()
-                    .take(col)
-                    .map(|c| c.len())
-                    .sum();
-                let start = line_start + col_start;
-                let end = line_start + line_byte_len;
-                let erase_len = end - start;
-                self.clear_colors(start, end);
-                self.rows.replace(start..end, " ".repeat(erase_len));
-            }
+            0 => self.rows[active].clear_range(col..cols),
             // Erase from start of line to cursor (inclusive).
-            1 => {
-                let col_end: usize = self
-                    .rows
-                    .line(active)
-                    .graphemes()
-                    .take(col + 1)
-                    .map(|c| c.len())
-                    .sum();
-                self.clear_colors(line_start, line_start + col_end);
-                self.rows
-                    .replace(line_start..line_start + col_end, " ".repeat(col_end));
-            }
+            1 => self.rows[active].clear_range(0..col + 1),
             // Erase entire line.
-            2 => {
-                self.clear_colors(line_start, line_start + line_byte_len);
-                self.rows.replace(
-                    line_start..line_start + line_byte_len,
-                    " ".repeat(line_byte_len),
-                );
-            }
+            2 => self.rows[active].clear(),
             _ => {}
         }
     }
@@ -346,35 +273,12 @@ impl Grid {
         n: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let width = viewport.cols as usize;
-        let cursor = cursor.col as usize;
-        let count = (n as usize).min(width - cursor);
+        let cols = self.rows[active].chars.len();
+        let col = cursor.col as usize;
+        let count = (n as usize).min(cols - col);
 
-        let line_start = self.rows.byte_of_line(active);
-        let line_len = self.rows.line(active).byte_len();
-        let mut to_cursor = 0;
-        let mut cursor_to_end_n = 0;
-        for (idx, c) in self.rows.line(active).graphemes().enumerate() {
-            if idx < cursor {
-                to_cursor += c.len();
-            } else if idx < cursor + count {
-                cursor_to_end_n += c.len();
-            }
-        }
-        let tail_len = line_len - (to_cursor + cursor_to_end_n);
-
-        self.clear_colors(
-            line_start + to_cursor,
-            line_start + to_cursor + cursor_to_end_n,
-        );
-        self.rows
-            .delete(line_start + to_cursor..line_start + to_cursor + cursor_to_end_n);
-        let delta = count as isize - cursor_to_end_n as isize;
-        if delta != 0 {
-            self.shift_colors(line_start + to_cursor, delta);
-        }
-        self.rows
-            .insert(line_start + to_cursor + tail_len, " ".repeat(count));
+        self.rows[active].copy_within(col + count..cols, col);
+        self.rows[active].clear_range(cols - count..cols);
     }
 
     pub fn insert_chars(
@@ -384,20 +288,12 @@ impl Grid {
         n: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let width = viewport.cols as usize;
-        let cursor = cursor.col as usize;
-        let count = (n as usize).min(width - cursor);
+        let cols = self.rows[active].chars.len();
+        let col = cursor.col as usize;
+        let count = (n as usize).min(cols - col);
 
-        let line_start = self.rows.byte_of_line(active);
-        let to_cursor = self
-            .rows
-            .line(active)
-            .graphemes()
-            .map(|c| c.len())
-            .take(cursor)
-            .sum::<usize>();
-        self.shift_colors(line_start + to_cursor, count as isize);
-        self.rows.insert(line_start + to_cursor, " ".repeat(count));
+        self.rows[active].copy_within(col..cols - count, col + count);
+        self.rows[active].clear_range(col..col + count);
     }
 
     pub fn erase_chars(
@@ -407,32 +303,11 @@ impl Grid {
         n: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let width = viewport.cols as usize;
-        let cursor = cursor.col as usize;
-        let count = (n as usize).min(width - cursor);
+        let cols = self.rows[active].chars.len();
+        let col = cursor.col as usize;
+        let end = (col + n as usize).min(cols);
 
-        let line_start = self.rows.byte_of_line(active);
-        let mut to_cursor = 0;
-        let mut cursor_to_end_n = 0;
-        for (idx, c) in self.rows.line(active).graphemes().enumerate() {
-            if idx < cursor {
-                to_cursor += c.len();
-            } else if idx < cursor + count {
-                cursor_to_end_n += c.len();
-            }
-        }
-
-        self.clear_colors(
-            line_start + to_cursor,
-            line_start + to_cursor + cursor_to_end_n,
-        );
-        let delta = count as isize - cursor_to_end_n as isize;
-        if delta != 0 {
-            self.shift_colors(line_start + to_cursor, delta);
-        }
-        self.rows
-            .delete(line_start + to_cursor..line_start + to_cursor + cursor_to_end_n);
-        self.rows.insert(line_start + to_cursor, " ".repeat(count));
+        self.rows[active].clear_range(col..end);
     }
 
     /// Scroll content up within a region: remove line at `top`, insert blank
@@ -444,24 +319,13 @@ impl Grid {
         bottom: u32,
         n: u32,
     ) {
-        let first_visible = self.rows.line_len() - viewport.rows as usize;
+        let first_visible = self.rows.len() - viewport.rows as usize;
         let abs_top = first_visible + top as usize;
         let abs_bottom = first_visible + bottom as usize;
         let n = (n as usize).min(abs_bottom - abs_top + 1);
-        let insert_text = format!("{}\n", " ".repeat(viewport.cols as usize));
         for _ in 0..n {
-            // Delete top line including its trailing newline.
-            let delete_start = self.rows.byte_of_line(abs_top);
-            let delete_end = self.rows.byte_of_line(abs_top + 1);
-            let deleted = delete_end - delete_start;
-            self.clear_colors(delete_start, delete_end);
-            self.rows.delete(delete_start..delete_end);
-            self.shift_colors(delete_start, -(deleted as isize));
-            // Insert blank line + newline before what is now at abs_bottom
-            // (the line just past the region, or byte_len if region is at end).
-            let insert_at = self.rows.byte_of_line(abs_bottom);
-            self.shift_colors(insert_at, insert_text.len() as isize);
-            self.rows.insert(insert_at, &insert_text);
+            self.rows.remove(abs_top);
+            self.rows.insert(abs_bottom, Row::new(viewport.cols));
         }
     }
 
@@ -474,23 +338,13 @@ impl Grid {
         bottom: u32,
         n: u32,
     ) {
-        let first_visible = self.rows.line_len() - viewport.rows as usize;
+        let first_visible = self.rows.len() - viewport.rows as usize;
         let abs_top = first_visible + top as usize;
         let abs_bottom = first_visible + bottom as usize;
         let n = (n as usize).min(abs_bottom - abs_top + 1);
-        let insert_text = format!("{}\n", " ".repeat(viewport.cols as usize));
         for _ in 0..n {
-            // Delete bottom line including its trailing newline.
-            let delete_start = self.rows.byte_of_line(abs_bottom);
-            let delete_end = self.rows.byte_of_line(abs_bottom + 1);
-            let deleted = delete_end - delete_start;
-            self.clear_colors(delete_start, delete_end);
-            self.rows.delete(delete_start..delete_end);
-            self.shift_colors(delete_start, -(deleted as isize));
-            // Insert blank line + newline at the top of the region.
-            let insert_at = self.rows.byte_of_line(abs_top);
-            self.shift_colors(insert_at, insert_text.len() as isize);
-            self.rows.insert(insert_at, &insert_text);
+            self.rows.remove(abs_bottom);
+            self.rows.insert(abs_top, Row::new(viewport.cols));
         }
     }
 
@@ -499,88 +353,120 @@ impl Grid {
         cursor: &Cursor,
         viewport: &Viewport,
     ) -> usize {
-        let idx = self.rows.line_len().saturating_sub(viewport.rows as usize) + cursor.row as usize;
-        idx.min(self.rows.line_len().saturating_sub(1))
+        self.rows.len() - viewport.rows as usize + cursor.row as usize
     }
 
     fn reflow(
         &mut self,
         new_width: u32,
     ) {
-        if self.rows.line_len() == 0 {
+        if self.rows.len() == 0 {
             return;
         }
 
-        let old_width = self.rows.line(0).graphemes().count();
-        let new_width = new_width as usize;
+        let old_width = self.rows[0].len();
         if old_width == new_width {
             return;
         }
 
-        let mut new_rope = Rope::new();
-        let mut new_wrapped = VecDeque::new();
-        let mut new_colors = BTreeMap::new();
-        let last_row = self.wrapped.len() - 1;
+        if new_width > old_width {
+            let mut row = 0;
+            while row < self.rows.len() as u32 {
+                self.rows[row as usize].resize(new_width);
 
-        let mut logical = String::new();
-        let mut logical_colors: Vec<CellColors> = Vec::new();
+                if self.rows[row as usize].wrapped {
+                    let (advanced, skipped) = self.reflow_soft_grow(row, old_width, new_width);
+                    let skipped = skipped.unwrap_or_default();
+                    row += advanced;
 
-        for (idy, line) in self.rows.lines().enumerate() {
-            let line_start = self.rows.byte_of_line(idy);
-            let mut byte_off = 0;
-            for grapheme in line.graphemes() {
-                logical_colors.push(self.get_color(line_start + byte_off));
-                byte_off += grapheme.len();
-            }
-
-            for chunk in line.chunks() {
-                logical.push_str(chunk);
-            }
-
-            if !self.wrapped[idy] || idy == last_row {
-                let trimmed = logical.trim_end_matches(' ');
-                let grapheme_count = trimmed.graphemes(true).count();
-                logical_colors.truncate(grapheme_count);
-                let graphemes: Vec<&str> = trimmed.graphemes(true).collect();
-
-                if graphemes.is_empty() {
-                    new_rope.insert(new_rope.byte_len(), &" ".repeat(new_width));
-                    new_rope.insert(new_rope.byte_len(), "\n");
-                    new_wrapped.push_back(false);
-                } else {
-                    let total_chunks = graphemes.chunks(new_width).len();
-                    let mut color_idx = 0;
-                    for (i, chunk) in graphemes.chunks(new_width).enumerate() {
-                        let mut byte_pos = new_rope.byte_len();
-                        for &g in chunk {
-                            let colors = logical_colors[color_idx];
-                            if !colors.is_default() {
-                                new_colors.insert(byte_pos, colors);
-                            }
-                            byte_pos += g.len();
-                            color_idx += 1;
-                        }
-
-                        let content: String = chunk.iter().copied().collect();
-                        let len = chunk.len();
-                        new_rope.insert(new_rope.byte_len(), &content);
-                        if len < new_width {
-                            new_rope.insert(new_rope.byte_len(), &" ".repeat(new_width - len));
-                        }
-                        new_rope.insert(new_rope.byte_len(), "\n");
-                        new_wrapped.push_back(i < total_chunks - 1);
+                    for _ in 0..skipped {
+                        self.rows.remove(row as usize + 1);
                     }
+                } else {
+                    row += 1;
                 }
+            }
+        } else {
+            let mut row = 0;
+            while row < self.rows.len() {
+                if self.rows[row].len() > new_width {
+                    let was_wrapped = self.rows[row].wrapped;
 
-                logical.clear();
-                logical_colors.clear();
+                    let has_content_overflow = self.rows[row].chars[new_width as usize..]
+                        .iter()
+                        .any(|&c| c != ' ');
+
+                    if has_content_overflow {
+                        let overflow = Row {
+                            chars: self.rows[row].chars.split_off(new_width as usize),
+                            fg: self.rows[row].fg.split_off(new_width as usize),
+                            bg: self.rows[row].bg.split_off(new_width as usize),
+                            wrapped: was_wrapped,
+                        };
+
+                        self.rows[row].wrapped = true;
+                        self.rows.insert(row + 1, overflow);
+                    } else {
+                        self.rows[row].truncate(new_width);
+                    }
+                } else {
+                    self.rows[row].resize(new_width);
+                }
+                row += 1;
+            }
+        }
+    }
+
+    fn reflow_soft_grow(
+        &mut self,
+        row: u32,
+        old_width: u32,
+        new_width: u32,
+    ) -> (u32, Option<u32>) {
+        let old_row = row;
+
+        let delta = new_width - old_width;
+
+        let mut dest_col = old_width;
+        let mut row = row as usize;
+        let mut next = row + 1;
+        while next < self.rows.len() && self.rows[row].wrapped {
+            let (front, back) = self.rows.as_mut_slices();
+            let current_row;
+            let next_row;
+
+            if row < front.len() && next >= front.len() {
+                next_row = &mut back[next - front.len()];
+                current_row = &mut front[row];
+            } else if row < front.len() && next < front.len() {
+                let (first, second) = front.split_at_mut(next);
+                next_row = &mut second[0];
+                current_row = &mut first[row];
+            } else {
+                let (first, second) = back.split_at_mut(next - front.len());
+                next_row = &mut second[0];
+                current_row = &mut first[row - front.len()];
+            }
+
+            let copied = current_row.copy_from(next_row, 0, dest_col as usize);
+            next_row.resize(new_width);
+            next_row.copy_within(copied as usize..new_width as usize, 0);
+
+            if delta >= dest_col {
+                // We have a delta that spills into the next row, so advance next and
+                // keep row here
+                self.rows[row].wrapped = self.rows[next].wrapped;
+                next += 1;
+                dest_col = new_width - dest_col;
+            } else {
+                dest_col -= delta;
+                row += 1;
+                next += 1;
             }
         }
 
-        self.rows = new_rope;
-        self.wrapped = new_wrapped;
-        self.colors = new_colors;
-        self.bytes_popped = 0;
+        self.rows[row].wrapped = false;
+        (row as u32 - old_row, Some((next - row - 1) as u32))
     }
 }
 
@@ -629,19 +515,19 @@ pub struct Terminal {
 /// The count of hard line boundaries between the image and the grid end is
 /// invariant through reflow, so it can be used to relocate the image after.
 fn anchor_images(
-    wrapped: &VecDeque<bool>,
+    rows: &VecDeque<Row>,
     images: &BTreeMap<u64, PlacedImage>,
 ) -> Vec<(u64, usize, usize)> {
     images
         .values()
         .map(|img| {
-            let lines_below = (img.row + 1..wrapped.len())
-                .filter(|&r| !wrapped[r])
+            let lines_below = (img.row + 1..rows.len())
+                .filter(|&r| !rows[r].wrapped)
                 .count();
 
             let mut row_offset = 0;
             let mut r = img.row;
-            while r > 0 && wrapped[r] {
+            while r > 0 && rows[r].wrapped {
                 row_offset += 1;
                 r -= 1;
             }
@@ -654,15 +540,15 @@ fn anchor_images(
 /// Restore image row positions from logical-line anchors produced by
 /// [`anchor_images`]. Images whose logical line was trimmed away are removed.
 fn restore_images(
-    wrapped: &VecDeque<bool>,
+    rows: &VecDeque<Row>,
     anchors: &[(u64, usize, usize)],
     images: &mut BTreeMap<u64, PlacedImage>,
 ) {
     for &(id, lines_below, row_offset) in anchors {
         let mut count = 0;
         let mut found = None;
-        for r in (0..wrapped.len()).rev() {
-            if r == 0 || !wrapped[r] {
+        for r in (0..rows.len()).rev() {
+            if r == 0 || !rows[r].wrapped {
                 if count == lines_below {
                     found = Some(r);
                     break;
@@ -674,7 +560,7 @@ fn restore_images(
         match found {
             Some(start) => {
                 let mut end = start + 1;
-                while end < wrapped.len() && wrapped[end] {
+                while end < rows.len() && rows[end].wrapped {
                     end += 1;
                 }
                 let new_row = start + row_offset.min(end - start - 1);
@@ -696,22 +582,16 @@ impl Terminal {
         scrollback_limit: u32,
         cell_height: u32,
     ) -> Self {
-        let mut cells = RopeBuilder::new();
-
-        let empty = " ".repeat(cols as usize);
+        let mut cells = VecDeque::with_capacity(rows as usize + scrollback_limit as usize);
         for _ in 0..rows {
-            cells.append(&empty);
-            cells.append("\n");
+            cells.push_back(Row::new(cols));
         }
 
         Self {
             grid: Grid {
-                rows: cells.build(),
-                wrapped: std::iter::repeat(false).take(rows as usize).collect(),
+                rows: cells,
                 scrollback_limit,
                 total_popped: 0,
-                colors: BTreeMap::new(),
-                bytes_popped: 0,
             },
             viewport: Viewport {
                 rows,
@@ -738,40 +618,10 @@ impl Terminal {
     pub fn visible_row(
         &self,
         screen_row: u32,
-    ) -> Row<'_> {
-        let base = self
-            .grid
-            .rows
-            .line_len()
-            .saturating_sub(self.viewport.rows as usize)
-            .saturating_sub(self.viewport.offset as usize);
-        let idx = (base + screen_row as usize).min(self.grid.rows.line_len() - 1);
-        Row {
-            chars: self.grid.rows.line(idx),
-        }
-    }
-
-    /// Returns per-column fg/bg colors for a visible row.
-    pub fn visible_row_colors(
-        &self,
-        screen_row: u32,
-    ) -> Vec<CellColors> {
-        let base = self
-            .grid
-            .rows
-            .line_len()
-            .saturating_sub(self.viewport.rows as usize)
-            .saturating_sub(self.viewport.offset as usize);
-        let line_idx = (base + screen_row as usize).min(self.grid.rows.line_len() - 1);
-        let line_start = self.grid.rows.byte_of_line(line_idx);
-
-        let mut result = Vec::with_capacity(self.viewport.cols as usize);
-        let mut byte_offset = 0;
-        for grapheme in self.grid.rows.line(line_idx).graphemes() {
-            result.push(self.grid.get_color(line_start + byte_offset));
-            byte_offset += grapheme.len();
-        }
-        result
+    ) -> &Row {
+        let base =
+            self.grid.rows.len() - self.viewport.rows as usize - self.viewport.offset as usize;
+        &self.grid.rows[base + screen_row as usize]
     }
 
     /// Scroll the viewport up (into history). Returns actual lines scrolled.
@@ -803,12 +653,8 @@ impl Terminal {
     /// Return images whose top-left falls within the current viewport,
     /// with screen-relative row/col positions.
     pub fn visible_images(&self) -> impl Iterator<Item = VisibleImage<'_>> {
-        let viewport_top = self
-            .grid
-            .rows
-            .line_len()
-            .saturating_sub(self.viewport.rows as usize)
-            .saturating_sub(self.viewport.offset as usize);
+        let viewport_top =
+            self.grid.rows.len() - self.viewport.rows as usize - self.viewport.offset as usize;
         let viewport_bottom = viewport_top + self.viewport.rows as usize;
 
         self.images.values().filter_map(move |img| {
@@ -833,26 +679,23 @@ impl Terminal {
         // Trim trailing empty rows that accumulated from padding in previous
         // resizes, so content stays visible when the viewport shrinks.
         let cursor_abs = self.grid.active_row_index(&self.cursor, &self.viewport);
-        while self.grid.rows.line_len() > cursor_abs + 1 {
+        while self.grid.rows.len() > cursor_abs + 1 {
             if self
                 .grid
                 .rows
-                .line(self.grid.rows.line_len() - 1)
-                .chars()
-                .all(|c| c == ' ')
+                .back()
+                .map_or(false, |r| r.chars.iter().all(|&c| c == ' '))
             {
-                let start = self.grid.rows.byte_of_line(self.grid.rows.line_len() - 1);
-                self.grid.clear_colors(start, self.grid.rows.byte_len());
-                self.grid.rows.delete(start..);
+                self.grid.rows.pop_back();
             } else {
                 break;
             }
         }
-        self.viewport.rows = self.viewport.rows.min(self.grid.rows.line_len() as u32);
+        self.viewport.rows = self.viewport.rows.min(self.grid.rows.len() as u32);
         let visible_start = self
             .grid
             .rows
-            .line_len()
+            .len()
             .saturating_sub(self.viewport.rows as usize);
         self.cursor.row = cursor_abs.saturating_sub(visible_start) as u32;
 
@@ -862,60 +705,52 @@ impl Terminal {
         let max_rows = rows as usize + self.grid.scrollback_limit as usize;
 
         if new_cols != old_cols {
-            let anchors = anchor_images(&self.grid.wrapped, &self.images);
+            let anchors = anchor_images(&self.grid.rows, &self.images);
 
             let old_distance_from_bottom = self
                 .grid
                 .rows
-                .line_len()
+                .len()
                 .saturating_sub(self.grid.active_row_index(&self.cursor, &self.viewport) + 1);
 
             self.grid.reflow(cols);
 
-            while self.grid.rows.line_len() > max_rows {
-                let eol = self.grid.rows.byte_of_line(1);
-                self.grid.rows.delete(0..eol);
-                self.grid.trim_colors_front(eol);
+            while self.grid.rows.len() > max_rows {
+                self.grid.rows.pop_front();
             }
 
             // Restore images and compute cursor position before padding so
             // that empty padding rows don't corrupt logical-line counts.
-            restore_images(&self.grid.wrapped, &anchors, &mut self.images);
+            restore_images(&self.grid.rows, &anchors, &mut self.images);
 
             let new_abs = self
                 .grid
                 .rows
-                .line_len()
+                .len()
                 .saturating_sub(old_distance_from_bottom + 1);
 
             // Pad at the back so content stays top-aligned when there is no
             // scrollback to reveal.
-            let empty = " ".repeat(cols as usize);
-            while self.grid.rows.line_len() < rows as usize {
-                self.grid.rows.insert(self.grid.rows.byte_len(), &empty);
-                self.grid.rows.insert(self.grid.rows.byte_len(), "\n");
+            while self.grid.rows.len() < rows as usize {
+                self.grid.rows.push_back(Row::new(cols));
             }
 
-            let visible_start = self.grid.rows.line_len().saturating_sub(rows as usize);
+            let visible_start = self.grid.rows.len().saturating_sub(rows as usize);
             self.cursor.row = new_abs.saturating_sub(visible_start).min(rows as usize - 1) as u32;
             self.cursor.col = self.cursor.col.min(cols.saturating_sub(1));
         } else {
-            let old_len = self.grid.rows.line_len();
+            let old_len = self.grid.rows.len();
             let old_abs = self.grid.active_row_index(&self.cursor, &self.viewport);
 
-            while self.grid.rows.line_len() > max_rows {
-                let eol = self.grid.rows.byte_of_line(1);
-                self.grid.rows.delete(0..eol);
-                self.grid.trim_colors_front(eol);
+            while self.grid.rows.len() > max_rows {
+                self.grid.rows.pop_front();
             }
 
-            let popped = old_len - self.grid.rows.line_len();
+            let popped = old_len - self.grid.rows.len();
 
             // Pad at the back so content stays top-aligned.
-            let empty = " ".repeat(cols as usize);
-            while self.grid.rows.line_len() < rows as usize {
-                self.grid.rows.insert(self.grid.rows.byte_len(), &empty);
-                self.grid.rows.insert(self.grid.rows.byte_len(), "\n");
+            while self.grid.rows.len() < rows as usize {
+                self.grid.rows.push_back(Row::new(cols));
             }
 
             // Only front pops shift image indices; push_back is invisible.
@@ -927,7 +762,7 @@ impl Terminal {
             }
 
             let new_abs = old_abs.saturating_sub(popped);
-            let visible_start = self.grid.rows.line_len().saturating_sub(rows as usize);
+            let visible_start = self.grid.rows.len().saturating_sub(rows as usize);
             self.cursor.row = new_abs.saturating_sub(visible_start).min(rows as usize - 1) as u32;
         }
 
@@ -950,19 +785,11 @@ impl Terminal {
             let popped_before = self.grid.total_popped;
 
             match action {
-                vte::Action::PrintByte(c) => put_char(
-                    &mut self.cursor,
-                    &mut self.grid,
-                    &mut self.viewport,
-                    &c.to_string(),
-                    self.fg,
-                    self.bg,
-                ),
                 vte::Action::Print(c) => put_char(
                     &mut self.cursor,
                     &mut self.grid,
                     &mut self.viewport,
-                    &c,
+                    c,
                     self.fg,
                     self.bg,
                 ),
@@ -1057,7 +884,7 @@ fn put_char(
     cursor: &mut Cursor,
     grid: &mut Grid,
     viewport: &mut Viewport,
-    ch: &str,
+    ch: char,
     fg: Srgb<u8>,
     bg: Srgb<u8>,
 ) {
@@ -1065,9 +892,7 @@ fn put_char(
         // Soft wrap: mark the current row as a continuation.
         cursor.col = 0;
         let r = grid.active_row_index(cursor, viewport);
-        if r < grid.wrapped.len() {
-            grid.wrapped[r] = true;
-        }
+        grid.rows[r].wrapped = true;
         if cursor.row == viewport.scroll_bottom {
             if viewport.scroll_top == 0 && viewport.scroll_bottom == viewport.rows - 1 {
                 grid.push_visible_row(viewport);
@@ -1082,36 +907,11 @@ fn put_char(
     // New output resets viewport to bottom.
     viewport.offset = 0;
 
-    // Ensure the grid has enough lines for the cursor position.
     let r = grid.active_row_index(cursor, viewport);
-    while r >= grid.rows.line_len() {
-        let empty = " ".repeat(viewport.cols as usize);
-        grid.rows.insert(grid.rows.byte_len(), &empty);
-        grid.rows.insert(grid.rows.byte_len(), "\n");
-        grid.wrapped.push_back(false);
-    }
-    let start = grid.rows.byte_of_line(r);
     let c = cursor.col as usize;
-
-    let mut c_off = 0;
-    let mut c_len = 0;
-    for (idx, g) in grid.rows.line(r).graphemes().take(c + 1).enumerate() {
-        if idx < c {
-            c_off += g.len();
-        } else {
-            c_len += g.len();
-        }
-    }
-
-    grid.rows.delete(start + c_off..start + c_off + c_len);
-    grid.rows.insert(start + c_off, ch);
-
-    let delta = ch.len() as isize - c_len as isize;
-    if delta != 0 {
-        grid.shift_colors(start + c_off + ch.len(), delta);
-    }
-    grid.set_color(start + c_off, CellColors { fg, bg });
-
+    grid.rows[r].chars[c] = ch;
+    grid.rows[r].fg[c] = fg;
+    grid.rows[r].bg[c] = bg;
     cursor.col += 1;
 }
 
@@ -1382,24 +1182,118 @@ mod tests {
         width: u32,
         rows: &[(&str, bool)],
     ) -> Grid {
-        let mut cells = RopeBuilder::new();
-        let mut wrapped = VecDeque::new();
-
-        for row in rows {
-            cells.append(row.0);
-            cells.append(" ".repeat(width as usize - row.0.len()));
-            cells.append("\n");
-            wrapped.push_back(row.1);
+        let mut grid_rows = VecDeque::new();
+        for &(text, wrapped) in rows {
+            let mut row = Row::new(width);
+            for (i, ch) in text.chars().enumerate() {
+                if i < width as usize {
+                    row.chars[i] = ch;
+                }
+            }
+            row.wrapped = wrapped;
+            grid_rows.push_back(row);
         }
-
         Grid {
-            rows: cells.build(),
-            wrapped,
+            rows: grid_rows,
             scrollback_limit: 1000,
             total_popped: 0,
-            colors: BTreeMap::new(),
-            bytes_popped: 0,
         }
+    }
+
+    fn row_chars(row: &Row) -> String {
+        row.chars.iter().collect()
+    }
+
+    // ── Row unit tests ──────────────────────────────────────────────
+
+    #[test]
+    fn row_new_filled_with_spaces() {
+        let row = Row::new(4);
+        assert_eq!(row.chars, vec![' '; 4]);
+        assert_eq!(row.fg, vec![default_fg(); 4]);
+        assert_eq!(row.bg, vec![default_bg(); 4]);
+        assert!(!row.wrapped);
+    }
+
+    #[test]
+    fn row_len() {
+        let row = Row::new(5);
+        assert_eq!(row.len(), 5);
+    }
+
+    #[test]
+    fn row_resize_grow() {
+        let mut row = Row::new(3);
+        row.chars[0] = 'a';
+        row.chars[1] = 'b';
+        row.chars[2] = 'c';
+        row.resize(5);
+        assert_eq!(row_chars(&row), "abc  ");
+        assert_eq!(row.len(), 5);
+    }
+
+    #[test]
+    fn row_resize_shrink() {
+        let mut row = Row::new(5);
+        row.chars[0] = 'a';
+        row.chars[1] = 'b';
+        row.chars[2] = 'c';
+        row.resize(2);
+        assert_eq!(row_chars(&row), "ab");
+    }
+
+    #[test]
+    fn row_clear() {
+        let mut row = Row::new(3);
+        row.chars[0] = 'x';
+        row.chars[1] = 'y';
+        row.fg[0] = Srgb::new(255, 0, 0);
+        row.clear();
+        assert_eq!(row.chars, vec![' '; 3]);
+        assert_eq!(row.fg, vec![default_fg(); 3]);
+    }
+
+    #[test]
+    fn row_clear_range() {
+        let mut row = Row::new(5);
+        for (i, ch) in "abcde".chars().enumerate() {
+            row.chars[i] = ch;
+        }
+        row.clear_range(1..4);
+        assert_eq!(row_chars(&row), "a   e");
+    }
+
+    #[test]
+    fn row_copy_within() {
+        let mut row = Row::new(6);
+        for (i, ch) in "abcdef".chars().enumerate() {
+            row.chars[i] = ch;
+        }
+        row.copy_within(0..3, 3);
+        assert_eq!(row_chars(&row), "abcabc");
+    }
+
+    #[test]
+    fn row_copy_from() {
+        let mut dst = Row::new(6);
+        let mut src = Row::new(3);
+        for (i, ch) in "xyz".chars().enumerate() {
+            src.chars[i] = ch;
+        }
+        dst.copy_from(&src, 0, 2);
+        assert_eq!(row_chars(&dst), "  xyz ");
+    }
+
+    #[test]
+    fn row_copy_from_with_offset() {
+        let mut dst = Row::new(5);
+        let mut src = Row::new(4);
+        for (i, ch) in "abcd".chars().enumerate() {
+            src.chars[i] = ch;
+        }
+        // Copy from src offset 2 to dst offset 0 → copies "cd" (length min(2,5)=2)
+        dst.copy_from(&src, 2, 0);
+        assert_eq!(row_chars(&dst), "cd   ");
     }
 
     // ── Reflow: grow with no wrapping ───────────────────────────────
@@ -1408,20 +1302,20 @@ mod tests {
     fn reflow_grow_no_wrapping() {
         let mut grid = make_grid(3, &[("abc", false), ("def", false)]);
         grid.reflow(5);
-        assert_eq!(grid.rows.line(0), "abc  ");
-        assert_eq!(grid.rows.line(1), "def  ");
-        assert!(!grid.wrapped[0]);
-        assert!(!grid.wrapped[1]);
-        assert_eq!(grid.rows.line_len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "abc  ");
+        assert_eq!(row_chars(&grid.rows[1]), "def  ");
+        assert!(!grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
     }
 
     #[test]
     fn reflow_same_width_is_noop() {
         let mut grid = make_grid(4, &[("abcd", false), ("efgh", false)]);
         grid.reflow(4);
-        assert_eq!(grid.rows.line(0), "abcd");
-        assert_eq!(grid.rows.line(1), "efgh");
-        assert_eq!(grid.rows.line_len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "abcd");
+        assert_eq!(row_chars(&grid.rows[1]), "efgh");
+        assert_eq!(grid.rows.len(), 2);
     }
 
     // ── Reflow: grow merges wrapped rows ────────────────────────────
@@ -1438,9 +1332,9 @@ mod tests {
         );
         // Growing to 6 should merge them into one row.
         grid.reflow(6);
-        assert_eq!(grid.rows.line(0), "abcdef");
-        assert!(!grid.wrapped[0]);
-        assert_eq!(grid.rows.line_len(), 1);
+        assert_eq!(row_chars(&grid.rows[0]), "abcdef");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(grid.rows.len(), 1);
     }
 
     #[test]
@@ -1448,8 +1342,8 @@ mod tests {
         // "abcdefghi" soft-wrapped at width 3.
         let mut grid = make_grid(3, &[("abc", true), ("def", true), ("ghi", false)]);
         grid.reflow(9);
-        assert_eq!(grid.rows.line(0), "abcdefghi");
-        assert_eq!(grid.rows.line_len(), 1);
+        assert_eq!(row_chars(&grid.rows[0]), "abcdefghi");
+        assert_eq!(grid.rows.len(), 1);
     }
 
     #[test]
@@ -1458,10 +1352,10 @@ mod tests {
         // Should become two rows: "abcde" / "fghi_".
         let mut grid = make_grid(3, &[("abc", true), ("def", true), ("ghi", true)]);
         grid.reflow(5);
-        assert_eq!(grid.rows.line(0), "abcde");
-        assert_eq!(grid.rows.line(1), "fghi ");
-        assert!(grid.wrapped[0]);
-        assert_eq!(grid.rows.line_len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "abcde");
+        assert_eq!(row_chars(&grid.rows[1]), "fghi ");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(grid.rows.len(), 2);
     }
 
     #[test]
@@ -1469,11 +1363,11 @@ mod tests {
         // Two logical lines: "abcdef" (wrapped) then "ghi" (not wrapped).
         let mut grid = make_grid(3, &[("abc", true), ("def", false), ("ghi", false)]);
         grid.reflow(6);
-        assert_eq!(grid.rows.line(0), "abcdef");
-        assert_eq!(grid.rows.line(1), "ghi   ");
-        assert!(!grid.wrapped[0]);
-        assert!(!grid.wrapped[1]);
-        assert_eq!(grid.rows.line_len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "abcdef");
+        assert_eq!(row_chars(&grid.rows[1]), "ghi   ");
+        assert!(!grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
     }
 
     #[test]
@@ -1490,10 +1384,10 @@ mod tests {
             ],
         );
         grid.reflow(6);
-        assert_eq!(grid.rows.line(0), "abcdef");
-        assert_eq!(grid.rows.line(1), "xx    ");
-        assert_eq!(grid.rows.line(2), "ghijkl");
-        assert_eq!(grid.rows.line_len(), 3);
+        assert_eq!(row_chars(&grid.rows[0]), "abcdef");
+        assert_eq!(row_chars(&grid.rows[1]), "xx    ");
+        assert_eq!(row_chars(&grid.rows[2]), "ghijkl");
+        assert_eq!(grid.rows.len(), 3);
     }
 
     // ── Reflow: single row ──────────────────────────────────────────
@@ -1502,8 +1396,8 @@ mod tests {
     fn reflow_single_row_grow() {
         let mut grid = make_grid(3, &[("abc", false)]);
         grid.reflow(6);
-        assert_eq!(grid.rows.line(0), "abc   ");
-        assert_eq!(grid.rows.line_len(), 1);
+        assert_eq!(row_chars(&grid.rows[0]), "abc   ");
+        assert_eq!(grid.rows.len(), 1);
     }
 
     // ── Reflow: shrink splits rows ─────────────────────────────────
@@ -1513,50 +1407,50 @@ mod tests {
         // "abc" and "def" padded to width 6; trailing spaces discarded.
         let mut grid = make_grid(6, &[("abc   ", false), ("def   ", false)]);
         grid.reflow(3);
-        assert_eq!(grid.rows.line(0), "abc");
-        assert_eq!(grid.rows.line(1), "def");
-        assert!(!grid.wrapped[0]);
-        assert!(!grid.wrapped[1]);
-        assert_eq!(grid.rows.line_len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(!grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
     }
 
     #[test]
     fn reflow_shrink_splits_full_row() {
         let mut grid = make_grid(6, &[("abcdef", false)]);
         grid.reflow(3);
-        assert_eq!(grid.rows.line(0), "abc");
-        assert_eq!(grid.rows.line(1), "def");
-        assert!(grid.wrapped[0]);
-        assert!(!grid.wrapped[1]);
-        assert_eq!(grid.rows.line_len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
     }
 
     #[test]
     fn reflow_shrink_splits_into_three() {
         let mut grid = make_grid(9, &[("abcdefghi", false)]);
         grid.reflow(3);
-        assert_eq!(grid.rows.line(0), "abc");
-        assert_eq!(grid.rows.line(1), "def");
-        assert_eq!(grid.rows.line(2), "ghi");
-        assert!(grid.wrapped[0]);
-        assert!(grid.wrapped[1]);
-        assert!(!grid.wrapped[2]);
-        assert_eq!(grid.rows.line_len(), 3);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert_eq!(row_chars(&grid.rows[2]), "ghi");
+        assert!(grid.rows[0].wrapped);
+        assert!(grid.rows[1].wrapped);
+        assert!(!grid.rows[2].wrapped);
+        assert_eq!(grid.rows.len(), 3);
     }
 
     #[test]
     fn reflow_shrink_two_logical_lines() {
         let mut grid = make_grid(6, &[("abcdef", false), ("ghijkl", false)]);
         grid.reflow(3);
-        assert_eq!(grid.rows.line(0), "abc");
-        assert_eq!(grid.rows.line(1), "def");
-        assert_eq!(grid.rows.line(2), "ghi");
-        assert_eq!(grid.rows.line(3), "jkl");
-        assert!(grid.wrapped[0]);
-        assert!(!grid.wrapped[1]);
-        assert!(grid.wrapped[2]);
-        assert!(!grid.wrapped[3]);
-        assert_eq!(grid.rows.line_len(), 4);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert_eq!(row_chars(&grid.rows[2]), "ghi");
+        assert_eq!(row_chars(&grid.rows[3]), "jkl");
+        assert!(grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
+        assert!(grid.rows[2].wrapped);
+        assert!(!grid.rows[3].wrapped);
+        assert_eq!(grid.rows.len(), 4);
     }
 
     #[test]
@@ -1564,15 +1458,15 @@ mod tests {
         // "abcdefghijkl" soft-wrapped at width 6, shrink to 3.
         let mut grid = make_grid(6, &[("abcdef", true), ("ghijkl", false)]);
         grid.reflow(3);
-        assert_eq!(grid.rows.line(0), "abc");
-        assert_eq!(grid.rows.line(1), "def");
-        assert_eq!(grid.rows.line(2), "ghi");
-        assert_eq!(grid.rows.line(3), "jkl");
-        assert!(grid.wrapped[0]);
-        assert!(grid.wrapped[1]);
-        assert!(grid.wrapped[2]);
-        assert!(!grid.wrapped[3]);
-        assert_eq!(grid.rows.line_len(), 4);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert_eq!(row_chars(&grid.rows[2]), "ghi");
+        assert_eq!(row_chars(&grid.rows[3]), "jkl");
+        assert!(grid.rows[0].wrapped);
+        assert!(grid.rows[1].wrapped);
+        assert!(grid.rows[2].wrapped);
+        assert!(!grid.rows[3].wrapped);
+        assert_eq!(grid.rows.len(), 4);
     }
 
     #[test]
@@ -1580,11 +1474,11 @@ mod tests {
         // 5 chars into width 3: "abcde" -> "abc" + "de "
         let mut grid = make_grid(5, &[("abcde", false)]);
         grid.reflow(3);
-        assert_eq!(grid.rows.line(0), "abc");
-        assert_eq!(grid.rows.line(1), "de ");
-        assert!(grid.wrapped[0]);
-        assert!(!grid.wrapped[1]);
-        assert_eq!(grid.rows.line_len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert_eq!(row_chars(&grid.rows[1]), "de ");
+        assert!(grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
     }
 
     #[test]
@@ -1595,17 +1489,17 @@ mod tests {
             &[("abcdef", false), ("xx    ", false), ("ghijkl", false)],
         );
         grid.reflow(3);
-        assert_eq!(grid.rows.line(0), "abc");
-        assert_eq!(grid.rows.line(1), "def");
-        assert_eq!(grid.rows.line(2), "xx ");
-        assert_eq!(grid.rows.line(3), "ghi");
-        assert_eq!(grid.rows.line(4), "jkl");
-        assert!(grid.wrapped[0]);
-        assert!(!grid.wrapped[1]);
-        assert!(!grid.wrapped[2]);
-        assert!(grid.wrapped[3]);
-        assert!(!grid.wrapped[4]);
-        assert_eq!(grid.rows.line_len(), 5);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert_eq!(row_chars(&grid.rows[2]), "xx ");
+        assert_eq!(row_chars(&grid.rows[3]), "ghi");
+        assert_eq!(row_chars(&grid.rows[4]), "jkl");
+        assert!(grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
+        assert!(!grid.rows[2].wrapped);
+        assert!(grid.rows[3].wrapped);
+        assert!(!grid.rows[4].wrapped);
+        assert_eq!(grid.rows.len(), 5);
     }
 
     // ── Reflow: trailing space stripping ────────────────────────────
@@ -1615,9 +1509,9 @@ mod tests {
         // "ab" with trailing padding on a wrapped row, then "cd".
         let mut grid = make_grid(5, &[("ab   ", true), ("cd   ", false)]);
         grid.reflow(10);
-        assert_eq!(grid.rows.line(0), "ab   cd   ");
-        assert!(!grid.wrapped[0]);
-        assert_eq!(grid.rows.line_len(), 1);
+        assert_eq!(row_chars(&grid.rows[0]), "ab   cd   ");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(grid.rows.len(), 1);
     }
 
     #[test]
@@ -1625,118 +1519,11 @@ mod tests {
         // Wrapped row where overflow portion is all spaces — no split needed.
         let mut grid = make_grid(6, &[("abc   ", true), ("def   ", false)]);
         grid.reflow(3);
-        assert_eq!(grid.rows.line(0), "abc");
-        assert_eq!(grid.rows.line(1), "   ");
-        assert_eq!(grid.rows.line(2), "def");
-        assert!(grid.wrapped[0]);
-        assert!(grid.wrapped[1]);
-        assert!(!grid.wrapped[2]);
-        assert_eq!(grid.rows.line_len(), 3);
-    }
-
-    #[test]
-    fn reflow_shrink_grow_maintains_space() {
-        let mut grid = make_grid(6, &[("abc   ", false), ("def   ", false)]);
-        grid.reflow(3);
-        grid.reflow(6);
-        assert_eq!(grid.rows.line(0), "abc   ");
-        assert_eq!(grid.rows.line(1), "def   ");
-        assert!(!grid.wrapped[0]);
-        assert!(!grid.wrapped[1]);
-        assert_eq!(grid.rows.line_len(), 2);
-    }
-
-    #[test]
-    fn reflow_mixed_wrapping_shrink_then_grow() {
-        // Three logical lines at width 8:
-        //   "Hi"                 — short unwrapped
-        //   "ABCDEFGHIJKLMNOP"   — 16-char wrapped across two rows
-        //   "Bye"                — short unwrapped
-        let mut grid = make_grid(
-            8,
-            &[
-                ("Hi      ", false),
-                ("ABCDEFGH", true),
-                ("IJKLMNOP", false),
-                ("Bye     ", false),
-            ],
-        );
-
-        // Shrink 8 → 4: long rows split, short rows truncate padding.
-        grid.reflow(4);
-        assert_eq!(grid.rows.line(0), "Hi  ");
-        assert!(!grid.wrapped[0]);
-        assert_eq!(grid.rows.line(1), "ABCD");
-        assert!(grid.wrapped[1]);
-        assert_eq!(grid.rows.line(2), "EFGH");
-        assert!(grid.wrapped[2]);
-        assert_eq!(grid.rows.line(3), "IJKL");
-        assert!(grid.wrapped[3]);
-        assert_eq!(grid.rows.line(4), "MNOP");
-        assert!(!grid.wrapped[4]);
-        assert_eq!(grid.rows.line(5), "Bye ");
-        assert!(!grid.wrapped[5]);
-        assert_eq!(grid.rows.line_len(), 6);
-
-        // Grow 4 → 6: wrapped chains partially re-merge.
-        // 16 chars at width 6 = three rows: 6 + 6 + 4.
-        grid.reflow(6);
-        assert_eq!(grid.rows.line(0), "Hi    ");
-        assert!(!grid.wrapped[0]);
-        assert_eq!(grid.rows.line(1), "ABCDEF");
-        assert!(grid.wrapped[1]);
-        assert_eq!(grid.rows.line(2), "GHIJKL");
-        assert!(grid.wrapped[2]);
-        assert_eq!(grid.rows.line(3), "MNOP  ");
-        assert!(!grid.wrapped[3]);
-        assert_eq!(grid.rows.line(4), "Bye   ");
-        assert!(!grid.wrapped[4]);
-        assert_eq!(grid.rows.line_len(), 5);
-    }
-
-    #[test]
-    fn reflow_mixed_wrapping_roundtrip() {
-        // Shrink then grow back to original width with mixed lines.
-        //   "Hi"             — short unwrapped
-        //   "abcdefghijkl"   — 12-char wrapped across two rows
-        //   "Lo"             — short unwrapped
-        let mut grid = make_grid(
-            6,
-            &[
-                ("Hi    ", false),
-                ("abcdef", true),
-                ("ghijkl", false),
-                ("Lo    ", false),
-            ],
-        );
-
-        // Shrink 6 → 3: 12-char line becomes 4 rows.
-        grid.reflow(3);
-        assert_eq!(grid.rows.line_len(), 6);
-        assert_eq!(grid.rows.line(0), "Hi ");
-        assert!(!grid.wrapped[0]);
-        assert_eq!(grid.rows.line(1), "abc");
-        assert!(grid.wrapped[1]);
-        assert_eq!(grid.rows.line(2), "def");
-        assert!(grid.wrapped[2]);
-        assert_eq!(grid.rows.line(3), "ghi");
-        assert!(grid.wrapped[3]);
-        assert_eq!(grid.rows.line(4), "jkl");
-        assert!(!grid.wrapped[4]);
-        assert_eq!(grid.rows.line(5), "Lo ");
-        assert!(!grid.wrapped[5]);
-
-        // Grow 3 → 6: should roundtrip back to original.
-        grid.reflow(6);
-        assert_eq!(grid.rows.line_len(), 4);
-        assert_eq!(grid.rows.line(0), "Hi    ");
-        assert!(!grid.wrapped[0]);
-        assert_eq!(grid.rows.line(1), "abcdef");
-        assert!(grid.wrapped[1]);
-        assert_eq!(grid.rows.line(2), "ghijkl");
-        assert!(!grid.wrapped[2]);
-        assert_eq!(grid.rows.line(3), "Lo    ");
-        assert!(!grid.wrapped[3]);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
     }
 
     #[test]
@@ -1745,124 +1532,384 @@ mod tests {
         let mut grid = make_grid(10, &[("hello     ", true), ("world     ", false)]);
         grid.reflow(5);
         grid.reflow(10);
-        assert_eq!(grid.rows.line(0), "hello     ");
-        assert_eq!(grid.rows.line(1), "world     ");
-        assert!(grid.wrapped[0]);
-        assert_eq!(grid.rows.line_len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "helloworld");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(grid.rows.len(), 1);
     }
 
-    // ── Color map ──────────────────────────────────────────────────
+    // ── Helpers for scroll region / push_visible_row tests ──────────
 
-    const RED: Srgb<u8> = Srgb::new(255, 0, 0);
-    const BLUE: Srgb<u8> = Srgb::new(0, 0, 255);
+    fn make_viewport(
+        rows: u32,
+        cols: u32,
+    ) -> Viewport {
+        Viewport {
+            rows,
+            cols,
+            offset: 0,
+            scroll_top: 0,
+            scroll_bottom: rows - 1,
+        }
+    }
 
-    #[test]
-    fn color_set_and_get() {
-        let mut grid = make_grid(4, &[("abcd", false)]);
-        let c = CellColors {
-            fg: RED,
-            bg: default_bg(),
+    /// Build a grid with `scrollback` history rows + `visible` visible rows.
+    /// Each row is labeled with a single char repeated to fill the width.
+    fn make_grid_with_scrollback(
+        width: u32,
+        visible: u32,
+        labels: &[char],
+    ) -> (Grid, Viewport) {
+        let vp = make_viewport(visible, width);
+        let mut rows = VecDeque::new();
+        for &ch in labels {
+            let mut row = Row::new(width);
+            for c in row.chars.iter_mut() {
+                *c = ch;
+            }
+            rows.push_back(row);
+        }
+        let grid = Grid {
+            rows,
+            scrollback_limit: 1000,
+            total_popped: 0,
         };
-        grid.set_color(0, c);
-        assert_eq!(grid.get_color(0), c);
-        // Unset position returns default.
-        assert_eq!(grid.get_color(1), CellColors::default());
+        (grid, vp)
+    }
+
+    fn all_chars(grid: &Grid) -> Vec<String> {
+        grid.rows.iter().map(|r| row_chars(r)).collect()
+    }
+
+    // ── 1. Scroll region tests ──────────────────────────────────────
+
+    #[test]
+    fn scroll_up_region_full_viewport() {
+        // Scroll up the full viewport: top row removed, blank inserted at bottom.
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
+        grid.scroll_up_in_region(&vp, 0, 2, 1);
+        assert_eq!(all_chars(&grid), vec!["BBB", "CCC", "   "]);
     }
 
     #[test]
-    fn color_default_is_not_stored() {
-        let mut grid = make_grid(4, &[("abcd", false)]);
-        grid.set_color(0, CellColors::default());
-        assert!(grid.colors.is_empty());
+    fn scroll_up_region_partial() {
+        // Scroll region covers only rows 1-2 of a 4-row viewport.
+        let (mut grid, vp) = make_grid_with_scrollback(3, 4, &['A', 'B', 'C', 'D']);
+        grid.scroll_up_in_region(&vp, 1, 2, 1);
+        // Row 0 and 3 unchanged; row 1 (B) removed, blank at row 2.
+        assert_eq!(all_chars(&grid), vec!["AAA", "CCC", "   ", "DDD"]);
     }
 
     #[test]
-    fn color_clear_range() {
-        let mut grid = make_grid(4, &[("abcd", false)]);
-        let c = CellColors {
-            fg: RED,
-            bg: default_bg(),
-        };
-        grid.set_color(0, c);
-        grid.set_color(1, c);
-        grid.set_color(2, c);
-        grid.clear_colors(0, 2);
-        // Only byte offset 2 survives.
-        assert_eq!(grid.get_color(0), CellColors::default());
-        assert_eq!(grid.get_color(1), CellColors::default());
-        assert_eq!(grid.get_color(2), c);
+    fn scroll_up_region_n_greater_than_1() {
+        let (mut grid, vp) = make_grid_with_scrollback(3, 4, &['A', 'B', 'C', 'D']);
+        grid.scroll_up_in_region(&vp, 0, 3, 2);
+        assert_eq!(all_chars(&grid), vec!["CCC", "DDD", "   ", "   "]);
     }
 
     #[test]
-    fn color_shift_after() {
-        let mut grid = make_grid(4, &[("abcd", false)]);
-        let c = CellColors {
-            fg: RED,
-            bg: default_bg(),
-        };
-        grid.set_color(2, c);
-        // Simulate inserting 1 byte at offset 1 — entries at >=1 shift right.
-        grid.shift_colors(1, 1);
-        assert_eq!(grid.get_color(2), CellColors::default());
-        assert_eq!(grid.get_color(3), c);
+    fn scroll_up_region_n_clamped_to_region_size() {
+        // n=100 but region is only 3 rows, should clamp.
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
+        grid.scroll_up_in_region(&vp, 0, 2, 100);
+        assert_eq!(all_chars(&grid), vec!["   ", "   ", "   "]);
     }
 
     #[test]
-    fn color_trim_front() {
-        let mut grid = make_grid(4, &[("abcd", false), ("efgh", false)]);
-        let c = CellColors {
-            fg: RED,
-            bg: default_bg(),
-        };
-        // "abcd\nefgh\n" — line 1 starts at byte 5.
-        grid.set_color(0, c);
-        grid.set_color(5, c);
-        // Trim first line (5 bytes: "abcd\n").
-        grid.trim_colors_front(5);
-        // Old byte 0 is gone; old byte 5 is now rope offset 0.
-        assert_eq!(grid.get_color(0), c);
-        assert!(grid.colors.len() == 1);
+    fn scroll_down_region_full_viewport() {
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
+        grid.scroll_down_in_region(&vp, 0, 2, 1);
+        assert_eq!(all_chars(&grid), vec!["   ", "AAA", "BBB"]);
     }
 
     #[test]
-    fn color_survives_reflow() {
-        let mut grid = make_grid(6, &[("abcdef", false)]);
-        let c = CellColors {
-            fg: RED,
-            bg: default_bg(),
-        };
-        // Color 'a' (byte 0) and 'd' (byte 3).
-        grid.set_color(0, c);
-        grid.set_color(3, c);
-        // Shrink to width 3: "abc" (wrapped) + "def".
+    fn scroll_down_region_partial() {
+        // Scroll region covers only rows 1-2 of a 4-row viewport.
+        let (mut grid, vp) = make_grid_with_scrollback(3, 4, &['A', 'B', 'C', 'D']);
+        grid.scroll_down_in_region(&vp, 1, 2, 1);
+        assert_eq!(all_chars(&grid), vec!["AAA", "   ", "BBB", "DDD"]);
+    }
+
+    #[test]
+    fn scroll_down_region_n_greater_than_1() {
+        let (mut grid, vp) = make_grid_with_scrollback(3, 4, &['A', 'B', 'C', 'D']);
+        grid.scroll_down_in_region(&vp, 0, 3, 2);
+        assert_eq!(all_chars(&grid), vec!["   ", "   ", "AAA", "BBB"]);
+    }
+
+    #[test]
+    fn scroll_down_region_n_clamped() {
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
+        grid.scroll_down_in_region(&vp, 0, 2, 100);
+        assert_eq!(all_chars(&grid), vec!["   ", "   ", "   "]);
+    }
+
+    #[test]
+    fn scroll_up_region_with_scrollback() {
+        // 2 scrollback rows + 3 visible. Scroll region is rows 0-2 of the
+        // viewport. Scrollback should be untouched.
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['S', 'T', 'A', 'B', 'C']);
+        grid.scroll_up_in_region(&vp, 0, 2, 1);
+        assert_eq!(all_chars(&grid), vec!["SSS", "TTT", "BBB", "CCC", "   "]);
+    }
+
+    #[test]
+    fn scroll_down_region_with_scrollback() {
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['S', 'T', 'A', 'B', 'C']);
+        grid.scroll_down_in_region(&vp, 0, 2, 1);
+        assert_eq!(all_chars(&grid), vec!["SSS", "TTT", "   ", "AAA", "BBB"]);
+    }
+
+    #[test]
+    fn scroll_up_preserves_colors() {
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
+        let red = Srgb::new(255, 0, 0);
+        grid.rows[1].fg[0] = red; // row B, first cell
+        grid.scroll_up_in_region(&vp, 0, 2, 1);
+        // B is now row 0; its color should survive.
+        assert_eq!(grid.rows[0].fg[0], red);
+        // New blank row at bottom should have default colors.
+        assert_eq!(grid.rows[2].fg[0], default_fg());
+    }
+
+    #[test]
+    fn scroll_down_preserves_colors() {
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
+        let blue = Srgb::new(0, 0, 255);
+        grid.rows[1].fg[0] = blue; // row B
+        grid.scroll_down_in_region(&vp, 0, 2, 1);
+        // B moved from row 1 to row 2.
+        assert_eq!(grid.rows[2].fg[0], blue);
+        // New blank row at top should have default colors.
+        assert_eq!(grid.rows[0].fg[0], default_fg());
+    }
+
+    #[test]
+    fn scroll_up_single_row_region() {
+        // A 1-row region: scrolling should just blank it.
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
+        grid.scroll_up_in_region(&vp, 1, 1, 1);
+        assert_eq!(all_chars(&grid), vec!["AAA", "   ", "CCC"]);
+    }
+
+    #[test]
+    fn scroll_down_single_row_region() {
+        let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
+        grid.scroll_down_in_region(&vp, 1, 1, 1);
+        assert_eq!(all_chars(&grid), vec!["AAA", "   ", "CCC"]);
+    }
+
+    // ── 2. Reflow with scrollback ───────────────────────────────────
+
+    #[test]
+    fn reflow_grow_with_scrollback_unwrapped() {
+        // Scrollback rows should be resized but not merged with visible rows.
+        let mut grid = make_grid(
+            5,
+            &[
+                ("SSSSS", false), // scrollback
+                ("AAAAA", false), // visible
+                ("BBBBB", false),
+            ],
+        );
+        grid.reflow(8);
+        assert_eq!(grid.rows.len(), 3);
+        assert_eq!(row_chars(&grid.rows[0]), "SSSSS   ");
+        assert_eq!(row_chars(&grid.rows[1]), "AAAAA   ");
+    }
+
+    #[test]
+    fn reflow_grow_with_scrollback_wrapped() {
+        // Wrapped rows in the scrollback should merge just like visible ones.
+        let mut grid = make_grid(
+            5,
+            &[
+                ("hello", true),  // scrollback, wraps into next
+                ("world", false), // scrollback
+                ("AAAAA", false), // visible
+            ],
+        );
+        grid.reflow(10);
+        assert_eq!(row_chars(&grid.rows[0]), "helloworld");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(grid.rows.len(), 2);
+    }
+
+    #[test]
+    fn reflow_shrink_with_scrollback() {
+        let mut grid = make_grid(
+            6,
+            &[
+                ("abcdef", false), // scrollback
+                ("ghijkl", false), // visible
+            ],
+        );
         grid.reflow(3);
-        assert_eq!(grid.rows.line(0), "abc");
-        assert_eq!(grid.rows.line(1), "def");
-        // 'a' is at byte 0 of new rope.
-        assert_eq!(grid.get_color(0), c);
-        // 'd' is at byte 0 of line 1 = byte 4 ("abc\n" = 4 bytes).
-        assert_eq!(grid.get_color(4), c);
-        // 'b' (byte 1) has no color.
-        assert_eq!(grid.get_color(1), CellColors::default());
+        // Both rows should split.
+        assert_eq!(grid.rows.len(), 4);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "ghi");
+        assert!(grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "jkl");
+    }
+
+    // ── 3. Reflow edge cases ────────────────────────────────────────
+
+    #[test]
+    fn reflow_empty_grid() {
+        let mut grid = Grid {
+            rows: VecDeque::new(),
+            scrollback_limit: 1000,
+            total_popped: 0,
+        };
+        grid.reflow(10); // should not panic
+        assert_eq!(grid.rows.len(), 0);
     }
 
     #[test]
-    fn color_reflow_roundtrip() {
+    fn reflow_single_row_shrink() {
         let mut grid = make_grid(6, &[("abcdef", false)]);
-        let ca = CellColors {
-            fg: RED,
-            bg: default_bg(),
-        };
-        let cd = CellColors {
-            fg: BLUE,
-            bg: default_bg(),
-        };
-        grid.set_color(0, ca);
-        grid.set_color(3, cd);
         grid.reflow(3);
+        assert_eq!(grid.rows.len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(!grid.rows[1].wrapped);
+    }
+
+    #[test]
+    fn reflow_shrink_exact_fit_no_overflow() {
+        // Content exactly fills the new width — no split needed.
+        let mut grid = make_grid(6, &[("abc   ", false)]);
+        grid.reflow(3);
+        // "abc" fits in 3 cols, trailing spaces are not content.
+        assert_eq!(grid.rows.len(), 1);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+    }
+
+    #[test]
+    fn reflow_shrink_preserves_colors() {
+        let mut grid = make_grid(6, &[("abcdef", false)]);
+        let red = Srgb::new(255, 0, 0);
+        grid.rows[0].fg[3] = red; // 'd' is red
+        grid.reflow(3);
+        // 'd' is now at row 1, col 0.
+        assert_eq!(grid.rows[1].fg[0], red);
+    }
+
+    #[test]
+    fn reflow_grow_preserves_colors() {
+        let mut grid = make_grid(3, &[("abc", true), ("def", false)]);
+        let red = Srgb::new(255, 0, 0);
+        grid.rows[1].fg[0] = red; // 'd' is red
         grid.reflow(6);
-        // After roundtrip, 'a' is back at byte 0, 'd' at byte 3.
-        assert_eq!(grid.get_color(0), ca);
-        assert_eq!(grid.get_color(3), cd);
+        // Merged into one row: "abcdef". 'd' is at col 3.
+        assert_eq!(grid.rows[0].fg[3], red);
+    }
+
+    // ── 4. push_visible_row ─────────────────────────────────────────
+
+    #[test]
+    fn push_visible_row_adds_blank() {
+        let vp = make_viewport(3, 4);
+        let (mut grid, _) = make_grid_with_scrollback(4, 3, &['A', 'B', 'C']);
+        grid.push_visible_row(&vp);
+        assert_eq!(grid.rows.len(), 4);
+        assert_eq!(row_chars(grid.rows.back().unwrap()), "    ");
+    }
+
+    #[test]
+    fn push_visible_row_trims_scrollback() {
+        let vp = make_viewport(3, 4);
+        let mut grid = Grid {
+            rows: VecDeque::new(),
+            scrollback_limit: 2,
+            total_popped: 0,
+        };
+        // Fill 3 visible + 2 scrollback = 5 rows (at the limit).
+        for ch in ['S', 'T', 'A', 'B', 'C'] {
+            let mut row = Row::new(4);
+            row.chars.fill(ch);
+            grid.rows.push_back(row);
+        }
+        assert_eq!(grid.rows.len(), 5); // at limit
+        grid.push_visible_row(&vp);
+        // Should have trimmed the oldest scrollback row.
+        assert_eq!(grid.rows.len(), 5);
+        assert_eq!(grid.total_popped, 1);
+        assert_eq!(row_chars(&grid.rows[0]), "TTTT"); // 'S' row was removed
+    }
+
+    #[test]
+    fn push_visible_row_total_popped_accumulates() {
+        let vp = make_viewport(2, 3);
+        let mut grid = Grid {
+            rows: VecDeque::new(),
+            scrollback_limit: 0,
+            total_popped: 0,
+        };
+        // Start with 2 visible rows.
+        for ch in ['A', 'B'] {
+            let mut row = Row::new(3);
+            row.chars.fill(ch);
+            grid.rows.push_back(row);
+        }
+        // Push 3 more rows — each should pop one.
+        grid.push_visible_row(&vp);
+        grid.push_visible_row(&vp);
+        grid.push_visible_row(&vp);
+        assert_eq!(grid.total_popped, 3);
+        assert_eq!(grid.rows.len(), 2);
+    }
+
+    // ── 5. reflow_soft_grow across VecDeque split ───────────────────
+
+    #[test]
+    fn reflow_grow_across_deque_boundary() {
+        // Force wrapped rows to straddle the VecDeque's internal ring buffer
+        // boundary. Rotating by exactly `len` preserves logical order while
+        // advancing the internal head pointer. With 3 rows and typical
+        // capacity 4, head lands at position 3 and elements wrap around.
+        let mut grid = make_grid(
+            3,
+            &[("abc", true), ("def", true), ("ghi", false)],
+        );
+        let n = grid.rows.len();
+        let cap = grid.rows.capacity();
+        if cap > n {
+            // Rotate by len to preserve order but shift the head pointer.
+            for _ in 0..n {
+                let row = grid.rows.pop_front().unwrap();
+                grid.rows.push_back(row);
+            }
+        }
+        grid.reflow(9);
+        assert_eq!(grid.rows.len(), 1);
+        assert_eq!(row_chars(&grid.rows[0]), "abcdefghi");
+        assert!(!grid.rows[0].wrapped);
+    }
+
+    #[test]
+    fn reflow_grow_across_deque_boundary_partial_merge() {
+        // 4 rows where only the first 2 are wrapped — merge should stop at
+        // the unwrapped boundary. Rotation forces ring buffer wrap-around.
+        let mut grid = make_grid(
+            3,
+            &[("abc", true), ("def", false), ("ghi", true), ("jkl", false)],
+        );
+        let n = grid.rows.len();
+        let cap = grid.rows.capacity();
+        if cap > n {
+            for _ in 0..n {
+                let row = grid.rows.pop_front().unwrap();
+                grid.rows.push_back(row);
+            }
+        }
+        grid.reflow(6);
+        assert_eq!(grid.rows.len(), 2);
+        assert_eq!(row_chars(&grid.rows[0]), "abcdef");
+        assert_eq!(row_chars(&grid.rows[1]), "ghijkl");
     }
 }

@@ -41,8 +41,8 @@ impl App {
         pty: Pty,
         opacity: f32,
         fonts_config: Option<&str>,
-        font_size: f32,
         scrollback_lines: u32,
+        font_size: f32,
     ) -> Self {
         let font_system = FontSystem::new(fonts_config, font_size);
         Self {
@@ -97,6 +97,7 @@ impl ApplicationHandler for App {
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
         let renderer = pollster::block_on(Renderer::new(
             Arc::clone(&window),
+            &mut self.font_system,
             &self.terminal,
             self.opacity,
         ));
@@ -233,8 +234,8 @@ fn main() {
         pty,
         config.opacity,
         config.fonts.as_deref(),
-        config.font_size,
         config.scrollback_lines,
+        config.font_size,
     );
     event_loop.run_app(&mut app).expect("run event loop");
 }
