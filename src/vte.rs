@@ -79,8 +79,10 @@ impl Intermediates {
 /// A single action produced by the parser.
 #[derive(Debug)]
 pub enum Action {
-    /// A printable character (ASCII or decoded UTF-8).
-    Print(char),
+    /// A printable character (ASCII).
+    PrintByte(char),
+    /// A printable character (utf8).
+    Print(String),
     /// A C0 or C1 control character.
     Execute(u8),
     /// A complete CSI (Control Sequence Introducer) sequence.
@@ -396,7 +398,7 @@ impl Parser {
     ) -> Option<Action> {
         match byte {
             0x00..=0x17 | 0x19 | 0x1C..=0x1F => Some(Action::Execute(byte)),
-            0x20..=0x7E => Some(Action::Print(byte as char)),
+            0x20..=0x7E => Some(Action::PrintByte(byte as char)),
             0x7F => None,
             0xC2..=0xDF => {
                 self.utf8_buf[0] = byte;
@@ -432,9 +434,9 @@ impl Parser {
         if self.utf8_len == self.utf8_needed {
             self.state = State::Ground;
             let s = std::str::from_utf8(&self.utf8_buf[..self.utf8_len as usize]);
-            match s.ok().and_then(|s| s.chars().next()) {
-                Some(c) => Some(Action::Print(c)),
-                None => Some(Action::Print('\u{FFFD}')),
+            match s.ok() {
+                Some(c) => Some(Action::Print(c.to_owned())),
+                None => Some(Action::PrintByte('\u{FFFD}')),
             }
         } else {
             None

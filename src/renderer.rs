@@ -11,6 +11,7 @@ use winit::window::Window;
 use crate::font::FontSystem;
 use crate::font::RasterizedGlyph;
 use crate::sixel::SixelImage;
+use crate::terminal::CellColors;
 use crate::terminal::Terminal;
 use crate::terminal::default_fg;
 
@@ -113,7 +114,6 @@ pub struct Renderer {
 impl Renderer {
     pub async fn new(
         window: Arc<Window>,
-        font_system: &mut FontSystem,
         _terminal: &Terminal,
         opacity: f32,
     ) -> Self {
@@ -490,7 +490,7 @@ impl Renderer {
             cache: None,
         });
 
-        let mut renderer = Self {
+        let renderer = Self {
             device,
             queue,
             surface,
@@ -519,16 +519,6 @@ impl Renderer {
         };
 
         renderer.update_screen_size(size);
-
-        // Pre-cache printable ASCII glyphs.
-        {
-            let ascii_chars: Vec<char> = (' '..='~').collect();
-            let shaped = font_system.shape_row(&ascii_chars);
-            for sg in &shaped {
-                renderer.ensure_glyph_cached(font_system, sg.font_index, sg.glyph_id);
-            }
-        }
-
         renderer
     }
 
@@ -720,9 +710,14 @@ impl Renderer {
 
             // Background quads for the whole row.
             let grid_row = terminal.visible_row(row);
+            let row_colors = terminal.visible_row_colors(row);
             for col in 0..terminal.viewport.cols {
                 let x = col as f32 * cell_w;
-                let bg_color = pack_color(&grid_row.bg[col as usize], self.bg_alpha);
+                let cell = row_colors
+                    .get(col as usize)
+                    .copied()
+                    .unwrap_or(CellColors::default());
+                let bg_color = pack_color(&cell.bg, self.bg_alpha);
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
                     BgVertex {
@@ -746,7 +741,7 @@ impl Renderer {
             }
 
             // Shape the entire row for foreground glyphs — borrows &[char] directly.
-            let shaped = font_system.shape_row(&grid_row.chars);
+            let shaped = font_system.shape_row(grid_row.chars);
 
             for sg in &shaped {
                 let entry = match self.ensure_glyph_cached(font_system, sg.font_index, sg.glyph_id)
@@ -764,7 +759,11 @@ impl Renderer {
                 let gw = entry.width as f32;
                 let gh = entry.height as f32;
 
-                let fg_color = pack_color(&grid_row.fg[sg.col as usize], 255);
+                let cell = row_colors
+                    .get(sg.col as usize)
+                    .copied()
+                    .unwrap_or(CellColors::default());
+                let fg_color = pack_color(&cell.fg, 255);
                 let fi = fg_vertices.len() as u32;
                 fg_vertices.extend_from_slice(&[
                     FgVertex {
