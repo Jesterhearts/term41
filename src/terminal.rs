@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::ops::RangeBounds;
 
 use palette::Srgb;
 
@@ -100,10 +101,14 @@ impl Row {
     }
 
     fn content_len(&self) -> u32 {
-        self.chars
-            .iter()
-            .rposition(|c| *c != ' ')
-            .map_or(0, |p| p + 1) as u32
+        if self.wrapped {
+            self.len()
+        } else {
+            self.chars
+                .iter()
+                .rposition(|c| *c != ' ')
+                .map_or(0, |p| p + 1) as u32
+        }
     }
 
     fn resize(
@@ -139,30 +144,33 @@ impl Row {
         self.bg[range].fill(default_bg());
     }
 
-    fn copy_within(
+    fn copy_within<R>(
         &mut self,
-        src: std::ops::Range<usize>,
+        src: R,
         dest: usize,
-    ) {
+    ) where
+        R: RangeBounds<usize> + Clone,
+    {
         self.chars.copy_within(src.clone(), dest);
         self.fg.copy_within(src.clone(), dest);
-        self.bg.copy_within(src.clone(), dest);
+        self.bg.copy_within(src, dest);
     }
 
     fn copy_from(
         &mut self,
         other: &Self,
-        src_offset: usize,
+        src: std::ops::Range<usize>,
         dest_offset: usize,
     ) -> usize {
-        let copy_len = ((other.content_len() as usize).saturating_sub(src_offset))
-            .min((self.len() as usize).saturating_sub(dest_offset));
+        let copy_len = ((other.content_len() as usize).saturating_sub(src.start))
+            .min((self.len() as usize).saturating_sub(dest_offset))
+            .min(src.len());
         self.chars[dest_offset..dest_offset + copy_len]
-            .copy_from_slice(&other.chars[src_offset..src_offset + copy_len]);
+            .copy_from_slice(&other.chars[src.start..src.start + copy_len]);
         self.fg[dest_offset..dest_offset + copy_len]
-            .copy_from_slice(&other.fg[src_offset..src_offset + copy_len]);
+            .copy_from_slice(&other.fg[src.start..src.start + copy_len]);
         self.bg[dest_offset..dest_offset + copy_len]
-            .copy_from_slice(&other.bg[src_offset..src_offset + copy_len]);
+            .copy_from_slice(&other.bg[src.start..src.start + copy_len]);
 
         copy_len
     }
@@ -360,113 +368,182 @@ impl Grid {
         &mut self,
         new_width: u32,
     ) {
-        if self.rows.len() == 0 {
+        if self.rows.is_empty() {
             return;
         }
 
-        let old_width = self.rows[0].len();
-        if old_width == new_width {
+        if self.rows[0].len() == new_width {
             return;
         }
 
-        if new_width > old_width {
+        if new_width > self.rows[0].len() {
+            if self.rows.len() == 1 {
+                self.rows[0].resize(new_width);
+                return;
+            }
+
+            let new_width = new_width as usize;
             let mut row = 0;
-            while row < self.rows.len() as u32 {
-                self.rows[row as usize].resize(new_width);
+            let mut col = self.rows[row].content_len() as usize;
+            let mut next = row + 1;
+            let mut next_col = 0;
 
-                if self.rows[row as usize].wrapped {
-                    let (advanced, skipped) = self.reflow_soft_grow(row, old_width, new_width);
-                    let skipped = skipped.unwrap_or_default();
-                    row += advanced;
-
-                    for _ in 0..skipped {
-                        self.rows.remove(row as usize + 1);
-                    }
-                } else {
+            while row < self.rows.len() && next < self.rows.len() {
+                self.rows[row].resize(new_width as u32);
+                if !self.rows[row].wrapped {
                     row += 1;
+                    if self.rows[row].wrapped && row == next {
+                        col = self.rows[row].content_len() as usize;
+                    } else {
+                        col = 0;
+                    }
+                    if row == next {
+                        next += 1;
+                    }
+                    continue;
+                }
+
+                while self.rows[row].wrapped && next < self.rows.len() {
+                    let (dst, src) = self.split_current_next(row, next);
+                    dst.resize(new_width as u32);
+
+                    while col < new_width && next_col < src.content_len() as usize {
+                        dst.chars[col] = src.chars[next_col];
+                        dst.fg[col] = src.fg[next_col];
+                        dst.bg[col] = src.bg[next_col];
+
+                        col += 1;
+                        next_col += 1;
+                    }
+
+                    if col == new_width && next_col >= src.content_len() as usize {
+                        // Fully consumed the next row and filled the current one, move on to
+                        // the following rows.
+                        row += 1;
+                        col = 0;
+                        next += 1;
+                        next_col = 0;
+                        dst.wrapped = src.wrapped;
+
+                        src.clear();
+                        src.wrapped = true;
+                    } else if next_col >= src.content_len() as usize {
+                        // Fully consumed the next row, move on to the following one.
+                        next += 1;
+                        next_col = 0;
+                        dst.wrapped = src.wrapped;
+
+                        src.clear();
+                        src.wrapped = true;
+                    } else {
+                        // Partially consumed the next row, mark it as wrapped and stay on it
+                        // for the next iteration.
+                        dst.wrapped = true;
+                        row += 1;
+                        if row == next {
+                            next += 1;
+                            src.copy_within(next_col.., 0);
+                            src.clear_range(next_col..src.len() as usize);
+                            col = src.len() as usize - next_col;
+                            next_col = 0;
+                            src.wrapped = true;
+                        } else {
+                            col = 0;
+                            self.rows[row].wrapped = true;
+                        }
+                    }
                 }
             }
+
+            self.rows[row].resize(new_width as u32);
+            self.rows
+                .truncate(row + if self.rows[row].wrapped { 0 } else { 1 });
         } else {
             let mut row = 0;
             while row < self.rows.len() {
                 if self.rows[row].len() > new_width {
-                    let was_wrapped = self.rows[row].wrapped;
-
-                    let has_content_overflow = self.rows[row].chars[new_width as usize..]
-                        .iter()
-                        .any(|&c| c != ' ');
-
-                    if has_content_overflow {
+                    if self.rows[row].content_len() > new_width {
                         let overflow = Row {
                             chars: self.rows[row].chars.split_off(new_width as usize),
                             fg: self.rows[row].fg.split_off(new_width as usize),
                             bg: self.rows[row].bg.split_off(new_width as usize),
-                            wrapped: was_wrapped,
+                            wrapped: self.rows[row].wrapped,
                         };
 
                         self.rows[row].wrapped = true;
                         self.rows.insert(row + 1, overflow);
                     } else {
+                        self.rows[row].wrapped = false;
                         self.rows[row].truncate(new_width);
                     }
                 } else {
+                    let mut content = self.rows[row].len() as usize;
                     self.rows[row].resize(new_width);
+
+                    // Pull content from continuation rows to fill space left
+                    // by a short overflow. This maintains the invariant that
+                    // only the last row in a wrapped sequence is partially
+                    // filled.
+                    while self.rows[row].wrapped && row + 1 < self.rows.len() {
+                        let room = new_width as usize - content;
+                        if room == 0 {
+                            break;
+                        }
+
+                        let next = row + 1;
+                        let next_content = self.rows[next].content_len() as usize;
+                        let to_copy = room.min(next_content);
+
+                        if to_copy > 0 {
+                            let (dst, src) = self.split_current_next(row, next);
+                            dst.chars[content..content + to_copy]
+                                .copy_from_slice(&src.chars[..to_copy]);
+                            dst.fg[content..content + to_copy].copy_from_slice(&src.fg[..to_copy]);
+                            dst.bg[content..content + to_copy].copy_from_slice(&src.bg[..to_copy]);
+                        }
+
+                        if to_copy >= next_content {
+                            // Fully consumed the next row — inherit its wrap
+                            // state and remove it.
+                            let next_wrapped = self.rows[next].wrapped;
+                            self.rows.remove(next);
+                            self.rows[row].wrapped = next_wrapped;
+                            content += to_copy;
+                        } else {
+                            // Partially consumed — shift remaining content left
+                            // and trim to its new length so the main loop can
+                            // process it correctly.
+                            self.rows[next].copy_within(to_copy.., 0);
+                            let remaining = self.rows[next].len() as usize - to_copy;
+                            self.rows[next].truncate(remaining as u32);
+                            break;
+                        }
+                    }
                 }
                 row += 1;
             }
         }
     }
 
-    fn reflow_soft_grow(
+    fn split_current_next(
         &mut self,
-        row: u32,
-        old_width: u32,
-        new_width: u32,
-    ) -> (u32, Option<u32>) {
-        let old_row = row;
+        row: usize,
+        next: usize,
+    ) -> (&mut Row, &mut Row) {
+        let (front, back) = self.rows.as_mut_slices();
 
-        let delta = new_width - old_width;
-
-        let mut dest_col = old_width;
-        let mut row = row as usize;
-        let mut next = row + 1;
-        while next < self.rows.len() && self.rows[row].wrapped {
-            let (front, back) = self.rows.as_mut_slices();
-            let current_row;
-            let next_row;
-
-            if row < front.len() && next >= front.len() {
-                next_row = &mut back[next - front.len()];
-                current_row = &mut front[row];
-            } else if row < front.len() && next < front.len() {
-                let (first, second) = front.split_at_mut(next);
-                next_row = &mut second[0];
-                current_row = &mut first[row];
-            } else {
-                let (first, second) = back.split_at_mut(next - front.len());
-                next_row = &mut second[0];
-                current_row = &mut first[row - front.len()];
-            }
-
-            let copied = current_row.copy_from(next_row, 0, dest_col as usize);
-            next_row.resize(new_width);
-            next_row.copy_within(copied as usize..new_width as usize, 0);
-
-            if delta >= dest_col {
-                // We have a delta that spills into the next row, so advance next and
-                // keep row here
-                self.rows[row].wrapped = self.rows[next].wrapped;
-                next += 1;
-                dest_col = new_width - dest_col;
-            } else {
-                dest_col -= delta;
-                row += 1;
-                next += 1;
-            }
+        if row < front.len() && next >= front.len() {
+            let next = next - front.len();
+            (&mut front[row], &mut back[next])
+        } else if next < front.len() && row >= front.len() {
+            (&mut back[row - front.len()], &mut front[next])
+        } else if next < front.len() {
+            let (first, second) = front.split_at_mut(next);
+            (&mut first[row], &mut second[0])
+        } else {
+            let (first, second) = back.split_at_mut(next - front.len());
+            (&mut first[row - front.len()], &mut second[0])
         }
-
-        self.rows[row].wrapped = false;
-        (row as u32 - old_row, Some((next - row - 1) as u32))
     }
 }
 
@@ -680,12 +757,7 @@ impl Terminal {
         // resizes, so content stays visible when the viewport shrinks.
         let cursor_abs = self.grid.active_row_index(&self.cursor, &self.viewport);
         while self.grid.rows.len() > cursor_abs + 1 {
-            if self
-                .grid
-                .rows
-                .back()
-                .map_or(false, |r| r.chars.iter().all(|&c| c == ' '))
-            {
+            if self.grid.rows.back().is_some_and(|r| r.content_len() == 0) {
                 self.grid.rows.pop_back();
             } else {
                 break;
@@ -835,36 +907,32 @@ impl Terminal {
                     let bytes = self.hook_bytes.pop().unwrap();
                     let params = self.hook_params.pop().unwrap();
                     let action = self.hook_action.pop().unwrap();
-                    match action {
-                        'q' => {
-                            let image = parse_sixel(params, bytes);
-                            let id = self.next_image_id;
-                            self.next_image_id += 1;
-                            let row = self.grid.active_row_index(&self.cursor, &self.viewport);
-                            let image_rows =
-                                (image.height + self.cell_height - 1) / self.cell_height;
-                            self.images.insert(
+                    if action == 'q' {
+                        let image = parse_sixel(params, bytes);
+                        let id = self.next_image_id;
+                        self.next_image_id += 1;
+                        let row = self.grid.active_row_index(&self.cursor, &self.viewport);
+                        let image_rows = image.height.div_ceil(self.cell_height);
+                        self.images.insert(
+                            id,
+                            PlacedImage {
+                                image,
                                 id,
-                                PlacedImage {
-                                    image,
-                                    id,
-                                    row,
-                                    col: self.cursor.col,
-                                },
-                            );
+                                row,
+                                col: self.cursor.col,
+                            },
+                        );
 
-                            // Advance cursor past the image, scrolling as needed.
-                            for _ in 0..image_rows {
-                                self.cursor.row += 1;
-                                if self.cursor.row >= self.viewport.rows {
-                                    self.grid.push_visible_row(&self.viewport);
-                                    self.cursor.row = self.viewport.rows - 1;
-                                }
+                        // Advance cursor past the image, scrolling as needed.
+                        for _ in 0..image_rows {
+                            self.cursor.row += 1;
+                            if self.cursor.row >= self.viewport.rows {
+                                self.grid.push_visible_row(&self.viewport);
+                                self.cursor.row = self.viewport.rows - 1;
                             }
-                            self.cursor.col = 0;
-                            self.viewport.offset = 0;
                         }
-                        _ => {}
+                        self.cursor.col = 0;
+                        self.viewport.offset = 0;
                     }
                 }
             }
@@ -1280,7 +1348,7 @@ mod tests {
         for (i, ch) in "xyz".chars().enumerate() {
             src.chars[i] = ch;
         }
-        dst.copy_from(&src, 0, 2);
+        dst.copy_from(&src, 0..3, 2);
         assert_eq!(row_chars(&dst), "  xyz ");
     }
 
@@ -1292,7 +1360,7 @@ mod tests {
             src.chars[i] = ch;
         }
         // Copy from src offset 2 to dst offset 0 → copies "cd" (length min(2,5)=2)
-        dst.copy_from(&src, 2, 0);
+        dst.copy_from(&src, 2..4, 0);
         assert_eq!(row_chars(&dst), "cd   ");
     }
 
@@ -1350,11 +1418,12 @@ mod tests {
     fn reflow_grow_partial_merge() {
         // "abcdefghi" at width 3, grow to 5.
         // Should become two rows: "abcde" / "fghi_".
-        let mut grid = make_grid(3, &[("abc", true), ("def", true), ("ghi", true)]);
+        let mut grid = make_grid(3, &[("abc", true), ("def", true), ("ghi", false)]);
         grid.reflow(5);
         assert_eq!(row_chars(&grid.rows[0]), "abcde");
         assert_eq!(row_chars(&grid.rows[1]), "fghi ");
         assert!(grid.rows[0].wrapped);
+        assert!(!grid.rows[1].wrapped);
         assert_eq!(grid.rows.len(), 2);
     }
 
@@ -1502,6 +1571,63 @@ mod tests {
         assert_eq!(grid.rows.len(), 5);
     }
 
+    #[test]
+    fn reflow_shrink_pulls_from_continuation() {
+        // "abcde" wrapped into "fg" — overflow "de" (len 2) should pull "f"
+        // from the continuation row to produce "def".
+        let mut grid = make_grid(5, &[("abcde", true), ("fg   ", false)]);
+        grid.reflow(3);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "g  ");
+        assert!(!grid.rows[2].wrapped);
+        assert_eq!(grid.rows.len(), 3);
+    }
+
+    #[test]
+    fn reflow_shrink_pull_fully_consumes_next() {
+        // Overflow "de" (len 2) pulls "f" from a single-char continuation,
+        // fully consuming it.
+        let mut grid = make_grid(5, &[("abcde", true), ("f    ", false)]);
+        grid.reflow(3);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
+    }
+
+    #[test]
+    fn reflow_shrink_pull_chains_through_main_loop() {
+        // Multiple overflow rows each pull from the next continuation,
+        // cascading through the main loop.
+        let mut grid = make_grid(4, &[("abcd", true), ("efgh", true), ("ij  ", false)]);
+        grid.reflow(3);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "ghi");
+        assert!(grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "j  ");
+        assert!(!grid.rows[3].wrapped);
+        assert_eq!(grid.rows.len(), 4);
+    }
+
+    #[test]
+    fn reflow_shrink_pull_preserves_colors() {
+        // Color on the next row should land at the right position after pull.
+        let mut grid = make_grid(5, &[("abcde", true), ("fg   ", false)]);
+        let red = Srgb::new(255, 0, 0);
+        grid.rows[1].fg[0] = red; // 'f' is red
+        grid.reflow(3);
+        // "def" in row 1 — 'f' is at col 2.
+        assert_eq!(grid.rows[1].chars[2], 'f');
+        assert_eq!(grid.rows[1].fg[2], red);
+    }
+
     // ── Reflow: trailing space stripping ────────────────────────────
 
     #[test]
@@ -1520,8 +1646,22 @@ mod tests {
         let mut grid = make_grid(6, &[("abc   ", true), ("def   ", false)]);
         grid.reflow(3);
         assert_eq!(row_chars(&grid.rows[0]), "abc");
-        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert_eq!(row_chars(&grid.rows[1]), "   ");
+        assert_eq!(row_chars(&grid.rows[2]), "def");
         assert!(grid.rows[0].wrapped);
+        assert!(grid.rows[1].wrapped);
+        assert!(!grid.rows[2].wrapped);
+        assert_eq!(grid.rows.len(), 3);
+    }
+
+    #[test]
+    fn reflow_shrink_grow_maintains_space() {
+        let mut grid = make_grid(6, &[("abc   ", false), ("def   ", false)]);
+        grid.reflow(3);
+        grid.reflow(6);
+        assert_eq!(row_chars(&grid.rows[0]), "abc   ");
+        assert_eq!(row_chars(&grid.rows[1]), "def   ");
+        assert!(!grid.rows[0].wrapped);
         assert!(!grid.rows[1].wrapped);
         assert_eq!(grid.rows.len(), 2);
     }
@@ -1532,9 +1672,11 @@ mod tests {
         let mut grid = make_grid(10, &[("hello     ", true), ("world     ", false)]);
         grid.reflow(5);
         grid.reflow(10);
-        assert_eq!(row_chars(&grid.rows[0]), "helloworld");
-        assert!(!grid.rows[0].wrapped);
-        assert_eq!(grid.rows.len(), 1);
+        assert_eq!(row_chars(&grid.rows[0]), "hello     ");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "world     ");
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
     }
 
     // ── Helpers for scroll region / push_visible_row tests ──────────
@@ -1577,7 +1719,7 @@ mod tests {
     }
 
     fn all_chars(grid: &Grid) -> Vec<String> {
-        grid.rows.iter().map(|r| row_chars(r)).collect()
+        grid.rows.iter().map(row_chars).collect()
     }
 
     // ── 1. Scroll region tests ──────────────────────────────────────
@@ -1755,6 +1897,152 @@ mod tests {
         assert_eq!(row_chars(&grid.rows[3]), "jkl");
     }
 
+    #[test]
+    fn reflow_mixed_wrapping_shrink_then_grow() {
+        // Three logical lines at width 8:
+        //   "Hi"                 — short unwrapped
+        //   "ABCDEFGHIJKLMNOP"   — 16-char wrapped across two rows
+        //   "Bye"                — short unwrapped
+        let mut grid = make_grid(
+            8,
+            &[
+                ("Hi      ", false),
+                ("ABCDEFGH", true),
+                ("IJKLMNOP", false),
+                ("Bye     ", false),
+            ],
+        );
+
+        // Shrink to width 4: "Hi" fits, "ABCD"/"EFGH"/"IJKL"/"MNOP", "Bye" fits.
+        grid.reflow(4);
+        assert_eq!(row_chars(&grid.rows[0]), "Hi  ");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "ABCD");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "EFGH");
+        assert!(grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "IJKL");
+        assert!(grid.rows[3].wrapped);
+        assert_eq!(row_chars(&grid.rows[4]), "MNOP");
+        assert!(!grid.rows[4].wrapped);
+        assert_eq!(row_chars(&grid.rows[5]), "Bye ");
+        assert!(!grid.rows[5].wrapped);
+        assert_eq!(grid.rows.len(), 6);
+
+        // Grow 4 → 6: wrapped chains partially re-merge.
+        // 16 chars at width 6 = three rows: 6 + 6 + 4.
+        grid.reflow(6);
+        assert_eq!(row_chars(&grid.rows[0]), "Hi    ");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "ABCDEF");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "GHIJKL");
+        assert!(grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "MNOP  ");
+        assert!(!grid.rows[3].wrapped);
+        assert_eq!(row_chars(&grid.rows[4]), "Bye   ");
+        assert!(!grid.rows[4].wrapped);
+        assert_eq!(grid.rows.len(), 5);
+    }
+
+    #[test]
+    fn reflow_multiple_wrapped_shrink_then_grow() {
+        // Two logical lines, each wrapped across two rows at width 6.
+        let mut grid = make_grid(
+            6,
+            &[
+                ("abcdef", true),
+                ("ghijkl", true),
+                ("mnopqr", false),
+                ("stuvwx", true),
+                ("yz0123", false),
+                ("      ", false),
+            ],
+        );
+
+        // Shrink to width 3: each wrapped line splits into two.
+        grid.reflow(3);
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "ghi");
+        assert!(grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "jkl");
+        assert!(grid.rows[3].wrapped);
+        assert_eq!(row_chars(&grid.rows[4]), "mno");
+        assert!(grid.rows[4].wrapped);
+        assert_eq!(row_chars(&grid.rows[5]), "pqr");
+        assert!(!grid.rows[5].wrapped);
+        assert_eq!(row_chars(&grid.rows[6]), "stu");
+        assert!(grid.rows[6].wrapped);
+        assert_eq!(row_chars(&grid.rows[7]), "vwx");
+        assert!(grid.rows[7].wrapped);
+        assert_eq!(row_chars(&grid.rows[8]), "yz0");
+        assert!(grid.rows[8].wrapped);
+        assert_eq!(row_chars(&grid.rows[9]), "123");
+        assert!(!grid.rows[9].wrapped);
+        assert_eq!(row_chars(&grid.rows[10]), "   ");
+        assert!(!grid.rows[10].wrapped);
+        assert_eq!(grid.rows.len(), 11);
+
+        grid.reflow(6);
+        assert_eq!(row_chars(&grid.rows[0]), "abcdef");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "ghijkl");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "mnopqr");
+        assert!(!grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "stuvwx");
+        assert!(grid.rows[3].wrapped);
+        assert_eq!(row_chars(&grid.rows[4]), "yz0123");
+        assert!(!grid.rows[4].wrapped);
+    }
+
+    #[test]
+    fn reflow_mixed_wrapping_roundtrip() {
+        // Shrink then grow back to original width with mixed lines.
+        //   "Hi"             — short unwrapped
+        //   "abcdefghijkl"   — 12-char wrapped across two rows
+        //   "Lo"             — short unwrapped
+
+        let mut grid = make_grid(
+            6,
+            &[
+                ("Hi    ", false),
+                ("abcdef", true),
+                ("ghijkl", false),
+                ("Lo    ", false),
+            ],
+        );
+
+        grid.reflow(3);
+        assert_eq!(row_chars(&grid.rows[0]), "Hi ");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "abc");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "def");
+        assert!(grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "ghi");
+        assert!(grid.rows[3].wrapped);
+        assert_eq!(row_chars(&grid.rows[4]), "jkl");
+        assert!(!grid.rows[4].wrapped);
+        assert_eq!(row_chars(&grid.rows[5]), "Lo ");
+        assert!(!grid.rows[5].wrapped);
+        assert_eq!(grid.rows.len(), 6);
+
+        grid.reflow(6);
+        assert_eq!(row_chars(&grid.rows[0]), "Hi    ");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "abcdef");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "ghijkl");
+        assert!(!grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "Lo    ");
+        assert!(!grid.rows[3].wrapped);
+        assert_eq!(grid.rows.len(), 4);
+    }
+
     // ── 3. Reflow edge cases ────────────────────────────────────────
 
     #[test]
@@ -1872,10 +2160,7 @@ mod tests {
         // boundary. Rotating by exactly `len` preserves logical order while
         // advancing the internal head pointer. With 3 rows and typical
         // capacity 4, head lands at position 3 and elements wrap around.
-        let mut grid = make_grid(
-            3,
-            &[("abc", true), ("def", true), ("ghi", false)],
-        );
+        let mut grid = make_grid(3, &[("abc", true), ("def", true), ("ghi", false)]);
         let n = grid.rows.len();
         let cap = grid.rows.capacity();
         if cap > n {
@@ -1886,9 +2171,9 @@ mod tests {
             }
         }
         grid.reflow(9);
-        assert_eq!(grid.rows.len(), 1);
         assert_eq!(row_chars(&grid.rows[0]), "abcdefghi");
         assert!(!grid.rows[0].wrapped);
+        assert_eq!(grid.rows.len(), 1);
     }
 
     #[test]
@@ -1908,8 +2193,92 @@ mod tests {
             }
         }
         grid.reflow(6);
-        assert_eq!(grid.rows.len(), 2);
         assert_eq!(row_chars(&grid.rows[0]), "abcdef");
+        assert!(!grid.rows[0].wrapped);
         assert_eq!(row_chars(&grid.rows[1]), "ghijkl");
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
+    }
+
+    // ── Reflow: shrink-then-grow with long lines ───────────────────
+    //
+    // These tests exercise the merge path where the grow width is more
+    // than double the shrunk width, requiring multiple source rows to
+    // be pulled into a single destination row. This is the common case
+    // for long log lines: a wide terminal shrinks narrow, creating many
+    // wrapped rows, then grows back.
+
+    #[test]
+    fn reflow_shrink_grow_roundtrip_long_line() {
+        // "abcdefghij" at width 10, shrink to 3 then grow back to 10.
+        // Ratio 10:3 means each destination row consumes ~3 source rows.
+        let mut grid = make_grid(10, &[("abcdefghij", false)]);
+
+        grid.reflow(3);
+        // "abc"W "def"W "ghi"W "j  "U
+        assert_eq!(row_chars(&grid.rows[0]), "abc");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "def");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "ghi");
+        assert!(grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "j  ");
+        assert!(!grid.rows[3].wrapped);
+        assert_eq!(grid.rows.len(), 4);
+
+        grid.reflow(10);
+        // Should recover the original single row.
+        assert_eq!(row_chars(&grid.rows[0]), "abcdefghij");
+        assert!(!grid.rows[0].wrapped);
+        assert_eq!(grid.rows.len(), 1);
+    }
+
+    #[test]
+    fn reflow_shrink_grow_long_line_partial_grow() {
+        // 20-char line shrunk to 4, then grown to 10 (not back to original).
+        // Content should reflow into two correctly packed rows.
+        let mut grid = make_grid(20, &[("abcdefghijklmnopqrst", false)]);
+
+        grid.reflow(4);
+        // "abcd"W "efgh"W "ijkl"W "mnop"W "qrst"U
+        assert_eq!(grid.rows.len(), 5);
+        assert_eq!(row_chars(&grid.rows[0]), "abcd");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "efgh");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "ijkl");
+        assert!(grid.rows[2].wrapped);
+        assert_eq!(row_chars(&grid.rows[3]), "mnop");
+        assert!(grid.rows[3].wrapped);
+        assert_eq!(row_chars(&grid.rows[4]), "qrst");
+        assert!(!grid.rows[4].wrapped);
+        assert_eq!(grid.rows.len(), 5);
+
+        grid.reflow(10);
+        // 20 chars at width 10 = two rows.
+        assert_eq!(row_chars(&grid.rows[0]), "abcdefghij");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "klmnopqrst");
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(grid.rows.len(), 2);
+    }
+
+    #[test]
+    fn reflow_shrink_grow_long_line_colors_roundtrip() {
+        // Per-cell colors must survive a shrink-then-grow roundtrip even
+        // when the grow width is more than double the shrunk width.
+        let mut grid = make_grid(10, &[("abcdefghij", false)]);
+        let red = Srgb::new(255, 0, 0);
+        grid.rows[0].fg[6] = red; // 'g' is red
+
+        grid.reflow(3);
+        // After shrink: "abc"W "def"W "ghi"W "j  "U — 'g' at row 2 col 0.
+        assert_eq!(grid.rows[2].chars[0], 'g');
+        assert_eq!(grid.rows[2].fg[0], red);
+
+        grid.reflow(10);
+        // After roundtrip: 'g' should be back at col 6 with its red color.
+        assert_eq!(grid.rows[0].chars[6], 'g');
+        assert_eq!(grid.rows[0].fg[6], red);
     }
 }

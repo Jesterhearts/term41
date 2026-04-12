@@ -831,12 +831,12 @@ impl Renderer {
             live_ids.insert(vis.id);
 
             // Upload to atlas on first encounter.
-            if !self.uploaded_image_ids.contains(&vis.id) {
-                if let Some(entry) = self.allocate_image_slot(vis.image.width, vis.image.height) {
-                    self.upload_image(vis.image, &entry);
-                    self.image_entries.insert(vis.id, entry);
-                    self.uploaded_image_ids.insert(vis.id);
-                }
+            if !self.uploaded_image_ids.contains(&vis.id)
+                && let Some(entry) = self.allocate_image_slot(vis.image.width, vis.image.height)
+            {
+                self.upload_image(vis.image, &entry);
+                self.image_entries.insert(vis.id, entry);
+                self.uploaded_image_ids.insert(vis.id);
             }
 
             if let Some(entry) = self.image_entries.get(&vis.id) {

@@ -38,7 +38,7 @@ pub fn parse_sixel(
     let transparent = params
         .iter()
         .nth(1)
-        .is_some_and(|p| p.get(0).is_some_and(|p| *p == 1));
+        .is_some_and(|p| p.first().is_some_and(|p| *p == 1));
 
     let mut max_w = 0;
     let mut rows = vec![];
@@ -56,7 +56,7 @@ pub fn parse_sixel(
     }
 
     let mut image = SixelImage {
-        pixels: vec![0; max_w as usize * rows.len() * 6 * 4],
+        pixels: vec![0; max_w * rows.len() * 6 * 4],
         width: max_w as u32,
         height: rows.len() as u32 * 6,
     };

@@ -1,3 +1,6 @@
+#![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
+
 mod config;
 mod font;
 mod pty;
@@ -150,21 +153,36 @@ impl ApplicationHandler for App {
                 }
 
                 // Shift+PageUp/Down for scrollback navigation.
-                if self.modifiers.shift_key() {
-                    if let Key::Named(named) = &event.logical_key {
-                        match named {
-                            NamedKey::PageUp => {
-                                self.terminal
-                                    .scroll_viewport_up(self.terminal.viewport.rows as u32);
-                                return;
-                            }
-                            NamedKey::PageDown => {
-                                self.terminal
-                                    .scroll_viewport_down(self.terminal.viewport.rows as u32);
-                                return;
-                            }
-                            _ => {}
+                if self.modifiers.shift_key()
+                    && let Key::Named(named) = &event.logical_key
+                {
+                    match named {
+                        NamedKey::PageUp => {
+                            self.terminal
+                                .scroll_viewport_up(self.terminal.viewport.rows);
+                            return;
                         }
+                        NamedKey::PageDown => {
+                            self.terminal
+                                .scroll_viewport_down(self.terminal.viewport.rows);
+                            return;
+                        }
+                        _ => {}
+                    }
+                }
+
+                // Ctrl+key → control character byte (0x00–0x1F).
+                if self.modifiers.control_key() {
+                    let byte = match &event.logical_key {
+                        Key::Character(c) => ctrl_byte(c),
+                        Key::Named(NamedKey::Space) => Some(0x00),
+                        _ => None,
+                    };
+
+                    if let Some(byte) = byte {
+                        self.terminal.reset_viewport();
+                        let _ = self.pty.write(&[byte]);
+                        return;
                     }
                 }
 
@@ -198,6 +216,20 @@ impl ApplicationHandler for App {
         _event_loop: &ActiveEventLoop,
     ) {
         self.request_redraw();
+    }
+}
+
+fn ctrl_byte(c: &str) -> Option<u8> {
+    match c.as_bytes() {
+        [b @ b'a'..=b'z'] => Some(b - b'a' + 1),
+        [b @ b'A'..=b'Z'] => Some(b - b'A' + 1),
+        [b'@'] => Some(0x00),
+        [b'['] => Some(0x1B),
+        [b'\\'] => Some(0x1C),
+        [b']'] => Some(0x1D),
+        [b'^'] => Some(0x1E),
+        [b'_'] => Some(0x1F),
+        _ => None,
     }
 }
 

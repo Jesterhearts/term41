@@ -144,10 +144,7 @@ impl FontSystem {
         cols: u32,
         rows: u32,
     ) -> (u32, u32) {
-        (
-            cols as u32 * self.cell_width,
-            rows as u32 * self.cell_height,
-        )
+        (cols * self.cell_width, rows * self.cell_height)
     }
 
     pub fn grid_dimensions(
@@ -155,8 +152,8 @@ impl FontSystem {
         pixel_width: u32,
         pixel_height: u32,
     ) -> (u32, u32) {
-        let cols = (pixel_width / self.cell_width).max(1) as u32;
-        let rows = (pixel_height / self.cell_height).max(1) as u32;
+        let cols = (pixel_width / self.cell_width).max(1);
+        let rows = (pixel_height / self.cell_height).max(1);
         (cols, rows)
     }
 
@@ -210,17 +207,17 @@ impl FontSystem {
             };
 
             // Get or create cached plan.
-            if !self.plan_cache.contains_key(&key) {
+            self.plan_cache.entry(key).or_insert_with(|| {
                 let shaper = loaded.shaper_data.shaper(&font_ref).build();
-                let plan = ShapePlan::new(
+
+                ShapePlan::new(
                     &shaper,
                     direction,
                     Some(script),
                     buffer.language().as_ref(),
                     &[],
-                );
-                self.plan_cache.insert(key, plan);
-            }
+                )
+            });
             let plan = &self.plan_cache[&key];
 
             let shaper = loaded.shaper_data.shaper(&font_ref).build();
@@ -230,7 +227,7 @@ impl FontSystem {
             let positions = output.glyph_positions();
             let scale = self.font_size / loaded.units_per_em;
 
-            for (info, pos) in infos.iter().zip(positions.iter()) {
+            for (i, (info, pos)) in infos.iter().zip(positions.iter()).enumerate() {
                 let cluster = info.cluster as usize;
                 if cluster >= col_map.len() {
                     continue;
@@ -248,7 +245,22 @@ impl FontSystem {
                     continue;
                 }
 
-                has_glyph[col as usize] = true;
+                // Mark all columns consumed by this glyph. For ligatures
+                // (e.g. `::` → single glyph), the cluster gap between
+                // consecutive output glyphs tells us which input columns
+                // were merged. Without this, fallback fonts would place
+                // individual glyphs on top of the ligature.
+                let end_byte = if i + 1 < infos.len() {
+                    (infos[i + 1].cluster as usize).min(col_map.len())
+                } else {
+                    col_map.len()
+                };
+                for byte in cluster..end_byte {
+                    if byte < col_map.len() {
+                        has_glyph[col_map[byte] as usize] = true;
+                    }
+                }
+
                 result.push(ShapedGlyph {
                     glyph_id,
                     font_index: font_idx,
@@ -337,10 +349,10 @@ fn charmap_lookup(
         Err(_) => return 0,
     };
     for record in cmap.encoding_records() {
-        if let Ok(subtable) = record.subtable(cmap.offset_data()) {
-            if let Some(gid) = subtable.map_codepoint(ch) {
-                return gid.to_u32();
-            }
+        if let Ok(subtable) = record.subtable(cmap.offset_data())
+            && let Some(gid) = subtable.map_codepoint(ch)
+        {
+            return gid.to_u32();
         }
     }
     0
@@ -386,17 +398,18 @@ fn rasterize_simple_glyph(
     }
 }
 
-fn rasterize_composite_glyph(
+/// Recursively collect the bounding box of a composite glyph, flattening
+/// nested composites so that leaf simple-glyph components at any depth are
+/// included.
+fn composite_bounds(
     composite: &CompositeGlyph,
     loca: &Loca,
     glyf: &read_fonts::tables::glyf::Glyf,
     scale: f32,
-) -> RasterizedGlyph {
-    let mut x_min_all = f32::MAX;
-    let mut y_min_all = f32::MAX;
-    let mut x_max_all = f32::MIN;
-    let mut y_max_all = f32::MIN;
-
+    parent_dx: f32,
+    parent_dy: f32,
+    bounds: &mut [f32; 4], // [x_min, y_min, x_max, y_max]
+) {
     for comp in composite.components() {
         let gid = GlyphId::new(comp.glyph.to_u32());
         let glyph = match loca.get_glyf(gid, glyf) {
@@ -405,17 +418,69 @@ fn rasterize_composite_glyph(
         };
 
         let (dx, dy) = match comp.anchor {
-            Anchor::Offset { x, y } => (x as f32 * scale, y as f32 * scale),
-            _ => (0.0, 0.0),
+            Anchor::Offset { x, y } => (x as f32 * scale + parent_dx, y as f32 * scale + parent_dy),
+            _ => (parent_dx, parent_dy),
         };
 
-        if let Glyph::Simple(simple) = glyph {
-            x_min_all = x_min_all.min(simple.x_min() as f32 * scale + dx);
-            y_min_all = y_min_all.min(simple.y_min() as f32 * scale + dy);
-            x_max_all = x_max_all.max(simple.x_max() as f32 * scale + dx);
-            y_max_all = y_max_all.max(simple.y_max() as f32 * scale + dy);
+        match glyph {
+            Glyph::Simple(simple) => {
+                bounds[0] = bounds[0].min(simple.x_min() as f32 * scale + dx);
+                bounds[1] = bounds[1].min(simple.y_min() as f32 * scale + dy);
+                bounds[2] = bounds[2].max(simple.x_max() as f32 * scale + dx);
+                bounds[3] = bounds[3].max(simple.y_max() as f32 * scale + dy);
+            }
+            Glyph::Composite(inner) => {
+                composite_bounds(&inner, loca, glyf, scale, dx, dy, bounds);
+            }
         }
     }
+}
+
+/// Recursively add all simple-glyph leaf components of a composite to a path,
+/// accumulating offsets through any nesting depth.
+fn composite_to_path(
+    pb: &mut PathBuilder,
+    composite: &CompositeGlyph,
+    loca: &Loca,
+    glyf: &read_fonts::tables::glyf::Glyf,
+    scale: f32,
+    x_min: f32,
+    y_max: f32,
+    parent_dx: f32,
+    parent_dy: f32,
+) {
+    for comp in composite.components() {
+        let gid = GlyphId::new(comp.glyph.to_u32());
+        let glyph = match loca.get_glyf(gid, glyf) {
+            Ok(Some(g)) => g,
+            _ => continue,
+        };
+
+        let (dx, dy) = match comp.anchor {
+            Anchor::Offset { x, y } => (x as f32 * scale + parent_dx, y as f32 * scale + parent_dy),
+            _ => (parent_dx, parent_dy),
+        };
+
+        match glyph {
+            Glyph::Simple(simple) => {
+                add_simple_glyph_to_path(pb, &simple, scale, x_min, y_max, dx, dy);
+            }
+            Glyph::Composite(inner) => {
+                composite_to_path(pb, &inner, loca, glyf, scale, x_min, y_max, dx, dy);
+            }
+        }
+    }
+}
+
+fn rasterize_composite_glyph(
+    composite: &CompositeGlyph,
+    loca: &Loca,
+    glyf: &read_fonts::tables::glyf::Glyf,
+    scale: f32,
+) -> RasterizedGlyph {
+    let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+    composite_bounds(composite, loca, glyf, scale, 0.0, 0.0, &mut bounds);
+    let [x_min_all, y_min_all, x_max_all, y_max_all] = bounds;
 
     if x_min_all >= x_max_all || y_min_all >= y_max_all {
         return empty_glyph();
@@ -431,20 +496,9 @@ fn rasterize_composite_glyph(
     }
 
     let mut pb = PathBuilder::new();
-    for comp in composite.components() {
-        let gid = GlyphId::new(comp.glyph.to_u32());
-        let glyph = match loca.get_glyf(gid, glyf) {
-            Ok(Some(Glyph::Simple(simple))) => simple,
-            _ => continue,
-        };
-
-        let (dx, dy) = match comp.anchor {
-            Anchor::Offset { x, y } => (x as f32 * scale, y as f32 * scale),
-            _ => (0.0, 0.0),
-        };
-
-        add_simple_glyph_to_path(&mut pb, &glyph, scale, x_min, y_max, dx, dy);
-    }
+    composite_to_path(
+        &mut pb, composite, loca, glyf, scale, x_min, y_max, 0.0, 0.0,
+    );
 
     let path = pb.finish();
     let mut dt = DrawTarget::new(width, height);
@@ -566,4 +620,37 @@ fn add_contour_to_path_with_offset(
         }
     }
     pb.close();
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    /// All shaped glyphs for visible characters must rasterize to non-empty
+    /// bitmaps, including ligature replacement glyphs that may be nested
+    /// composites (composite referencing another composite).
+    #[test]
+    fn shaped_glyphs_rasterize() {
+        let mut fs = FontSystem::new(None, 18.0);
+
+        for text in [":: ", "a::b ", "Hello "] {
+            let chars: Vec<char> = text.chars().collect();
+            let shaped = fs.shape_row(&chars);
+            for sg in &shaped {
+                let ch = chars[sg.col as usize];
+                if ch == ' ' {
+                    continue;
+                }
+                let raster = fs.rasterize_glyph(sg.font_index, sg.glyph_id);
+                assert!(
+                    raster.width > 0 && raster.height > 0,
+                    "glyph {} for '{ch}' at col {} in {text:?} must rasterize, got {}x{}",
+                    sg.glyph_id,
+                    sg.col,
+                    raster.width,
+                    raster.height,
+                );
+            }
+        }
+    }
 }
