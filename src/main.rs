@@ -15,9 +15,14 @@ use std::sync::Arc;
 use font::FontSystem;
 use pty::Pty;
 use renderer::Renderer;
+use terminal::MouseButton as TermMouseButton;
+use terminal::MouseEventKind;
+use terminal::MouseModifiers;
 use terminal::Terminal;
 use winit::application::ApplicationHandler;
+use winit::dpi::PhysicalPosition;
 use winit::event::ElementState;
+use winit::event::MouseButton;
 use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
@@ -38,6 +43,56 @@ struct App {
     pty: Pty,
     opacity: f32,
     modifiers: winit::keyboard::ModifiersState,
+
+    /// Last known pointer position in physical pixels. Updated on every
+    /// CursorMoved; click/release events fall back to this because winit
+    /// doesn't embed position in MouseInput.
+    mouse_pos: PhysicalPosition<f64>,
+
+    /// Buttons currently held, used to pick the reported button code on
+    /// motion events under tracking mode 1002.
+    mouse_buttons: MouseButtonState,
+
+    /// Last cell a motion event was reported for. Motion is suppressed
+    /// until the pointer crosses into a new cell, so apps don't drown in
+    /// per-pixel events.
+    last_motion_cell: Option<(u32, u32)>,
+}
+
+#[derive(Default, Copy, Clone)]
+struct MouseButtonState {
+    left: bool,
+    middle: bool,
+    right: bool,
+}
+
+impl MouseButtonState {
+    fn set(
+        &mut self,
+        button: MouseButton,
+        pressed: bool,
+    ) {
+        match button {
+            MouseButton::Left => self.left = pressed,
+            MouseButton::Middle => self.middle = pressed,
+            MouseButton::Right => self.right = pressed,
+            _ => {}
+        }
+    }
+
+    /// Pick a single button to report in motion events. xterm reports the
+    /// lowest-numbered held button.
+    fn primary_held(&self) -> TermMouseButton {
+        if self.left {
+            TermMouseButton::Left
+        } else if self.middle {
+            TermMouseButton::Middle
+        } else if self.right {
+            TermMouseButton::Right
+        } else {
+            TermMouseButton::None
+        }
+    }
 }
 
 impl App {
@@ -62,6 +117,38 @@ impl App {
             pty,
             opacity,
             modifiers: winit::keyboard::ModifiersState::default(),
+            mouse_pos: PhysicalPosition::new(0.0, 0.0),
+            mouse_buttons: MouseButtonState::default(),
+            last_motion_cell: None,
+        }
+    }
+
+    fn cell_at(
+        &self,
+        pos: PhysicalPosition<f64>,
+    ) -> (u32, u32) {
+        let x = pos.x.max(0.0) as u32;
+        let y = pos.y.max(0.0) as u32;
+        let cols = self.terminal.viewport.cols.saturating_sub(1);
+        let rows = self.terminal.viewport.rows.saturating_sub(1);
+        (
+            (x / self.font_system.cell_width).min(cols),
+            (y / self.font_system.cell_height).min(rows),
+        )
+    }
+
+    fn mouse_modifiers(&self) -> MouseModifiers {
+        MouseModifiers {
+            shift: self.modifiers.shift_key(),
+            alt: self.modifiers.alt_key(),
+            ctrl: self.modifiers.control_key(),
+        }
+    }
+
+    fn flush_pending(&mut self) {
+        let bytes = self.terminal.take_pending_output();
+        if !bytes.is_empty() {
+            let _ = self.pty.write(&bytes);
         }
     }
 
@@ -138,17 +225,101 @@ impl ApplicationHandler for App {
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
-                let lines = match delta {
-                    winit::event::MouseScrollDelta::LineDelta(_, y) => -y as i32,
-                    winit::event::MouseScrollDelta::PixelDelta(pos) => {
-                        -(pos.y as i32) / self.font_system.cell_height as i32
-                    }
+                let (x_lines, y_lines) = match delta {
+                    winit::event::MouseScrollDelta::LineDelta(x, y) => (x as i32, -y as i32),
+                    winit::event::MouseScrollDelta::PixelDelta(pos) => (
+                        (pos.x as i32) / self.font_system.cell_width as i32,
+                        -(pos.y as i32) / self.font_system.cell_height as i32,
+                    ),
                 };
-                if lines < 0 {
-                    self.terminal.scroll_viewport_up(lines.unsigned_abs());
-                } else if lines > 0 {
-                    self.terminal.scroll_viewport_down(lines as u32);
+
+                // When an app has mouse tracking enabled we forward wheel
+                // events as button presses so it can page/scroll its own
+                // viewport; shift bypasses the app so the user can still
+                // navigate scrollback.
+                if self.terminal.mouse_tracking_enabled() && !self.modifiers.shift_key() {
+                    let (col, row) = self.cell_at(self.mouse_pos);
+                    let mods = self.mouse_modifiers();
+                    let mut report = |button: TermMouseButton, steps: u32| {
+                        for _ in 0..steps {
+                            self.terminal.mouse_report(
+                                MouseEventKind::Press,
+                                button,
+                                col,
+                                row,
+                                mods,
+                            );
+                        }
+                    };
+                    if y_lines < 0 {
+                        report(TermMouseButton::WheelUp, y_lines.unsigned_abs());
+                    } else if y_lines > 0 {
+                        report(TermMouseButton::WheelDown, y_lines as u32);
+                    }
+                    if x_lines < 0 {
+                        report(TermMouseButton::WheelLeft, x_lines.unsigned_abs());
+                    } else if x_lines > 0 {
+                        report(TermMouseButton::WheelRight, x_lines as u32);
+                    }
+                    self.flush_pending();
+                    return;
                 }
+
+                if y_lines < 0 {
+                    self.terminal.scroll_viewport_up(y_lines.unsigned_abs());
+                } else if y_lines > 0 {
+                    self.terminal.scroll_viewport_down(y_lines as u32);
+                }
+            }
+
+            WindowEvent::CursorMoved { position, .. } => {
+                self.mouse_pos = position;
+                if !self.terminal.mouse_tracking_enabled() || self.modifiers.shift_key() {
+                    return;
+                }
+                let cell = self.cell_at(position);
+                if self.last_motion_cell == Some(cell) {
+                    return;
+                }
+                self.last_motion_cell = Some(cell);
+                let button = self.mouse_buttons.primary_held();
+                // ButtonEvent mode wants motion only when a button is
+                // held; AnyEvent mode wants it always. Terminal::mouse_report
+                // does the filtering itself, so we just hand off.
+                let mods = self.mouse_modifiers();
+                self.terminal
+                    .mouse_report(MouseEventKind::Motion, button, cell.0, cell.1, mods);
+                self.flush_pending();
+            }
+
+            WindowEvent::MouseInput { state, button, .. } => {
+                let term_button = match button {
+                    MouseButton::Left => TermMouseButton::Left,
+                    MouseButton::Middle => TermMouseButton::Middle,
+                    MouseButton::Right => TermMouseButton::Right,
+                    _ => return,
+                };
+                let pressed = state == ElementState::Pressed;
+                self.mouse_buttons.set(button, pressed);
+                // Motion-suppression cell resets on every new click so the
+                // first motion after press always reports once.
+                if pressed {
+                    self.last_motion_cell = None;
+                }
+
+                if !self.terminal.mouse_tracking_enabled() || self.modifiers.shift_key() {
+                    return;
+                }
+                let (col, row) = self.cell_at(self.mouse_pos);
+                let kind = if pressed {
+                    MouseEventKind::Press
+                } else {
+                    MouseEventKind::Release
+                };
+                let mods = self.mouse_modifiers();
+                self.terminal
+                    .mouse_report(kind, term_button, col, row, mods);
+                self.flush_pending();
             }
 
             WindowEvent::ModifiersChanged(mods) => {
