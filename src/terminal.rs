@@ -377,87 +377,67 @@ impl Grid {
         }
 
         if new_width > self.rows[0].len() {
-            if self.rows.len() == 1 {
-                self.rows[0].resize(new_width);
-                return;
-            }
-
             let new_width = new_width as usize;
-            let mut row = 0;
-            let mut col = self.rows[row].content_len() as usize;
-            let mut next = row + 1;
-            let mut next_col = 0;
+            let mut dst = 0;
+            let mut dst_col = self.rows[0].content_len() as usize;
+            let mut src = 1;
+            let mut src_col: usize = 0;
 
-            while row < self.rows.len() && next < self.rows.len() {
-                self.rows[row].resize(new_width as u32);
-                if !self.rows[row].wrapped {
-                    row += 1;
-                    if self.rows[row].wrapped && row == next {
-                        col = self.rows[row].content_len() as usize;
+            while dst < self.rows.len() && src < self.rows.len() {
+                self.rows[dst].resize(new_width as u32);
+
+                if !self.rows[dst].wrapped {
+                    dst += 1;
+                    dst_col = if dst == src && self.rows[dst].wrapped {
+                        self.rows[dst].content_len() as usize
                     } else {
-                        col = 0;
-                    }
-                    if row == next {
-                        next += 1;
+                        0
+                    };
+                    if dst == src {
+                        src += 1;
                     }
                     continue;
                 }
 
-                while self.rows[row].wrapped && next < self.rows.len() {
-                    let (dst, src) = self.split_current_next(row, next);
-                    dst.resize(new_width as u32);
+                // Pull one chunk from src into dst.
+                let (d, s) = self.split_current_next(dst, src);
+                let s_content = s.content_len() as usize;
+                let n = d.copy_from(s, src_col..s_content, dst_col);
+                dst_col += n;
+                src_col += n;
 
-                    while col < new_width && next_col < src.content_len() as usize {
-                        dst.chars[col] = src.chars[next_col];
-                        dst.fg[col] = src.fg[next_col];
-                        dst.bg[col] = src.bg[next_col];
+                // If src exhausted: inherit its wrap state, clear it, advance.
+                if src_col >= s_content {
+                    d.wrapped = s.wrapped;
+                    s.clear();
+                    s.wrapped = true;
+                    src += 1;
+                    src_col = 0;
+                }
 
-                        col += 1;
-                        next_col += 1;
+                // If dst full: advance to next row.
+                if dst_col >= new_width {
+                    if src_col > 0 {
+                        self.rows[dst].wrapped = true;
                     }
-
-                    if col == new_width && next_col >= src.content_len() as usize {
-                        // Fully consumed the next row and filled the current one, move on to
-                        // the following rows.
-                        row += 1;
-                        col = 0;
-                        next += 1;
-                        next_col = 0;
-                        dst.wrapped = src.wrapped;
-
-                        src.clear();
-                        src.wrapped = true;
-                    } else if next_col >= src.content_len() as usize {
-                        // Fully consumed the next row, move on to the following one.
-                        next += 1;
-                        next_col = 0;
-                        dst.wrapped = src.wrapped;
-
-                        src.clear();
-                        src.wrapped = true;
-                    } else {
-                        // Partially consumed the next row, mark it as wrapped and stay on it
-                        // for the next iteration.
-                        dst.wrapped = true;
-                        row += 1;
-                        if row == next {
-                            next += 1;
-                            src.copy_within(next_col.., 0);
-                            src.clear_range(next_col..src.len() as usize);
-                            col = src.len() as usize - next_col;
-                            next_col = 0;
-                            src.wrapped = true;
-                        } else {
-                            col = 0;
-                            self.rows[row].wrapped = true;
-                        }
+                    dst += 1;
+                    dst_col = 0;
+                    if dst == src {
+                        // Collision: dst caught up to partially-consumed src.
+                        // Shift remaining content to front and advance src.
+                        self.rows[dst].copy_within(src_col.., 0);
+                        let len = self.rows[dst].len() as usize;
+                        self.rows[dst].clear_range(len - src_col..len);
+                        dst_col = len - src_col;
+                        src += 1;
+                        src_col = 0;
                     }
                 }
             }
 
-            self.rows[row].resize(new_width as u32);
+            self.rows[dst].resize(new_width as u32);
             self.rows
-                .truncate(row + if self.rows[row].wrapped { 0 } else { 1 });
+                .truncate(dst + if self.rows[dst].wrapped { 0 } else { 1 });
         } else {
             let mut row = 0;
             while row < self.rows.len() {
@@ -1467,6 +1447,38 @@ mod tests {
         grid.reflow(6);
         assert_eq!(row_chars(&grid.rows[0]), "abc   ");
         assert_eq!(grid.rows.len(), 1);
+    }
+
+    // ── Reflow: grow collision ────────────────────────────────────
+
+    #[test]
+    fn reflow_grow_collision_preserves_line_boundary() {
+        // "abcdef" (wrapped at width 3) then "ghi" (unwrapped). Grow to 4.
+        // The collision on "def" must not merge content from "ghi".
+        let mut grid = make_grid(3, &[("abc", true), ("def", false), ("ghi", false)]);
+        grid.reflow(4);
+        assert_eq!(row_chars(&grid.rows[0]), "abcd");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "ef  ");
+        assert!(!grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "ghi ");
+        assert!(!grid.rows[2].wrapped);
+        assert_eq!(grid.rows.len(), 3);
+    }
+
+    #[test]
+    fn reflow_grow_collision_continues_when_wrapped() {
+        // "abcdefghi" at width 3, grow to 4. Collision on row 1 which IS
+        // wrapped — merging should continue through the chain.
+        let mut grid = make_grid(3, &[("abc", true), ("def", true), ("ghi", false)]);
+        grid.reflow(4);
+        assert_eq!(row_chars(&grid.rows[0]), "abcd");
+        assert!(grid.rows[0].wrapped);
+        assert_eq!(row_chars(&grid.rows[1]), "efgh");
+        assert!(grid.rows[1].wrapped);
+        assert_eq!(row_chars(&grid.rows[2]), "i   ");
+        assert!(!grid.rows[2].wrapped);
+        assert_eq!(grid.rows.len(), 3);
     }
 
     // ── Reflow: shrink splits rows ─────────────────────────────────
