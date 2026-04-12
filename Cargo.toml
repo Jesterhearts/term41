@@ -3,8 +3,18 @@ name    = "term41"
 version = "0.1.0"
 edition = "2024"
 
+[features]
+default              = ["wayland-data-control"]
+# Enables arboard's zwlr_data_control_manager_v1 backend on Wayland, giving
+# access to compositors that implement the protocol (sway, wayfire, Hyprland,
+# etc.) without requiring a focused-window hack. Disable only for
+# environments where the dependency is unavailable.
+wayland-data-control = ["arboard/wayland-data-control"]
+
 [dependencies]
+arboard    = { version = "3.6.1", default-features = false }
 atoi       = "2.0.0"
+base64     = "0.22.1"
 bytemuck   = { version = "1.25.0", features = ["derive", "extern_crate_alloc"] }
 dirs       = "6.0.0"
 env_logger = "0.11.10"
@@ -18,5 +28,6 @@ raqote     = { version = "0.8.5", default-features = false }
 read-fonts = "0.39.1"
 serde      = { version = "1.0.228", features = ["derive"] }
 toml       = "1.1.2"
+unicode-segmentation = "1.12.0"
 wgpu       = "29.0.1"
 winit      = "0.30.13"

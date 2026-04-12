@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
+mod clipboard;
 mod config;
 mod font;
 mod pty;
@@ -71,6 +72,13 @@ impl App {
                 break;
             }
             self.terminal.process(&buf[..n]);
+        }
+        // Drain any bytes the terminal itself queued for the PTY (OSC 52
+        // query responses and similar). Do this after the read loop so we
+        // batch replies across a whole input chunk.
+        let reply = self.terminal.take_pending_output();
+        if !reply.is_empty() {
+            let _ = self.pty.write(&reply);
         }
     }
 
