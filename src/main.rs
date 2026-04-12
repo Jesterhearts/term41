@@ -6,16 +6,20 @@ mod config;
 mod font;
 mod pty;
 mod renderer;
+mod selection;
 mod sixel;
 mod terminal;
 mod vte;
 
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use clipboard::ClipboardKind;
 use font::FontSystem;
 use pty::Pty;
 use renderer::Renderer;
+use selection::SelectionMode;
 use terminal::MouseButton as TermMouseButton;
 use terminal::MouseEventKind;
 use terminal::MouseModifiers;
@@ -58,7 +62,22 @@ struct App {
     /// until the pointer crosses into a new cell, so apps don't drown in
     /// per-pixel events.
     last_motion_cell: Option<(u32, u32)>,
+
+    /// Timestamp of the last left-button press — combined with
+    /// `last_click_cell` to detect double/triple clicks.
+    last_click_time: Option<Instant>,
+    last_click_cell: Option<(u32, u32)>,
+    /// Consecutive-click counter. 1 = single, 2 = double, 3 = triple.
+    /// Resets after the click-expiry window or on a cell change.
+    click_count: u32,
+
+    /// True while the left button is held in selection mode, so motion
+    /// events extend the selection rather than being dropped.
+    left_drag_active: bool,
 }
+
+/// Maximum time between clicks that still count as part of a sequence.
+const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 #[derive(Default, Copy, Clone)]
 struct MouseButtonState {
@@ -121,6 +140,10 @@ impl App {
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             mouse_buttons: MouseButtonState::default(),
             last_motion_cell: None,
+            last_click_time: None,
+            last_click_cell: None,
+            click_count: 0,
+            left_drag_active: false,
         }
     }
 
@@ -150,6 +173,30 @@ impl App {
         let bytes = self.terminal.take_pending_output();
         if !bytes.is_empty() {
             let _ = self.pty.write(&bytes);
+        }
+    }
+
+    /// Mouse events are forwarded to the foreground app when it has
+    /// requested tracking and the shift bypass isn't active.
+    fn forward_mouse_to_app(&self) -> bool {
+        self.terminal.mouse_tracking_enabled() && !self.modifiers.shift_key()
+    }
+
+    /// Compute the click-sequence count for a new left-button press at
+    /// `cell`. Same cell + within the multi-click window + not exceeding
+    /// triple-click yields the next number; anything else restarts at 1.
+    fn next_click_count(
+        &self,
+        cell: (u32, u32),
+    ) -> u32 {
+        let within_window = self
+            .last_click_time
+            .is_some_and(|t| t.elapsed() <= MULTI_CLICK_WINDOW);
+        let same_cell = self.last_click_cell == Some(cell);
+        if within_window && same_cell && self.click_count < 3 {
+            self.click_count + 1
+        } else {
+            1
         }
     }
 
@@ -275,22 +322,30 @@ impl ApplicationHandler for App {
 
             WindowEvent::CursorMoved { position, .. } => {
                 self.mouse_pos = position;
-                if !self.terminal.mouse_tracking_enabled() || self.modifiers.shift_key() {
-                    return;
-                }
                 let cell = self.cell_at(position);
-                if self.last_motion_cell == Some(cell) {
+
+                if self.forward_mouse_to_app() {
+                    if self.last_motion_cell == Some(cell) {
+                        return;
+                    }
+                    self.last_motion_cell = Some(cell);
+                    let button = self.mouse_buttons.primary_held();
+                    let mods = self.mouse_modifiers();
+                    self.terminal.mouse_report(
+                        MouseEventKind::Motion,
+                        button,
+                        cell.0,
+                        cell.1,
+                        mods,
+                    );
+                    self.flush_pending();
                     return;
                 }
-                self.last_motion_cell = Some(cell);
-                let button = self.mouse_buttons.primary_held();
-                // ButtonEvent mode wants motion only when a button is
-                // held; AnyEvent mode wants it always. Terminal::mouse_report
-                // does the filtering itself, so we just hand off.
-                let mods = self.mouse_modifiers();
-                self.terminal
-                    .mouse_report(MouseEventKind::Motion, button, cell.0, cell.1, mods);
-                self.flush_pending();
+
+                // Local selection path: extend the active drag.
+                if self.left_drag_active {
+                    self.terminal.extend_selection(cell.0, cell.1);
+                }
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
@@ -302,25 +357,62 @@ impl ApplicationHandler for App {
                 };
                 let pressed = state == ElementState::Pressed;
                 self.mouse_buttons.set(button, pressed);
-                // Motion-suppression cell resets on every new click so the
-                // first motion after press always reports once.
                 if pressed {
                     self.last_motion_cell = None;
                 }
 
-                if !self.terminal.mouse_tracking_enabled() || self.modifiers.shift_key() {
+                if self.forward_mouse_to_app() {
+                    let (col, row) = self.cell_at(self.mouse_pos);
+                    let kind = if pressed {
+                        MouseEventKind::Press
+                    } else {
+                        MouseEventKind::Release
+                    };
+                    let mods = self.mouse_modifiers();
+                    self.terminal
+                        .mouse_report(kind, term_button, col, row, mods);
+                    self.flush_pending();
                     return;
                 }
+
                 let (col, row) = self.cell_at(self.mouse_pos);
-                let kind = if pressed {
-                    MouseEventKind::Press
-                } else {
-                    MouseEventKind::Release
-                };
-                let mods = self.mouse_modifiers();
-                self.terminal
-                    .mouse_report(kind, term_button, col, row, mods);
-                self.flush_pending();
+                match (button, pressed) {
+                    (MouseButton::Left, true) => {
+                        self.click_count = self.next_click_count((col, row));
+                        self.last_click_cell = Some((col, row));
+                        self.last_click_time = Some(Instant::now());
+                        let mode = match self.click_count {
+                            2 => SelectionMode::Word,
+                            3 => SelectionMode::Line,
+                            _ => SelectionMode::Char,
+                        };
+                        self.terminal.start_selection(col, row, mode);
+                        self.left_drag_active = true;
+                    }
+                    (MouseButton::Left, false) => {
+                        self.left_drag_active = false;
+                        if self.terminal.has_selection() {
+                            // Drag released with real content — mirror
+                            // xterm/Linux convention and stage it on the
+                            // primary selection so middle-click elsewhere
+                            // picks it up without an explicit copy.
+                            self.terminal.copy_selection(ClipboardKind::Primary);
+                        } else {
+                            self.terminal.clear_selection();
+                        }
+                    }
+                    (MouseButton::Right, true) => {
+                        if self.terminal.has_selection() {
+                            self.terminal.copy_selection(ClipboardKind::Clipboard);
+                            self.terminal.clear_selection();
+                        } else {
+                            self.terminal.reset_viewport();
+                            self.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                            self.flush_pending();
+                        }
+                    }
+                    _ => {}
+                }
             }
 
             WindowEvent::ModifiersChanged(mods) => {
@@ -351,18 +443,23 @@ impl ApplicationHandler for App {
                     }
                 }
 
-                // Ctrl+Shift+V → paste clipboard (bracketed if the app opted
-                // in). Caught before the Ctrl+key → control-byte path so
-                // Ctrl-V still emits 0x16 when Shift isn't held.
+                // Ctrl+Shift+V / Ctrl+Shift+C → clipboard paste / copy.
+                // Caught before the Ctrl+key → control-byte path so plain
+                // Ctrl-V / Ctrl-C still emit 0x16 / 0x03.
                 if self.modifiers.control_key()
                     && self.modifiers.shift_key()
                     && let Key::Character(c) = &event.logical_key
-                    && c.eq_ignore_ascii_case("v")
                 {
-                    self.terminal.reset_viewport();
-                    self.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
-                    self.flush_pending();
-                    return;
+                    if c.eq_ignore_ascii_case("v") {
+                        self.terminal.reset_viewport();
+                        self.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                        self.flush_pending();
+                        return;
+                    }
+                    if c.eq_ignore_ascii_case("c") && self.terminal.has_selection() {
+                        self.terminal.copy_selection(ClipboardKind::Clipboard);
+                        return;
+                    }
                 }
 
                 // Ctrl+key → control character byte (0x00–0x1F).
