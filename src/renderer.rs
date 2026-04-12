@@ -722,7 +722,16 @@ impl Renderer {
             let grid_row = terminal.visible_row(row);
             for col in 0..terminal.viewport.cols {
                 let x = col as f32 * cell_w;
-                let bg_color = pack_color(&grid_row.bg[col as usize], self.bg_alpha);
+                // Selected cells invert fg/bg — keeps selection visible
+                // against any theme without adding a dedicated highlight
+                // color or pipeline.
+                let selected = terminal.is_cell_selected(row, col);
+                let bg_cell = if selected {
+                    &grid_row.fg[col as usize]
+                } else {
+                    &grid_row.bg[col as usize]
+                };
+                let bg_color = pack_color(bg_cell, self.bg_alpha);
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
                     BgVertex {
@@ -764,7 +773,12 @@ impl Renderer {
                 let gw = entry.width as f32;
                 let gh = entry.height as f32;
 
-                let fg_color = pack_color(&grid_row.fg[sg.col as usize], 255);
+                let fg_cell = if terminal.is_cell_selected(row, sg.col as u32) {
+                    &grid_row.bg[sg.col as usize]
+                } else {
+                    &grid_row.fg[sg.col as usize]
+                };
+                let fg_color = pack_color(fg_cell, 255);
                 let fi = fg_vertices.len() as u32;
                 fg_vertices.extend_from_slice(&[
                     FgVertex {
