@@ -702,6 +702,10 @@ pub struct Terminal {
 
     /// Wire encoding used for mouse events.
     mouse_encoding: MouseEncoding,
+
+    /// Mode 2004 — when enabled, pasted text is wrapped in
+    /// `\x1b[200~ ... \x1b[201~` so apps can distinguish it from typed input.
+    bracketed_paste: bool,
 }
 
 /// Save image positions as logical-line anchors that survive reflow.
@@ -795,6 +799,44 @@ impl Terminal {
             pending_output: Vec::new(),
             mouse_tracking: MouseTracking::Off,
             mouse_encoding: MouseEncoding::Default,
+            bracketed_paste: false,
+        }
+    }
+
+    /// Queue pasted text for delivery to the PTY. When the foreground app
+    /// has enabled bracketed paste (mode 2004) the text is wrapped in
+    /// start/end markers so the app can distinguish it from typed input and
+    /// skip auto-indent / command-execution heuristics. In either case the
+    /// paste-end marker is scrubbed from the interior of the payload so a
+    /// crafted clipboard can't break out of the bracket.
+    pub fn paste(
+        &mut self,
+        text: &str,
+    ) {
+        const PASTE_END: &str = "\x1b[201~";
+        if self.bracketed_paste {
+            self.pending_output.extend_from_slice(b"\x1b[200~");
+            for chunk in text.split(PASTE_END) {
+                self.pending_output.extend_from_slice(chunk.as_bytes());
+            }
+            self.pending_output.extend_from_slice(b"\x1b[201~");
+        } else {
+            for chunk in text.split(PASTE_END) {
+                self.pending_output.extend_from_slice(chunk.as_bytes());
+            }
+        }
+    }
+
+    /// Read the given selection from the system clipboard and paste it.
+    /// No-op if the clipboard returned nothing (headless or empty).
+    pub fn paste_from_clipboard(
+        &mut self,
+        kind: ClipboardKind,
+    ) {
+        if let Some(text) = self.clipboard.get(kind)
+            && !text.is_empty()
+        {
+            self.paste(&text);
         }
     }
 
@@ -934,7 +976,9 @@ impl Terminal {
                     if is == b"?" && (action == 'h' || action == 'l') {
                         let enable = action == 'h';
                         for p in params.iter() {
-                            if !apply_mouse_mode(
+                            if p[0] == 2004 {
+                                self.bracketed_paste = enable;
+                            } else if !apply_mouse_mode(
                                 p[0],
                                 enable,
                                 &mut self.mouse_tracking,
@@ -3308,6 +3352,64 @@ mod tests {
             MouseModifiers::default(),
         );
         assert!(!emitted);
+        assert!(term.take_pending_output().is_empty());
+    }
+
+    // ---- Bracketed paste (mode 2004) ----
+
+    #[test]
+    fn paste_default_is_raw() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        term.paste("hello\n");
+        assert_eq!(term.take_pending_output(), b"hello\n");
+    }
+
+    #[test]
+    fn paste_wraps_when_mode_2004_enabled() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        term.process(b"\x1b[?2004h");
+        assert!(term.bracketed_paste);
+        term.paste("hello\n");
+        assert_eq!(term.take_pending_output(), b"\x1b[200~hello\n\x1b[201~");
+    }
+
+    #[test]
+    fn decrst_2004_disables_bracketed_paste() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        term.process(b"\x1b[?2004h");
+        term.process(b"\x1b[?2004l");
+        assert!(!term.bracketed_paste);
+        term.paste("hi");
+        assert_eq!(term.take_pending_output(), b"hi");
+    }
+
+    #[test]
+    fn paste_scrubs_embedded_end_marker() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        term.process(b"\x1b[?2004h");
+        // The clipboard tries to break out of the bracket — the injected
+        // `\x1b[201~` is stripped and everything else comes through.
+        term.paste("evil\x1b[201~injection");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1b[200~evilinjection\x1b[201~"
+        );
+    }
+
+    #[test]
+    fn paste_from_clipboard_round_trips() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        term.clipboard = Clipboard::in_memory();
+        term.clipboard.set(ClipboardKind::Clipboard, "hello");
+        term.paste_from_clipboard(ClipboardKind::Clipboard);
+        assert_eq!(term.take_pending_output(), b"hello");
+    }
+
+    #[test]
+    fn paste_from_clipboard_ignores_empty_selection() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        term.clipboard = Clipboard::in_memory();
+        term.paste_from_clipboard(ClipboardKind::Clipboard);
         assert!(term.take_pending_output().is_empty());
     }
 }

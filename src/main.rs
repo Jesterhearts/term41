@@ -12,6 +12,7 @@ mod vte;
 
 use std::sync::Arc;
 
+use clipboard::ClipboardKind;
 use font::FontSystem;
 use pty::Pty;
 use renderer::Renderer;
@@ -348,6 +349,20 @@ impl ApplicationHandler for App {
                         }
                         _ => {}
                     }
+                }
+
+                // Ctrl+Shift+V → paste clipboard (bracketed if the app opted
+                // in). Caught before the Ctrl+key → control-byte path so
+                // Ctrl-V still emits 0x16 when Shift isn't held.
+                if self.modifiers.control_key()
+                    && self.modifiers.shift_key()
+                    && let Key::Character(c) = &event.logical_key
+                    && c.eq_ignore_ascii_case("v")
+                {
+                    self.terminal.reset_viewport();
+                    self.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                    self.flush_pending();
+                    return;
                 }
 
                 // Ctrl+key → control character byte (0x00–0x1F).
