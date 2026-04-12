@@ -160,7 +160,7 @@ fn write_sixel(
         }
 
         if end_x > row.pixels[bit].len() {
-            row.pixels[bit].resize(end_x, color);
+            row.pixels[bit].resize(end_x, row.default_color);
         }
         row.pixels[bit][cursor..end_x].fill(color);
     }
