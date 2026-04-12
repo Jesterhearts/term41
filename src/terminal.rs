@@ -8,6 +8,11 @@ use palette::Srgb;
 
 use crate::clipboard::Clipboard;
 use crate::clipboard::ClipboardKind;
+use crate::selection::Selection;
+use crate::selection::SelectionMode;
+use crate::selection::SelectionPoint;
+use crate::selection::expand_to_line;
+use crate::selection::expand_to_word;
 use crate::sixel::SixelImage;
 use crate::sixel::parse_sixel;
 use crate::vte;
@@ -90,7 +95,7 @@ pub struct Row {
 }
 
 impl Row {
-    fn new(cols: u32) -> Self {
+    pub fn new(cols: u32) -> Self {
         let n = cols as usize;
         Self {
             chars: vec![' '; n],
@@ -706,6 +711,10 @@ pub struct Terminal {
     /// Mode 2004 — when enabled, pasted text is wrapped in
     /// `\x1b[200~ ... \x1b[201~` so apps can distinguish it from typed input.
     bracketed_paste: bool,
+
+    /// Active text selection, if any. Positions use absolute row indices so
+    /// the selection stays locked to content across scrollback trimming.
+    pub selection: Option<Selection>,
 }
 
 /// Save image positions as logical-line anchors that survive reflow.
@@ -800,6 +809,289 @@ impl Terminal {
             mouse_tracking: MouseTracking::Off,
             mouse_encoding: MouseEncoding::Default,
             bracketed_paste: false,
+            selection: None,
+        }
+    }
+
+    // ---- Selection ------------------------------------------------------
+
+    /// Translate a viewport-relative screen row to an absolute row index
+    /// (stable under scrollback trimming). `screen_row` is 0 at the top of
+    /// the visible area.
+    fn screen_row_to_absolute(
+        &self,
+        screen_row: u32,
+    ) -> u64 {
+        let base =
+            self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
+        (self.active.grid.total_popped + base + screen_row as usize) as u64
+    }
+
+    /// Convert an absolute row to an index into the grid's VecDeque.
+    /// Returns None if the row has already fallen off the top of scrollback.
+    fn absolute_row_to_local(
+        &self,
+        abs: u64,
+    ) -> Option<usize> {
+        let popped = self.active.grid.total_popped as u64;
+        if abs < popped {
+            return None;
+        }
+        let local = (abs - popped) as usize;
+        if local >= self.active.grid.rows.len() {
+            return None;
+        }
+        Some(local)
+    }
+
+    /// Begin a new selection rooted at `(col, screen_row)`. For Word/Line
+    /// modes the anchor and head snap to word/line boundaries immediately.
+    pub fn start_selection(
+        &mut self,
+        col: u32,
+        screen_row: u32,
+        mode: SelectionMode,
+    ) {
+        let abs_row = self.screen_row_to_absolute(screen_row);
+        let Some(local) = self.absolute_row_to_local(abs_row) else {
+            return;
+        };
+        let row = &self.active.grid.rows[local];
+        let origin = SelectionPoint { row: abs_row, col };
+
+        let (anchor, head) = match mode {
+            SelectionMode::Char => (origin, origin),
+            SelectionMode::Word => {
+                let (s, e) = expand_to_word(row, col);
+                (
+                    SelectionPoint {
+                        row: abs_row,
+                        col: s,
+                    },
+                    SelectionPoint {
+                        row: abs_row,
+                        col: e,
+                    },
+                )
+            }
+            SelectionMode::Line => {
+                let (s, e) = expand_to_line(row);
+                (
+                    SelectionPoint {
+                        row: abs_row,
+                        col: s,
+                    },
+                    SelectionPoint {
+                        row: abs_row,
+                        col: e,
+                    },
+                )
+            }
+        };
+        self.selection = Some(Selection {
+            anchor,
+            head,
+            mode,
+            origin,
+        });
+    }
+
+    /// Extend the current selection to `(col, screen_row)`. For Word/Line
+    /// selections both the anchor and head snap to word/line boundaries so
+    /// the live drag always covers whole words/lines, with the anchor
+    /// flipping between the two ends of the origin segment as the drag
+    /// direction changes.
+    pub fn extend_selection(
+        &mut self,
+        col: u32,
+        screen_row: u32,
+    ) {
+        let Some(sel) = self.selection.as_ref() else {
+            return;
+        };
+        let mode = sel.mode;
+        let origin = sel.origin;
+
+        let abs_row = self.screen_row_to_absolute(screen_row);
+        let Some(local) = self.absolute_row_to_local(abs_row) else {
+            return;
+        };
+        let Some(origin_local) = self.absolute_row_to_local(origin.row) else {
+            return;
+        };
+
+        let head_row = &self.active.grid.rows[local];
+        let origin_row = &self.active.grid.rows[origin_local];
+
+        let new_point = SelectionPoint { row: abs_row, col };
+        let forward = (new_point.row, new_point.col) >= (origin.row, origin.col);
+
+        let (anchor, head) = match mode {
+            SelectionMode::Char => (origin, new_point),
+            SelectionMode::Word => {
+                let (o_start, o_end) = expand_to_word(origin_row, origin.col);
+                let (h_start, h_end) = expand_to_word(head_row, col);
+                if forward {
+                    (
+                        SelectionPoint {
+                            row: origin.row,
+                            col: o_start,
+                        },
+                        SelectionPoint {
+                            row: abs_row,
+                            col: h_end,
+                        },
+                    )
+                } else {
+                    (
+                        SelectionPoint {
+                            row: origin.row,
+                            col: o_end,
+                        },
+                        SelectionPoint {
+                            row: abs_row,
+                            col: h_start,
+                        },
+                    )
+                }
+            }
+            SelectionMode::Line => {
+                let (o_start, o_end) = expand_to_line(origin_row);
+                let (h_start, h_end) = expand_to_line(head_row);
+                if forward {
+                    (
+                        SelectionPoint {
+                            row: origin.row,
+                            col: o_start,
+                        },
+                        SelectionPoint {
+                            row: abs_row,
+                            col: h_end,
+                        },
+                    )
+                } else {
+                    (
+                        SelectionPoint {
+                            row: origin.row,
+                            col: o_end,
+                        },
+                        SelectionPoint {
+                            row: abs_row,
+                            col: h_start,
+                        },
+                    )
+                }
+            }
+        };
+
+        let sel = self.selection.as_mut().unwrap();
+        sel.anchor = anchor;
+        sel.head = head;
+    }
+
+    /// Drop the current selection. Called when a click resolves to a
+    /// single cell with no drag, or after the selection has been copied.
+    pub fn clear_selection(&mut self) {
+        self.selection = None;
+    }
+
+    /// True when there is a selection with real content (at least one
+    /// cell). Used by right-click to choose between copy and paste.
+    pub fn has_selection(&self) -> bool {
+        self.selection.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    /// Render-time query: is the given viewport cell currently highlighted?
+    pub fn is_cell_selected(
+        &self,
+        screen_row: u32,
+        screen_col: u32,
+    ) -> bool {
+        let Some(sel) = &self.selection else {
+            return false;
+        };
+        if sel.is_empty() {
+            return false;
+        }
+        let abs_row = self.screen_row_to_absolute(screen_row);
+        sel.contains(SelectionPoint {
+            row: abs_row,
+            col: screen_col,
+        })
+    }
+
+    /// Extract selection text. Trailing padding spaces on intermediate /
+    /// line-mode rows are trimmed; soft-wrapped rows join without a
+    /// newline, hard-wrapped ones separate with `\n`.
+    pub fn selection_text(&self) -> Option<String> {
+        let sel = self.selection.as_ref()?;
+        if sel.is_empty() {
+            return None;
+        }
+        let (start, end) = sel.ordered();
+        let popped = self.active.grid.total_popped as u64;
+        let last_idx = self.active.grid.rows.len().saturating_sub(1);
+
+        let mut out = String::new();
+        for abs_row in start.row..=end.row {
+            let local = abs_row.checked_sub(popped)? as usize;
+            if local > last_idx {
+                break;
+            }
+            let row = &self.active.grid.rows[local];
+            let row_len_cols = row.chars.len() as u32;
+            if row_len_cols == 0 {
+                if abs_row < end.row && !row.wrapped {
+                    out.push('\n');
+                }
+                continue;
+            }
+
+            let (col_start, col_end, trim) = match sel.mode {
+                SelectionMode::Line => (0, row_len_cols - 1, true),
+                _ => {
+                    let is_first = abs_row == start.row;
+                    let is_last = abs_row == end.row;
+                    let cs = if is_first { start.col } else { 0 };
+                    let ce = if is_last { end.col } else { row_len_cols - 1 };
+                    let trim = !is_last;
+                    (cs, ce, trim)
+                }
+            };
+            let col_end = col_end.min(row_len_cols - 1);
+            if col_start > col_end {
+                if abs_row < end.row && !row.wrapped {
+                    out.push('\n');
+                }
+                continue;
+            }
+
+            let segment: String = row.chars[col_start as usize..=col_end as usize]
+                .iter()
+                .collect();
+            if trim {
+                out.push_str(segment.trim_end_matches(' '));
+            } else {
+                out.push_str(&segment);
+            }
+
+            if abs_row < end.row && !row.wrapped {
+                out.push('\n');
+            }
+        }
+
+        Some(out)
+    }
+
+    /// Copy the current selection to the given clipboard. No-op if empty.
+    /// Does not clear the selection — callers that want visual feedback
+    /// cleared invoke `clear_selection` explicitly.
+    pub fn copy_selection(
+        &mut self,
+        kind: ClipboardKind,
+    ) {
+        if let Some(text) = self.selection_text() {
+            self.clipboard.set(kind, &text);
         }
     }
 
@@ -3411,5 +3703,110 @@ mod tests {
         term.clipboard = Clipboard::in_memory();
         term.paste_from_clipboard(ClipboardKind::Clipboard);
         assert!(term.take_pending_output().is_empty());
+    }
+
+    // ---- Selection ----
+
+    fn write_row(
+        term: &mut Terminal,
+        screen_row: u32,
+        text: &str,
+    ) {
+        term.process(format!("\x1b[{};1H", screen_row + 1).as_bytes());
+        term.process(text.as_bytes());
+    }
+
+    #[test]
+    fn start_selection_char_mode_is_empty_initially() {
+        let mut term = Terminal::new(10, 3, 100, 16);
+        term.start_selection(2, 1, SelectionMode::Char);
+        assert!(term.selection.is_some());
+        assert!(!term.has_selection()); // empty Char = not "has selection"
+    }
+
+    #[test]
+    fn char_selection_extend_produces_text() {
+        let mut term = Terminal::new(10, 3, 100, 16);
+        write_row(&mut term, 0, "hello");
+        term.start_selection(0, 0, SelectionMode::Char);
+        term.extend_selection(4, 0);
+        assert_eq!(term.selection_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn word_selection_snaps_to_boundaries() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        write_row(&mut term, 0, "hello world");
+        term.start_selection(2, 0, SelectionMode::Word); // in "hello"
+        assert_eq!(term.selection_text().as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn line_selection_covers_full_row() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        write_row(&mut term, 0, "hello world");
+        term.start_selection(5, 0, SelectionMode::Line);
+        // Line selection trims trailing padding spaces.
+        assert_eq!(term.selection_text().as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn selection_spans_rows_with_newline_separator() {
+        let mut term = Terminal::new(10, 3, 100, 16);
+        write_row(&mut term, 0, "abc");
+        write_row(&mut term, 1, "def");
+        term.start_selection(0, 0, SelectionMode::Char);
+        term.extend_selection(2, 1);
+        // Intermediate row trims trailing spaces, \n joins hard line breaks.
+        assert_eq!(term.selection_text().as_deref(), Some("abc\ndef"));
+    }
+
+    #[test]
+    fn selection_drags_backwards_flips_anchor_head() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        write_row(&mut term, 0, "hello world");
+        term.start_selection(8, 0, SelectionMode::Word); // in "world"
+        term.extend_selection(2, 0); // drag back into "hello"
+        assert_eq!(term.selection_text().as_deref(), Some("hello world"));
+    }
+
+    #[test]
+    fn is_cell_selected_matches_contains() {
+        let mut term = Terminal::new(10, 3, 100, 16);
+        write_row(&mut term, 0, "abcdefghij");
+        term.start_selection(2, 0, SelectionMode::Char);
+        term.extend_selection(5, 0);
+        assert!(!term.is_cell_selected(0, 1));
+        assert!(term.is_cell_selected(0, 2));
+        assert!(term.is_cell_selected(0, 5));
+        assert!(!term.is_cell_selected(0, 6));
+        assert!(!term.is_cell_selected(1, 3));
+    }
+
+    #[test]
+    fn copy_selection_writes_to_clipboard() {
+        let mut term = Terminal::new(10, 3, 100, 16);
+        term.clipboard = Clipboard::in_memory();
+        write_row(&mut term, 0, "copy-me");
+        term.start_selection(0, 0, SelectionMode::Char);
+        term.extend_selection(6, 0);
+        term.copy_selection(ClipboardKind::Clipboard);
+        assert_eq!(
+            term.clipboard.get(ClipboardKind::Clipboard).as_deref(),
+            Some("copy-me")
+        );
+        // Selection survives copy (callers clear explicitly).
+        assert!(term.has_selection());
+    }
+
+    #[test]
+    fn clear_selection_drops_state() {
+        let mut term = Terminal::new(10, 3, 100, 16);
+        write_row(&mut term, 0, "hello");
+        term.start_selection(0, 0, SelectionMode::Char);
+        term.extend_selection(4, 0);
+        term.clear_selection();
+        assert!(term.selection.is_none());
+        assert!(term.selection_text().is_none());
     }
 }
