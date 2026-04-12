@@ -832,7 +832,7 @@ impl Terminal {
                         esc_dispatch(&mut self.active, &self.viewport, is, byte);
                     }
                 }
-                vte::Action::OscDispatch => {}
+                vte::Action::OscDispatch(_data) => {}
                 vte::Action::Hook { params, action } => {
                     self.hook_bytes.push(vec![]);
                     self.hook_params.push(params);

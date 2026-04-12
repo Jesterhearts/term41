@@ -6,6 +6,13 @@
 const MAX_PARAMS: usize = 16;
 const MAX_INTERMEDIATES: usize = 4;
 
+/// Maximum OSC string payload retained before further bytes are dropped.
+///
+/// Protects against unterminated OSC streams exhausting memory while leaving
+/// ample room for legitimate uses such as base64-encoded clipboard payloads in
+/// OSC 52 — generous enough to hold a raw image pasted to the system clipboard.
+const MAX_OSC_LEN: usize = 32 * 1024 * 1024;
+
 // ---------------------------------------------------------------------------
 // Params
 // ---------------------------------------------------------------------------
@@ -95,7 +102,11 @@ pub enum Action {
         byte: u8,
     },
     /// A complete OSC (Operating System Command) string.
-    OscDispatch,
+    ///
+    /// The payload contains the raw bytes between the OSC introducer and its
+    /// terminator (BEL, ST, or a cancelling control), with the terminator
+    /// itself excluded.
+    OscDispatch(Vec<u8>),
     /// Start of a DCS (Device Control String) — parameters are available.
     Hook { params: Params, action: char },
     /// A data byte within a DCS string.
@@ -158,6 +169,10 @@ pub struct Parser {
     utf8_buf: [u8; 4],
     utf8_len: u8,
     utf8_needed: u8,
+
+    // OSC string accumulator — the payload is taken out on dispatch, leaving
+    // an empty Vec ready to accept the next sequence without reallocating.
+    osc_buf: Vec<u8>,
 }
 
 impl Parser {
@@ -176,6 +191,7 @@ impl Parser {
             utf8_buf: [0; 4],
             utf8_len: 0,
             utf8_needed: 0,
+            osc_buf: Vec::new(),
         }
     }
 
@@ -292,7 +308,7 @@ impl Parser {
     fn exit_action(&mut self) -> Option<Action> {
         match self.state {
             State::DcsPassthrough => Some(Action::Unhook),
-            State::OscString => Some(Action::OscDispatch),
+            State::OscString => Some(Action::OscDispatch(std::mem::take(&mut self.osc_buf))),
             _ => None,
         }
     }
@@ -766,9 +782,14 @@ impl Parser {
             // BEL terminates the OSC string (xterm extension, widely supported).
             0x07 => {
                 self.state = State::Ground;
-                Some(Action::OscDispatch)
+                Some(Action::OscDispatch(std::mem::take(&mut self.osc_buf)))
             }
-            _ => None,
+            _ => {
+                if self.osc_buf.len() < MAX_OSC_LEN {
+                    self.osc_buf.push(byte);
+                }
+                None
+            }
         }
     }
 
@@ -806,5 +827,55 @@ impl Iterator for ParseIter<'_, '_> {
             }
         }
         None
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn osc_payloads(input: &[u8]) -> Vec<Vec<u8>> {
+        let mut parser = Parser::new();
+        parser
+            .parse(input)
+            .filter_map(|a| match a {
+                Action::OscDispatch(data) => Some(data),
+                _ => None,
+            })
+            .collect()
+    }
+
+    #[test]
+    fn osc_dispatch_carries_bel_terminated_payload() {
+        assert_eq!(
+            osc_payloads(b"\x1b]52;c;aGVsbG8=\x07"),
+            vec![b"52;c;aGVsbG8=".to_vec()]
+        );
+    }
+
+    #[test]
+    fn osc_dispatch_carries_st_terminated_payload() {
+        assert_eq!(
+            osc_payloads(b"\x1b]0;title\x1b\\"),
+            vec![b"0;title".to_vec()]
+        );
+    }
+
+    #[test]
+    fn osc_payload_reused_across_sequences() {
+        let out = osc_payloads(b"\x1b]1;one\x07\x1b]2;two\x07");
+        assert_eq!(out, vec![b"1;one".to_vec(), b"2;two".to_vec()]);
+    }
+
+    #[test]
+    fn osc_payload_truncates_at_max_len() {
+        // Sequence is well over MAX_OSC_LEN when we include the terminator.
+        let mut input = Vec::with_capacity(MAX_OSC_LEN + 16);
+        input.extend_from_slice(b"\x1b]");
+        input.resize(input.len() + MAX_OSC_LEN + 8, b'a');
+        input.push(0x07);
+        let out = osc_payloads(&input);
+        assert_eq!(out.len(), 1);
+        assert_eq!(out[0].len(), MAX_OSC_LEN);
     }
 }
