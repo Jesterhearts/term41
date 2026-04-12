@@ -448,21 +448,20 @@ impl Grid {
         let abs_top = first_visible + top as usize;
         let abs_bottom = first_visible + bottom as usize;
         let n = (n as usize).min(abs_bottom - abs_top + 1);
-        let empty = " ".repeat(viewport.cols as usize);
+        let insert_text = format!("{}\n", " ".repeat(viewport.cols as usize));
         for _ in 0..n {
-            let top_line_start = self.rows.byte_of_line(abs_top);
-            let top_line_len = self.rows.line(abs_top).byte_len();
-            // +1 for the newline delimiter between lines.
-            let deleted = top_line_len + 1;
-            self.clear_colors(top_line_start, top_line_start + top_line_len);
-            self.rows
-                .delete(top_line_start..top_line_start + top_line_len);
-            // Shift colors for everything after the deleted line left.
-            self.shift_colors(top_line_start, -(deleted as isize));
-            let bottom_line_start = self.rows.byte_of_line(abs_bottom);
-            // Shift colors for content after the insert point right.
-            self.shift_colors(bottom_line_start, empty.len() as isize + 1);
-            self.rows.insert(bottom_line_start, &empty);
+            // Delete top line including its trailing newline.
+            let delete_start = self.rows.byte_of_line(abs_top);
+            let delete_end = self.rows.byte_of_line(abs_top + 1);
+            let deleted = delete_end - delete_start;
+            self.clear_colors(delete_start, delete_end);
+            self.rows.delete(delete_start..delete_end);
+            self.shift_colors(delete_start, -(deleted as isize));
+            // Insert blank line + newline before what is now at abs_bottom
+            // (the line just past the region, or byte_len if region is at end).
+            let insert_at = self.rows.byte_of_line(abs_bottom);
+            self.shift_colors(insert_at, insert_text.len() as isize);
+            self.rows.insert(insert_at, &insert_text);
         }
     }
 
@@ -479,18 +478,19 @@ impl Grid {
         let abs_top = first_visible + top as usize;
         let abs_bottom = first_visible + bottom as usize;
         let n = (n as usize).min(abs_bottom - abs_top + 1);
-        let empty = " ".repeat(viewport.cols as usize);
+        let insert_text = format!("{}\n", " ".repeat(viewport.cols as usize));
         for _ in 0..n {
-            let bottom_line_start = self.rows.byte_of_line(abs_bottom);
-            let bottom_line_len = self.rows.line(abs_bottom).byte_len();
-            let deleted = bottom_line_len + 1;
-            self.clear_colors(bottom_line_start, bottom_line_start + bottom_line_len);
-            self.rows
-                .delete(bottom_line_start..bottom_line_start + bottom_line_len);
-            self.shift_colors(bottom_line_start, -(deleted as isize));
-            let top_line_start = self.rows.byte_of_line(abs_top);
-            self.shift_colors(top_line_start, empty.len() as isize + 1);
-            self.rows.insert(top_line_start, &empty);
+            // Delete bottom line including its trailing newline.
+            let delete_start = self.rows.byte_of_line(abs_bottom);
+            let delete_end = self.rows.byte_of_line(abs_bottom + 1);
+            let deleted = delete_end - delete_start;
+            self.clear_colors(delete_start, delete_end);
+            self.rows.delete(delete_start..delete_end);
+            self.shift_colors(delete_start, -(deleted as isize));
+            // Insert blank line + newline at the top of the region.
+            let insert_at = self.rows.byte_of_line(abs_top);
+            self.shift_colors(insert_at, insert_text.len() as isize);
+            self.rows.insert(insert_at, &insert_text);
         }
     }
 
