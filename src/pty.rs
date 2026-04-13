@@ -1,13 +1,28 @@
-use std::ffi::CString;
+use std::collections::VecDeque;
 use std::io;
-use std::os::fd::FromRawFd;
-use std::os::fd::OwnedFd;
-use std::os::fd::RawFd;
+use std::io::Read;
+use std::io::Write;
+use std::sync::mpsc;
+use std::thread;
+
+use portable_pty::Child;
+use portable_pty::CommandBuilder;
+use portable_pty::MasterPty;
+use portable_pty::PtySize;
+use portable_pty::native_pty_system;
 
 /// A pseudo-terminal connected to a child shell process.
+///
+/// Wraps `portable-pty` so the same code path handles forkpty on Unix and
+/// ConPTY on Windows. portable-pty exposes a blocking reader, so a worker
+/// thread pumps bytes into a channel and `read` drains it without ever
+/// blocking the UI loop.
 pub struct Pty {
-    master: OwnedFd,
-    child_pid: libc::pid_t,
+    master: Box<dyn MasterPty + Send>,
+    writer: Box<dyn Write + Send>,
+    child: Box<dyn Child + Send + Sync>,
+    rx: mpsc::Receiver<Vec<u8>>,
+    pending: VecDeque<u8>,
 }
 
 impl Pty {
@@ -16,75 +31,80 @@ impl Pty {
         cols: u16,
         rows: u16,
     ) -> io::Result<Self> {
-        let winsize = libc::winsize {
-            ws_col: cols,
-            ws_row: rows,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
+        let pty_system = native_pty_system();
+        let pair = pty_system
+            .openpty(PtySize {
+                rows,
+                cols,
+                pixel_width: 0,
+                pixel_height: 0,
+            })
+            .map_err(io::Error::other)?;
 
-        let mut master_fd: RawFd = -1;
+        // new_default_prog resolves to $SHELL (or the passwd entry) on Unix
+        // and to %ComSpec%/cmd.exe on Windows, and arranges login-shell argv0
+        // semantics where applicable.
+        let mut cmd = CommandBuilder::new_default_prog();
+        cmd.env("TERM", "xterm-256color");
 
-        // SAFETY: forkpty is a well-defined POSIX call. We immediately exec in the
-        // child.
-        let pid = unsafe {
-            libc::forkpty(
-                &mut master_fd,
-                std::ptr::null_mut(),
-                std::ptr::null(),
-                &winsize,
-            )
-        };
+        let child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
+        // Drop our handle on the slave so the child is the only side keeping
+        // it open; that way closing the master at shutdown delivers SIGHUP
+        // (or the ConPTY equivalent) cleanly.
+        drop(pair.slave);
 
-        if pid < 0 {
-            return Err(io::Error::last_os_error());
-        }
+        let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
+        let writer = pair.master.take_writer().map_err(io::Error::other)?;
 
-        if pid == 0 {
-            // Child process: exec the user's shell.
-            exec_shell();
-        }
-
-        // Parent process.
-        let master = unsafe { OwnedFd::from_raw_fd(master_fd) };
-        set_nonblocking(&master)?;
+        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        thread::Builder::new()
+            .name("pty-reader".into())
+            .spawn(move || pump_reader(reader, tx))
+            .map_err(io::Error::other)?;
 
         Ok(Self {
-            master,
-            child_pid: pid,
+            master: pair.master,
+            writer,
+            child,
+            rx,
+            pending: VecDeque::new(),
         })
     }
 
-    /// Non-blocking read from the PTY master fd.
+    /// Non-blocking read of bytes received from the PTY. Returns 0 when no
+    /// data is currently available so callers can poll in the event loop.
     pub fn read(
-        &self,
+        &mut self,
         buf: &mut [u8],
     ) -> io::Result<usize> {
-        let fd = fd_raw(&self.master);
-        // SAFETY: buf is a valid slice, fd is owned by us.
-        let n = unsafe { libc::read(fd, buf.as_mut_ptr().cast(), buf.len()) };
-        if n < 0 {
-            let err = io::Error::last_os_error();
-            if err.kind() == io::ErrorKind::WouldBlock {
-                return Ok(0);
+        if self.pending.is_empty() {
+            match self.rx.try_recv() {
+                Ok(chunk) => self.pending.extend(chunk),
+                // Empty: nothing pending right now. Disconnected: reader
+                // thread exited (child closed its end); treat as EOF — keep
+                // returning 0 so the UI loop stays responsive until the user
+                // closes the window.
+                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => return Ok(0),
             }
-            return Err(err);
         }
-        Ok(n as usize)
+
+        let n = buf.len().min(self.pending.len());
+        let (head, tail) = self.pending.as_slices();
+        let from_head = n.min(head.len());
+        buf[..from_head].copy_from_slice(&head[..from_head]);
+        if n > from_head {
+            buf[from_head..n].copy_from_slice(&tail[..n - from_head]);
+        }
+        self.pending.drain(..n);
+        Ok(n)
     }
 
     /// Write bytes to the PTY (sends input to the shell).
     pub fn write(
-        &self,
+        &mut self,
         data: &[u8],
     ) -> io::Result<usize> {
-        let fd = fd_raw(&self.master);
-        // SAFETY: data is a valid slice, fd is owned by us.
-        let n = unsafe { libc::write(fd, data.as_ptr().cast(), data.len()) };
-        if n < 0 {
-            return Err(io::Error::last_os_error());
-        }
-        Ok(n as usize)
+        self.writer.write(data)
     }
 
     /// Notify the PTY of a terminal resize.
@@ -93,70 +113,36 @@ impl Pty {
         cols: u16,
         rows: u16,
     ) {
-        let winsize = libc::winsize {
-            ws_col: cols,
-            ws_row: rows,
-            ws_xpixel: 0,
-            ws_ypixel: 0,
-        };
-        let fd = fd_raw(&self.master);
-        // SAFETY: fd is valid, winsize is on the stack.
-        unsafe {
-            libc::ioctl(fd, libc::TIOCSWINSZ, &winsize);
-        }
+        let _ = self.master.resize(PtySize {
+            rows,
+            cols,
+            pixel_width: 0,
+            pixel_height: 0,
+        });
     }
 }
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        unsafe {
-            libc::kill(self.child_pid, libc::SIGHUP);
+        let _ = self.child.kill();
+    }
+}
+
+fn pump_reader(
+    mut reader: Box<dyn Read + Send>,
+    tx: mpsc::Sender<Vec<u8>>,
+) {
+    let mut buf = vec![0u8; 64 * 1024];
+    loop {
+        match reader.read(&mut buf) {
+            Ok(0) => break,
+            Ok(n) => {
+                if tx.send(buf[..n].to_vec()).is_err() {
+                    break;
+                }
+            }
+            Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+            Err(_) => break,
         }
     }
-}
-
-fn fd_raw(fd: &OwnedFd) -> RawFd {
-    use std::os::fd::AsRawFd;
-    fd.as_raw_fd()
-}
-
-fn set_nonblocking(fd: &OwnedFd) -> io::Result<()> {
-    let raw = fd_raw(fd);
-    // SAFETY: standard fcntl usage on a valid fd.
-    let flags = unsafe { libc::fcntl(raw, libc::F_GETFL) };
-    if flags < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    let result = unsafe { libc::fcntl(raw, libc::F_SETFL, flags | libc::O_NONBLOCK) };
-    if result < 0 {
-        return Err(io::Error::last_os_error());
-    }
-    Ok(())
-}
-
-fn exec_shell() -> ! {
-    let shell = std::env::var("SHELL").unwrap_or_else(|_| "/bin/sh".to_string());
-    let shell_c = CString::new(shell.clone()).expect("shell path");
-
-    // Set TERM so programs know our capabilities.
-    let term = CString::new("TERM=xterm-256color").expect("TERM env");
-    unsafe {
-        libc::putenv(term.into_raw());
-    }
-
-    // Exec as a login shell by convention (argv[0] starts with '-').
-    let shell_name = std::path::Path::new(&shell)
-        .file_name()
-        .unwrap_or_default()
-        .to_string_lossy();
-    let argv0 = CString::new(format!("-{shell_name}")).expect("argv0");
-    let argv: [*const libc::c_char; 2] = [argv0.as_ptr(), std::ptr::null()];
-
-    unsafe {
-        libc::execvp(shell_c.as_ptr(), argv.as_ptr());
-    }
-
-    // If execvp returns, something went wrong.
-    eprintln!("term41: failed to exec shell: {shell}");
-    unsafe { libc::_exit(1) }
 }

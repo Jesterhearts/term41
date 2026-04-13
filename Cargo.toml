@@ -25,6 +25,7 @@ palette              = { version = "0.7.6", default-features = false, features =
 ] }
 png                  = "0.18.1"
 pollster             = "0.4.0"
+portable-pty         = "0.9.0"
 raqote               = { version = "0.8.5", default-features = false }
 read-fonts           = "0.39.1"
 # OpenType SVG emoji are essentially static vector artwork — no <text> runs, no
