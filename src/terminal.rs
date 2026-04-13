@@ -1,4 +1,5 @@
 mod color;
+mod cursor;
 mod grid;
 mod hyperlink;
 mod image;
@@ -11,7 +12,8 @@ mod screen;
 
 use std::path::PathBuf;
 
-pub use self::color::default_fg;
+pub use self::cursor::CursorShape;
+pub use self::cursor::CursorStyle;
 pub use self::grid::Viewport;
 pub use self::hyperlink::HyperlinkRegistry;
 pub use self::image::PlacedImage;
@@ -109,6 +111,17 @@ pub struct Terminal {
     /// here when they want unambiguous Ctrl+letter, Shift+Enter, etc. The
     /// effective flags drive the input encoder in `main.rs`.
     pub kitty_keyboard: KittyKeyboardState,
+
+    /// Cursor shape and blink, settable both via config and at runtime via
+    /// DECSCUSR (`CSI Ps SP q`). The renderer reads this each frame; the
+    /// blink phase itself is owned by the renderer.
+    pub cursor_style: CursorStyle,
+
+    /// Mode `?1004` — when enabled, focus changes are reported to the
+    /// foreground app as `\x1b[I` (focus in) and `\x1b[O` (focus out). The
+    /// event loop calls [`Self::report_focus_change`] on every winit
+    /// `Focused` event; that method gates emission on this flag.
+    focus_reporting: bool,
 }
 
 impl Terminal {
@@ -141,7 +154,33 @@ impl Terminal {
             current_directory: None,
             hyperlinks: HyperlinkRegistry::new(),
             kitty_keyboard: KittyKeyboardState::new(),
+            cursor_style: CursorStyle::default(),
+            focus_reporting: false,
         }
+    }
+
+    /// Override the default cursor style. Called once at startup so the
+    /// user's `config.toml` preference takes effect before any DECSCUSR
+    /// arrives from the shell.
+    pub fn set_default_cursor_style(
+        &mut self,
+        style: CursorStyle,
+    ) {
+        self.cursor_style = style;
+    }
+
+    /// Queue a focus-in / focus-out report onto `pending_output` if focus
+    /// reporting is currently enabled. Safe to call unconditionally.
+    pub fn report_focus_change(
+        &mut self,
+        focused: bool,
+    ) {
+        if !self.focus_reporting {
+            return;
+        }
+        // Per xterm: CSI I on focus gain, CSI O on focus loss.
+        let payload: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
+        self.pending_output.extend_from_slice(payload);
     }
 
     /// Translate a viewport-relative screen row to an absolute row index
@@ -621,6 +660,8 @@ impl Terminal {
                         for p in params.iter() {
                             if p[0] == 2004 {
                                 self.bracketed_paste = enable;
+                            } else if p[0] == 1004 {
+                                self.focus_reporting = enable;
                             } else if !apply_mouse_mode(
                                 p[0],
                                 enable,
@@ -644,6 +685,16 @@ impl Terminal {
                             &mut self.kitty_keyboard,
                             &mut self.pending_output,
                         );
+                    } else if action == 'q' && is == b" " {
+                        // DECSCUSR. The space intermediate is mandatory; the
+                        // single param picks shape+blink (0/1=blink block,
+                        // 2=block, 3/4=underline, 5/6=beam).
+                        let ps = params
+                            .iter()
+                            .next()
+                            .and_then(|g| g.first().copied())
+                            .unwrap_or(0);
+                        self.cursor_style.apply_decscusr(ps);
                     } else {
                         csi_dispatch(&mut self.active, &self.viewport, &params, is, action);
                     }
@@ -1123,5 +1174,70 @@ mod tests {
         let mut term = Terminal::new(20, 3, 100, 16);
         term.process(b"\x1b[>3u\x1b[?u");
         assert_eq!(term.take_pending_output(), b"\x1b[?3u");
+    }
+
+    // ---- Cursor style (DECSCUSR) ----
+
+    #[test]
+    fn decscusr_sets_steady_block() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[2 q");
+        assert_eq!(
+            term.cursor_style,
+            CursorStyle {
+                shape: CursorShape::Block,
+                blink: false,
+            }
+        );
+    }
+
+    #[test]
+    fn decscusr_sets_blinking_beam() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[5 q");
+        assert_eq!(
+            term.cursor_style,
+            CursorStyle {
+                shape: CursorShape::Beam,
+                blink: true,
+            }
+        );
+    }
+
+    #[test]
+    fn config_default_cursor_style_overrides_xterm_default() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.set_default_cursor_style(CursorStyle {
+            shape: CursorShape::Underline,
+            blink: false,
+        });
+        assert_eq!(term.cursor_style.shape, CursorShape::Underline);
+        assert!(!term.cursor_style.blink);
+    }
+
+    // ---- Focus reporting (?1004) ----
+
+    #[test]
+    fn focus_change_silent_when_reporting_disabled() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.report_focus_change(true);
+        assert!(term.take_pending_output().is_empty());
+    }
+
+    #[test]
+    fn focus_change_emits_csi_i_o_when_enabled() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[?1004h");
+        term.report_focus_change(true);
+        term.report_focus_change(false);
+        assert_eq!(term.take_pending_output(), b"\x1b[I\x1b[O");
+    }
+
+    #[test]
+    fn decrst_1004_disables_focus_reporting() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[?1004h\x1b[?1004l");
+        term.report_focus_change(true);
+        assert!(term.take_pending_output().is_empty());
     }
 }

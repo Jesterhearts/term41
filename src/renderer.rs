@@ -4,6 +4,8 @@ mod shelf;
 
 use std::num::NonZeroU64;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use palette::Srgb;
 use wgpu::util::DeviceExt;
@@ -14,8 +16,8 @@ use crate::font::FontSystem;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
+use crate::terminal::CursorShape;
 use crate::terminal::Terminal;
-use crate::terminal::default_fg;
 
 /// Packed vertex for background quads: position + color.
 #[repr(C)]
@@ -70,7 +72,16 @@ pub struct Renderer {
     image_atlas: ImageAtlas,
 
     bg_alpha: u8,
+
+    /// When the renderer started; used as the reference for the cursor blink
+    /// phase. Wall-clock would work too — `Instant` keeps it monotonic
+    /// regardless of system clock changes.
+    started: Instant,
 }
+
+/// Half-period of the cursor blink. xterm uses 530ms by default; 500 lands
+/// just shy of that and is the common choice for newer terminals.
+const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
 
 impl Renderer {
     pub async fn new(
@@ -332,6 +343,7 @@ impl Renderer {
             glyph_atlas,
             image_atlas,
             bg_alpha: (opacity.clamp(0.0, 1.0) * 255.0) as u8,
+            started: Instant::now(),
         };
 
         renderer.update_screen_size(size);
@@ -396,6 +408,12 @@ impl Renderer {
         let mut fg_vertices: Vec<FgVertex> = Vec::new();
         let mut fg_indices: Vec<u32> = Vec::new();
 
+        // Resolve cursor state once. The block-shape path needs to invert
+        // the glyph at the cursor cell, so we track its position even when
+        // the bar/underline shapes are active (those don't invert but still
+        // need the position for the overlay quad).
+        let cursor_state = self.cursor_state(terminal);
+
         for row in 0..terminal.viewport.rows {
             let y = row as f32 * cell_h;
 
@@ -403,11 +421,14 @@ impl Renderer {
             let grid_row = terminal.visible_row(row);
             for col in 0..terminal.viewport.cols {
                 let x = col as f32 * cell_w;
-                // Selected cells invert fg/bg — keeps selection visible
-                // against any theme without adding a dedicated highlight
-                // color or pipeline.
+                // A cell is rendered with inverted fg/bg when it is selected
+                // OR when it sits under a visible block cursor — both cases
+                // want the cell's text to read as its own bg-on-fg, so we
+                // collapse them into one bool.
                 let selected = terminal.is_cell_selected(row, col);
-                let bg_cell = if selected {
+                let block_cursor_here = cursor_state.is_block_at(row, col);
+                let inverted = selected || block_cursor_here;
+                let bg_cell = if inverted {
                     &grid_row.fg[col as usize]
                 } else {
                     &grid_row.bg[col as usize]
@@ -467,6 +488,32 @@ impl Renderer {
                 }
             }
 
+            // Underline / beam cursor overlays sit in the bg pass so the
+            // glyph keeps its normal colour and the bar paints behind /
+            // beside the character rather than over it.
+            if let Some(overlay) = cursor_state.bar_overlay_at(row, &grid_row.fg, cell_w, cell_h) {
+                let bi = bg_vertices.len() as u32;
+                bg_vertices.extend_from_slice(&[
+                    BgVertex {
+                        pos: [overlay.x, overlay.y],
+                        color: overlay.color,
+                    },
+                    BgVertex {
+                        pos: [overlay.x + overlay.w, overlay.y],
+                        color: overlay.color,
+                    },
+                    BgVertex {
+                        pos: [overlay.x, overlay.y + overlay.h],
+                        color: overlay.color,
+                    },
+                    BgVertex {
+                        pos: [overlay.x + overlay.w, overlay.y + overlay.h],
+                        color: overlay.color,
+                    },
+                ]);
+                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+            }
+
             // Shape the entire row for foreground glyphs — borrows &[char] directly.
             let shaped = font_system.shape_row(&grid_row.cells);
 
@@ -496,7 +543,9 @@ impl Renderer {
                 let gw = sw as f32;
                 let gh = sh as f32;
 
-                let fg_cell = if terminal.is_cell_selected(row, sg.col as u32) {
+                let inverted = terminal.is_cell_selected(row, sg.col as u32)
+                    || cursor_state.is_block_at(row, sg.col as u32);
+                let fg_cell = if inverted {
                     &grid_row.bg[sg.col as usize]
                 } else {
                     &grid_row.fg[sg.col as usize]
@@ -532,33 +581,6 @@ impl Renderer {
                 ]);
                 fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
             }
-        }
-
-        // Cursor: draw an inverted cell (only when viewing the live terminal).
-        if terminal.active.offset == 0 {
-            let cx = terminal.active.cursor.col as f32 * cell_w;
-            let cy = terminal.active.cursor.row as f32 * cell_h;
-            let cursor_color = pack_color(&default_fg(), 255);
-            let bi = bg_vertices.len() as u32;
-            bg_vertices.extend_from_slice(&[
-                BgVertex {
-                    pos: [cx, cy],
-                    color: cursor_color,
-                },
-                BgVertex {
-                    pos: [cx + cell_w, cy],
-                    color: cursor_color,
-                },
-                BgVertex {
-                    pos: [cx, cy + cell_h],
-                    color: cursor_color,
-                },
-                BgVertex {
-                    pos: [cx + cell_w, cy + cell_h],
-                    color: cursor_color,
-                },
-            ]);
-            bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
         }
 
         // ---- Build image quads ----
@@ -757,5 +779,123 @@ impl Renderer {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+    }
+
+    /// Resolve "is the cursor visible right now and what does it look like"
+    /// once per frame. Hidden cases — scrolled away from live or in the
+    /// blink-off phase — collapse to [`CursorRenderState::Hidden`] so the
+    /// per-cell loops don't have to know the rules.
+    fn cursor_state(
+        &self,
+        terminal: &Terminal,
+    ) -> CursorRenderState {
+        if terminal.active.offset != 0 {
+            return CursorRenderState::Hidden;
+        }
+        let style = terminal.cursor_style;
+        if style.blink {
+            // Square wave: half the period on, half off. `as_secs_f32` keeps
+            // the math out of integer overflow territory for long sessions.
+            let elapsed = self.started.elapsed().as_secs_f32();
+            let half = CURSOR_BLINK_HALF_PERIOD.as_secs_f32();
+            let phase = (elapsed / half) as u64;
+            if phase & 1 == 1 {
+                return CursorRenderState::Hidden;
+            }
+        }
+        CursorRenderState::Visible {
+            row: terminal.active.cursor.row,
+            col: terminal.active.cursor.col,
+            shape: style.shape,
+        }
+    }
+}
+
+/// Tells the per-cell loops what (if anything) the cursor wants drawn at a
+/// given coordinate. Computed once per frame so blink and viewport-offset
+/// checks don't repeat for every cell.
+#[derive(Debug, Clone, Copy)]
+enum CursorRenderState {
+    Hidden,
+    Visible {
+        row: u32,
+        col: u32,
+        shape: CursorShape,
+    },
+}
+
+/// Geometry of an underline / beam overlay. Not used for block — that path
+/// inverts the cell instead and needs no separate quad.
+struct BarOverlay {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: u32,
+}
+
+impl CursorRenderState {
+    /// True iff the cursor is a visible block at this cell — both sides of
+    /// the inversion (bg quad, fg glyph) consult this.
+    fn is_block_at(
+        self,
+        row: u32,
+        col: u32,
+    ) -> bool {
+        matches!(
+            self,
+            CursorRenderState::Visible {
+                row: r,
+                col: c,
+                shape: CursorShape::Block,
+            } if r == row && c == col,
+        )
+    }
+
+    /// Build a thin overlay quad for underline / beam shapes when this row
+    /// holds the cursor cell. Returns `None` for block, hidden, or the
+    /// wrong row. `fg_row` is the row's per-cell fg colors so the bar
+    /// adopts the cell's text colour and stays visible against any theme.
+    fn bar_overlay_at(
+        self,
+        row: u32,
+        fg_row: &[Srgb<u8>],
+        cell_w: f32,
+        cell_h: f32,
+    ) -> Option<BarOverlay> {
+        let CursorRenderState::Visible { row: r, col, shape } = self else {
+            return None;
+        };
+        if r != row {
+            return None;
+        }
+        let fg = fg_row.get(col as usize)?;
+        let color = pack_color(fg, 255);
+        let x0 = col as f32 * cell_w;
+        let y0 = row as f32 * cell_h;
+        match shape {
+            CursorShape::Block => None,
+            CursorShape::Underline => {
+                // 2-px-ish strip along the bottom; matches xterm's default.
+                let h = (cell_h * 0.12).max(2.0);
+                Some(BarOverlay {
+                    x: x0,
+                    y: y0 + cell_h - h,
+                    w: cell_w,
+                    h,
+                    color,
+                })
+            }
+            CursorShape::Beam => {
+                let w = (cell_w * 0.12).max(2.0);
+                Some(BarOverlay {
+                    x: x0,
+                    y: y0,
+                    w,
+                    h: cell_h,
+                    color,
+                })
+            }
+        }
     }
 }

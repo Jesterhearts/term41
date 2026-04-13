@@ -16,6 +16,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clipboard::ClipboardKind;
+use config::Config;
 use font::FontSystem;
 use pty::Pty;
 use renderer::Renderer;
@@ -123,24 +124,23 @@ impl MouseButtonState {
 impl App {
     fn new(
         pty: Pty,
-        opacity: f32,
-        fonts_config: Option<&str>,
-        scrollback_lines: u32,
-        font_size: f32,
+        config: Config,
     ) -> Self {
-        let font_system = FontSystem::new(fonts_config, font_size);
+        let font_system = FontSystem::new(config.fonts.as_deref(), config.font_size);
+        let mut terminal = Terminal::new(
+            INITIAL_COLS,
+            INITIAL_ROWS,
+            config.scrollback_lines,
+            font_system.cell_height,
+        );
+        terminal.set_default_cursor_style(config.cursor_style);
         Self {
             window: None,
             renderer: None,
-            terminal: Terminal::new(
-                INITIAL_COLS,
-                INITIAL_ROWS,
-                scrollback_lines,
-                font_system.cell_height,
-            ),
+            terminal,
             font_system,
             pty,
-            opacity,
+            opacity: config.opacity,
             modifiers: winit::keyboard::ModifiersState::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             mouse_buttons: MouseButtonState::default(),
@@ -275,6 +275,11 @@ impl ApplicationHandler for App {
                     self.terminal.resize(cols, rows);
                     self.pty.resize(cols as u16, rows as u16);
                 }
+            }
+
+            WindowEvent::Focused(focused) => {
+                self.terminal.report_focus_change(focused);
+                self.flush_pending();
             }
 
             WindowEvent::MouseWheel { delta, .. } => {
@@ -704,12 +709,6 @@ fn main() {
     let event_loop = EventLoop::new().expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(
-        pty,
-        config.opacity,
-        config.fonts.as_deref(),
-        config.scrollback_lines,
-        config.font_size,
-    );
+    let mut app = App::new(pty, config);
     event_loop.run_app(&mut app).expect("run event loop");
 }

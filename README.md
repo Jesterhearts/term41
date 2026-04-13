@@ -35,6 +35,10 @@ write my own, with the features I prefer.
 - [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
   with the `disambiguate-escape-codes` flag, so TUIs can distinguish
   combos like `Ctrl+Enter` and `Ctrl+I` from their legacy aliases
+- DECSCUSR cursor styles (block / underline / beam, blinking or steady)
+  with config defaults
+- Focus reporting (DECSET 1004) so apps can react when the window
+  gains/loses focus
 - Sixel image rendering
 - Configurable window opacity, fonts, font size, and scrollback size
 
@@ -100,6 +104,14 @@ font_size = 24.0
 
 # Number of scrollback lines retained above the visible viewport.
 scrollback_lines = 10000
+
+# Default cursor shape: "block", "underline", or "beam". Apps can still
+# override at runtime via DECSCUSR (`CSI Ps SP q`).
+cursor_shape = "block"
+
+# Whether the cursor blinks. Apps can still override at runtime via
+# DECSCUSR.
+cursor_blink = true
 ```
 
 ### Key bindings
