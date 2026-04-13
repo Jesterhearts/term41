@@ -1,5 +1,7 @@
-use std::collections::HashMap;
-use std::collections::HashSet;
+pub mod glyph_atlas;
+pub mod image_atlas;
+mod shelf;
+
 use std::num::NonZeroU64;
 use std::sync::Arc;
 
@@ -9,14 +11,11 @@ use winit::dpi::PhysicalSize;
 use winit::window::Window;
 
 use crate::font::FontSystem;
-use crate::font::RasterizedGlyph;
-use crate::sixel::SixelImage;
+use crate::renderer::glyph_atlas::GlyphAtlas;
+use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
+use crate::renderer::image_atlas::ImageAtlas;
 use crate::terminal::Terminal;
 use crate::terminal::default_fg;
-
-const ATLAS_SIZE: u32 = 1024;
-const IMAGE_ATLAS_SIZE: u32 = 2048;
-const IMAGE_ATLAS_LAYERS: u32 = 64;
 
 /// Packed vertex for background quads: position + color.
 #[repr(C)]
@@ -35,41 +34,13 @@ struct FgVertex {
     color: u32,
 }
 
-/// Packed vertex for image quads: position + UV + layer + transparency flag.
+/// Packed vertex for image quads: position + UV + atlas layer.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageVertex {
     pos: [f32; 2],
-    /// xy = UV coords, z = atlas layer, w = 1.0 if image has transparent bg.
+    /// xy = normalized UV coords, z = atlas layer index.
     uv_layer: [f32; 3],
-}
-
-/// Location of a glyph in the atlas texture.
-#[derive(Clone, Copy)]
-struct AtlasEntry {
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-    bearing_x: i32,
-    bearing_y: i32,
-}
-
-/// Location of an image in the image atlas texture array.
-#[derive(Clone, Copy)]
-struct ImageAtlasEntry {
-    layer: u32,
-    x: u32,
-    y: u32,
-    width: u32,
-    height: u32,
-}
-
-/// Per-layer allocation state for row-based packing.
-struct LayerState {
-    cursor_x: u32,
-    cursor_y: u32,
-    row_height: u32,
 }
 
 fn pack_color(
@@ -92,22 +63,10 @@ pub struct Renderer {
     screen_size_buffer: wgpu::Buffer,
     screen_size_bind_group: wgpu::BindGroup,
 
-    atlas_texture: wgpu::Texture,
-    atlas_bind_group: wgpu::BindGroup,
+    glyph_atlas: GlyphAtlas,
+    image_atlas: ImageAtlas,
 
-    image_atlas_texture: wgpu::Texture,
-    image_bind_group: wgpu::BindGroup,
-
-    glyph_cache: HashMap<(usize, u16), AtlasEntry>,
-    atlas_cursor_x: u32,
-    atlas_cursor_y: u32,
-    atlas_row_height: u32,
     bg_alpha: u8,
-
-    // Image atlas state.
-    image_layers: Vec<LayerState>,
-    image_entries: HashMap<u64, ImageAtlasEntry>,
-    uploaded_image_ids: HashSet<u64>,
 }
 
 impl Renderer {
@@ -205,148 +164,8 @@ impl Renderer {
             }],
         });
 
-        // ---- Glyph atlas ----
-        let atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph_atlas"),
-            size: wgpu::Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let atlas_view = atlas_texture.create_view(&wgpu::TextureViewDescriptor::default());
-        let atlas_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let atlas_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("atlas_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 2,
-                    visibility: wgpu::ShaderStages::VERTEX,
-                    ty: wgpu::BindingType::Buffer {
-                        ty: wgpu::BufferBindingType::Uniform,
-                        has_dynamic_offset: false,
-                        min_binding_size: NonZeroU64::new(8),
-                    },
-                    count: None,
-                },
-            ],
-        });
-
-        let atlas_size_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
-            label: Some("atlas_size"),
-            contents: bytemuck::cast_slice(&[ATLAS_SIZE as f32, ATLAS_SIZE as f32]),
-            usage: wgpu::BufferUsages::UNIFORM,
-        });
-
-        let atlas_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("atlas_bg"),
-            layout: &atlas_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&atlas_sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: atlas_size_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
-        // ---- Image atlas (2D texture array) ----
-        let image_atlas_texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("image_atlas"),
-            size: wgpu::Extent3d {
-                width: IMAGE_ATLAS_SIZE,
-                height: IMAGE_ATLAS_SIZE,
-                depth_or_array_layers: IMAGE_ATLAS_LAYERS,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let image_atlas_view = image_atlas_texture.create_view(&wgpu::TextureViewDescriptor {
-            dimension: Some(wgpu::TextureViewDimension::D2Array),
-            ..Default::default()
-        });
-        let image_sampler = device.create_sampler(&wgpu::SamplerDescriptor {
-            mag_filter: wgpu::FilterMode::Nearest,
-            min_filter: wgpu::FilterMode::Nearest,
-            ..Default::default()
-        });
-
-        let image_layout = device.create_bind_group_layout(&wgpu::BindGroupLayoutDescriptor {
-            label: Some("image_layout"),
-            entries: &[
-                wgpu::BindGroupLayoutEntry {
-                    binding: 0,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Texture {
-                        sample_type: wgpu::TextureSampleType::Float { filterable: true },
-                        view_dimension: wgpu::TextureViewDimension::D2Array,
-                        multisampled: false,
-                    },
-                    count: None,
-                },
-                wgpu::BindGroupLayoutEntry {
-                    binding: 1,
-                    visibility: wgpu::ShaderStages::FRAGMENT,
-                    ty: wgpu::BindingType::Sampler(wgpu::SamplerBindingType::Filtering),
-                    count: None,
-                },
-            ],
-        });
-
-        let image_bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("image_bg"),
-            layout: &image_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&image_atlas_view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&image_sampler),
-                },
-            ],
-        });
+        let glyph_atlas = GlyphAtlas::new(&device);
+        let image_atlas = ImageAtlas::new(&device);
 
         // ---- Shaders ----
         let bg_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -405,7 +224,10 @@ impl Renderer {
         // ---- Foreground pipeline ----
         let fg_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
             label: Some("fg_pipeline_layout"),
-            bind_group_layouts: &[Some(&screen_size_layout), Some(&atlas_layout)],
+            bind_group_layouts: &[
+                Some(&screen_size_layout),
+                Some(glyph_atlas.bind_group_layout()),
+            ],
             immediate_size: 0,
         });
 
@@ -450,7 +272,10 @@ impl Renderer {
         let image_pipeline_layout =
             device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
                 label: Some("image_pipeline_layout"),
-                bind_group_layouts: &[Some(&screen_size_layout), Some(&image_layout)],
+                bind_group_layouts: &[
+                    Some(&screen_size_layout),
+                    Some(image_atlas.bind_group_layout()),
+                ],
                 immediate_size: 0,
             });
 
@@ -500,33 +325,24 @@ impl Renderer {
             image_pipeline,
             screen_size_buffer,
             screen_size_bind_group,
-            atlas_texture,
-            atlas_bind_group,
-            image_atlas_texture,
-            image_bind_group,
-            glyph_cache: HashMap::new(),
-            atlas_cursor_x: 0,
-            atlas_cursor_y: 0,
-            atlas_row_height: 0,
+            glyph_atlas,
+            image_atlas,
             bg_alpha: (opacity.clamp(0.0, 1.0) * 255.0) as u8,
-            image_layers: vec![LayerState {
-                cursor_x: 0,
-                cursor_y: 0,
-                row_height: 0,
-            }],
-            image_entries: HashMap::new(),
-            uploaded_image_ids: HashSet::new(),
         };
 
         renderer.update_screen_size(size);
 
-        // Pre-cache printable ASCII glyphs.
-        {
-            let ascii_chars: Vec<char> = (' '..='~').collect();
-            let shaped = font_system.shape_row(&ascii_chars);
-            for sg in &shaped {
-                renderer.ensure_glyph_cached(font_system, sg.font_index, sg.glyph_id);
-            }
+        // Pre-cache printable ASCII glyphs so the first few frames don't
+        // rasterize them on demand.
+        let ascii_chars: Vec<char> = (' '..='~').collect();
+        let shaped = font_system.shape_row(&ascii_chars);
+        for sg in &shaped {
+            renderer.glyph_atlas.ensure_cached(
+                &renderer.queue,
+                font_system,
+                sg.font_index,
+                sg.glyph_id,
+            );
         }
 
         renderer
@@ -553,151 +369,6 @@ impl Renderer {
             &self.screen_size_buffer,
             0,
             bytemuck::cast_slice(&[size.width as f32, size.height as f32, 0.0f32, 0.0f32]),
-        );
-    }
-
-    /// Look up a glyph for a character. Uses char→glyph_index cache to skip
-    /// shaping on subsequent frames. Only calls FontSystem on first encounter.
-    /// Ensure a glyph is cached in the atlas. Rasterizes on first encounter.
-    fn ensure_glyph_cached(
-        &mut self,
-        font_system: &FontSystem,
-        font_index: usize,
-        glyph_id: u16,
-    ) -> Option<AtlasEntry> {
-        let key = (font_index, glyph_id);
-
-        if let Some(entry) = self.glyph_cache.get(&key).copied() {
-            return Some(entry);
-        }
-
-        let glyph = font_system.rasterize_glyph(font_index, glyph_id);
-
-        if glyph.width == 0 || glyph.height == 0 {
-            let entry = AtlasEntry {
-                x: 0,
-                y: 0,
-                width: 0,
-                height: 0,
-                bearing_x: glyph.bearing_x,
-                bearing_y: glyph.bearing_y,
-            };
-            self.glyph_cache.insert(key, entry);
-            return Some(entry);
-        }
-
-        if self.atlas_cursor_x + glyph.width > ATLAS_SIZE {
-            self.atlas_cursor_x = 0;
-            self.atlas_cursor_y += self.atlas_row_height;
-            self.atlas_row_height = 0;
-        }
-
-        if self.atlas_cursor_y + glyph.height > ATLAS_SIZE {
-            log::warn!("glyph atlas full, cannot cache glyph {glyph_id}");
-            return None;
-        }
-
-        let entry = AtlasEntry {
-            x: self.atlas_cursor_x,
-            y: self.atlas_cursor_y,
-            width: glyph.width,
-            height: glyph.height,
-            bearing_x: glyph.bearing_x,
-            bearing_y: glyph.bearing_y,
-        };
-
-        upload_glyph(&self.queue, &self.atlas_texture, &entry, &glyph);
-
-        self.atlas_cursor_x += glyph.width;
-        self.atlas_row_height = self.atlas_row_height.max(glyph.height);
-        self.glyph_cache.insert(key, entry);
-
-        Some(entry)
-    }
-
-    /// Allocate space in the image atlas for an image of the given dimensions.
-    fn allocate_image_slot(
-        &mut self,
-        width: u32,
-        height: u32,
-    ) -> Option<ImageAtlasEntry> {
-        if width > IMAGE_ATLAS_SIZE || height > IMAGE_ATLAS_SIZE {
-            log::warn!(
-                "sixel image too large for atlas: {width}x{height} (max {IMAGE_ATLAS_SIZE})"
-            );
-            return None;
-        }
-
-        // Try to fit in an existing layer.
-        for (layer_idx, layer) in self.image_layers.iter_mut().enumerate() {
-            if layer.cursor_x + width > IMAGE_ATLAS_SIZE {
-                layer.cursor_x = 0;
-                layer.cursor_y += layer.row_height;
-                layer.row_height = 0;
-            }
-            if layer.cursor_y + height <= IMAGE_ATLAS_SIZE {
-                let entry = ImageAtlasEntry {
-                    layer: layer_idx as u32,
-                    x: layer.cursor_x,
-                    y: layer.cursor_y,
-                    width,
-                    height,
-                };
-                layer.cursor_x += width;
-                layer.row_height = layer.row_height.max(height);
-                return Some(entry);
-            }
-        }
-
-        // Need a new layer.
-        if self.image_layers.len() as u32 >= IMAGE_ATLAS_LAYERS {
-            log::warn!("image atlas full, all {IMAGE_ATLAS_LAYERS} layers used");
-            return None;
-        }
-
-        let layer_idx = self.image_layers.len() as u32;
-        self.image_layers.push(LayerState {
-            cursor_x: width,
-            cursor_y: 0,
-            row_height: height,
-        });
-
-        Some(ImageAtlasEntry {
-            layer: layer_idx,
-            x: 0,
-            y: 0,
-            width,
-            height,
-        })
-    }
-
-    fn upload_image(
-        &self,
-        image: &SixelImage,
-        entry: &ImageAtlasEntry,
-    ) {
-        self.queue.write_texture(
-            wgpu::TexelCopyTextureInfo {
-                texture: &self.image_atlas_texture,
-                mip_level: 0,
-                origin: wgpu::Origin3d {
-                    x: entry.x,
-                    y: entry.y,
-                    z: entry.layer,
-                },
-                aspect: wgpu::TextureAspect::All,
-            },
-            &image.pixels,
-            wgpu::TexelCopyBufferLayout {
-                offset: 0,
-                bytes_per_row: Some(image.width * 4),
-                rows_per_image: None,
-            },
-            wgpu::Extent3d {
-                width: image.width,
-                height: image.height,
-                depth_or_array_layers: 1,
-            },
         );
     }
 
@@ -758,20 +429,29 @@ impl Renderer {
             let shaped = font_system.shape_row(&grid_row.chars);
 
             for sg in &shaped {
-                let entry = match self.ensure_glyph_cached(font_system, sg.font_index, sg.glyph_id)
-                {
+                let slot = match self.glyph_atlas.ensure_cached(
+                    &self.queue,
+                    font_system,
+                    sg.font_index,
+                    sg.glyph_id,
+                ) {
                     Some(e) => e,
                     None => continue,
                 };
 
-                if entry.width == 0 || entry.height == 0 {
+                if slot.is_empty() {
                     continue;
                 }
 
-                let gx = sg.col as f32 * cell_w + entry.bearing_x as f32 + sg.x_offset;
-                let gy = y + baseline - entry.bearing_y as f32 - sg.y_offset;
-                let gw = entry.width as f32;
-                let gh = entry.height as f32;
+                let sx = slot.x();
+                let sy = slot.y();
+                let sw = slot.width();
+                let sh = slot.height();
+
+                let gx = sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+                let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
+                let gw = sw as f32;
+                let gh = sh as f32;
 
                 let fg_cell = if terminal.is_cell_selected(row, sg.col as u32) {
                     &grid_row.bg[sg.col as usize]
@@ -783,25 +463,22 @@ impl Renderer {
                 fg_vertices.extend_from_slice(&[
                     FgVertex {
                         pos: [gx, gy],
-                        uv: [entry.x as f32, entry.y as f32],
+                        uv: [sx as f32, sy as f32],
                         color: fg_color,
                     },
                     FgVertex {
                         pos: [gx + gw, gy],
-                        uv: [(entry.x + entry.width) as f32, entry.y as f32],
+                        uv: [(sx + sw) as f32, sy as f32],
                         color: fg_color,
                     },
                     FgVertex {
                         pos: [gx, gy + gh],
-                        uv: [entry.x as f32, (entry.y + entry.height) as f32],
+                        uv: [sx as f32, (sy + sh) as f32],
                         color: fg_color,
                     },
                     FgVertex {
                         pos: [gx + gw, gy + gh],
-                        uv: [
-                            (entry.x + entry.width) as f32,
-                            (entry.y + entry.height) as f32,
-                        ],
+                        uv: [(sx + sw) as f32, (sy + sh) as f32],
                         color: fg_color,
                     },
                 ]);
@@ -840,30 +517,30 @@ impl Renderer {
         let mut image_vertices: Vec<ImageVertex> = Vec::new();
         let mut image_indices: Vec<u32> = Vec::new();
 
-        let mut live_ids = HashSet::<u64>::new();
         for vis in terminal.visible_images() {
-            live_ids.insert(vis.id);
-
-            // Upload to atlas on first encounter.
-            if !self.uploaded_image_ids.contains(&vis.id)
-                && let Some(entry) = self.allocate_image_slot(vis.image.width, vis.image.height)
+            let entry = match self
+                .image_atlas
+                .ensure_cached(&self.queue, vis.id, vis.image)
             {
-                self.upload_image(vis.image, &entry);
-                self.image_entries.insert(vis.id, entry);
-                self.uploaded_image_ids.insert(vis.id);
-            }
+                Some(e) => e,
+                None => continue,
+            };
 
-            if let Some(entry) = self.image_entries.get(&vis.id) {
-                let x = vis.screen_col as f32 * cell_w;
-                let y = vis.screen_row as f32 * cell_h;
-                let w = vis.image.width as f32;
-                let h = vis.image.height as f32;
+            let base_x = vis.screen_col as f32 * cell_w;
+            let base_y = vis.screen_row as f32 * cell_h;
 
-                let u0 = entry.x as f32 / IMAGE_ATLAS_SIZE as f32;
-                let v0 = entry.y as f32 / IMAGE_ATLAS_SIZE as f32;
-                let u1 = (entry.x + entry.width) as f32 / IMAGE_ATLAS_SIZE as f32;
-                let v1 = (entry.y + entry.height) as f32 / IMAGE_ATLAS_SIZE as f32;
-                let layer = entry.layer as f32;
+            for tile in &entry.tiles {
+                let a = &tile.alloc;
+                let x = base_x + tile.src_x as f32;
+                let y = base_y + tile.src_y as f32;
+                let w = a.width as f32;
+                let h = a.height as f32;
+
+                let u0 = a.x as f32 / IMAGE_ATLAS_SIZE as f32;
+                let v0 = a.y as f32 / IMAGE_ATLAS_SIZE as f32;
+                let u1 = (a.x + a.width) as f32 / IMAGE_ATLAS_SIZE as f32;
+                let v1 = (a.y + a.height) as f32 / IMAGE_ATLAS_SIZE as f32;
+                let layer = a.layer as f32;
 
                 let ii = image_vertices.len() as u32;
                 image_vertices.extend_from_slice(&[
@@ -887,10 +564,6 @@ impl Renderer {
                 image_indices.extend_from_slice(&[ii, ii + 1, ii + 2, ii + 2, ii + 1, ii + 3]);
             }
         }
-
-        // Clean up atlas entries for images no longer in the terminal.
-        self.uploaded_image_ids.retain(|id| live_ids.contains(id));
-        self.image_entries.retain(|id, _| live_ids.contains(id));
 
         // ---- Acquire surface texture ----
         let frame = match self.surface.get_current_texture() {
@@ -989,7 +662,7 @@ impl Renderer {
 
             pass.set_pipeline(&self.fg_pipeline);
             pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_bind_group(1, &self.atlas_bind_group, &[]);
+            pass.set_bind_group(1, self.glyph_atlas.bind_group(), &[]);
             pass.set_vertex_buffer(0, fg_vbuf.slice(..));
             pass.set_index_buffer(fg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..fg_indices.len() as u32, 0, 0..1);
@@ -1028,7 +701,7 @@ impl Renderer {
 
             pass.set_pipeline(&self.image_pipeline);
             pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_bind_group(1, &self.image_bind_group, &[]);
+            pass.set_bind_group(1, self.image_atlas.bind_group(), &[]);
             pass.set_vertex_buffer(0, img_vbuf.slice(..));
             pass.set_index_buffer(img_ibuf.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(0..image_indices.len() as u32, 0, 0..1);
@@ -1037,35 +710,4 @@ impl Renderer {
         self.queue.submit(Some(encoder.finish()));
         frame.present();
     }
-}
-
-fn upload_glyph(
-    queue: &wgpu::Queue,
-    texture: &wgpu::Texture,
-    entry: &AtlasEntry,
-    glyph: &RasterizedGlyph,
-) {
-    queue.write_texture(
-        wgpu::TexelCopyTextureInfo {
-            texture,
-            mip_level: 0,
-            origin: wgpu::Origin3d {
-                x: entry.x,
-                y: entry.y,
-                z: 0,
-            },
-            aspect: wgpu::TextureAspect::All,
-        },
-        &glyph.bitmap,
-        wgpu::TexelCopyBufferLayout {
-            offset: 0,
-            bytes_per_row: Some(glyph.width),
-            rows_per_image: None,
-        },
-        wgpu::Extent3d {
-            width: glyph.width,
-            height: glyph.height,
-            depth_or_array_layers: 1,
-        },
-    );
 }
