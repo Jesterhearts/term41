@@ -18,8 +18,11 @@ pub struct PlacedImage {
 pub struct VisibleImage<'a> {
     pub image: &'a SixelImage,
     pub id: u64,
-    /// Row relative to the top of the viewport (0 = top).
-    pub screen_row: u32,
+    /// Row of the image's top edge relative to the top of the viewport.
+    /// Negative when the image's top is scrolled above the viewport; the
+    /// renderer emits a quad extending above the screen, which the GPU clips
+    /// so only the visible portion is drawn.
+    pub screen_row: i32,
     /// Column position.
     pub screen_col: u32,
 }

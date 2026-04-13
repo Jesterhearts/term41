@@ -510,19 +510,24 @@ impl Terminal {
         self.active.offset = 0;
     }
 
-    /// Return images whose top-left falls within the current viewport,
-    /// with screen-relative row/col positions.
+    /// Return images whose row range overlaps the current viewport, with
+    /// screen-relative row/col positions. `screen_row` is negative when the
+    /// image's top edge is above the viewport so the renderer can offset the
+    /// quad upward and let the GPU clip to the visible portion.
     pub fn visible_images(&self) -> impl Iterator<Item = VisibleImage<'_>> {
         let viewport_top =
             self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
         let viewport_bottom = viewport_top + self.viewport.rows as usize;
+        let cell_height = self.cell_height;
 
         self.active.images.values().filter_map(move |img| {
-            if img.row >= viewport_top && img.row < viewport_bottom {
+            let img_rows = img.image.height.div_ceil(cell_height).max(1) as usize;
+            let img_bottom = img.row + img_rows;
+            if img.row < viewport_bottom && img_bottom > viewport_top {
                 Some(VisibleImage {
                     image: &img.image,
                     id: img.id,
-                    screen_row: (img.row - viewport_top) as u32,
+                    screen_row: img.row as i32 - viewport_top as i32,
                     screen_col: img.col,
                 })
             } else {
