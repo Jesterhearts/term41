@@ -18,7 +18,11 @@ use crate::renderer::shelf::ShelfPacker;
 pub const ATLAS_SIZE: u32 = 1024;
 const CACHE_CAPACITY: usize = 2048;
 
-pub type GlyphKey = (usize, u16);
+/// `(font_index, glyph_id, cells_wide)`. Cluster span is part of the key
+/// because colour rasterisers size their output to the cluster's visual
+/// footprint — the same `glyph_id` rendered at width 1 versus width 2
+/// yields different bitmaps.
+pub type GlyphKey = (usize, u16, u8);
 
 /// A cached glyph: its atlas region plus the font metrics needed to position
 /// the quad. Empty glyphs (zero-size whitespace) carry no allocation.
@@ -172,14 +176,15 @@ impl GlyphAtlas {
         font_system: &FontSystem,
         font_index: usize,
         glyph_id: u16,
+        cells_wide: u8,
     ) -> Option<GlyphSlot> {
-        let key = (font_index, glyph_id);
+        let key = (font_index, glyph_id, cells_wide);
 
         if let Some(slot) = self.cache.get(&key).copied() {
             return Some(slot);
         }
 
-        let glyph = font_system.rasterize_glyph(font_index, glyph_id);
+        let glyph = font_system.rasterize_glyph(font_index, glyph_id, cells_wide as u32);
 
         if glyph.width == 0 || glyph.height == 0 {
             let slot = GlyphSlot {

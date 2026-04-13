@@ -48,6 +48,13 @@ pub struct ShapedGlyph {
     pub glyph_id: u16,
     pub font_index: usize,
     pub col: u16,
+    /// Number of terminal cells this glyph occupies horizontally — derived
+    /// from the column gap to the next shaped glyph (or the row end). For a
+    /// ZWJ ligature the font collapses into a single glyph, this counts all
+    /// the cells the ligated cluster claims, so colour rasterisers can scale
+    /// the emoji to fit its visual footprint instead of squashing it into a
+    /// single cell.
+    pub cells_wide: u8,
     pub x_offset: f32,
     pub y_offset: f32,
 }
@@ -294,6 +301,8 @@ impl FontSystem {
                         glyph_id,
                         font_index: font_idx,
                         col,
+                        // Refined once shaping completes — see `assign_cells_wide`.
+                        cells_wide: 1,
                         x_offset: pos.x_offset as f32 * scale,
                         y_offset: pos.y_offset as f32 * scale,
                     });
@@ -304,11 +313,13 @@ impl FontSystem {
                     .enumerate()
                     .all(|(i, &has)| has || cells[i] == " " || cells[i].is_empty());
                 if all_covered {
+                    assign_cells_wide(&mut result, cells.len() as u16);
                     return result;
                 }
             }
         }
 
+        assign_cells_wide(&mut result, cells.len() as u16);
         result
     }
 
@@ -323,6 +334,7 @@ impl FontSystem {
         &self,
         font_index: usize,
         glyph_index: u16,
+        cells_wide: u32,
     ) -> RasterizedGlyph {
         let loaded = &self.fonts[font_index];
         let scale = self.font_size / loaded.units_per_em;
@@ -331,23 +343,25 @@ impl FontSystem {
             return empty_glyph();
         };
 
-        if let Some(glyph) =
-            svg::rasterize_svg(&font, glyph_index, self.cell_width, self.cell_height)
+        // Colour rasterisers receive the cell box scaled to the cluster's
+        // visual span. The outline path doesn't read `cell_width` at all —
+        // glyf positioning derives entirely from the glyph's own bounding
+        // box and `font_size` — so it sees no behavioural change when a
+        // cluster covers more than one cell.
+        let target_w = self.cell_width * cells_wide.max(1);
+
+        if let Some(glyph) = svg::rasterize_svg(&font, glyph_index, target_w, self.cell_height) {
+            return glyph;
+        }
+        if let Some(glyph) = colr::rasterize_colr_v1(&font, glyph_index, target_w, self.cell_height)
         {
             return glyph;
         }
-        if let Some(glyph) =
-            colr::rasterize_colr_v1(&font, glyph_index, self.cell_width, self.cell_height)
+        if let Some(glyph) = bitmap::rasterize_sbix(&font, glyph_index, target_w, self.cell_height)
         {
             return glyph;
         }
-        if let Some(glyph) =
-            bitmap::rasterize_sbix(&font, glyph_index, self.cell_width, self.cell_height)
-        {
-            return glyph;
-        }
-        if let Some(glyph) =
-            bitmap::rasterize_cbdt(&font, glyph_index, self.cell_width, self.cell_height)
+        if let Some(glyph) = bitmap::rasterize_cbdt(&font, glyph_index, target_w, self.cell_height)
         {
             return glyph;
         }
@@ -369,6 +383,35 @@ impl FontSystem {
             }
             _ => empty_glyph(),
         }
+    }
+}
+
+/// Walk the shaped output left-to-right and stamp each glyph with the
+/// number of terminal cells it occupies. The span is the gap between this
+/// glyph's column and the next *strictly later* glyph's column (or the row
+/// end). Glyphs that share a column — base + combining marks, or one
+/// cluster that produced multiple glyphs — all get the same span, which is
+/// what colour rasterisers need to size emoji to their visual footprint.
+fn assign_cells_wide(
+    result: &mut [ShapedGlyph],
+    n_cells: u16,
+) {
+    result.sort_by(|a, b| {
+        a.col.cmp(&b.col).then(
+            a.x_offset
+                .partial_cmp(&b.x_offset)
+                .unwrap_or(std::cmp::Ordering::Equal),
+        )
+    });
+    for i in 0..result.len() {
+        let here = result[i].col;
+        let next_after = result[i + 1..]
+            .iter()
+            .find(|s| s.col > here)
+            .map(|s| s.col)
+            .unwrap_or(n_cells);
+        let span = next_after.saturating_sub(here).max(1);
+        result[i].cells_wide = span.min(u8::MAX as u16) as u8;
     }
 }
 
@@ -752,7 +795,7 @@ mod tests {
                 if cell == " " {
                     continue;
                 }
-                let raster = fs.rasterize_glyph(sg.font_index, sg.glyph_id);
+                let raster = fs.rasterize_glyph(sg.font_index, sg.glyph_id, sg.cells_wide as u32);
                 assert!(
                     raster.width > 0 && raster.height > 0,
                     "glyph {} for {cell:?} at col {} in {text:?} must rasterize, got {}x{}",

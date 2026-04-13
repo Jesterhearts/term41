@@ -69,17 +69,17 @@ fn render_node(
     pad: u32,
 ) -> Option<RasterizedGlyph> {
     // `render_node` translates the node so its bounding box sits at pixmap
-    // origin; we get to choose where in the pixmap that origin lands. Place
-    // the scaled bbox centered horizontally and flush to the top-pad line —
-    // matches the layout the other emoji rasterisers produce.
+    // origin; we choose where in the pixmap that origin lands.
     let bbox = node.abs_layer_bounding_box()?;
-    let scaled_w = (bbox.width() * scale).ceil() as u32;
-    let scaled_h = (bbox.height() * scale).ceil() as u32;
-    let out_w = scaled_w.max(cell_width) + 2 * pad;
-    let out_h = scaled_h.max(cell_height) + 2 * pad;
-
-    let x_off = pad as f32 + ((cell_width as f32 - scaled_w as f32) * 0.5).max(0.0);
-    let y_off = pad as f32;
+    let scale = clamp_scale(scale, bbox.width(), bbox.height(), cell_width, cell_height);
+    let (out_w, out_h, x_off, y_off) = layout(
+        bbox.width(),
+        bbox.height(),
+        scale,
+        cell_width,
+        cell_height,
+        pad,
+    );
 
     let mut pixmap = Pixmap::new(out_w, out_h)?;
     let transform = Transform::from_translate(x_off, y_off).pre_scale(scale, scale);
@@ -97,16 +97,65 @@ fn render_tree(
     pad: u32,
 ) -> Option<RasterizedGlyph> {
     let size = tree.size();
-    let scaled_w = (size.width() * scale).ceil() as u32;
-    let scaled_h = (size.height() * scale).ceil() as u32;
-    let out_w = scaled_w.max(cell_width) + 2 * pad;
-    let out_h = scaled_h.max(cell_height) + 2 * pad;
+    let scale = clamp_scale(scale, size.width(), size.height(), cell_width, cell_height);
+    let (out_w, out_h, x_off, y_off) = layout(
+        size.width(),
+        size.height(),
+        scale,
+        cell_width,
+        cell_height,
+        pad,
+    );
 
     let mut pixmap = Pixmap::new(out_w, out_h)?;
-    let transform = Transform::from_translate(pad as f32, pad as f32).pre_scale(scale, scale);
+    let transform = Transform::from_translate(x_off, y_off).pre_scale(scale, scale);
     resvg::render(tree, transform, &mut pixmap.as_mut());
 
     Some(finish(pixmap, out_w, out_h, ascent_px, pad))
+}
+
+/// Cap the scale so the rendered content fits within `cell_width ×
+/// cell_height`, preserving aspect. SVG glyphs reach this code with a scale
+/// that just fit vertical line height; for a width=1 cluster (cell_width <
+/// cell_height) the content would otherwise overflow into the next cell.
+fn clamp_scale(
+    scale: f32,
+    src_w: f32,
+    src_h: f32,
+    cell_width: u32,
+    cell_height: u32,
+) -> f32 {
+    let mut scale = scale;
+    let scaled_w = src_w * scale;
+    let scaled_h = src_h * scale;
+    if scaled_w > cell_width as f32 {
+        scale *= cell_width as f32 / scaled_w;
+    }
+    if scaled_h > cell_height as f32 {
+        scale *= cell_height as f32 / scaled_h;
+    }
+    scale
+}
+
+/// Pixmap dimensions and the in-pixmap offset that places the scaled content
+/// centered inside the cell box (with `pad` of slack on every side). Bitmap
+/// stays at `cell_* + 2*pad` so colour glyphs share one consistent layout
+/// contract regardless of how much the artwork was shrunk.
+fn layout(
+    src_w: f32,
+    src_h: f32,
+    scale: f32,
+    cell_width: u32,
+    cell_height: u32,
+    pad: u32,
+) -> (u32, u32, f32, f32) {
+    let scaled_w = (src_w * scale).round() as u32;
+    let scaled_h = (src_h * scale).round() as u32;
+    let out_w = cell_width + 2 * pad;
+    let out_h = cell_height + 2 * pad;
+    let x_off = pad as f32 + ((cell_width as f32 - scaled_w as f32) * 0.5).max(0.0);
+    let y_off = pad as f32 + ((cell_height as f32 - scaled_h as f32) * 0.5).max(0.0);
+    (out_w, out_h, x_off, y_off)
 }
 
 fn finish(

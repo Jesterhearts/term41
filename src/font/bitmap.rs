@@ -186,17 +186,16 @@ fn place_emoji(
     let out_w = cell_width + 2 * pad;
     let out_h = cell_height + 2 * pad;
 
-    // Emoji font's own vertical metrics. Fit the full ascent+|descent| span
-    // into cell_height so the visible glyph matches the surrounding text's
-    // cap height without overflowing. Fallback path keeps the emoji at cell
-    // height if we can't read the metrics — better than collapsing.
-    let (scale_y, ascent_px) = match font.hhea() {
+    // Pick the source → pixel scale. Start from the font-metric ratio that
+    // fits the emoji's natural line height into `cell_height`, then cap it
+    // by the width budget so a width=1 cluster doesn't overflow into the
+    // neighbouring cell. The height fallback (no `hhea`) keeps the emoji at
+    // cell height — better than collapsing.
+    let (mut scale, ascent_px) = match font.hhea() {
         Ok(hhea) => {
             let ascent_units = hhea.ascender().to_i16() as f32;
             let descent_units = -hhea.descender().to_i16() as f32;
             let line_h = (ascent_units + descent_units).max(1.0);
-            // Convert font units → pixels, then scale source pixels so that
-            // ppem → line_h px.
             let upem = font
                 .head()
                 .map(|h| h.units_per_em() as f32)
@@ -210,13 +209,15 @@ fn place_emoji(
             (scale, cell_height as f32)
         }
     };
-    // Preserve source aspect.
-    let scale = scale_y;
+    let natural_w = src.width() as f32 * scale;
+    if natural_w > cell_width as f32 {
+        scale *= cell_width as f32 / natural_w;
+    }
 
     let scaled_w = (src.width() as f32 * scale).round() as u32;
     let scaled_h = (src.height() as f32 * scale).round() as u32;
-    // Horizontal center inside the cell; vertical — align baseline with
-    // ascent_px so the emoji sits the way a COLR-painted one would.
+    // Center horizontally and vertically inside the cell — keeps width=1
+    // emoji visually balanced rather than crammed against the top-left.
     let x_off = pad as i32 + ((cell_width as i32 - scaled_w as i32) / 2).max(0);
     let y_off = pad as i32 + ((cell_height as i32 - scaled_h as i32) / 2).max(0);
 

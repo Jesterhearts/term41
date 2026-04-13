@@ -351,6 +351,7 @@ impl Renderer {
                 font_system,
                 sg.font_index,
                 sg.glyph_id,
+                sg.cells_wide,
             );
         }
 
@@ -443,6 +444,7 @@ impl Renderer {
                     font_system,
                     sg.font_index,
                     sg.glyph_id,
+                    sg.cells_wide,
                 ) {
                     Some(e) => e,
                     None => continue,

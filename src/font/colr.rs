@@ -56,15 +56,25 @@ pub fn rasterize_colr_v1(
         .ok()
         .flatten()?;
 
-    // Emoji font's own vertical metrics. We fit the emoji's natural line
-    // height (ascent + |descent|) to the cell height so the glyph ends up
-    // roughly the same size as monospace letters in the primary font.
+    // Emoji font's own horizontal metrics. We fit the emoji's natural line
+    // height (ascent + |descent|) to `cell_height`, and additionally cap the
+    // scale so the rendered ink fits `cell_width`. `ascent_units` is the
+    // closer proxy for visual ink extent than `line_height_units` — most
+    // emoji occupy the above-baseline region and the descender area stays
+    // empty — so width/height centering uses the ascent box rather than the
+    // em box.
     let hhea = font.hhea().ok()?;
     let ascent_units = hhea.ascender().to_i16() as f32;
     let descent_units = -hhea.descender().to_i16() as f32;
     let line_height_units = (ascent_units + descent_units).max(1.0);
-    let scale = cell_height as f32 / line_height_units;
-    let ascent_px = ascent_units * scale;
+    let scale_h = cell_height as f32 / line_height_units;
+    let scale_w = cell_width as f32 / ascent_units.max(1.0);
+    let scale = scale_h.min(scale_w);
+    // `bearing_y` describes where the **bitmap** sits relative to the line
+    // baseline — the renderer doesn't know we shrank the artwork. Use the
+    // un-shrunk ascent so the bitmap rectangle still aligns with the cell
+    // box; the in-bitmap centering below moves only the artwork inside it.
+    let ascent_px_for_bearing = ascent_units * scale_h;
 
     // Bitmap size — match the cell with small padding for ink that slightly
     // exceeds the advance/ascent.
@@ -72,11 +82,15 @@ pub fn rasterize_colr_v1(
     let width = cell_width as i32 + pad * 2;
     let height = cell_height as i32 + pad * 2;
 
-    // Base transform: font units (y-up) → pixel coords (y-down). The origin
-    // (baseline at x=0) lands at (pad, pad + ascent_px) so both ink above
-    // and below the baseline fits within the allocated bitmap.
-    let base = Transform::scale(scale, -scale)
-        .then_translate(raqote::Vector::new(pad as f32, pad as f32 + ascent_px));
+    // Base transform: font units (y-up) → pixel coords (y-down). Center the
+    // approximate ink box (ascent-sized, square) inside the cell. The em
+    // box would leave an unused descender strip that biases the glyph
+    // upward; the ascent box is a better fit for where the ink actually is.
+    let ink_box = ascent_units * scale;
+    let x_origin = pad as f32 + ((cell_width as f32 - ink_box) * 0.5).max(0.0);
+    let y_origin = pad as f32 + ((cell_height as f32 - ink_box) * 0.5).max(0.0) + ink_box;
+    let base =
+        Transform::scale(scale, -scale).then_translate(raqote::Vector::new(x_origin, y_origin));
 
     let mut painter = Painter {
         colr: colr.clone(),
@@ -97,10 +111,7 @@ pub fn rasterize_colr_v1(
         width: width as u32,
         height: height as u32,
         bearing_x: -pad,
-        // bearing_y is measured from baseline upward; our base transform put
-        // the baseline at (pad + ascent), so the top of the bitmap sits
-        // `pad + ascent` above the baseline.
-        bearing_y: (pad as f32 + ascent_px) as i32,
+        bearing_y: (pad as f32 + ascent_px_for_bearing) as i32,
         is_color: true,
     })
 }
