@@ -114,6 +114,8 @@ scrollback_lines = 10000
 
 ## License
 
+term41 is released into the public domain under [The Unlicense](LICENSE).
+
 The embedded Fairfax HD font is distributed under the SIL Open Font License; see
 [`resources/fonts/FairfaxHD-OFL.txt`](resources/fonts/FairfaxHD-OFL.txt).
 
