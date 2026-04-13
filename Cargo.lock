@@ -2201,6 +2201,7 @@ dependencies = [
  "smol_str 0.3.6",
  "toml",
  "unicode-segmentation",
+ "unicode-width",
  "wgpu",
  "winit",
 ]

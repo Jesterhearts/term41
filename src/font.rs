@@ -272,11 +272,12 @@ impl FontSystem {
                 });
             }
 
-            // If all non-space columns are filled, stop trying fonts.
+            // If all non-space columns are filled, stop trying fonts. Empty
+            // cells are wide-glyph continuations — their anchor handled them.
             let all_covered = has_glyph
                 .iter()
                 .enumerate()
-                .all(|(i, &has)| has || cells[i] == " ");
+                .all(|(i, &has)| has || cells[i] == " " || cells[i].is_empty());
             if all_covered {
                 break;
             }
