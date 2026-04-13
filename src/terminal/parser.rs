@@ -89,8 +89,26 @@ pub(super) fn put_char(
     screen.cursor.col += width as u32;
 }
 
-fn is_wide_anchor(cell: &SmolStr) -> bool {
-    UnicodeWidthStr::width(cell.as_str()) >= 2
+/// True if the cell at `col` is the anchor of a wide glyph — it holds
+/// non-blank text and its right neighbour is the empty continuation
+/// sentinel we placed when laying out the wide glyph. Consulting the grid
+/// state is more robust than re-measuring the cell text: `unicode-width`
+/// disagrees with glibc `wcswidth` on VS16-upgraded emoji (e.g. `❤️`, which
+/// `unicode-width` reports as width 2 but `wcswidth` reports as 1), and we
+/// keep such clusters single-cell to stay in sync with the shell's cursor
+/// tracking. Checking neighbour emptiness reflects the physical invariant.
+fn is_wide_anchor_at(
+    row: &Row,
+    col: usize,
+) -> bool {
+    let Some(anchor) = row.cells.get(col) else {
+        return false;
+    };
+    let Some(right) = row.cells.get(col + 1) else {
+        return false;
+    };
+    let anchor_str = anchor.as_str();
+    !anchor_str.is_empty() && anchor_str != " " && right.as_str().is_empty()
 }
 
 /// Keep the wide-anchor/continuation invariant intact across an overwrite.
@@ -103,11 +121,11 @@ fn break_wide_glyphs_around_write(
     col: usize,
     width: usize,
 ) {
-    if col > 0 && is_wide_anchor(&row.cells[col - 1]) {
+    if col > 0 && is_wide_anchor_at(row, col - 1) {
         row.cells[col - 1] = blank_cell();
     }
     let last = col + width - 1;
-    if last < row.cells.len() && is_wide_anchor(&row.cells[last]) {
+    if is_wide_anchor_at(row, last) {
         let cont = last + 1;
         if cont < row.cells.len() {
             row.cells[cont] = blank_cell();
@@ -169,6 +187,13 @@ fn try_extend_prev_cell(
         return false;
     }
 
+    // Fold without widening the cell. VS16 etc. can bump `unicode-width` on
+    // the combined string (e.g. `❤` + `VS16` → 2), but glibc `wcswidth` —
+    // which the host shell uses to track cursor columns — still reports 1.
+    // Matching wcswidth keeps backspace/cursor-movement in sync with
+    // readline; `is_wide_anchor_at` looks at the grid state (continuation
+    // cell to the right) rather than re-measuring this text, so the next
+    // write won't misidentify the cell as a wide anchor and blank it.
     let mut combined = String::with_capacity(prev.len() + s.len());
     combined.push_str(prev);
     combined.push_str(s);
@@ -486,6 +511,76 @@ mod tests {
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "e\u{0301}");
         assert_eq!(screen.cursor.col, 1);
+    }
+
+    #[test]
+    fn put_char_vs16_emoji_stays_in_single_cell() {
+        let (mut screen, viewport) = setup();
+        // `UnicodeWidthStr::width("❤\u{FE0F}") == 2`, but glibc `wcswidth`
+        // reports 1 because it treats VS16 as a zero-width variation
+        // selector without upgrading the base to emoji presentation. The
+        // host shell tracks cursor position via wcswidth, so our grid must
+        // agree — otherwise a single backspace from readline lands on the
+        // continuation cell and the user can't delete the emoji. Keep the
+        // cluster in one cell; the shaper still sees the full cluster
+        // text and renders it scaled to that cell.
+        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{2764}\u{FE0F}");
+        assert_eq!(
+            screen.grid.rows[r].cells[1].as_str(),
+            " ",
+            "VS16 must not widen the cell — cells[1] stays blank"
+        );
+        assert_eq!(screen.cursor.col, 1);
+    }
+
+    #[test]
+    fn put_char_write_after_vs16_emoji_preserves_the_emoji() {
+        // Reproduces the reported "heart vanishes when you type anything
+        // after it" bug. Before the fix, `is_wide_anchor` re-measured the
+        // cell text with `UnicodeWidthStr` — which returns 2 for "❤\u{FE0F}"
+        // — so `break_wide_glyphs_around_write` treated the single-cell
+        // emoji as a misaligned wide anchor and blanked it. The grid-state
+        // check in `is_wide_anchor_at` looks at the right neighbour
+        // instead, matching the physical layout.
+        let (mut screen, viewport) = setup();
+        feed("\u{2764}\u{FE0F}X".as_bytes(), &mut screen, &viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(
+            screen.grid.rows[r].cells[0].as_str(),
+            "\u{2764}\u{FE0F}",
+            "heart must survive subsequent write"
+        );
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "X");
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn backspace_over_vs16_emoji_moves_one_column() {
+        // Readline sends a single BS to rub out `❤\u{FE0F}` because glibc
+        // `wcswidth` reports its width as 1. The cursor must land on the
+        // anchor column so subsequent rub-out bytes (typically `\b \b`)
+        // clear the cell cleanly; widening the cell into 2 columns would
+        // leave the cursor sitting on the continuation after one BS and
+        // desync the shell's tracking.
+        let (mut screen, viewport) = setup();
+        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &viewport);
+        assert_eq!(screen.cursor.col, 1);
+
+        execute(&mut screen, &viewport, BS);
+        assert_eq!(screen.cursor.col, 0);
+
+        // A full rub-out of `\b \b` from bash lands us back at col 0 with
+        // the cell erased.
+        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &viewport);
+        feed(b"\x08 \x08", &mut screen, &viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), " ");
+        assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
