@@ -44,7 +44,7 @@ pub fn load() -> Config {
     let file: ConfigFile = match toml::from_str(&contents) {
         Ok(f) => f,
         Err(e) => {
-            log::warn!("failed to parse {}: {e}", path.display());
+            warn!("failed to parse {}: {e}", path.display());
             return Config::default();
         }
     };

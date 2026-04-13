@@ -26,6 +26,9 @@ pub type GlyphKey = (usize, u16);
 pub struct GlyphSlot {
     pub bearing_x: i32,
     pub bearing_y: i32,
+    /// True for color glyphs (COLR, emoji bitmaps, …) — the shader samples
+    /// the atlas RGBA directly instead of tinting by the fg color.
+    pub is_color: bool,
     /// `None` for empty glyphs, which never consume atlas space.
     alloc: Option<Allocation>,
 }
@@ -72,7 +75,7 @@ impl GlyphAtlas {
             mip_level_count: 1,
             sample_count: 1,
             dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::R8Unorm,
+            format: wgpu::TextureFormat::Rgba8Unorm,
             usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
             view_formats: &[],
         });
@@ -182,6 +185,7 @@ impl GlyphAtlas {
             let slot = GlyphSlot {
                 bearing_x: glyph.bearing_x,
                 bearing_y: glyph.bearing_y,
+                is_color: glyph.is_color,
                 alloc: None,
             };
             make_room_in_cache(&mut self.cache, &mut self.packer);
@@ -196,10 +200,9 @@ impl GlyphAtlas {
             // Atlas is full; free the LRU entry and retry. Give up if the
             // cache is empty — the glyph simply cannot fit.
             if !evict_one(&mut self.cache, &mut self.packer) {
-                log::warn!(
+                warn!(
                     "glyph {glyph_id} too large for atlas ({}x{})",
-                    glyph.width,
-                    glyph.height
+                    glyph.width, glyph.height
                 );
                 return None;
             }
@@ -210,6 +213,7 @@ impl GlyphAtlas {
         let slot = GlyphSlot {
             bearing_x: glyph.bearing_x,
             bearing_y: glyph.bearing_y,
+            is_color: glyph.is_color,
             alloc: Some(alloc),
         };
         make_room_in_cache(&mut self.cache, &mut self.packer);
@@ -266,7 +270,7 @@ fn upload_glyph(
         &glyph.bitmap,
         wgpu::TexelCopyBufferLayout {
             offset: 0,
-            bytes_per_row: Some(glyph.width),
+            bytes_per_row: Some(glyph.width * 4),
             rows_per_image: None,
         },
         wgpu::Extent3d {

@@ -1,3 +1,7 @@
+mod bitmap;
+mod colr;
+mod svg;
+
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -25,13 +29,18 @@ use smol_str::SmolStr;
 /// The embedded Fairfax HD font (ultimate fallback).
 static FAIRFAX_HD: &[u8] = include_bytes!("../resources/fonts/FairfaxHD.ttf");
 
-/// Rasterized glyph data ready for upload to a texture atlas.
+/// Rasterized glyph data ready for upload to a texture atlas. The bitmap is
+/// always RGBA8 (4 bytes per pixel). Outline glyphs encode their coverage
+/// into the alpha channel with `rgb = 0`; color glyphs (COLR, emoji bitmaps)
+/// encode full colour and set `is_color = true` so the shader samples the
+/// atlas directly instead of tinting by the fg colour.
 pub struct RasterizedGlyph {
     pub bitmap: Vec<u8>,
     pub width: u32,
     pub height: u32,
     pub bearing_x: i32,
     pub bearing_y: i32,
+    pub is_color: bool,
 }
 
 /// A shaped glyph with its position info, ready for rendering.
@@ -48,6 +57,11 @@ struct LoadedFont {
     data: Arc<Vec<u8>>,
     shaper_data: ShaperData,
     units_per_em: f32,
+    /// True if the font carries colour glyph tables (COLR, CBDT, sbix, or
+    /// SVG). Used by shape_row to prefer colour fonts for emoji clusters
+    /// over text fonts that might also have a monochrome outline for the
+    /// same codepoint.
+    is_color: bool,
 }
 
 /// Key for the ShapePlan cache.
@@ -100,11 +114,11 @@ impl FontSystem {
                 if let Some(id) = db.query(&query) {
                     let loaded = db.with_face_data(id, |data, _face_index| load_font(data));
                     if let Some(Some(font)) = loaded {
-                        log::info!("loaded font: {family_name}");
+                        info!("loaded font: {family_name}");
                         fonts.push(font);
                     }
                 } else {
-                    log::warn!("font not found: {family_name}");
+                    warn!("font not found: {family_name}");
                 }
             }
         }
@@ -165,6 +179,13 @@ impl FontSystem {
     /// Shape an entire terminal row with font fallback and plan caching.
     /// Takes `&[SmolStr]` directly from the terminal's SoA storage — each
     /// cell is one grapheme cluster.
+    ///
+    /// Emoji clusters (ending in VS16 or whose first codepoint falls in a
+    /// known emoji-presentation range) are shaped in a dedicated first pass
+    /// that only accepts glyphs from colour fonts. A text font with a
+    /// monochrome outline of `U+2764 HEAVY BLACK HEART` would otherwise win
+    /// the race against a colour-emoji font and render a narrow lifeless
+    /// glyph in place of the emoji the user pasted.
     pub fn shape_row(
         &mut self,
         cells: &[SmolStr],
@@ -185,101 +206,106 @@ impl FontSystem {
             }
         }
 
+        let wants_color: Vec<bool> = cells.iter().map(|c| cluster_prefers_color(c)).collect();
+
         // Track which columns still need a glyph (for fallback).
         let mut has_glyph = vec![false; cells.len()];
         let mut result: Vec<ShapedGlyph> = Vec::with_capacity(cells.len());
 
-        for (font_idx, loaded) in self.fonts.iter().enumerate() {
-            let font_ref = match FontRef::new(&loaded.data) {
-                Ok(f) => f,
-                Err(_) => continue,
-            };
-
-            let mut buffer = UnicodeBuffer::new();
-            buffer.push_str(&row_text);
-            buffer.guess_segment_properties();
-
-            let direction = buffer.direction();
-            let script = buffer.script();
-
-            let key = PlanKey {
-                font_index: font_idx,
-                direction,
-                script,
-            };
-
-            // Get or create cached plan.
-            self.plan_cache.entry(key).or_insert_with(|| {
-                let shaper = loaded.shaper_data.shaper(&font_ref).build();
-
-                ShapePlan::new(
-                    &shaper,
-                    direction,
-                    Some(script),
-                    buffer.language().as_ref(),
-                    &[],
-                )
-            });
-            let plan = &self.plan_cache[&key];
-
-            let shaper = loaded.shaper_data.shaper(&font_ref).build();
-            let output = shaper.shape_with_plan(plan, buffer, &[]);
-
-            let infos = output.glyph_infos();
-            let positions = output.glyph_positions();
-            let scale = self.font_size / loaded.units_per_em;
-
-            for (i, (info, pos)) in infos.iter().zip(positions.iter()).enumerate() {
-                let cluster = info.cluster as usize;
-                if cluster >= col_map.len() {
-                    continue;
-                }
-                let col = col_map[cluster];
-
-                // Skip if this column already has a glyph from a higher-priority font.
-                if has_glyph[col as usize] {
-                    continue;
-                }
-
-                let glyph_id = info.glyph_id as u16;
-                // glyph_id 0 is .notdef — try next font.
-                if glyph_id == 0 {
-                    continue;
-                }
-
-                // Mark all columns consumed by this glyph. For ligatures
-                // (e.g. `::` → single glyph), the cluster gap between
-                // consecutive output glyphs tells us which input columns
-                // were merged. Without this, fallback fonts would place
-                // individual glyphs on top of the ligature.
-                let end_byte = if i + 1 < infos.len() {
-                    (infos[i + 1].cluster as usize).min(col_map.len())
-                } else {
-                    col_map.len()
+        // Two passes: first only accept a glyph when the font's "colour"
+        // classification matches the cluster's preference. Second pass lets
+        // any remaining uncovered cell take whichever font has a glyph.
+        for pass in 0..2 {
+            for (font_idx, loaded) in self.fonts.iter().enumerate() {
+                let font_ref = match FontRef::new(&loaded.data) {
+                    Ok(f) => f,
+                    Err(_) => continue,
                 };
-                for byte in cluster..end_byte {
-                    if byte < col_map.len() {
-                        has_glyph[col_map[byte] as usize] = true;
+
+                let mut buffer = UnicodeBuffer::new();
+                buffer.push_str(&row_text);
+                buffer.guess_segment_properties();
+
+                let direction = buffer.direction();
+                let script = buffer.script();
+
+                let key = PlanKey {
+                    font_index: font_idx,
+                    direction,
+                    script,
+                };
+
+                // Get or create cached plan.
+                self.plan_cache.entry(key).or_insert_with(|| {
+                    let shaper = loaded.shaper_data.shaper(&font_ref).build();
+
+                    ShapePlan::new(
+                        &shaper,
+                        direction,
+                        Some(script),
+                        buffer.language().as_ref(),
+                        &[],
+                    )
+                });
+                let plan = &self.plan_cache[&key];
+
+                let shaper = loaded.shaper_data.shaper(&font_ref).build();
+                let output = shaper.shape_with_plan(plan, buffer, &[]);
+
+                let infos = output.glyph_infos();
+                let positions = output.glyph_positions();
+                let scale = self.font_size / loaded.units_per_em;
+
+                for (i, (info, pos)) in infos.iter().zip(positions.iter()).enumerate() {
+                    let cluster = info.cluster as usize;
+                    if cluster >= col_map.len() {
+                        continue;
                     }
+                    let col = col_map[cluster];
+
+                    if has_glyph[col as usize] {
+                        continue;
+                    }
+
+                    let glyph_id = info.glyph_id as u16;
+                    if glyph_id == 0 {
+                        continue;
+                    }
+
+                    // Pass 0: require font type to match cluster preference.
+                    if pass == 0 && wants_color[col as usize] != loaded.is_color {
+                        continue;
+                    }
+
+                    // Mark all columns consumed by this glyph (handles
+                    // ligatures and multi-codepoint clusters).
+                    let end_byte = if i + 1 < infos.len() {
+                        (infos[i + 1].cluster as usize).min(col_map.len())
+                    } else {
+                        col_map.len()
+                    };
+                    for byte in cluster..end_byte {
+                        if byte < col_map.len() {
+                            has_glyph[col_map[byte] as usize] = true;
+                        }
+                    }
+
+                    result.push(ShapedGlyph {
+                        glyph_id,
+                        font_index: font_idx,
+                        col,
+                        x_offset: pos.x_offset as f32 * scale,
+                        y_offset: pos.y_offset as f32 * scale,
+                    });
                 }
 
-                result.push(ShapedGlyph {
-                    glyph_id,
-                    font_index: font_idx,
-                    col,
-                    x_offset: pos.x_offset as f32 * scale,
-                    y_offset: pos.y_offset as f32 * scale,
-                });
-            }
-
-            // If all non-space columns are filled, stop trying fonts. Empty
-            // cells are wide-glyph continuations — their anchor handled them.
-            let all_covered = has_glyph
-                .iter()
-                .enumerate()
-                .all(|(i, &has)| has || cells[i] == " " || cells[i].is_empty());
-            if all_covered {
-                break;
+                let all_covered = has_glyph
+                    .iter()
+                    .enumerate()
+                    .all(|(i, &has)| has || cells[i] == " " || cells[i].is_empty());
+                if all_covered {
+                    return result;
+                }
             }
         }
 
@@ -287,6 +313,12 @@ impl FontSystem {
     }
 
     /// Rasterize a glyph from a specific font in the chain.
+    ///
+    /// Probes color-glyph tables in the FreeType/HarfBuzz-preferred order —
+    /// SVG → COLR v1 → sbix → CBDT — then falls back to `glyf` outlines.
+    /// Each color rasteriser derives its own scaling from the emoji font's
+    /// metrics, so a Noto Color Emoji glyph (1024 upem) fits the cell
+    /// regardless of the primary monospace font's unit system.
     pub fn rasterize_glyph(
         &self,
         font_index: usize,
@@ -294,15 +326,37 @@ impl FontSystem {
     ) -> RasterizedGlyph {
         let loaded = &self.fonts[font_index];
         let scale = self.font_size / loaded.units_per_em;
-        let rf = match read_fonts::FontRef::new(&loaded.data) {
-            Ok(f) => f,
-            Err(_) => return empty_glyph(),
+
+        let Ok(font) = read_fonts::FontRef::new(&loaded.data) else {
+            return empty_glyph();
         };
-        let loca = match rf.loca(None) {
+
+        if let Some(glyph) =
+            svg::rasterize_svg(&font, glyph_index, self.cell_width, self.cell_height)
+        {
+            return glyph;
+        }
+        if let Some(glyph) =
+            colr::rasterize_colr_v1(&font, glyph_index, self.cell_width, self.cell_height)
+        {
+            return glyph;
+        }
+        if let Some(glyph) =
+            bitmap::rasterize_sbix(&font, glyph_index, self.cell_width, self.cell_height)
+        {
+            return glyph;
+        }
+        if let Some(glyph) =
+            bitmap::rasterize_cbdt(&font, glyph_index, self.cell_width, self.cell_height)
+        {
+            return glyph;
+        }
+
+        let loca = match font.loca(None) {
             Ok(l) => l,
             Err(_) => return empty_glyph(),
         };
-        let glyf = match rf.glyf() {
+        let glyf = match font.glyf() {
             Ok(g) => g,
             Err(_) => return empty_glyph(),
         };
@@ -318,6 +372,40 @@ impl FontSystem {
     }
 }
 
+/// Heuristic: true when a cluster is likely meant to render as a colour
+/// emoji. Covers the two common routes: explicit `VS16` selector, and
+/// default-emoji-presentation codepoints in the main emoji blocks. Keeps
+/// CJK and ordinary symbols (which `unicode-width` also reports as wide)
+/// out of the colour path.
+fn cluster_prefers_color(cell: &str) -> bool {
+    if cell.ends_with('\u{FE0F}') {
+        return true;
+    }
+    cell.chars().any(is_default_emoji_codepoint)
+}
+
+fn is_default_emoji_codepoint(c: char) -> bool {
+    let cp = c as u32;
+    // Misc Symbols / Dingbats / Transport blocks that are all emoji-by-default.
+    matches!(
+        cp,
+        0x1F300..=0x1F5FF
+            | 0x1F600..=0x1F64F
+            | 0x1F680..=0x1F6FF
+            | 0x1F700..=0x1F77F
+            | 0x1F780..=0x1F7FF
+            | 0x1F800..=0x1F8FF
+            | 0x1F900..=0x1F9FF
+            | 0x1FA00..=0x1FA6F
+            | 0x1FA70..=0x1FAFF
+            | 0x2600..=0x26FF
+            | 0x2700..=0x27BF
+            | 0x1F000..=0x1F0FF
+            | 0x1F100..=0x1F1FF
+            | 0x1F200..=0x1F2FF
+    )
+}
+
 fn empty_glyph() -> RasterizedGlyph {
     RasterizedGlyph {
         bitmap: vec![],
@@ -325,6 +413,7 @@ fn empty_glyph() -> RasterizedGlyph {
         height: 0,
         bearing_x: 0,
         bearing_y: 0,
+        is_color: false,
     }
 }
 
@@ -335,11 +424,15 @@ fn load_font(data: &[u8]) -> Option<LoadedFont> {
     let rf = read_fonts::FontRef::new(&data).ok()?;
     let head = rf.head().ok()?;
     let units_per_em = head.units_per_em() as f32;
+    // Probe for colour glyph tables. If any is present, we treat this as a
+    // colour font and let it win the font-selection race for emoji clusters.
+    let is_color = rf.colr().is_ok() || rf.cbdt().is_ok() || rf.sbix().is_ok() || rf.svg().is_ok();
 
     Some(LoadedFont {
         data,
         shaper_data,
         units_per_em,
+        is_color,
     })
 }
 
@@ -386,19 +479,33 @@ fn rasterize_simple_glyph(
         &DrawOptions::default(),
     );
 
-    let pixels = dt.get_data();
-    let mut bitmap = vec![0u8; (width * height) as usize];
-    for (i, &pixel) in pixels.iter().enumerate() {
-        bitmap[i] = (pixel >> 24) as u8;
-    }
-
     RasterizedGlyph {
-        bitmap,
+        bitmap: alpha_mask_to_rgba(dt.get_data(), width, height),
         width: width as u32,
         height: height as u32,
         bearing_x: x_min as i32,
         bearing_y: y_max as i32,
+        is_color: false,
     }
+}
+
+/// Convert a raqote `DrawTarget` buffer (premultiplied ARGB in platform byte
+/// order) into an RGBA8 bitmap whose colour channels are zero. The atlas
+/// texture is RGBA, but outline glyphs only need coverage in the alpha
+/// channel — the shader picks up `.a` in the alpha-path branch and the
+/// colour path is not taken for `is_color = false` glyphs.
+fn alpha_mask_to_rgba(
+    pixels: &[u32],
+    width: i32,
+    height: i32,
+) -> Vec<u8> {
+    let mut bitmap = vec![0u8; (width * height * 4) as usize];
+    for (i, &pixel) in pixels.iter().enumerate() {
+        // raqote stores ARGB in u32; the alpha byte is the top 8 bits.
+        let alpha = (pixel >> 24) as u8;
+        bitmap[i * 4 + 3] = alpha;
+    }
+    bitmap
 }
 
 /// Recursively collect the bounding box of a composite glyph, flattening
@@ -511,18 +618,13 @@ fn rasterize_composite_glyph(
         &DrawOptions::default(),
     );
 
-    let pixels = dt.get_data();
-    let mut bitmap = vec![0u8; (width * height) as usize];
-    for (i, &pixel) in pixels.iter().enumerate() {
-        bitmap[i] = (pixel >> 24) as u8;
-    }
-
     RasterizedGlyph {
-        bitmap,
+        bitmap: alpha_mask_to_rgba(dt.get_data(), width, height),
         width: width as u32,
         height: height as u32,
         bearing_x: x_min as i32,
         bearing_y: y_max as i32,
+        is_color: false,
     }
 }
 

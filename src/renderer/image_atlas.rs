@@ -157,10 +157,9 @@ impl ImageAtlas {
                     for prior in &tiles {
                         self.packer.free(&prior.alloc);
                     }
-                    log::warn!(
+                    warn!(
                         "image {id} tile {}x{} does not fit in atlas",
-                        region.width,
-                        region.height
+                        region.width, region.height
                     );
                     return None;
                 }

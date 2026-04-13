@@ -25,13 +25,16 @@ struct BgVertex {
     color: u32,
 }
 
-/// Packed vertex for foreground (glyph) quads: position + UV + color.
+/// Packed vertex for foreground (glyph) quads: position + UV + color + flags.
+/// `flags & 1` selects the color-glyph shader path (sample atlas RGBA as-is
+/// instead of tinting it by `color`).
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct FgVertex {
     pos: [f32; 2],
     uv: [f32; 2],
     color: u32,
+    flags: u32,
 }
 
 /// Packed vertex for image quads: position + UV + atlas layer.
@@ -243,7 +246,8 @@ impl Renderer {
                     attributes: &wgpu::vertex_attr_array![
                         0 => Float32x2,
                         1 => Float32x2,
-                        2 => Uint32
+                        2 => Uint32,
+                        3 => Uint32
                     ],
                 }],
                 compilation_options: Default::default(),
@@ -464,27 +468,32 @@ impl Renderer {
                     &grid_row.fg[sg.col as usize]
                 };
                 let fg_color = pack_color(fg_cell, 255);
+                let flags: u32 = if slot.is_color { 1 } else { 0 };
                 let fi = fg_vertices.len() as u32;
                 fg_vertices.extend_from_slice(&[
                     FgVertex {
                         pos: [gx, gy],
                         uv: [sx as f32, sy as f32],
                         color: fg_color,
+                        flags,
                     },
                     FgVertex {
                         pos: [gx + gw, gy],
                         uv: [(sx + sw) as f32, sy as f32],
                         color: fg_color,
+                        flags,
                     },
                     FgVertex {
                         pos: [gx, gy + gh],
                         uv: [sx as f32, (sy + sh) as f32],
                         color: fg_color,
+                        flags,
                     },
                     FgVertex {
                         pos: [gx + gw, gy + gh],
                         uv: [(sx + sw) as f32, (sy + sh) as f32],
                         color: fg_color,
+                        flags,
                     },
                 ]);
                 fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
@@ -579,7 +588,7 @@ impl Renderer {
                 return;
             }
             other => {
-                log::error!("surface error: {other:?}");
+                error!("surface error: {other:?}");
                 return;
             }
         };

@@ -37,6 +37,9 @@ use winit::keyboard::NamedKey;
 use winit::window::Window;
 use winit::window::WindowId;
 
+#[macro_use]
+extern crate log;
+
 const INITIAL_COLS: u32 = 80;
 const INITIAL_ROWS: u32 = 24;
 

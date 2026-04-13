@@ -27,7 +27,7 @@ impl Clipboard {
         let backend = match ArboardClipboard::new() {
             Ok(cb) => Backend::Real(cb),
             Err(e) => {
-                log::warn!("clipboard unavailable, falling back to in-memory: {e}");
+                warn!("clipboard unavailable, falling back to in-memory: {e}");
                 Backend::InMemory {
                     clipboard: String::new(),
                     primary: String::new(),
@@ -59,7 +59,7 @@ impl Clipboard {
             Backend::Real(cb) => {
                 let result = set_real(cb, kind, text);
                 if let Err(e) = result {
-                    log::warn!("clipboard set failed: {e}");
+                    warn!("clipboard set failed: {e}");
                 }
             }
             Backend::InMemory { clipboard, primary } => {
@@ -81,7 +81,7 @@ impl Clipboard {
             Backend::Real(cb) => match get_real(cb, kind) {
                 Ok(text) => Some(text),
                 Err(e) => {
-                    log::warn!("clipboard get failed: {e}");
+                    warn!("clipboard get failed: {e}");
                     None
                 }
             },
