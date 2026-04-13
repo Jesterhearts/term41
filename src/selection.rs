@@ -98,32 +98,51 @@ pub fn expand_to_word(
     col: u32,
 ) -> (u32, u32) {
     let col = col as usize;
-    if col >= row.chars.len() {
+    if col >= row.cells.len() {
         return (col as u32, col as u32);
     }
 
-    let text: String = row.chars.iter().collect();
-    let click_byte: usize = row.chars.iter().take(col).map(|c| c.len_utf8()).sum();
+    // Build the row text and a per-cell byte offset so grapheme-cluster cells
+    // map bidirectionally to column indices.
+    let mut text = String::new();
+    let mut cell_byte_starts: Vec<usize> = Vec::with_capacity(row.cells.len() + 1);
+    for cell in &row.cells {
+        cell_byte_starts.push(text.len());
+        text.push_str(cell);
+    }
+    cell_byte_starts.push(text.len());
+
+    let click_byte = cell_byte_starts[col];
 
     for (start_byte, segment) in text.split_word_bound_indices() {
         let end_byte = start_byte + segment.len();
         if click_byte >= start_byte && click_byte < end_byte {
-            let start_col = text[..start_byte].chars().count() as u32;
-            let end_col = text[..end_byte].chars().count() as u32;
+            let start_col = byte_to_col(&cell_byte_starts, start_byte) as u32;
+            let end_col = byte_to_col(&cell_byte_starts, end_byte) as u32;
             return (start_col, end_col.saturating_sub(1));
         }
     }
     (col as u32, col as u32)
 }
 
+fn byte_to_col(
+    cell_byte_starts: &[usize],
+    byte: usize,
+) -> usize {
+    cell_byte_starts
+        .iter()
+        .rposition(|&b| b <= byte)
+        .unwrap_or(0)
+}
+
 /// Expand a point to cover a full row in Line mode. Returns the inclusive
 /// column range; the caller pairs this with the row to produce start/end
 /// selection points.
 pub fn expand_to_line(row: &Row) -> (u32, u32) {
-    if row.chars.is_empty() {
+    if row.cells.is_empty() {
         (0, 0)
     } else {
-        (0, row.chars.len() as u32 - 1)
+        (0, row.cells.len() as u32 - 1)
     }
 }
 
@@ -134,8 +153,9 @@ mod tests {
 
     fn row_from(text: &str) -> Row {
         let mut r = Row::new(text.chars().count() as u32);
+        let mut buf = [0u8; 4];
         for (i, c) in text.chars().enumerate() {
-            r.chars[i] = c;
+            r.cells[i] = smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf));
         }
         r
     }

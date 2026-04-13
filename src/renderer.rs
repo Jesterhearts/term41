@@ -334,8 +334,13 @@ impl Renderer {
 
         // Pre-cache printable ASCII glyphs so the first few frames don't
         // rasterize them on demand.
-        let ascii_chars: Vec<char> = (' '..='~').collect();
-        let shaped = font_system.shape_row(&ascii_chars);
+        let ascii_cells: Vec<smol_str::SmolStr> = (' '..='~')
+            .map(|c| {
+                let mut buf = [0u8; 4];
+                smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
+            })
+            .collect();
+        let shaped = font_system.shape_row(&ascii_cells);
         for sg in &shaped {
             renderer.glyph_atlas.ensure_cached(
                 &renderer.queue,
@@ -426,7 +431,7 @@ impl Renderer {
             }
 
             // Shape the entire row for foreground glyphs — borrows &[char] directly.
-            let shaped = font_system.shape_row(&grid_row.chars);
+            let shaped = font_system.shape_row(&grid_row.cells);
 
             for sg in &shaped {
                 let slot = match self.glyph_atlas.ensure_cached(

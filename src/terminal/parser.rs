@@ -1,3 +1,6 @@
+use smol_str::SmolStr;
+use unicode_segmentation::UnicodeSegmentation;
+
 use crate::terminal::color::apply_sgr;
 use crate::terminal::grid::Viewport;
 use crate::terminal::screen::Screen;
@@ -19,8 +22,16 @@ const SCS_INTERMEDIATES: &[u8] = b"()*+";
 pub(super) fn put_char(
     screen: &mut Screen,
     viewport: &Viewport,
-    ch: char,
+    s: SmolStr,
 ) {
+    // If `s` extends the grapheme cluster in the cell immediately left of the
+    // cursor, append it there instead of consuming a new cell. This folds
+    // combining marks and ZWJ continuations into the base cell they decorate.
+    if try_extend_prev_cell(screen, viewport, &s) {
+        screen.offset = 0;
+        return;
+    }
+
     let fg = screen.fg;
     let bg = screen.bg;
 
@@ -50,10 +61,50 @@ pub(super) fn put_char(
 
     let r = screen.grid.active_row_index(&screen.cursor, viewport);
     let c = screen.cursor.col as usize;
-    screen.grid.rows[r].chars[c] = ch;
+    screen.grid.rows[r].cells[c] = s;
     screen.grid.rows[r].fg[c] = fg;
     screen.grid.rows[r].bg[c] = bg;
     screen.cursor.col += 1;
+}
+
+/// If appending `s` to the previously-written cell keeps it a single grapheme
+/// cluster, do so and return `true`. Handles the cursor-at-col-0 continuation
+/// case by reaching back to the last cell of the wrapped predecessor row.
+fn try_extend_prev_cell(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    s: &str,
+) -> bool {
+    let (prev_row, prev_col) = if screen.cursor.col > 0 && screen.cursor.col <= viewport.cols {
+        let row = screen.grid.active_row_index(&screen.cursor, viewport);
+        (row, (screen.cursor.col - 1) as usize)
+    } else if screen.cursor.col == 0 {
+        let row = screen.grid.active_row_index(&screen.cursor, viewport);
+        if row == 0 || !screen.grid.rows[row].wrapped {
+            return false;
+        }
+        let prev_row = row - 1;
+        let last_col = screen.grid.rows[prev_row].cells.len().saturating_sub(1);
+        (prev_row, last_col)
+    } else {
+        return false;
+    };
+
+    let prev = &screen.grid.rows[prev_row].cells[prev_col];
+    // Don't extend the implicit blank in an untouched cell.
+    if prev.as_str() == " " {
+        return false;
+    }
+
+    let mut combined = String::with_capacity(prev.len() + s.len());
+    combined.push_str(prev);
+    combined.push_str(s);
+    if combined.graphemes(true).count() != 1 {
+        return false;
+    }
+
+    screen.grid.rows[prev_row].cells[prev_col] = SmolStr::new(&combined);
+    true
 }
 
 pub(super) fn execute(
@@ -275,7 +326,7 @@ mod tests {
         let mut parser = Parser::new();
         for action in parser.parse(input) {
             match action {
-                Action::Print(ch) => put_char(screen, viewport, ch),
+                Action::Print(s) => put_char(screen, viewport, s),
                 Action::Execute(b) => execute(screen, viewport, b),
                 Action::CsiDispatch {
                     params,
@@ -302,7 +353,11 @@ mod tests {
     ) -> String {
         let first_visible = screen.grid.rows.len() - viewport.rows as usize;
         let r = first_visible + row as usize;
-        screen.grid.rows[r].chars.iter().collect()
+        let mut s = String::new();
+        for cell in &screen.grid.rows[r].cells {
+            s.push_str(cell);
+        }
+        s
     }
 
     // -- put_char -----------------------------------------------------------
@@ -313,7 +368,7 @@ mod tests {
         screen.fg = Srgb::new(1, 2, 3);
         screen.bg = Srgb::new(4, 5, 6);
 
-        put_char(&mut screen, &viewport, 'A');
+        put_char(&mut screen, &viewport, SmolStr::new_inline("A"));
 
         assert_eq!(row_text(&screen, &viewport, 0).chars().next(), Some('A'));
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
@@ -344,8 +399,32 @@ mod tests {
     fn put_char_resets_scrollback_offset() {
         let (mut screen, viewport) = setup();
         screen.offset = 5;
-        put_char(&mut screen, &viewport, 'x');
+        put_char(&mut screen, &viewport, SmolStr::new_inline("x"));
         assert_eq!(screen.offset, 0);
+    }
+
+    #[test]
+    fn put_char_folds_combining_mark_into_previous_cell() {
+        let (mut screen, viewport) = setup();
+        // U+0301 COMBINING ACUTE ACCENT — feeding "e" then the combining mark
+        // should store the full grapheme "é" in one cell without advancing.
+        feed("e\u{0301}".as_bytes(), &mut screen, &viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "e\u{0301}");
+        assert_eq!(screen.cursor.col, 1);
+    }
+
+    #[test]
+    fn put_char_zwj_sequence_occupies_one_cell() {
+        let (mut screen, viewport) = setup();
+        // "🇺🇸" is two regional-indicator codepoints that form a single
+        // grapheme cluster (US flag). They should collapse into one cell.
+        feed("🇺🇸".as_bytes(), &mut screen, &viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "🇺🇸");
+        assert_eq!(screen.cursor.col, 1);
     }
 
     // -- execute ------------------------------------------------------------

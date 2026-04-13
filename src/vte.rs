@@ -3,6 +3,8 @@
 //! Implements the standard VTE state machine as a pull parser. Feed bytes via
 //! [`Parser::parse`] and iterate over the resulting [`Action`] values.
 
+use smol_str::SmolStr;
+
 const MAX_PARAMS: usize = 16;
 const MAX_INTERMEDIATES: usize = 4;
 
@@ -86,8 +88,10 @@ impl Intermediates {
 /// A single action produced by the parser.
 #[derive(Debug)]
 pub enum Action {
-    /// A printable character (ASCII or decoded UTF-8).
-    Print(char),
+    /// A printable character (ASCII or decoded UTF-8). The payload is the raw
+    /// UTF-8 for a single codepoint; grapheme-cluster accumulation happens
+    /// downstream where the previous cell's contents are known.
+    Print(SmolStr),
     /// A C0 or C1 control character.
     Execute(u8),
     /// A complete CSI (Control Sequence Introducer) sequence.
@@ -412,7 +416,12 @@ impl Parser {
     ) -> Option<Action> {
         match byte {
             0x00..=0x17 | 0x19 | 0x1C..=0x1F => Some(Action::Execute(byte)),
-            0x20..=0x7E => Some(Action::Print(byte as char)),
+            0x20..=0x7E => {
+                // Inline SmolStr for single ASCII byte — no allocation.
+                let buf = [byte];
+                let s = std::str::from_utf8(&buf).unwrap();
+                Some(Action::Print(SmolStr::new_inline(s)))
+            }
             0x7F => None,
             0xC2..=0xDF => {
                 self.utf8_buf[0] = byte;
@@ -448,9 +457,10 @@ impl Parser {
         if self.utf8_len == self.utf8_needed {
             self.state = State::Ground;
             let s = std::str::from_utf8(&self.utf8_buf[..self.utf8_len as usize]);
-            match s.ok().and_then(|s| s.chars().next()) {
-                Some(c) => Some(Action::Print(c)),
-                None => Some(Action::Print('\u{FFFD}')),
+            // Up to 4 UTF-8 bytes → always fits inline in SmolStr (23-byte cap).
+            match s.ok() {
+                Some(s) => Some(Action::Print(SmolStr::new_inline(s))),
+                None => Some(Action::Print(SmolStr::new_inline("\u{FFFD}"))),
             }
         } else {
             None

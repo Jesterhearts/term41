@@ -60,7 +60,7 @@ impl Grid {
         match mode {
             // Erase from cursor to end of screen.
             0 => {
-                let cols = self.rows[active].chars.len();
+                let cols = self.rows[active].cells.len();
                 self.rows[active].clear_range(col..cols);
                 for r in (active + 1)..self.rows.len() {
                     self.rows[r].clear();
@@ -95,7 +95,7 @@ impl Grid {
         mode: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let cols = self.rows[active].chars.len();
+        let cols = self.rows[active].cells.len();
         let col = cursor.col as usize;
 
         match mode {
@@ -116,7 +116,7 @@ impl Grid {
         n: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let cols = self.rows[active].chars.len();
+        let cols = self.rows[active].cells.len();
         let col = cursor.col as usize;
         let count = (n as usize).min(cols - col);
 
@@ -131,7 +131,7 @@ impl Grid {
         n: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let cols = self.rows[active].chars.len();
+        let cols = self.rows[active].cells.len();
         let col = cursor.col as usize;
         let count = (n as usize).min(cols - col);
 
@@ -146,7 +146,7 @@ impl Grid {
         n: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let cols = self.rows[active].chars.len();
+        let cols = self.rows[active].cells.len();
         let col = cursor.col as usize;
         let end = (col + n as usize).min(cols);
 
@@ -279,7 +279,7 @@ impl Grid {
                 if self.rows[row].len() > new_width {
                     if self.rows[row].content_len() > new_width {
                         let overflow = Row {
-                            chars: self.rows[row].chars.split_off(new_width as usize),
+                            cells: self.rows[row].cells.split_off(new_width as usize),
                             fg: self.rows[row].fg.split_off(new_width as usize),
                             bg: self.rows[row].bg.split_off(new_width as usize),
                             wrapped: self.rows[row].wrapped,
@@ -311,8 +311,9 @@ impl Grid {
 
                         if to_copy > 0 {
                             let (dst, src) = self.split_current_next(row, next);
-                            dst.chars[content..content + to_copy]
-                                .copy_from_slice(&src.chars[..to_copy]);
+                            for i in 0..to_copy {
+                                dst.cells[content + i] = src.cells[i].clone();
+                            }
                             dst.fg[content..content + to_copy].copy_from_slice(&src.fg[..to_copy]);
                             dst.bg[content..content + to_copy].copy_from_slice(&src.bg[..to_copy]);
                         }
@@ -380,7 +381,7 @@ mod tests {
             let mut row = Row::new(width);
             for (i, ch) in text.chars().enumerate() {
                 if i < width as usize {
-                    row.chars[i] = ch;
+                    row.cells[i] = char_cell(ch);
                 }
             }
             row.wrapped = wrapped;
@@ -393,8 +394,17 @@ mod tests {
         }
     }
 
+    fn char_cell(ch: char) -> smol_str::SmolStr {
+        let mut buf = [0u8; 4];
+        smol_str::SmolStr::new_inline(ch.encode_utf8(&mut buf))
+    }
+
     fn row_chars(row: &Row) -> String {
-        row.chars.iter().collect()
+        let mut s = String::new();
+        for cell in &row.cells {
+            s.push_str(cell);
+        }
+        s
     }
 
     // ── Reflow: grow with no wrapping ───────────────────────────────
@@ -689,7 +699,7 @@ mod tests {
         grid.rows[1].fg[0] = red; // 'f' is red
         grid.reflow(3);
         // "def" in row 1 — 'f' is at col 2.
-        assert_eq!(grid.rows[1].chars[2], 'f');
+        assert_eq!(grid.rows[1].cells[2], "f");
         assert_eq!(grid.rows[1].fg[2], red);
     }
 
@@ -764,8 +774,8 @@ mod tests {
         let mut rows = VecDeque::new();
         for &ch in labels {
             let mut row = Row::new(width);
-            for c in row.chars.iter_mut() {
-                *c = ch;
+            for c in row.cells.iter_mut() {
+                *c = char_cell(ch);
             }
             rows.push_back(row);
         }
@@ -1178,7 +1188,7 @@ mod tests {
         // Fill 3 visible + 2 scrollback = 5 rows (at the limit).
         for ch in ['S', 'T', 'A', 'B', 'C'] {
             let mut row = Row::new(4);
-            row.chars.fill(ch);
+            row.cells.fill(char_cell(ch));
             grid.rows.push_back(row);
         }
         assert_eq!(grid.rows.len(), 5); // at limit
@@ -1200,7 +1210,7 @@ mod tests {
         // Start with 2 visible rows.
         for ch in ['A', 'B'] {
             let mut row = Row::new(3);
-            row.chars.fill(ch);
+            row.cells.fill(char_cell(ch));
             grid.rows.push_back(row);
         }
         // Push 3 more rows — each should pop one.
@@ -1332,12 +1342,12 @@ mod tests {
 
         grid.reflow(3);
         // After shrink: "abc"W "def"W "ghi"W "j  "U — 'g' at row 2 col 0.
-        assert_eq!(grid.rows[2].chars[0], 'g');
+        assert_eq!(grid.rows[2].cells[0], "g");
         assert_eq!(grid.rows[2].fg[0], red);
 
         grid.reflow(10);
         // After roundtrip: 'g' should be back at col 6 with its red color.
-        assert_eq!(grid.rows[0].chars[6], 'g');
+        assert_eq!(grid.rows[0].cells[6], "g");
         assert_eq!(grid.rows[0].fg[6], red);
     }
 }

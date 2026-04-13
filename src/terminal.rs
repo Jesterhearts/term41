@@ -340,7 +340,7 @@ impl Terminal {
                 break;
             }
             let row = &self.active.grid.rows[local];
-            let row_len_cols = row.chars.len() as u32;
+            let row_len_cols = row.cells.len() as u32;
             if row_len_cols == 0 {
                 if abs_row < end.row && !row.wrapped {
                     out.push('\n');
@@ -367,9 +367,10 @@ impl Terminal {
                 continue;
             }
 
-            let segment: String = row.chars[col_start as usize..=col_end as usize]
-                .iter()
-                .collect();
+            let mut segment = String::new();
+            for cell in &row.cells[col_start as usize..=col_end as usize] {
+                segment.push_str(cell);
+            }
             if trim {
                 out.push_str(segment.trim_end_matches(' '));
             } else {
@@ -681,7 +682,9 @@ mod tests {
         let mut s = String::new();
         for r in 0..term.viewport.rows {
             let row = term.visible_row(r);
-            s.extend(row.chars.iter());
+            for cell in &row.cells {
+                s.push_str(cell);
+            }
             s.push('\n');
         }
         s

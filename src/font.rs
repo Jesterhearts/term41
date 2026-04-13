@@ -20,6 +20,7 @@ use read_fonts::tables::glyf::Glyph;
 use read_fonts::tables::glyf::SimpleGlyph;
 use read_fonts::tables::loca::Loca;
 use read_fonts::types::GlyphId;
+use smol_str::SmolStr;
 
 /// The embedded Fairfax HD font (ultimate fallback).
 static FAIRFAX_HD: &[u8] = include_bytes!("../resources/fonts/FairfaxHD.ttf");
@@ -162,21 +163,22 @@ impl FontSystem {
     }
 
     /// Shape an entire terminal row with font fallback and plan caching.
-    /// Takes `&[char]` directly from the terminal's SoA storage.
+    /// Takes `&[SmolStr]` directly from the terminal's SoA storage — each
+    /// cell is one grapheme cluster.
     pub fn shape_row(
         &mut self,
-        chars: &[char],
+        cells: &[SmolStr],
     ) -> Vec<ShapedGlyph> {
-        if chars.is_empty() {
+        if cells.is_empty() {
             return vec![];
         }
 
         // Build the row string and byte-offset → column mapping.
         let mut row_text = String::new();
         let mut col_map: Vec<u16> = Vec::new();
-        for (col, &ch) in chars.iter().enumerate() {
+        for (col, cell) in cells.iter().enumerate() {
             let start = row_text.len();
-            row_text.push(ch);
+            row_text.push_str(cell);
             let added = row_text.len() - start;
             for _ in 0..added {
                 col_map.push(col as u16);
@@ -184,8 +186,8 @@ impl FontSystem {
         }
 
         // Track which columns still need a glyph (for fallback).
-        let mut has_glyph = vec![false; chars.len()];
-        let mut result: Vec<ShapedGlyph> = Vec::with_capacity(chars.len());
+        let mut has_glyph = vec![false; cells.len()];
+        let mut result: Vec<ShapedGlyph> = Vec::with_capacity(cells.len());
 
         for (font_idx, loaded) in self.fonts.iter().enumerate() {
             let font_ref = match FontRef::new(&loaded.data) {
@@ -274,7 +276,7 @@ impl FontSystem {
             let all_covered = has_glyph
                 .iter()
                 .enumerate()
-                .all(|(i, &has)| has || chars[i] == ' ');
+                .all(|(i, &has)| has || cells[i] == " ");
             if all_covered {
                 break;
             }
@@ -634,17 +636,23 @@ mod tests {
         let mut fs = FontSystem::new(None, 18.0);
 
         for text in [":: ", "a::b ", "Hello "] {
-            let chars: Vec<char> = text.chars().collect();
-            let shaped = fs.shape_row(&chars);
+            let cells: Vec<SmolStr> = text
+                .chars()
+                .map(|c| {
+                    let mut buf = [0u8; 4];
+                    SmolStr::new_inline(c.encode_utf8(&mut buf))
+                })
+                .collect();
+            let shaped = fs.shape_row(&cells);
             for sg in &shaped {
-                let ch = chars[sg.col as usize];
-                if ch == ' ' {
+                let cell = &cells[sg.col as usize];
+                if cell == " " {
                     continue;
                 }
                 let raster = fs.rasterize_glyph(sg.font_index, sg.glyph_id);
                 assert!(
                     raster.width > 0 && raster.height > 0,
-                    "glyph {} for '{ch}' at col {} in {text:?} must rasterize, got {}x{}",
+                    "glyph {} for {cell:?} at col {} in {text:?} must rasterize, got {}x{}",
                     sg.glyph_id,
                     sg.col,
                     raster.width,

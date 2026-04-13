@@ -29,6 +29,7 @@ pollster   = "0.4.0"
 raqote     = { version = "0.8.5", default-features = false }
 read-fonts = "0.39.1"
 serde      = { version = "1.0.228", features = ["derive"] }
+smol_str = "0.3.6"
 toml       = "1.1.2"
 unicode-segmentation = "1.12.0"
 wgpu       = "29.0.1"
