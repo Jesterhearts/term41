@@ -69,6 +69,7 @@ pub(super) fn put_char(
 
     let fg = screen.fg;
     let bg = screen.bg;
+    let link = screen.current_hyperlink;
     let r = screen.grid.active_row_index(&screen.cursor, viewport);
     let col = screen.cursor.col as usize;
 
@@ -81,10 +82,12 @@ pub(super) fn put_char(
     screen.grid.rows[r].cells[col] = s;
     screen.grid.rows[r].fg[col] = fg;
     screen.grid.rows[r].bg[col] = bg;
+    screen.grid.rows[r].links[col] = link;
     for i in 1..width {
         screen.grid.rows[r].cells[col + i] = continuation_cell();
         screen.grid.rows[r].fg[col + i] = fg;
         screen.grid.rows[r].bg[col + i] = bg;
+        screen.grid.rows[r].links[col + i] = link;
     }
     screen.cursor.col += width as u32;
 }

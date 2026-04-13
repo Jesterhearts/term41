@@ -8,6 +8,7 @@ use crate::terminal::color::default_fg;
 use crate::terminal::grid::Cursor;
 use crate::terminal::grid::Grid;
 use crate::terminal::grid::Viewport;
+use crate::terminal::hyperlink::HyperlinkId;
 use crate::terminal::image::PlacedImage;
 use crate::terminal::image::anchor_images;
 use crate::terminal::image::restore_images;
@@ -41,6 +42,10 @@ pub struct Screen {
     pub offset: u32,
     pub images: BTreeMap<u64, PlacedImage>,
     pub saved_cursor: Option<SavedCursor>,
+    /// Hyperlink id currently associated with new cell writes (set by OSC 8).
+    /// Lives on the screen, not the terminal, so a link span open on the
+    /// primary screen doesn't bleed into the alt screen and vice versa.
+    pub current_hyperlink: Option<HyperlinkId>,
 }
 
 impl Screen {
@@ -67,6 +72,7 @@ impl Screen {
             offset: 0,
             images: BTreeMap::new(),
             saved_cursor: None,
+            current_hyperlink: None,
         }
     }
 }

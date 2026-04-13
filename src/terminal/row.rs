@@ -5,6 +5,7 @@ use smol_str::SmolStr;
 
 use crate::terminal::color::default_bg;
 use crate::terminal::color::default_fg;
+use crate::terminal::hyperlink::HyperlinkId;
 
 /// Inline SmolStr for the default blank cell. Cheap to clone.
 pub(super) fn blank_cell() -> SmolStr {
@@ -19,6 +20,11 @@ pub struct Row {
     pub cells: Vec<SmolStr>,
     pub fg: Vec<Srgb<u8>>,
     pub bg: Vec<Srgb<u8>>,
+    /// Hyperlink id per cell, set from the screen's current OSC 8 span at
+    /// write time. `None` for plain cells; reused ids share the same target
+    /// in [`HyperlinkRegistry`](super::HyperlinkRegistry) so adjacent cells
+    /// of one link render as one underlined region.
+    pub links: Vec<Option<HyperlinkId>>,
     /// True if this row is a continuation of the previous row (soft wrap).
     pub wrapped: bool,
 }
@@ -30,6 +36,7 @@ impl Row {
             cells: vec![blank_cell(); n],
             fg: vec![default_fg(); n],
             bg: vec![default_bg(); n],
+            links: vec![None; n],
             wrapped: false,
         }
     }
@@ -57,6 +64,7 @@ impl Row {
         self.cells.resize(new_len, blank_cell());
         self.fg.resize(new_len, default_fg());
         self.bg.resize(new_len, default_bg());
+        self.links.resize(new_len, None);
     }
 
     pub(super) fn truncate(
@@ -67,6 +75,7 @@ impl Row {
         self.cells.truncate(new_len);
         self.fg.truncate(new_len);
         self.bg.truncate(new_len);
+        self.links.truncate(new_len);
     }
 
     pub(super) fn clear(&mut self) {
@@ -81,7 +90,8 @@ impl Row {
             *cell = blank_cell();
         }
         self.fg[range.clone()].fill(default_fg());
-        self.bg[range].fill(default_bg());
+        self.bg[range.clone()].fill(default_bg());
+        self.links[range].fill(None);
     }
 
     pub(super) fn copy_within<R>(
@@ -105,7 +115,8 @@ impl Row {
             }
         }
         self.fg.copy_within(src.clone(), dest);
-        self.bg.copy_within(src, dest);
+        self.bg.copy_within(src.clone(), dest);
+        self.links.copy_within(src, dest);
     }
 
     pub(super) fn copy_from(
@@ -124,6 +135,8 @@ impl Row {
             .copy_from_slice(&other.fg[src.start..src.start + copy_len]);
         self.bg[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.bg[src.start..src.start + copy_len]);
+        self.links[dest_offset..dest_offset + copy_len]
+            .copy_from_slice(&other.links[src.start..src.start + copy_len]);
 
         copy_len
     }

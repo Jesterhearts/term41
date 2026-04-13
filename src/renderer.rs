@@ -433,6 +433,38 @@ impl Renderer {
                     },
                 ]);
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+
+                // OSC 8 hyperlink underline. Stack a thin opaque quad at the
+                // baseline of cells that carry a link so users can see what
+                // is clickable. Uses the cell foreground colour so the line
+                // tracks the surrounding text and stays visible against any
+                // theme. Drawn in the bg pass so the glyph still paints over
+                // any pixels the underline would otherwise eat.
+                if grid_row.links[col as usize].is_some() {
+                    let underline_color = pack_color(&grid_row.fg[col as usize], 255);
+                    let thickness = (cell_h * 0.06).max(1.0);
+                    let uy = y + cell_h - thickness;
+                    let bi = bg_vertices.len() as u32;
+                    bg_vertices.extend_from_slice(&[
+                        BgVertex {
+                            pos: [x, uy],
+                            color: underline_color,
+                        },
+                        BgVertex {
+                            pos: [x + cell_w, uy],
+                            color: underline_color,
+                        },
+                        BgVertex {
+                            pos: [x, uy + thickness],
+                            color: underline_color,
+                        },
+                        BgVertex {
+                            pos: [x + cell_w, uy + thickness],
+                            color: underline_color,
+                        },
+                    ]);
+                    bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+                }
             }
 
             // Shape the entire row for foreground glyphs — borrows &[char] directly.

@@ -20,6 +20,7 @@ use font::FontSystem;
 use pty::Pty;
 use renderer::Renderer;
 use selection::SelectionMode;
+use terminal::KittyFlags;
 use terminal::MouseButton as TermMouseButton;
 use terminal::MouseEventKind;
 use terminal::MouseModifiers;
@@ -33,6 +34,7 @@ use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoop;
 use winit::keyboard::Key;
+use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
 use winit::window::Window;
 use winit::window::WindowId;
@@ -381,6 +383,17 @@ impl ApplicationHandler for App {
                 let (col, row) = self.cell_at(self.mouse_pos);
                 match (button, pressed) {
                     (MouseButton::Left, true) => {
+                        // Ctrl+click on a hyperlink opens the target — checked
+                        // before selection so the click doesn't also drop a
+                        // single-cell anchor that would block the next drag.
+                        if self.modifiers.control_key()
+                            && let Some(url) = self.terminal.hyperlink_at(row, col)
+                        {
+                            if let Err(e) = open::that_detached(url) {
+                                warn!("failed to open hyperlink {url:?}: {e}");
+                            }
+                            return;
+                        }
                         self.click_count = self.next_click_count((col, row));
                         self.last_click_cell = Some((col, row));
                         self.last_click_time = Some(Instant::now());
@@ -465,6 +478,19 @@ impl ApplicationHandler for App {
                     }
                 }
 
+                // Kitty keyboard protocol takes precedence: when the app has
+                // pushed flags onto the stack, use the disambiguating
+                // encoding so combos like Ctrl+Enter and Ctrl+I survive
+                // round-tripping. Returns None to fall through to legacy.
+                let kitty_flags = self.terminal.kitty_keyboard.current();
+                if let Some(bytes) =
+                    kitty_encode_input(&event.logical_key, self.modifiers, kitty_flags)
+                {
+                    self.terminal.reset_viewport();
+                    let _ = self.pty.write(&bytes);
+                    return;
+                }
+
                 // Ctrl+key → control character byte (0x00–0x1F).
                 if self.modifiers.control_key() {
                     let byte = match &event.logical_key {
@@ -525,6 +551,128 @@ fn ctrl_byte(c: &str) -> Option<u8> {
         [b'_'] => Some(0x1F),
         _ => None,
     }
+}
+
+/// Pack winit modifier state into the kitty wire format: bit 0 = shift,
+/// bit 1 = alt, bit 2 = ctrl, bit 3 = super. Encoded values are this byte
+/// plus 1 (so a key with no modifiers reports `1`, not `0`).
+fn kitty_modifier_bits(mods: ModifiersState) -> u8 {
+    let mut b = 0;
+    if mods.shift_key() {
+        b |= 1;
+    }
+    if mods.alt_key() {
+        b |= 2;
+    }
+    if mods.control_key() {
+        b |= 4;
+    }
+    if mods.super_key() {
+        b |= 8;
+    }
+    b
+}
+
+/// Encode a key event in the kitty keyboard protocol format if the active
+/// `flags` call for it. Returns `None` to fall through to the legacy
+/// xterm-style encoding (plain text, single control bytes, traditional CSI
+/// arrows, …) — that's the right behaviour both when no flags are active
+/// and when the key+modifier combo isn't ambiguous under DISAMBIGUATE.
+fn kitty_encode_input(
+    key: &Key,
+    mods: ModifiersState,
+    flags: KittyFlags,
+) -> Option<Vec<u8>> {
+    if !flags.contains(KittyFlags::DISAMBIGUATE_ESCAPE_CODES) {
+        return None;
+    }
+
+    let mod_bits = kitty_modifier_bits(mods);
+    // Shift alone is never disambiguating — capital letters and shifted
+    // punctuation already produce distinct bytes via the OS layout.
+    let only_shift_or_none = (mod_bits & !1) == 0;
+    let mod_param = mod_bits + 1;
+
+    match key {
+        Key::Character(s) => {
+            if only_shift_or_none {
+                return None;
+            }
+            // Per spec, the key code is the codepoint of the unmodified key
+            // — i.e. the lowercased form. Pick the first char; combining
+            // sequences (extremely rare for a single keypress) fall through
+            // to legacy.
+            let lower = s.to_lowercase();
+            let cp = lower.chars().next()? as u32;
+            Some(format!("\x1b[{cp};{mod_param}u").into_bytes())
+        }
+        Key::Named(named) => kitty_encode_named(*named, mod_bits, mod_param),
+        _ => None,
+    }
+}
+
+/// Functional-key encoding under the kitty protocol. Plain (no-mod) presses
+/// keep the legacy bytes — apps without DISAMBIGUATE knowledge still need
+/// `\r` for Enter — but any modifier triggers a CSI form so combos like
+/// Ctrl+Enter and Alt+ArrowLeft become unambiguous.
+fn kitty_encode_named(
+    named: NamedKey,
+    mod_bits: u8,
+    mod_param: u8,
+) -> Option<Vec<u8>> {
+    // Keys whose legacy encoding is a single byte get the `CSI codepoint ; mods u`
+    // shape. The codepoint is the C0 byte the legacy form would produce.
+    let direct_code = match named {
+        NamedKey::Enter => Some(13u32),
+        NamedKey::Tab => Some(9),
+        NamedKey::Backspace => Some(127),
+        NamedKey::Escape => Some(27),
+        NamedKey::Space => Some(32),
+        _ => None,
+    };
+    if let Some(cp) = direct_code {
+        // Shift alone passes through to legacy — Shift+Tab is the one
+        // exception apps actually want as CSI Z, but the spec lets
+        // disambiguate-only mode emit it as `CSI 9;2u` and TUIs handle that.
+        if (mod_bits & !1) == 0 && mod_bits == 0 {
+            return None;
+        }
+        return Some(format!("\x1b[{cp};{mod_param}u").into_bytes());
+    }
+
+    // Cursor / nav keys with modifiers: use the long-standing xterm modifier
+    // form (`CSI 1 ; mods <letter>` for arrows + Home/End, `CSI N ; mods ~`
+    // for the tilde family). It pre-dates kitty by decades and TUIs that
+    // request kitty mode also handle these correctly.
+    if mod_bits == 0 {
+        return None;
+    }
+
+    let arrow_action = match named {
+        NamedKey::ArrowUp => Some('A'),
+        NamedKey::ArrowDown => Some('B'),
+        NamedKey::ArrowRight => Some('C'),
+        NamedKey::ArrowLeft => Some('D'),
+        NamedKey::Home => Some('H'),
+        NamedKey::End => Some('F'),
+        _ => None,
+    };
+    if let Some(action) = arrow_action {
+        return Some(format!("\x1b[1;{mod_param}{action}").into_bytes());
+    }
+
+    let tilde_code = match named {
+        NamedKey::Insert => Some(2u32),
+        NamedKey::Delete => Some(3),
+        NamedKey::PageUp => Some(5),
+        NamedKey::PageDown => Some(6),
+        _ => None,
+    };
+    if let Some(code) = tilde_code {
+        return Some(format!("\x1b[{code};{mod_param}~").into_bytes());
+    }
+
+    None
 }
 
 fn named_key_to_bytes(key: NamedKey) -> Option<Vec<u8>> {

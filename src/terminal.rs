@@ -1,16 +1,23 @@
 mod color;
 mod grid;
+mod hyperlink;
 mod image;
+mod keyboard;
 mod mouse;
 mod osc;
 mod parser;
 mod row;
 mod screen;
 
+use std::path::PathBuf;
+
 pub use self::color::default_fg;
 pub use self::grid::Viewport;
+pub use self::hyperlink::HyperlinkRegistry;
 pub use self::image::PlacedImage;
 pub use self::image::VisibleImage;
+pub use self::keyboard::KittyFlags;
+pub use self::keyboard::KittyKeyboardState;
 pub use self::mouse::MouseButton;
 pub use self::mouse::MouseEncoding;
 pub use self::mouse::MouseEventKind;
@@ -26,9 +33,11 @@ use crate::selection::SelectionPoint;
 use crate::selection::expand_to_line;
 use crate::selection::expand_to_word;
 use crate::sixel::parse_sixel;
+use crate::terminal::keyboard::handle_kitty_keyboard;
 use crate::terminal::mouse::apply_mouse_mode;
 use crate::terminal::mouse::encode_mouse_event;
 use crate::terminal::mouse::should_report;
+use crate::terminal::osc::OscContext;
 use crate::terminal::osc::handle_osc;
 use crate::terminal::parser::csi_dispatch;
 use crate::terminal::parser::esc_dispatch;
@@ -84,6 +93,22 @@ pub struct Terminal {
     /// Active text selection, if any. Positions use absolute row indices so
     /// the selection stays locked to content across scrollback trimming.
     pub selection: Option<Selection>,
+
+    /// Last directory reported by the foreground shell via OSC 7. None when
+    /// no shell has reported, or after a remote-session shell sent an empty
+    /// payload to disclaim its previous report. Useful for "open new window
+    /// here" and any title-bar surfacing of the current directory.
+    pub current_directory: Option<PathBuf>,
+
+    /// Interns OSC 8 hyperlink targets so each cell only has to carry a
+    /// 4-byte id. Lives on the terminal (not per-screen) so a link active
+    /// when the alt screen is entered keeps resolving on return.
+    pub hyperlinks: HyperlinkRegistry,
+
+    /// Kitty keyboard protocol mode stack. Apps push richer key encodings
+    /// here when they want unambiguous Ctrl+letter, Shift+Enter, etc. The
+    /// effective flags drive the input encoder in `main.rs`.
+    pub kitty_keyboard: KittyKeyboardState,
 }
 
 impl Terminal {
@@ -113,6 +138,9 @@ impl Terminal {
             mouse_encoding: MouseEncoding::Default,
             bracketed_paste: false,
             selection: None,
+            current_directory: None,
+            hyperlinks: HyperlinkRegistry::new(),
+            kitty_keyboard: KittyKeyboardState::new(),
         }
     }
 
@@ -485,6 +513,22 @@ impl Terminal {
         &self.active.grid.rows[base + screen_row as usize]
     }
 
+    /// Resolve the hyperlink target at the given viewport cell, or `None`
+    /// when the cell is not part of an OSC 8 span. Used by the click handler
+    /// to decide whether Ctrl+click should open something.
+    pub fn hyperlink_at(
+        &self,
+        screen_row: u32,
+        screen_col: u32,
+    ) -> Option<&str> {
+        if screen_row >= self.viewport.rows || screen_col >= self.viewport.cols {
+            return None;
+        }
+        let row = self.visible_row(screen_row);
+        let id = row.links.get(screen_col as usize).copied().flatten()?;
+        self.hyperlinks.get(id)
+    }
+
     /// Scroll the viewport up (into history). Returns actual lines scrolled.
     pub fn scroll_viewport_up(
         &mut self,
@@ -593,6 +637,13 @@ impl Terminal {
                                 );
                             }
                         }
+                    } else if action == 'u' && matches!(is, b">" | b"<" | b"=" | b"?") {
+                        handle_kitty_keyboard(
+                            is[0],
+                            &params,
+                            &mut self.kitty_keyboard,
+                            &mut self.pending_output,
+                        );
                     } else {
                         csi_dispatch(&mut self.active, &self.viewport, &params, is, action);
                     }
@@ -611,7 +662,14 @@ impl Terminal {
                     }
                 }
                 vte::Action::OscDispatch(data) => {
-                    handle_osc(&data, &mut self.clipboard, &mut self.pending_output)
+                    let mut ctx = OscContext {
+                        clipboard: &mut self.clipboard,
+                        pending_output: &mut self.pending_output,
+                        current_directory: &mut self.current_directory,
+                        hyperlinks: &mut self.hyperlinks,
+                        current_hyperlink: &mut self.active.current_hyperlink,
+                    };
+                    handle_osc(&data, &mut ctx);
                 }
                 vte::Action::Hook { params, action } => {
                     self.hook_bytes.push(vec![]);
@@ -1006,5 +1064,64 @@ mod tests {
         term.clear_selection();
         assert!(term.selection.is_none());
         assert!(term.selection_text().is_none());
+    }
+
+    // ---- OSC 7 cwd ----
+
+    #[test]
+    fn osc_7_updates_terminal_cwd() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b]7;file://localhost/tmp/work\x1b\\");
+        assert_eq!(
+            term.current_directory.as_deref(),
+            Some(std::path::Path::new("/tmp/work"))
+        );
+    }
+
+    // ---- OSC 8 hyperlinks ----
+
+    #[test]
+    fn osc_8_attaches_link_to_subsequent_cells() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\after");
+        assert_eq!(term.hyperlink_at(0, 0), Some("https://example.com"));
+        assert_eq!(term.hyperlink_at(0, 3), Some("https://example.com"));
+        // First cell after the closing OSC 8 carries no link.
+        assert_eq!(term.hyperlink_at(0, 4), None);
+    }
+
+    #[test]
+    fn osc_8_close_clears_current_link() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b]8;;https://example.com\x1b\\");
+        assert!(term.active.current_hyperlink.is_some());
+        term.process(b"\x1b]8;;\x1b\\");
+        assert!(term.active.current_hyperlink.is_none());
+    }
+
+    // ---- Kitty keyboard protocol ----
+
+    #[test]
+    fn kitty_push_records_flags() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[>1u");
+        assert_eq!(
+            term.kitty_keyboard.current(),
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES
+        );
+    }
+
+    #[test]
+    fn kitty_pop_default_unwinds_one_frame() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[>1u\x1b[<u");
+        assert!(term.kitty_keyboard.current().is_empty());
+    }
+
+    #[test]
+    fn kitty_query_writes_response_to_pending_output() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[>3u\x1b[?u");
+        assert_eq!(term.take_pending_output(), b"\x1b[?3u");
     }
 }

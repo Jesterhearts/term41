@@ -30,6 +30,11 @@ write my own, with the features I prefer.
 - Right-click paste (or copy, if a selection is active)
 - `Ctrl+Shift+C` / `Ctrl+Shift+V` for clipboard copy/paste
 - OSC 52 clipboard integration
+- OSC 7 current-directory reporting (consumed by the terminal)
+- OSC 8 hyperlinks — underlined cells, `Ctrl`+left-click to open
+- [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
+  with the `disambiguate-escape-codes` flag, so TUIs can distinguish
+  combos like `Ctrl+Enter` and `Ctrl+I` from their legacy aliases
 - Sixel image rendering
 - Configurable window opacity, fonts, font size, and scrollback size
 
@@ -111,6 +116,7 @@ scrollback_lines = 10000
 | Right-click (with selection)     | Copy selection to system clipboard                     |
 | `Ctrl+Shift+C`                   | Copy selection to system clipboard                     |
 | `Ctrl+Shift+V`                   | Paste from system clipboard                            |
+| `Ctrl` + left-click on a link    | Open the OSC 8 hyperlink target in the system handler  |
 
 ## License
 
