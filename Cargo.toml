@@ -51,3 +51,7 @@ default              = ["wayland-data-control"]
 # etc.) without requiring a focused-window hack. Disable only for
 # environments where the dependency is unavailable.
 wayland-data-control = ["arboard/wayland-data-control"]
+
+[profile.release-debug]
+inherits = "release"
+debug    = true
