@@ -848,6 +848,17 @@ impl Terminal {
                             .grid
                             .active_row_index(&self.active.cursor, &self.viewport);
                         let image_rows = image.height.div_ceil(self.cell_height);
+                        // An app redrawing a sixel places the new image over
+                        // the old one. Without this sweep the fresh `id`
+                        // leaves the previous entry in the map, so each
+                        // redraw adds a ghost at the old position.
+                        crate::terminal::image::remove_overlapping(
+                            &mut self.active.images,
+                            row,
+                            image_rows.max(1) as usize,
+                            self.active.cursor.col,
+                            self.cell_height,
+                        );
                         self.active.images.insert(
                             id,
                             PlacedImage {
@@ -1096,6 +1107,120 @@ mod tests {
             term.take_pending_output(),
             b"\x1b[200~evilinjection\x1b[201~"
         );
+    }
+
+    // ---- Sixel image placement ----
+
+    fn place_image(
+        term: &mut Terminal,
+        row: usize,
+        col: u32,
+        height_px: u32,
+    ) -> u64 {
+        let id = term.next_image_id;
+        term.next_image_id += 1;
+        term.active.images.insert(
+            id,
+            PlacedImage {
+                image: crate::sixel::SixelImage {
+                    pixels: vec![],
+                    width: 1,
+                    height: height_px,
+                },
+                id,
+                row,
+                col,
+            },
+        );
+        id
+    }
+
+    #[test]
+    fn sixel_redraw_at_same_position_replaces_previous() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        // cell_height = 16, so 32px = 2 grid rows.
+        let id_a = place_image(&mut term, 5, 0, 32);
+        self::image::remove_overlapping(&mut term.active.images, 5, 2, 0, 16);
+        // The manual sweep used by the Unhook handler — call it to verify
+        // the behavior the handler relies on.
+        assert!(!term.active.images.contains_key(&id_a));
+    }
+
+    #[test]
+    fn sixel_different_columns_coexist() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        let id_a = place_image(&mut term, 5, 0, 32);
+        let id_b = place_image(&mut term, 5, 10, 32);
+        // Dedup sweep for a new image at col 0 must not touch col 10.
+        self::image::remove_overlapping(&mut term.active.images, 5, 2, 0, 16);
+        assert!(!term.active.images.contains_key(&id_a));
+        assert!(term.active.images.contains_key(&id_b));
+    }
+
+    #[test]
+    fn scroll_region_shifts_images_up() {
+        let mut term = Terminal::new(10, 10, 0, 16);
+        // Set scroll region rows 0..=9 (whole screen is the region when
+        // we use DECSTBM with a custom bottom). Place image at absolute
+        // row 5, then issue CSI M (delete line) from row 0 to scroll the
+        // region up by 2.
+        term.process(b"\x1b[1;8r"); // DECSTBM top=1, bottom=8 (0-indexed: 0..=7)
+        let id = place_image(&mut term, 5, 0, 16);
+        term.process(b"\x1b[H"); // cursor home
+        term.process(b"\x1b[2M"); // delete 2 lines → scroll_up_in_region n=2
+        let img = term.active.images.get(&id).expect("image retained");
+        assert_eq!(img.row, 3, "image should shift up by 2 rows");
+    }
+
+    #[test]
+    fn scroll_region_drops_image_pushed_out_of_top() {
+        let mut term = Terminal::new(10, 10, 0, 16);
+        term.process(b"\x1b[1;8r");
+        let id = place_image(&mut term, 2, 0, 16);
+        term.process(b"\x1b[H");
+        term.process(b"\x1b[5M"); // 5 > available space above → image goes past top
+        assert!(
+            !term.active.images.contains_key(&id),
+            "image scrolled past region top should be dropped"
+        );
+    }
+
+    #[test]
+    fn scroll_region_preserves_images_outside_region() {
+        let mut term = Terminal::new(10, 10, 0, 16);
+        term.process(b"\x1b[2;5r"); // region rows 1..=4 (abs 1..=4 with no scrollback)
+        let id = place_image(&mut term, 8, 0, 16); // below region
+        term.process(b"\x1b[2H"); // move into region
+        term.process(b"\x1b[2M"); // scroll up inside region
+        let img = term.active.images.get(&id).expect("image retained");
+        assert_eq!(img.row, 8, "image outside region is unaffected");
+    }
+
+    #[test]
+    fn ed_2_removes_visible_images() {
+        let mut term = Terminal::new(10, 10, 0, 16);
+        let id = place_image(&mut term, 3, 0, 16);
+        term.process(b"\x1b[2J"); // ED 2 — clear entire screen
+        assert!(
+            !term.active.images.contains_key(&id),
+            "ED 2 should drop images on the visible area"
+        );
+    }
+
+    #[test]
+    fn alt_screen_entry_clears_alt_images() {
+        let mut term = Terminal::new(10, 10, 0, 16);
+        // Enter alt once and place an image on the alt buffer.
+        term.process(b"\x1b[?1049h");
+        assert!(term.on_alt_screen);
+        let id = place_image(&mut term, 3, 0, 16);
+        // Leave alt — clear_visible should drop the alt's image.
+        term.process(b"\x1b[?1049l");
+        assert!(!term.on_alt_screen);
+        // Re-enter alt; the alt buffer (now `active` again) must not
+        // have the old image.
+        term.process(b"\x1b[?1049h");
+        assert!(!term.active.images.contains_key(&id));
     }
 
     // ---- Synchronized output (mode 2026) ----

@@ -1,5 +1,9 @@
+use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
+use crate::terminal::image::PlacedImage;
+use crate::terminal::image::clear_in_range;
+use crate::terminal::image::shift_in_region;
 use crate::terminal::row::Row;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +55,7 @@ impl Grid {
         &mut self,
         cursor: &Cursor,
         viewport: &Viewport,
+        images: &mut BTreeMap<u64, PlacedImage>,
         mode: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
@@ -73,13 +78,18 @@ impl Grid {
                 }
                 self.rows[active].clear_range(0..col + 1);
             }
-            // Erase entire screen.
+            // Erase entire screen — cells *and* any images sitting on them.
+            // Without the image sweep an app that draws sixels, calls ED 2,
+            // and redraws would stack ghost copies over every cycle.
             2 => {
                 for r in first_visible..self.rows.len() {
                     self.rows[r].clear();
                 }
+                clear_in_range(images, first_visible, self.rows.len());
             }
-            // Erase scrollback buffer.
+            // Erase scrollback buffer. Images anchored inside scrollback
+            // ride out on the existing `total_popped` adjustment in
+            // `Terminal::process`, so no explicit sweep is needed here.
             3 => {
                 self.total_popped += first_visible;
                 self.rows.drain(0..first_visible);
@@ -154,10 +164,13 @@ impl Grid {
     }
 
     /// Scroll content up within a region: remove line at `top`, insert blank
-    /// at `bottom`. Both are viewport-relative row indices.
+    /// at `bottom`. Both are viewport-relative row indices. Images anchored
+    /// inside the region shift up with the content; images pushed out the
+    /// top are dropped (matches xterm's "scrolled off = gone" rule).
     pub(super) fn scroll_up_in_region(
         &mut self,
         viewport: &Viewport,
+        images: &mut BTreeMap<u64, PlacedImage>,
         top: u32,
         bottom: u32,
         n: u32,
@@ -170,13 +183,17 @@ impl Grid {
             self.rows.remove(abs_top);
             self.rows.insert(abs_bottom, Row::new(viewport.cols));
         }
+        shift_in_region(images, abs_top, abs_bottom, -(n as i64));
     }
 
     /// Scroll content down within a region: insert blank at `top`, remove
-    /// line at `bottom`. Both are viewport-relative row indices.
+    /// line at `bottom`. Both are viewport-relative row indices. Images
+    /// anchored inside the region shift down with the content; images
+    /// pushed out the bottom are dropped.
     pub(super) fn scroll_down_in_region(
         &mut self,
         viewport: &Viewport,
+        images: &mut BTreeMap<u64, PlacedImage>,
         top: u32,
         bottom: u32,
         n: u32,
@@ -189,6 +206,7 @@ impl Grid {
             self.rows.remove(abs_bottom);
             self.rows.insert(abs_top, Row::new(viewport.cols));
         }
+        shift_in_region(images, abs_top, abs_bottom, n as i64);
     }
 
     pub fn active_row_index(
@@ -798,7 +816,7 @@ mod tests {
     fn scroll_up_region_full_viewport() {
         // Scroll up the full viewport: top row removed, blank inserted at bottom.
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
-        grid.scroll_up_in_region(&vp, 0, 2, 1);
+        grid.scroll_up_in_region(&vp, &mut BTreeMap::new(), 0, 2, 1);
         assert_eq!(all_chars(&grid), vec!["BBB", "CCC", "   "]);
     }
 
@@ -806,7 +824,7 @@ mod tests {
     fn scroll_up_region_partial() {
         // Scroll region covers only rows 1-2 of a 4-row viewport.
         let (mut grid, vp) = make_grid_with_scrollback(3, 4, &['A', 'B', 'C', 'D']);
-        grid.scroll_up_in_region(&vp, 1, 2, 1);
+        grid.scroll_up_in_region(&vp, &mut BTreeMap::new(), 1, 2, 1);
         // Row 0 and 3 unchanged; row 1 (B) removed, blank at row 2.
         assert_eq!(all_chars(&grid), vec!["AAA", "CCC", "   ", "DDD"]);
     }
@@ -814,7 +832,7 @@ mod tests {
     #[test]
     fn scroll_up_region_n_greater_than_1() {
         let (mut grid, vp) = make_grid_with_scrollback(3, 4, &['A', 'B', 'C', 'D']);
-        grid.scroll_up_in_region(&vp, 0, 3, 2);
+        grid.scroll_up_in_region(&vp, &mut BTreeMap::new(), 0, 3, 2);
         assert_eq!(all_chars(&grid), vec!["CCC", "DDD", "   ", "   "]);
     }
 
@@ -822,14 +840,14 @@ mod tests {
     fn scroll_up_region_n_clamped_to_region_size() {
         // n=100 but region is only 3 rows, should clamp.
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
-        grid.scroll_up_in_region(&vp, 0, 2, 100);
+        grid.scroll_up_in_region(&vp, &mut BTreeMap::new(), 0, 2, 100);
         assert_eq!(all_chars(&grid), vec!["   ", "   ", "   "]);
     }
 
     #[test]
     fn scroll_down_region_full_viewport() {
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
-        grid.scroll_down_in_region(&vp, 0, 2, 1);
+        grid.scroll_down_in_region(&vp, &mut BTreeMap::new(), 0, 2, 1);
         assert_eq!(all_chars(&grid), vec!["   ", "AAA", "BBB"]);
     }
 
@@ -837,21 +855,21 @@ mod tests {
     fn scroll_down_region_partial() {
         // Scroll region covers only rows 1-2 of a 4-row viewport.
         let (mut grid, vp) = make_grid_with_scrollback(3, 4, &['A', 'B', 'C', 'D']);
-        grid.scroll_down_in_region(&vp, 1, 2, 1);
+        grid.scroll_down_in_region(&vp, &mut BTreeMap::new(), 1, 2, 1);
         assert_eq!(all_chars(&grid), vec!["AAA", "   ", "BBB", "DDD"]);
     }
 
     #[test]
     fn scroll_down_region_n_greater_than_1() {
         let (mut grid, vp) = make_grid_with_scrollback(3, 4, &['A', 'B', 'C', 'D']);
-        grid.scroll_down_in_region(&vp, 0, 3, 2);
+        grid.scroll_down_in_region(&vp, &mut BTreeMap::new(), 0, 3, 2);
         assert_eq!(all_chars(&grid), vec!["   ", "   ", "AAA", "BBB"]);
     }
 
     #[test]
     fn scroll_down_region_n_clamped() {
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
-        grid.scroll_down_in_region(&vp, 0, 2, 100);
+        grid.scroll_down_in_region(&vp, &mut BTreeMap::new(), 0, 2, 100);
         assert_eq!(all_chars(&grid), vec!["   ", "   ", "   "]);
     }
 
@@ -860,14 +878,14 @@ mod tests {
         // 2 scrollback rows + 3 visible. Scroll region is rows 0-2 of the
         // viewport. Scrollback should be untouched.
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['S', 'T', 'A', 'B', 'C']);
-        grid.scroll_up_in_region(&vp, 0, 2, 1);
+        grid.scroll_up_in_region(&vp, &mut BTreeMap::new(), 0, 2, 1);
         assert_eq!(all_chars(&grid), vec!["SSS", "TTT", "BBB", "CCC", "   "]);
     }
 
     #[test]
     fn scroll_down_region_with_scrollback() {
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['S', 'T', 'A', 'B', 'C']);
-        grid.scroll_down_in_region(&vp, 0, 2, 1);
+        grid.scroll_down_in_region(&vp, &mut BTreeMap::new(), 0, 2, 1);
         assert_eq!(all_chars(&grid), vec!["SSS", "TTT", "   ", "AAA", "BBB"]);
     }
 
@@ -876,7 +894,7 @@ mod tests {
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
         let red = Srgb::new(255, 0, 0);
         grid.rows[1].fg[0] = red; // row B, first cell
-        grid.scroll_up_in_region(&vp, 0, 2, 1);
+        grid.scroll_up_in_region(&vp, &mut BTreeMap::new(), 0, 2, 1);
         // B is now row 0; its color should survive.
         assert_eq!(grid.rows[0].fg[0], red);
         // New blank row at bottom should have default colors.
@@ -888,7 +906,7 @@ mod tests {
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
         let blue = Srgb::new(0, 0, 255);
         grid.rows[1].fg[0] = blue; // row B
-        grid.scroll_down_in_region(&vp, 0, 2, 1);
+        grid.scroll_down_in_region(&vp, &mut BTreeMap::new(), 0, 2, 1);
         // B moved from row 1 to row 2.
         assert_eq!(grid.rows[2].fg[0], blue);
         // New blank row at top should have default colors.
@@ -899,14 +917,14 @@ mod tests {
     fn scroll_up_single_row_region() {
         // A 1-row region: scrolling should just blank it.
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
-        grid.scroll_up_in_region(&vp, 1, 1, 1);
+        grid.scroll_up_in_region(&vp, &mut BTreeMap::new(), 1, 1, 1);
         assert_eq!(all_chars(&grid), vec!["AAA", "   ", "CCC"]);
     }
 
     #[test]
     fn scroll_down_single_row_region() {
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
-        grid.scroll_down_in_region(&vp, 1, 1, 1);
+        grid.scroll_down_in_region(&vp, &mut BTreeMap::new(), 1, 1, 1);
         assert_eq!(all_chars(&grid), vec!["AAA", "   ", "CCC"]);
     }
 

@@ -147,9 +147,13 @@ fn soft_wrap(
         if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
             screen.grid.push_visible_row(viewport);
         } else {
-            screen
-                .grid
-                .scroll_up_in_region(viewport, screen.scroll_top, screen.scroll_bottom, 1);
+            screen.grid.scroll_up_in_region(
+                viewport,
+                &mut screen.images,
+                screen.scroll_top,
+                screen.scroll_bottom,
+                1,
+            );
         }
     } else if screen.cursor.row < viewport.rows - 1 {
         screen.cursor.row += 1;
@@ -221,6 +225,7 @@ pub(super) fn execute(
                 } else {
                     screen.grid.scroll_up_in_region(
                         viewport,
+                        &mut screen.images,
                         screen.scroll_top,
                         screen.scroll_bottom,
                         1,
@@ -284,7 +289,9 @@ pub(super) fn csi_dispatch(
         }
         'J' => {
             let mode = p.first().copied().unwrap_or(0);
-            screen.grid.erase_in_display(&screen.cursor, viewport, mode);
+            screen
+                .grid
+                .erase_in_display(&screen.cursor, viewport, &mut screen.images, mode);
         }
         'K' => {
             let mode = p.first().copied().unwrap_or(0);
@@ -302,17 +309,27 @@ pub(super) fn csi_dispatch(
         'L' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
             if cursor.row >= screen.scroll_top && cursor.row <= screen.scroll_bottom {
-                screen
-                    .grid
-                    .scroll_down_in_region(viewport, cursor.row, screen.scroll_bottom, n);
+                let top = cursor.row;
+                screen.grid.scroll_down_in_region(
+                    viewport,
+                    &mut screen.images,
+                    top,
+                    screen.scroll_bottom,
+                    n,
+                );
             }
         }
         'M' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
             if cursor.row >= screen.scroll_top && cursor.row <= screen.scroll_bottom {
-                screen
-                    .grid
-                    .scroll_up_in_region(viewport, cursor.row, screen.scroll_bottom, n);
+                let top = cursor.row;
+                screen.grid.scroll_up_in_region(
+                    viewport,
+                    &mut screen.images,
+                    top,
+                    screen.scroll_bottom,
+                    n,
+                );
             }
         }
         'P' => {
@@ -336,6 +353,7 @@ pub(super) fn csi_dispatch(
             } else {
                 screen.grid.scroll_up_in_region(
                     viewport,
+                    &mut screen.images,
                     screen.scroll_top,
                     screen.scroll_bottom,
                     n,
@@ -344,9 +362,13 @@ pub(super) fn csi_dispatch(
         }
         'T' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            screen
-                .grid
-                .scroll_down_in_region(viewport, screen.scroll_top, screen.scroll_bottom, n);
+            screen.grid.scroll_down_in_region(
+                viewport,
+                &mut screen.images,
+                screen.scroll_top,
+                screen.scroll_bottom,
+                n,
+            );
         }
         'r' => {
             let top = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
@@ -382,6 +404,7 @@ pub(super) fn esc_dispatch(
             if screen.cursor.row == screen.scroll_top {
                 screen.grid.scroll_down_in_region(
                     viewport,
+                    &mut screen.images,
                     screen.scroll_top,
                     screen.scroll_bottom,
                     1,

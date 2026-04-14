@@ -11,6 +11,7 @@ use crate::terminal::grid::Viewport;
 use crate::terminal::hyperlink::HyperlinkId;
 use crate::terminal::image::PlacedImage;
 use crate::terminal::image::anchor_images;
+use crate::terminal::image::clear_in_range;
 use crate::terminal::image::restore_images;
 use crate::terminal::row::Row;
 
@@ -109,6 +110,9 @@ pub(super) fn restore_cursor_slot(
 }
 
 /// Clear every cell of the visible area. Leaves any scrollback untouched.
+/// Also drops images anchored to visible rows — an alt-screen transition
+/// that left sixel images behind would render them on top of the fresh
+/// screen the app is about to draw.
 pub(super) fn clear_visible(
     screen: &mut Screen,
     viewport: &Viewport,
@@ -121,6 +125,7 @@ pub(super) fn clear_visible(
     for r in first_visible..screen.grid.rows.len() {
         screen.grid.rows[r].clear();
     }
+    clear_in_range(&mut screen.images, first_visible, screen.grid.rows.len());
 }
 
 /// Switch between the primary and alt screens. Idempotent: a no-op if the

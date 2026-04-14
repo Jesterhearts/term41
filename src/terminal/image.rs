@@ -27,6 +27,64 @@ pub struct VisibleImage<'a> {
     pub screen_col: u32,
 }
 
+/// Remove any existing image that would overlap a new image placed at
+/// `(top_row, col)` spanning `height_rows` grid rows. Column match is
+/// exact — sixel apps re-place images at the same column on redraw, and
+/// requiring an exact col keeps two images at the same row but different
+/// columns (tiled previews, side-by-side thumbnails) from clobbering each
+/// other without needing a cell-width value the terminal doesn't track.
+pub(super) fn remove_overlapping(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    top_row: usize,
+    height_rows: usize,
+    col: u32,
+    cell_height: u32,
+) {
+    let new_bottom = top_row + height_rows;
+    images.retain(|_, img| {
+        if img.col != col {
+            return true;
+        }
+        let old_rows = img.image.height.div_ceil(cell_height).max(1) as usize;
+        let old_bottom = img.row + old_rows;
+        // Keep only if disjoint on rows (half-open intervals).
+        old_bottom <= top_row || img.row >= new_bottom
+    });
+}
+
+/// Translate images whose top row lies within `[abs_top, abs_bottom]` by
+/// `delta` rows — the visible effect of a DECSTBM region scroll. Images
+/// whose new top falls outside the region are removed, matching xterm's
+/// "content scrolled out of the region is gone" behavior.
+pub(super) fn shift_in_region(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    abs_top: usize,
+    abs_bottom: usize,
+    delta: i64,
+) {
+    images.retain(|_, img| {
+        if img.row < abs_top || img.row > abs_bottom {
+            return true;
+        }
+        let new_row = img.row as i64 + delta;
+        if new_row < abs_top as i64 || new_row > abs_bottom as i64 {
+            return false;
+        }
+        img.row = new_row as usize;
+        true
+    });
+}
+
+/// Remove any image whose top row lies within `[start, end)`. Used by ED 2
+/// and alt-screen clear to drop images that sit on cleared cells.
+pub(super) fn clear_in_range(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    start: usize,
+    end: usize,
+) {
+    images.retain(|_, img| img.row < start || img.row >= end);
+}
+
 /// Save image positions as logical-line anchors that survive reflow.
 ///
 /// Each image is mapped to (id, logical_lines_below, row_offset_in_line).
