@@ -122,6 +122,19 @@ pub struct Terminal {
     /// event loop calls [`Self::report_focus_change`] on every winit
     /// `Focused` event; that method gates emission on this flag.
     focus_reporting: bool,
+
+    /// Title last reported by the foreground app via OSC 0 / OSC 2.
+    /// `None` means no app has set a title (or one explicitly cleared
+    /// it); the host applies its default ("term41") in that case.
+    pub current_title: Option<String>,
+
+    /// Latched true whenever the parser sees a BEL byte (0x07). The host
+    /// drains this each frame via [`Self::take_bell_pending`] so it can
+    /// flash the screen, ping the compositor, etc. Latched (not
+    /// counted) because reacting once per frame is the right grain — a
+    /// noisy app that bells in a tight loop should still get one
+    /// per-frame response, not a queue that backs up forever.
+    bell_pending: bool,
 }
 
 impl Terminal {
@@ -156,7 +169,16 @@ impl Terminal {
             kitty_keyboard: KittyKeyboardState::new(),
             cursor_style: CursorStyle::default(),
             focus_reporting: false,
+            current_title: None,
+            bell_pending: false,
         }
+    }
+
+    /// Drain the bell flag. Returns `true` exactly when at least one BEL
+    /// has arrived since the last call, leaving the flag cleared so the
+    /// next frame starts fresh.
+    pub fn take_bell_pending(&mut self) -> bool {
+        std::mem::replace(&mut self.bell_pending, false)
     }
 
     /// Override the default cursor style. Called once at startup so the
@@ -684,7 +706,18 @@ impl Terminal {
 
             match action {
                 vte::Action::Print(c) => put_char(&mut self.active, &self.viewport, c),
-                vte::Action::Execute(byte) => execute(&mut self.active, &self.viewport, byte),
+                vte::Action::Execute(byte) => {
+                    if byte == 0x07 {
+                        // BEL: surface to the host. The parser already
+                        // swallows BEL inside execute(), but routing it
+                        // here lets us notify the windowing layer (urgent
+                        // hint, visual flash) without coupling the
+                        // Screen module to that decision.
+                        self.bell_pending = true;
+                    } else {
+                        execute(&mut self.active, &self.viewport, byte);
+                    }
+                }
                 vte::Action::CsiDispatch {
                     params,
                     intermediates,
@@ -755,6 +788,7 @@ impl Terminal {
                         current_directory: &mut self.current_directory,
                         hyperlinks: &mut self.hyperlinks,
                         current_hyperlink: &mut self.active.current_hyperlink,
+                        current_title: &mut self.current_title,
                     };
                     handle_osc(&data, &mut ctx);
                 }
@@ -1278,6 +1312,51 @@ mod tests {
     }
 
     // ---- Live config reload effects ----
+
+    // ---- Title (OSC 0 / OSC 2) ----
+
+    #[test]
+    fn osc_2_updates_terminal_title() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b]2;build ok\x1b\\");
+        assert_eq!(term.current_title.as_deref(), Some("build ok"));
+    }
+
+    #[test]
+    fn osc_0_updates_terminal_title() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b]0;hi\x1b\\");
+        assert_eq!(term.current_title.as_deref(), Some("hi"));
+    }
+
+    // ---- Bell ----
+
+    #[test]
+    fn bel_byte_sets_bell_pending() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        assert!(!term.take_bell_pending());
+        term.process(b"\x07");
+        assert!(term.take_bell_pending());
+        // Take is destructive — second poll within the same frame returns false.
+        assert!(!term.take_bell_pending());
+    }
+
+    #[test]
+    fn bel_inside_text_is_caught() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"hi\x07there");
+        assert!(term.take_bell_pending());
+    }
+
+    #[test]
+    fn bel_does_not_advance_cursor() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x07");
+        assert_eq!(term.active.cursor.col, 0);
+        assert_eq!(term.active.cursor.row, 0);
+    }
+
+    // ---- Live config reload ----
 
     #[test]
     fn set_scrollback_limit_takes_effect_on_next_push() {

@@ -18,6 +18,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clipboard::ClipboardKind;
+use config::BellMode;
 use config::Config;
 use font::FontSystem;
 use keybindings::Action;
@@ -76,6 +77,12 @@ struct App {
     boot_font_size: f32,
     boot_opacity: f32,
     keybindings: keybindings::Keybindings,
+    bell_mode: BellMode,
+    /// Last title we pushed to the OS via `Window::set_title`. Compared
+    /// against `terminal.current_title` each frame so we only call
+    /// `set_title` when something actually changed (the call hops to the
+    /// compositor on Wayland and isn't free).
+    applied_title: Option<String>,
     modifiers: winit::keyboard::ModifiersState,
 
     /// Last known pointer position in physical pixels. Updated on every
@@ -170,6 +177,8 @@ impl App {
             boot_font_size: config.font_size,
             boot_opacity: config.opacity,
             keybindings: config.keybindings,
+            bell_mode: config.bell,
+            applied_title: None,
             modifiers: winit::keyboard::ModifiersState::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             mouse_buttons: MouseButtonState::default(),
@@ -195,6 +204,7 @@ impl App {
         self.terminal.set_default_cursor_style(cfg.cursor_style);
         self.terminal.set_scrollback_limit(cfg.scrollback_lines);
         self.keybindings = cfg.keybindings;
+        self.bell_mode = cfg.bell;
 
         if cfg.fonts != self.boot_fonts {
             warn!(
@@ -213,6 +223,54 @@ impl App {
                 "config: opacity changed ({} → {}); restart to apply",
                 self.boot_opacity, cfg.opacity
             );
+        }
+    }
+
+    /// Push the foreground app's OSC 0 / OSC 2 title onto the OS window
+    /// when it changes. Falls back to `term41` when the app clears the
+    /// title (or never set one) so the user always has a recognisable
+    /// label in their window list.
+    fn sync_window_title(&mut self) {
+        let want = self.terminal.current_title.as_deref();
+        if self.applied_title.as_deref() == want {
+            return;
+        }
+        let Some(window) = &self.window else {
+            return;
+        };
+        match want {
+            Some(t) => window.set_title(t),
+            None => window.set_title("term41"),
+        }
+        self.applied_title = want.map(str::to_owned);
+    }
+
+    /// Drain the bell flag and act on it according to the configured
+    /// [`BellMode`]. Polled once per frame so a tight loop of BELs only
+    /// produces one user-visible reaction per frame, not a queue of
+    /// stacked flashes / urgency requests.
+    fn dispatch_bell(&mut self) {
+        if !self.terminal.take_bell_pending() {
+            return;
+        }
+        match self.bell_mode {
+            BellMode::Off => {}
+            BellMode::Visual => {
+                if let Some(renderer) = &mut self.renderer {
+                    renderer.notify_bell();
+                }
+            }
+            BellMode::Urgent => {
+                if let Some(window) = &self.window {
+                    // Informational rather than Critical: critical bobs
+                    // the dock indefinitely on macOS, which is overkill
+                    // for a routine bell. Informational is more "look at
+                    // me when you have a moment".
+                    window.request_user_attention(Some(
+                        winit::window::UserAttentionType::Informational,
+                    ));
+                }
+            }
         }
     }
 
@@ -596,6 +654,8 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::RedrawRequested => {
                 self.read_pty_output();
+                self.sync_window_title();
+                self.dispatch_bell();
                 if let Some(renderer) = &mut self.renderer {
                     renderer.render(&mut self.font_system, &self.terminal);
                 }

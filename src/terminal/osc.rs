@@ -19,6 +19,7 @@ pub(super) struct OscContext<'a> {
     pub current_directory: &'a mut Option<PathBuf>,
     pub hyperlinks: &'a mut HyperlinkRegistry,
     pub current_hyperlink: &'a mut Option<HyperlinkId>,
+    pub current_title: &'a mut Option<String>,
 }
 
 /// Split an OSC payload into its numeric command prefix and the remainder.
@@ -77,11 +78,32 @@ pub(super) fn handle_osc(
 ) {
     let (cmd, rest) = split_osc(payload);
     match cmd {
+        // OSC 0 sets icon name + window title; OSC 2 sets just the window
+        // title. We don't have a separate icon-name surface, so both feed
+        // the same field. OSC 1 (icon name only) is intentionally ignored.
+        b"0" | b"2" => handle_osc_title(rest, ctx.current_title),
         b"7" => handle_osc_7(rest, ctx.current_directory),
         b"8" => handle_osc_8(rest, ctx.hyperlinks, ctx.current_hyperlink),
         b"52" => handle_osc_52(rest, ctx.clipboard, ctx.pending_output),
         _ => {}
     }
+}
+
+/// OSC 0 / OSC 2 — set the window title. Empty payloads clear the title
+/// (matches xterm) so apps can hand back default behaviour. Non-UTF-8
+/// payloads are dropped rather than mojibaked into the title bar.
+fn handle_osc_title(
+    rest: &[u8],
+    current_title: &mut Option<String>,
+) {
+    if rest.is_empty() {
+        *current_title = None;
+        return;
+    }
+    let Ok(text) = std::str::from_utf8(rest) else {
+        return;
+    };
+    *current_title = Some(text.to_owned());
 }
 
 /// Implements OSC 52 clipboard read/write as used by vim, tmux, etc.
@@ -219,6 +241,7 @@ mod tests {
         cwd: Option<PathBuf>,
         registry: HyperlinkRegistry,
         current_link: Option<HyperlinkId>,
+        title: Option<String>,
     }
 
     impl Bag {
@@ -229,6 +252,7 @@ mod tests {
                 cwd: None,
                 registry: HyperlinkRegistry::new(),
                 current_link: None,
+                title: None,
             }
         }
 
@@ -242,6 +266,7 @@ mod tests {
                 current_directory: &mut self.cwd,
                 hyperlinks: &mut self.registry,
                 current_hyperlink: &mut self.current_link,
+                current_title: &mut self.title,
             };
             handle_osc(payload, &mut ctx);
         }
@@ -418,6 +443,47 @@ mod tests {
         bag.dispatch(b"8;id=b;https://example.com");
         let id_b = bag.current_link.unwrap();
         assert_ne!(id_a, id_b);
+    }
+
+    // ---- OSC 0 / OSC 2 ----
+
+    #[test]
+    fn osc_0_sets_window_title() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"0;hello");
+        assert_eq!(bag.title.as_deref(), Some("hello"));
+    }
+
+    #[test]
+    fn osc_2_sets_window_title() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"2;build done");
+        assert_eq!(bag.title.as_deref(), Some("build done"));
+    }
+
+    #[test]
+    fn osc_2_empty_clears_title() {
+        let mut bag = Bag::new();
+        bag.title = Some("stale".into());
+        bag.dispatch(b"2;");
+        assert!(bag.title.is_none());
+    }
+
+    #[test]
+    fn osc_2_drops_invalid_utf8() {
+        let mut bag = Bag::new();
+        bag.title = Some("kept".into());
+        bag.dispatch(b"2;\xff\xfe");
+        // Invalid UTF-8 leaves the previous title untouched rather than
+        // wiping it; that's safer than displaying garbage.
+        assert_eq!(bag.title.as_deref(), Some("kept"));
+    }
+
+    #[test]
+    fn osc_1_is_ignored() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"1;icon-name-only");
+        assert!(bag.title.is_none());
     }
 
     #[test]

@@ -39,6 +39,9 @@ write my own, with the features I prefer.
   with config defaults
 - Focus reporting (DECSET 1004) so apps can react when the window
   gains/loses focus
+- OSC 0 / OSC 2 window title forwarded to the OS
+- Configurable bell handling (`off`, `visual` flash, or `urgent`
+  attention hint to the compositor)
 - Configurable keybindings via `config.toml`
 - Live config reload — the watcher picks up edits in place; cursor,
   scrollback, and keybinding changes apply instantly (font / opacity
@@ -116,6 +119,11 @@ cursor_shape = "block"
 # Whether the cursor blinks. Apps can still override at runtime via
 # DECSCUSR.
 cursor_blink = true
+
+# Bell handling: "off" (default), "visual" (brief screen flash), or
+# "urgent" (request the compositor mark the window as needing
+# attention — taskbar bobbing, urgency hint, etc).
+bell = "off"
 
 # Keybindings. Setting this *replaces* the defaults — to disable a
 # default binding, omit it. Modifiers: Ctrl/Shift/Alt/Super (case

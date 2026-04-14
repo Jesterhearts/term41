@@ -10,6 +10,24 @@ use crate::terminal::CursorStyle;
 
 const DEFAULT_SCROLLBACK: u32 = 10_000;
 
+/// What to do when the foreground app rings the bell (BEL / `\x07`).
+///
+/// Default is [`BellMode::Off`] because shells like bash ring the bell on
+/// completion-ambiguity by default — most users find that surprising
+/// rather than useful out of the box.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum BellMode {
+    /// Ignore the bell entirely.
+    #[default]
+    Off,
+    /// Briefly flash the screen.
+    Visual,
+    /// Ask the compositor to mark the window as needing attention
+    /// (taskbar bobbing on macOS, urgency hint on X11/Wayland). Quiet
+    /// when the window is focused; eye-catching when it isn't.
+    Urgent,
+}
+
 #[derive(Deserialize)]
 struct ConfigFile {
     opacity: Option<f32>,
@@ -23,6 +41,8 @@ struct ConfigFile {
     /// Replace the default keybindings entirely. Setting an empty array
     /// disables all bindings — useful for debugging conflicts.
     keybindings: Option<Vec<KeybindingConfig>>,
+    /// Bell behaviour: `off`, `visual`, or `urgent`.
+    bell: Option<String>,
 }
 
 pub struct Config {
@@ -32,6 +52,7 @@ pub struct Config {
     pub scrollback_lines: u32,
     pub cursor_style: CursorStyle,
     pub keybindings: Keybindings,
+    pub bell: BellMode,
 }
 
 impl Default for Config {
@@ -43,6 +64,7 @@ impl Default for Config {
             scrollback_lines: DEFAULT_SCROLLBACK,
             cursor_style: CursorStyle::default(),
             keybindings: Keybindings::defaults(),
+            bell: BellMode::default(),
         }
     }
 }
@@ -66,6 +88,7 @@ pub fn load_from(path: &std::path::Path) -> Config {
 
     let cursor_style = build_cursor_style(file.cursor_shape.as_deref(), file.cursor_blink);
     let keybindings = build_keybindings(file.keybindings, &path.display());
+    let bell = build_bell_mode(file.bell.as_deref());
 
     Config {
         opacity: file.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
@@ -74,6 +97,25 @@ pub fn load_from(path: &std::path::Path) -> Config {
         scrollback_lines: file.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
         cursor_style,
         keybindings,
+        bell,
+    }
+}
+
+/// Map the optional `bell = "..."` toml field onto a [`BellMode`]. Unknown
+/// values warn and default to off so a typo can't silently turn the bell
+/// on (or off) against the user's intent.
+fn build_bell_mode(raw: Option<&str>) -> BellMode {
+    let Some(s) = raw else {
+        return BellMode::default();
+    };
+    match s.to_ascii_lowercase().as_str() {
+        "off" | "none" | "false" => BellMode::Off,
+        "visual" | "flash" => BellMode::Visual,
+        "urgent" | "attention" => BellMode::Urgent,
+        other => {
+            warn!("unknown bell mode {other:?}; falling back to off");
+            BellMode::Off
+        }
     }
 }
 

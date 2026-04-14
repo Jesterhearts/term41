@@ -77,11 +77,23 @@ pub struct Renderer {
     /// phase. Wall-clock would work too — `Instant` keeps it monotonic
     /// regardless of system clock changes.
     started: Instant,
+
+    /// When the current visual bell flash started, if one is in progress.
+    /// Cleared back to `None` once the flash is past its fade-out window;
+    /// `notify_bell` re-arms it.
+    bell_started: Option<Instant>,
 }
 
 /// Half-period of the cursor blink. xterm uses 530ms by default; 500 lands
 /// just shy of that and is the common choice for newer terminals.
 const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
+
+/// How long the visual bell stays on screen, fading out linearly.
+const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);
+
+/// Peak alpha of the bell flash overlay (0–255). Chosen so the flash is
+/// noticeable on dark themes without being eye-searing on light ones.
+const BELL_FLASH_PEAK_ALPHA: f32 = 80.0;
 
 impl Renderer {
     pub async fn new(
@@ -344,6 +356,7 @@ impl Renderer {
             image_atlas,
             bg_alpha: (opacity.clamp(0.0, 1.0) * 255.0) as u8,
             started: Instant::now(),
+            bell_started: None,
         };
 
         renderer.update_screen_size(size);
@@ -583,6 +596,44 @@ impl Renderer {
             }
         }
 
+        // ---- Visual bell flash overlay ----
+        // Drawn after the row content as a semi-transparent white quad
+        // covering the whole window. Fades out linearly across
+        // BELL_FLASH_DURATION; once the fade is done we clear the timer
+        // so subsequent frames do nothing until the next BEL.
+        if let Some(start) = self.bell_started {
+            let elapsed = start.elapsed();
+            if elapsed >= BELL_FLASH_DURATION {
+                self.bell_started = None;
+            } else {
+                let progress = elapsed.as_secs_f32() / BELL_FLASH_DURATION.as_secs_f32();
+                let alpha = (BELL_FLASH_PEAK_ALPHA * (1.0 - progress)) as u8;
+                let surface_w = self.surface_config.width as f32;
+                let surface_h = self.surface_config.height as f32;
+                let color = u32::from_be_bytes([255, 255, 255, alpha]);
+                let bi = bg_vertices.len() as u32;
+                bg_vertices.extend_from_slice(&[
+                    BgVertex {
+                        pos: [0.0, 0.0],
+                        color,
+                    },
+                    BgVertex {
+                        pos: [surface_w, 0.0],
+                        color,
+                    },
+                    BgVertex {
+                        pos: [0.0, surface_h],
+                        color,
+                    },
+                    BgVertex {
+                        pos: [surface_w, surface_h],
+                        color,
+                    },
+                ]);
+                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+            }
+        }
+
         // ---- Build image quads ----
         let mut image_vertices: Vec<ImageVertex> = Vec::new();
         let mut image_indices: Vec<u32> = Vec::new();
@@ -779,6 +830,14 @@ impl Renderer {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+    }
+
+    /// Trigger a visual bell flash. Idempotent within the flash window:
+    /// re-arming mid-flash restarts the fade-out from full alpha, which
+    /// is the desired behaviour for back-to-back bells (the user sees
+    /// each one rather than a single blended pulse).
+    pub fn notify_bell(&mut self) {
+        self.bell_started = Some(Instant::now());
     }
 
     /// Resolve "is the cursor visible right now and what does it look like"
