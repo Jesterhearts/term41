@@ -2,6 +2,9 @@ use std::path::PathBuf;
 
 use serde::Deserialize;
 
+use crate::keybindings::Keybinding;
+use crate::keybindings::KeybindingConfig;
+use crate::keybindings::Keybindings;
 use crate::terminal::CursorShape;
 use crate::terminal::CursorStyle;
 
@@ -17,6 +20,9 @@ struct ConfigFile {
     cursor_shape: Option<String>,
     /// Whether the cursor blinks. Defaults to true.
     cursor_blink: Option<bool>,
+    /// Replace the default keybindings entirely. Setting an empty array
+    /// disables all bindings — useful for debugging conflicts.
+    keybindings: Option<Vec<KeybindingConfig>>,
 }
 
 pub struct Config {
@@ -25,6 +31,7 @@ pub struct Config {
     pub font_size: f32,
     pub scrollback_lines: u32,
     pub cursor_style: CursorStyle,
+    pub keybindings: Keybindings,
 }
 
 impl Default for Config {
@@ -35,17 +42,16 @@ impl Default for Config {
             font_size: 24.0,
             scrollback_lines: DEFAULT_SCROLLBACK,
             cursor_style: CursorStyle::default(),
+            keybindings: Keybindings::defaults(),
         }
     }
 }
 
-pub fn load() -> Config {
-    let path = match config_path() {
-        Some(p) => p,
-        None => return Config::default(),
-    };
-
-    let contents = match std::fs::read_to_string(&path) {
+/// Read and parse the config at `path`, falling back to defaults on any
+/// I/O or parse failure. Used both by the startup loader and the
+/// live-reload watcher (which already knows the path it's watching).
+pub fn load_from(path: &std::path::Path) -> Config {
+    let contents = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return Config::default(),
     };
@@ -59,6 +65,7 @@ pub fn load() -> Config {
     };
 
     let cursor_style = build_cursor_style(file.cursor_shape.as_deref(), file.cursor_blink);
+    let keybindings = build_keybindings(file.keybindings, &path.display());
 
     Config {
         opacity: file.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
@@ -66,7 +73,34 @@ pub fn load() -> Config {
         font_size: file.font_size.unwrap_or(24.0).max(1.0),
         scrollback_lines: file.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
         cursor_style,
+        keybindings,
     }
+}
+
+/// Public so `main.rs` can hand the watcher the same path the loader uses.
+pub fn config_file_path() -> Option<PathBuf> {
+    config_path()
+}
+
+/// Map the optional `keybindings = [...]` toml field onto a
+/// [`Keybindings`]. Returns [`Keybindings::defaults`] when the key is
+/// absent; an empty array (`keybindings = []`) is honoured as "no
+/// bindings" so users can disable them all to debug a conflict.
+fn build_keybindings(
+    raw: Option<Vec<KeybindingConfig>>,
+    path: &dyn std::fmt::Display,
+) -> Keybindings {
+    let Some(entries) = raw else {
+        return Keybindings::defaults();
+    };
+    let mut out = Vec::with_capacity(entries.len());
+    for entry in entries {
+        match Keybinding::from_config_entry(entry) {
+            Ok(b) => out.push(b),
+            Err(e) => warn!("invalid keybinding in {path}: {e}"),
+        }
+    }
+    Keybindings::from_config(out)
 }
 
 /// Map the optional shape + blink toml fields onto a [`CursorStyle`]. Falls

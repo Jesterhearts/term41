@@ -4,6 +4,7 @@
 mod clipboard;
 mod config;
 mod font;
+mod keybindings;
 mod pty;
 mod renderer;
 mod selection;
@@ -11,6 +12,7 @@ mod sixel;
 mod terminal;
 mod vte;
 
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -18,6 +20,7 @@ use std::time::Instant;
 use clipboard::ClipboardKind;
 use config::Config;
 use font::FontSystem;
+use keybindings::Action;
 use pty::Pty;
 use renderer::Renderer;
 use selection::SelectionMode;
@@ -34,6 +37,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoop;
+use winit::event_loop::EventLoopProxy;
 use winit::keyboard::Key;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
@@ -46,6 +50,14 @@ extern crate log;
 const INITIAL_COLS: u32 = 80;
 const INITIAL_ROWS: u32 = 24;
 
+/// Custom event type for the winit event loop. Keeps cross-thread plumbing
+/// (config watcher, future async tasks) out of the main `WindowEvent` flow.
+#[derive(Debug, Clone)]
+enum AppEvent {
+    /// The config file changed on disk and should be re-read + applied.
+    ReloadConfig,
+}
+
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
@@ -53,6 +65,17 @@ struct App {
     font_system: FontSystem,
     pty: Pty,
     opacity: f32,
+    /// Path to the config file we'll reload on `AppEvent::ReloadConfig`.
+    /// `None` means we couldn't even resolve a config dir at startup, so
+    /// reloads are silently disabled.
+    config_path: Option<PathBuf>,
+    /// Snapshot of the config knobs that *can't* be hot-reloaded — fonts,
+    /// font_size, opacity. Kept so `apply_config` can warn when the user
+    /// changes one (signalling that a restart is needed).
+    boot_fonts: Option<String>,
+    boot_font_size: f32,
+    boot_opacity: f32,
+    keybindings: keybindings::Keybindings,
     modifiers: winit::keyboard::ModifiersState,
 
     /// Last known pointer position in physical pixels. Updated on every
@@ -125,6 +148,7 @@ impl App {
     fn new(
         pty: Pty,
         config: Config,
+        config_path: Option<PathBuf>,
     ) -> Self {
         let font_system = FontSystem::new(config.fonts.as_deref(), config.font_size);
         let mut terminal = Terminal::new(
@@ -141,6 +165,11 @@ impl App {
             font_system,
             pty,
             opacity: config.opacity,
+            config_path,
+            boot_fonts: config.fonts.clone(),
+            boot_font_size: config.font_size,
+            boot_opacity: config.opacity,
+            keybindings: config.keybindings,
             modifiers: winit::keyboard::ModifiersState::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
             mouse_buttons: MouseButtonState::default(),
@@ -149,6 +178,68 @@ impl App {
             last_click_cell: None,
             click_count: 0,
             left_drag_active: false,
+        }
+    }
+
+    /// Re-read the watched config file and apply the axes that can change
+    /// at runtime (cursor style, scrollback budget, keybindings). Knobs
+    /// that need a fresh GPU surface or atlas (opacity, fonts, font size)
+    /// log a "needs restart" warning when they change so the user knows
+    /// to relaunch — silent ignoring would be worse than the small noise.
+    fn reload_config(&mut self) {
+        let Some(path) = self.config_path.as_ref() else {
+            return;
+        };
+        let cfg = config::load_from(path);
+
+        self.terminal.set_default_cursor_style(cfg.cursor_style);
+        self.terminal.set_scrollback_limit(cfg.scrollback_lines);
+        self.keybindings = cfg.keybindings;
+
+        if cfg.fonts != self.boot_fonts {
+            warn!(
+                "config: fonts changed (was {:?}, now {:?}); restart to apply",
+                self.boot_fonts, cfg.fonts
+            );
+        }
+        if (cfg.font_size - self.boot_font_size).abs() > f32::EPSILON {
+            warn!(
+                "config: font_size changed ({} → {}); restart to apply",
+                self.boot_font_size, cfg.font_size
+            );
+        }
+        if (cfg.opacity - self.boot_opacity).abs() > f32::EPSILON {
+            warn!(
+                "config: opacity changed ({} → {}); restart to apply",
+                self.boot_opacity, cfg.opacity
+            );
+        }
+    }
+
+    /// Run a configurable [`Action`] in response to a keybinding match.
+    fn run_action(
+        &mut self,
+        action: Action,
+    ) {
+        match action {
+            Action::ScrollPageUp => {
+                self.terminal
+                    .scroll_viewport_up(self.terminal.viewport.rows);
+            }
+            Action::ScrollPageDown => {
+                self.terminal
+                    .scroll_viewport_down(self.terminal.viewport.rows);
+            }
+            Action::Copy => {
+                if self.terminal.has_selection() {
+                    self.terminal.copy_selection(ClipboardKind::Clipboard);
+                }
+            }
+            Action::Paste => {
+                self.terminal.reset_viewport();
+                self.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                self.flush_pending();
+            }
         }
     }
 
@@ -229,7 +320,17 @@ impl App {
     }
 }
 
-impl ApplicationHandler for App {
+impl ApplicationHandler<AppEvent> for App {
+    fn user_event(
+        &mut self,
+        _event_loop: &ActiveEventLoop,
+        event: AppEvent,
+    ) {
+        match event {
+            AppEvent::ReloadConfig => self.reload_config(),
+        }
+    }
+
     fn resumed(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -445,42 +546,12 @@ impl ApplicationHandler for App {
                     return;
                 }
 
-                // Shift+PageUp/Down for scrollback navigation.
-                if self.modifiers.shift_key()
-                    && let Key::Named(named) = &event.logical_key
-                {
-                    match named {
-                        NamedKey::PageUp => {
-                            self.terminal
-                                .scroll_viewport_up(self.terminal.viewport.rows);
-                            return;
-                        }
-                        NamedKey::PageDown => {
-                            self.terminal
-                                .scroll_viewport_down(self.terminal.viewport.rows);
-                            return;
-                        }
-                        _ => {}
-                    }
-                }
-
-                // Ctrl+Shift+V / Ctrl+Shift+C → clipboard paste / copy.
-                // Caught before the Ctrl+key → control-byte path so plain
-                // Ctrl-V / Ctrl-C still emit 0x16 / 0x03.
-                if self.modifiers.control_key()
-                    && self.modifiers.shift_key()
-                    && let Key::Character(c) = &event.logical_key
-                {
-                    if c.eq_ignore_ascii_case("v") {
-                        self.terminal.reset_viewport();
-                        self.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
-                        self.flush_pending();
-                        return;
-                    }
-                    if c.eq_ignore_ascii_case("c") && self.terminal.has_selection() {
-                        self.terminal.copy_selection(ClipboardKind::Clipboard);
-                        return;
-                    }
+                // Configurable keybindings run before any of the legacy
+                // input encoders so the user's overrides win — including
+                // disabling the previous defaults by omitting them.
+                if let Some(action) = self.keybindings.lookup(&event.logical_key, self.modifiers) {
+                    self.run_action(action);
+                    return;
                 }
 
                 // Kitty keyboard protocol takes precedence: when the app has
@@ -703,12 +774,94 @@ fn named_key_to_bytes(key: NamedKey) -> Option<Vec<u8>> {
 fn main() {
     env_logger::init();
 
-    let config = config::load();
+    let config_path = config::config_file_path();
+    let config = match config_path.as_deref() {
+        Some(p) => config::load_from(p),
+        None => Config::default(),
+    };
     let pty = Pty::spawn(INITIAL_COLS as u16, INITIAL_ROWS as u16).expect("failed to spawn PTY");
 
-    let event_loop = EventLoop::new().expect("create event loop");
+    let event_loop: EventLoop<AppEvent> = EventLoop::with_user_event()
+        .build()
+        .expect("create event loop");
     event_loop.set_control_flow(ControlFlow::Wait);
 
-    let mut app = App::new(pty, config);
+    // Spawn the file watcher before running the loop so we don't miss a
+    // save during startup. The watcher owns its own thread (via notify)
+    // and only needs the proxy to forward reload notifications back.
+    if let Some(ref path) = config_path {
+        spawn_config_watcher(path.clone(), event_loop.create_proxy());
+    }
+
+    let mut app = App::new(pty, config, config_path);
     event_loop.run_app(&mut app).expect("run event loop");
+}
+
+/// Watch the config file for modifications and post `AppEvent::ReloadConfig`
+/// onto the winit event loop whenever it changes. We watch the *parent*
+/// directory rather than the file itself because many editors save by
+/// writing to a temp file and renaming over the original, which would
+/// invalidate a file-level watch on the first save.
+fn spawn_config_watcher(
+    config_path: PathBuf,
+    proxy: EventLoopProxy<AppEvent>,
+) {
+    use notify::EventKind;
+    use notify::RecursiveMode;
+    use notify::Watcher;
+
+    let Some(dir) = config_path.parent().map(PathBuf::from) else {
+        return;
+    };
+
+    // The watcher needs to outlive this function; stash it on the spawned
+    // thread so its `Drop` runs only when the process exits.
+    std::thread::Builder::new()
+        .name("config-watcher".into())
+        .spawn(move || {
+            let target = config_path.clone();
+            let proxy_for_handler = proxy.clone();
+            let mut watcher = match notify::recommended_watcher(move |res| {
+                let event: notify::Event = match res {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!("config watcher error: {e}");
+                        return;
+                    }
+                };
+                // Only react to events touching the config file itself.
+                // Atomic-rename saves can show up as `Create` or `Modify`
+                // depending on the editor; both are reload triggers.
+                let touches_config = event.paths.iter().any(|p| p == &target);
+                if !touches_config {
+                    return;
+                }
+                if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                    return;
+                }
+                if proxy_for_handler
+                    .send_event(AppEvent::ReloadConfig)
+                    .is_err()
+                {
+                    // Event loop is gone — process is shutting down.
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!("failed to create config watcher: {e}");
+                    return;
+                }
+            };
+
+            if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+                warn!("failed to watch config dir {}: {e}", dir.display());
+                return;
+            }
+            // Park the thread; the watcher uses its own internal thread to
+            // drive the callback. Dropping `watcher` here would unsubscribe
+            // immediately, so we keep it alive by parking forever.
+            std::thread::park();
+            drop(watcher);
+        })
+        .expect("spawn config watcher");
 }

@@ -39,6 +39,10 @@ write my own, with the features I prefer.
   with config defaults
 - Focus reporting (DECSET 1004) so apps can react when the window
   gains/loses focus
+- Configurable keybindings via `config.toml`
+- Live config reload — the watcher picks up edits in place; cursor,
+  scrollback, and keybinding changes apply instantly (font / opacity
+  changes still need a restart and log a notice)
 - Sixel image rendering
 - Configurable window opacity, fonts, font size, and scrollback size
 
@@ -112,7 +116,23 @@ cursor_shape = "block"
 # Whether the cursor blinks. Apps can still override at runtime via
 # DECSCUSR.
 cursor_blink = true
+
+# Keybindings. Setting this *replaces* the defaults — to disable a
+# default binding, omit it. Modifiers: Ctrl/Shift/Alt/Super (case
+# insensitive). Keys: any printable character, or named keys like
+# PageUp, PageDown, Home, End, F1..F12, Enter, Tab, Escape, Space,
+# Up/Down/Left/Right, Delete, Insert, Backspace.
+keybindings = [
+  { keys = "Shift+PageUp",   action = "ScrollPageUp"   },
+  { keys = "Shift+PageDown", action = "ScrollPageDown" },
+  { keys = "Ctrl+Shift+C",   action = "Copy"           },
+  { keys = "Ctrl+Shift+V",   action = "Paste"          },
+]
 ```
+
+The config file is watched for changes; cursor style, scrollback size,
+and keybindings re-apply on save without restarting. Font and opacity
+changes are noted in the log but require a restart to take effect.
 
 ### Key bindings
 
@@ -126,8 +146,8 @@ cursor_blink = true
 | Triple-click                     | Start selection in line mode                           |
 | Right-click (no selection)       | Paste from system clipboard                            |
 | Right-click (with selection)     | Copy selection to system clipboard                     |
-| `Ctrl+Shift+C`                   | Copy selection to system clipboard                     |
-| `Ctrl+Shift+V`                   | Paste from system clipboard                            |
+| `Ctrl+Shift+C`                   | Copy selection to system clipboard (configurable)      |
+| `Ctrl+Shift+V`                   | Paste from system clipboard (configurable)             |
 | `Ctrl` + left-click on a link    | Open the OSC 8 hyperlink target in the system handler  |
 
 ## License

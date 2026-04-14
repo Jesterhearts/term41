@@ -169,6 +169,42 @@ impl Terminal {
         self.cursor_style = style;
     }
 
+    /// Update the scrollback budget on the primary screen and immediately
+    /// trim any history that exceeds the new cap. Trimming on update (not
+    /// lazily on next push) makes the live-reload path feel responsive —
+    /// the user shrinks the limit, the unwanted history goes away on the
+    /// next render. The alt screen always has zero scrollback so its
+    /// budget never moves.
+    pub fn set_scrollback_limit(
+        &mut self,
+        limit: u32,
+    ) {
+        let primary = if self.on_alt_screen {
+            &mut self.stash
+        } else {
+            &mut self.active
+        };
+        primary.grid.scrollback_limit = limit;
+
+        let max_rows = self.viewport.rows as usize + limit as usize;
+        let grid = &mut primary.grid;
+        let popped_before = grid.rows.len();
+        while grid.rows.len() > max_rows {
+            grid.rows.pop_front();
+            grid.total_popped += 1;
+        }
+        let popped = popped_before - grid.rows.len();
+        if popped > 0 {
+            // Sixel images anchored to popped rows must move with the
+            // surviving rows; mirrors the same fix-up `process` does
+            // after a row is pushed off the top.
+            primary.images.retain(|_, img| img.row >= popped);
+            for img in primary.images.values_mut() {
+                img.row -= popped;
+            }
+        }
+    }
+
     /// Queue a focus-in / focus-out report onto `pending_output` if focus
     /// reporting is currently enabled. Safe to call unconditionally.
     pub fn report_focus_change(
@@ -1239,5 +1275,29 @@ mod tests {
         term.process(b"\x1b[?1004h\x1b[?1004l");
         term.report_focus_change(true);
         assert!(term.take_pending_output().is_empty());
+    }
+
+    // ---- Live config reload effects ----
+
+    #[test]
+    fn set_scrollback_limit_takes_effect_on_next_push() {
+        let mut term = Terminal::new(8, 2, 100, 16);
+        // Burn through enough lines to trigger trim-on-push later.
+        for i in 0..50u32 {
+            term.process(format!("line{i}\n").as_bytes());
+        }
+        term.set_scrollback_limit(5);
+        // Push more lines so the per-row trim path runs against the new limit.
+        for i in 0..20u32 {
+            term.process(format!("after{i}\n").as_bytes());
+        }
+        // Visible rows + scrollback budget caps total grid rows.
+        let max_expected = term.viewport.rows as usize + 5;
+        assert!(
+            term.active.grid.rows.len() <= max_expected,
+            "grid kept {} rows after lowering limit to 5 (max {})",
+            term.active.grid.rows.len(),
+            max_expected,
+        );
     }
 }
