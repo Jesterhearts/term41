@@ -656,7 +656,13 @@ impl ApplicationHandler<AppEvent> for App {
                 self.read_pty_output();
                 self.sync_window_title();
                 self.dispatch_bell();
-                if let Some(renderer) = &mut self.renderer {
+                // Mode 2026: while a synchronized update is open, parse PTY
+                // bytes but skip presenting so apps never show a half-drawn
+                // frame. The timeout inside `is_synchronized_update_active`
+                // keeps us from freezing if the app never sends ESU.
+                if !self.terminal.is_synchronized_update_active()
+                    && let Some(renderer) = &mut self.renderer
+                {
                     renderer.render(&mut self.font_system, &self.terminal);
                 }
 

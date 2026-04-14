@@ -11,6 +11,8 @@ mod row;
 mod screen;
 
 use std::path::PathBuf;
+use std::time::Duration;
+use std::time::Instant;
 
 pub use self::cursor::CursorShape;
 pub use self::cursor::CursorStyle;
@@ -135,7 +137,22 @@ pub struct Terminal {
     /// noisy app that bells in a tight loop should still get one
     /// per-frame response, not a queue that backs up forever.
     bell_pending: bool,
+
+    /// Mode 2026 — Synchronized Output (BSU/ESU). `Some(t)` from the moment
+    /// `CSI ? 2026 h` arrives until either `CSI ? 2026 l` clears it or the
+    /// [`SYNCHRONIZED_UPDATE_TIMEOUT`] safety deadline passes; otherwise
+    /// `None`. The host consults [`Self::is_synchronized_update_active`] to
+    /// decide whether to skip the frame. State still updates during a BSU —
+    /// only the render is deferred, so the eventual ESU (or timeout) lands
+    /// on a fully-parsed frame.
+    synchronized_update_since: Option<Instant>,
 }
+
+/// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
+/// (`CSI ? 2026 h`) but never sends ESU (because it crashed, was killed,
+/// forgot the terminator, etc.) rendering resumes after this window so the
+/// UI doesn't appear frozen. 150ms matches the contour-terminal spec.
+const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
 
 impl Terminal {
     pub fn new(
@@ -171,7 +188,17 @@ impl Terminal {
             focus_reporting: false,
             current_title: None,
             bell_pending: false,
+            synchronized_update_since: None,
         }
+    }
+
+    /// Returns `true` when the foreground app has opened a synchronized
+    /// output window (mode 2026) that has not yet been closed or timed out.
+    /// The host should skip rendering while this returns `true` so partial
+    /// frames (e.g. mid-scroll, mid-reflow) are never presented.
+    pub fn is_synchronized_update_active(&self) -> bool {
+        self.synchronized_update_since
+            .is_some_and(|start| start.elapsed() < SYNCHRONIZED_UPDATE_TIMEOUT)
     }
 
     /// Drain the bell flag. Returns `true` exactly when at least one BEL
@@ -731,6 +758,12 @@ impl Terminal {
                                 self.bracketed_paste = enable;
                             } else if p[0] == 1004 {
                                 self.focus_reporting = enable;
+                            } else if p[0] == 2026 {
+                                // BSU refreshes the deadline; ESU clears it.
+                                // Refreshing on a nested BSU matches the
+                                // contour spec's "keep the window open" rule
+                                // for apps that chain updates.
+                                self.synchronized_update_since = enable.then(Instant::now);
                             } else if !apply_mouse_mode(
                                 p[0],
                                 enable,
@@ -1063,6 +1096,36 @@ mod tests {
             term.take_pending_output(),
             b"\x1b[200~evilinjection\x1b[201~"
         );
+    }
+
+    // ---- Synchronized output (mode 2026) ----
+
+    #[test]
+    fn bsu_sets_synchronized_update_flag() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        assert!(!term.is_synchronized_update_active());
+        term.process(b"\x1b[?2026h");
+        assert!(term.is_synchronized_update_active());
+    }
+
+    #[test]
+    fn esu_clears_synchronized_update_flag() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        term.process(b"\x1b[?2026h");
+        term.process(b"\x1b[?2026l");
+        assert!(!term.is_synchronized_update_active());
+        assert!(term.synchronized_update_since.is_none());
+    }
+
+    #[test]
+    fn synchronized_update_expires_after_timeout() {
+        let mut term = Terminal::new(80, 24, 100, 16);
+        term.process(b"\x1b[?2026h");
+        // Back-date the start so the safety deadline has already passed —
+        // avoids a real sleep in the test but exercises the timeout path.
+        term.synchronized_update_since =
+            Some(Instant::now() - SYNCHRONIZED_UPDATE_TIMEOUT - Duration::from_millis(1));
+        assert!(!term.is_synchronized_update_active());
     }
 
     #[test]
