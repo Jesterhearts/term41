@@ -39,6 +39,10 @@ pub enum Action {
     /// Scroll the viewport to the next OSC 133 prompt (below the current
     /// viewport top).
     ScrollNextPrompt,
+    /// Launch a detached copy of this binary with its working directory
+    /// inherited from the current session — typically bound to
+    /// `Ctrl+Shift+N`. The new process gets its own winit window.
+    OpenNewWindow,
 }
 
 /// One key, identified either by its winit `NamedKey` (Enter, F1, …) or by
@@ -106,6 +110,11 @@ impl Keybindings {
                     key: KeySpec::Named(NamedKey::ArrowDown),
                     mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
                     action: Action::ScrollNextPrompt,
+                },
+                Keybinding {
+                    key: KeySpec::Char('n'),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::OpenNewWindow,
                 },
             ],
         }
@@ -382,5 +391,13 @@ mod tests {
             bindings.lookup(&pgup, ModifiersState::SHIFT),
             Some(Action::ScrollPageUp)
         );
+    }
+
+    #[test]
+    fn defaults_bind_ctrl_shift_n_to_open_new_window() {
+        let bindings = Keybindings::defaults();
+        let key = Key::Character(SmolStr::new_inline("n"));
+        let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(bindings.lookup(&key, mods), Some(Action::OpenNewWindow));
     }
 }

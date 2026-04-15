@@ -373,6 +373,52 @@ impl App {
             Action::ScrollNextPrompt => {
                 self.terminal.scroll_to_next_prompt();
             }
+            Action::OpenNewWindow => {
+                self.spawn_new_window();
+            }
+        }
+    }
+
+    /// Fork a detached copy of this binary, seeded with the current
+    /// session's working directory. Relies on OSC 7 to know the shell's
+    /// cwd; falls back to inheriting this process's cwd when the shell
+    /// never reported one.
+    fn spawn_new_window(&self) {
+        let exe = match std::env::current_exe() {
+            Ok(p) => p,
+            Err(e) => {
+                warn!("open-new-window: cannot locate term41 binary: {e}");
+                return;
+            }
+        };
+
+        let mut cmd = std::process::Command::new(&exe);
+        match self.terminal.current_directory.as_ref() {
+            Some(cwd) => {
+                cmd.current_dir(cwd);
+            }
+            None => {
+                debug!("open-new-window: no OSC 7 cwd available, inheriting parent");
+            }
+        }
+
+        match cmd.spawn() {
+            Ok(child) => {
+                // Detach from the child without leaving a zombie: a
+                // watcher thread reaps the exit status and drops it.
+                // Losing the PID isn't a problem — new windows are
+                // independent by design.
+                let mut child = child;
+                std::thread::Builder::new()
+                    .name("new-window-waiter".into())
+                    .spawn(move || {
+                        let _ = child.wait();
+                    })
+                    .ok();
+            }
+            Err(e) => {
+                warn!("open-new-window: spawn failed: {e}");
+            }
         }
     }
 
