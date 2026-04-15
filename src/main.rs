@@ -27,6 +27,7 @@ use pty::Pty;
 use renderer::Renderer;
 use selection::SelectionMode;
 use terminal::KittyFlags;
+use terminal::KittyKeys;
 use terminal::MouseButton as TermMouseButton;
 use terminal::MouseEventKind;
 use terminal::MouseModifiers;
@@ -301,6 +302,12 @@ impl App {
             }
             Action::OpenSearch => {
                 self.terminal.open_search();
+            }
+            Action::ScrollPrevPrompt => {
+                self.terminal.scroll_to_prev_prompt();
+            }
+            Action::ScrollNextPrompt => {
+                self.terminal.scroll_to_next_prompt();
             }
         }
     }
@@ -754,16 +761,16 @@ fn ctrl_byte(c: &str) -> Option<u8> {
 fn kitty_modifier_bits(mods: ModifiersState) -> u8 {
     let mut b = 0;
     if mods.shift_key() {
-        b |= 1;
+        b |= KittyKeys::SHIFT.bits();
     }
     if mods.alt_key() {
-        b |= 2;
+        b |= KittyKeys::ALT.bits();
     }
     if mods.control_key() {
-        b |= 4;
+        b |= KittyKeys::CTRL.bits();
     }
     if mods.super_key() {
-        b |= 8;
+        b |= KittyKeys::SUPER.bits();
     }
     b
 }

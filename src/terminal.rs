@@ -24,6 +24,7 @@ pub use self::image::PlacedImage;
 pub use self::image::VisibleImage;
 pub use self::keyboard::KittyFlags;
 pub use self::keyboard::KittyKeyboardState;
+pub use self::keyboard::KittyKeys;
 pub use self::mouse::MouseButton;
 pub use self::mouse::MouseEncoding;
 pub use self::mouse::MouseEventKind;
@@ -157,6 +158,19 @@ pub struct Terminal {
     /// only the render is deferred, so the eventual ESU (or timeout) lands
     /// on a fully-parsed frame.
     synchronized_update_since: Option<Instant>,
+
+    /// Absolute row index of the most recent OSC 133 `A` (prompt-start)
+    /// mark. An OSC 133 `D` resolves to this row and stamps its exit code
+    /// there, so the success/failure indicator sits next to the prompt
+    /// line — the anchor the user scrolls to — rather than the end of the
+    /// command's output. `None` before any shell-integration prompt has
+    /// been seen.
+    ///
+    /// Lives on `Terminal` rather than per-`Screen` because a prompt is
+    /// meaningful only on the primary screen; an app on the alt screen
+    /// that emits OSC 133 would still write into this slot, but the marks
+    /// land on alt's grid and disappear with the alt-screen teardown.
+    current_prompt_row: Option<u64>,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -201,6 +215,7 @@ impl Terminal {
             current_title: None,
             bell_pending: false,
             synchronized_update_since: None,
+            current_prompt_row: None,
         }
     }
 
@@ -901,6 +916,77 @@ impl Terminal {
         delta
     }
 
+    /// Move the viewport to the previous OSC 133 prompt (above the current
+    /// viewport top). No-op if none exists above or the active screen has
+    /// no shell-integration marks.
+    pub fn scroll_to_prev_prompt(&mut self) {
+        let top = self.screen_row_to_absolute(0);
+        // Iterate the grid directly rather than collecting: prompt rows
+        // are sparse, so walking the whole buffer once and taking the max
+        // matching index is cheaper than building a vec.
+        let popped = self.active.grid.total_popped as u64;
+        let target = self
+            .active
+            .grid
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.prompt_start)
+            .map(|(i, _)| popped + i as u64)
+            .filter(|&r| r < top)
+            .max();
+        if let Some(target) = target {
+            self.scroll_absolute_to_viewport_top(target);
+        }
+    }
+
+    /// Move the viewport to the next OSC 133 prompt (below the current
+    /// viewport top). No-op if none exists below — importantly, this
+    /// includes the case where the user is at the most recent prompt, so
+    /// repeated presses at the live prompt are silent rather than
+    /// flickering.
+    pub fn scroll_to_next_prompt(&mut self) {
+        let top = self.screen_row_to_absolute(0);
+        let popped = self.active.grid.total_popped as u64;
+        let target = self
+            .active
+            .grid
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.prompt_start)
+            .map(|(i, _)| popped + i as u64)
+            .find(|&r| r > top);
+        if let Some(target) = target {
+            self.scroll_absolute_to_viewport_top(target);
+        }
+    }
+
+    /// Adjust `offset` so `target_abs` lands at the top of the visible
+    /// viewport. If the target sits inside the live window the viewport
+    /// can't scroll further (`offset = 0`) and the target appears wherever
+    /// it naturally falls — typically a few rows down from the top.
+    fn scroll_absolute_to_viewport_top(
+        &mut self,
+        target_abs: u64,
+    ) {
+        let popped = self.active.grid.total_popped as u64;
+        let Some(target_local) = target_abs.checked_sub(popped) else {
+            return;
+        };
+        let grid_len = self.active.grid.rows.len();
+        let rows = self.viewport.rows as usize;
+        if grid_len <= rows || (target_local as usize) >= grid_len {
+            self.active.offset = 0;
+            return;
+        }
+        let max_top = grid_len - rows;
+        let top = (target_local as usize).min(max_top);
+        let offset = (grid_len - rows - top) as u32;
+        let max_offset = self.active.grid.scrollback_len(&self.viewport);
+        self.active.offset = offset.min(max_offset);
+    }
+
     /// Scroll the viewport down (toward live). Returns actual lines scrolled.
     pub fn scroll_viewport_down(
         &mut self,
@@ -1060,8 +1146,10 @@ impl Terminal {
                         pending_output: &mut self.pending_output,
                         current_directory: &mut self.current_directory,
                         hyperlinks: &mut self.hyperlinks,
-                        current_hyperlink: &mut self.active.current_hyperlink,
+                        active_screen: &mut self.active,
+                        viewport: &self.viewport,
                         current_title: &mut self.current_title,
+                        current_prompt_row: &mut self.current_prompt_row,
                     };
                     handle_osc(&data, &mut ctx);
                 }
@@ -1898,5 +1986,194 @@ mod tests {
             term.active.grid.rows.len(),
             max_expected,
         );
+    }
+
+    // ---- OSC 133 shell integration + prompt navigation ----
+
+    /// Drive a scripted shell session that emits OSC 133 marks into the
+    /// terminal, producing enough rows to land some prompts in scrollback.
+    /// Each invocation simulates one prompt + one command.
+    fn emit_prompt(
+        term: &mut Terminal,
+        label: &str,
+        output_lines: u32,
+        exit: i32,
+    ) {
+        term.process(b"\x1b]133;A\x1b\\");
+        term.process(label.as_bytes());
+        term.process(b"\x1b]133;B\x1b\\");
+        term.process(b"\n\x1b]133;C\x1b\\");
+        for i in 0..output_lines {
+            term.process(format!("out{i}\n").as_bytes());
+        }
+        term.process(format!("\x1b]133;D;{exit}\x1b\\").as_bytes());
+    }
+
+    #[test]
+    fn osc_133_stamps_exit_status_onto_prompt_row_through_process() {
+        let mut term = Terminal::new(10, 6, 100, 16);
+        emit_prompt(&mut term, "$ ls", 1, 0);
+        // Prompt landed on row 0 (the first row written to). Exit status
+        // should be stamped there, not on the D row further down.
+        let prompt_row = &term.active.grid.rows[0];
+        assert!(prompt_row.prompt_start);
+        assert_eq!(prompt_row.exit_status, Some(0));
+    }
+
+    #[test]
+    fn osc_133_exit_status_survives_scrollback_pop() {
+        // Small viewport so prompts quickly move into scrollback.
+        let mut term = Terminal::new(10, 3, 100, 16);
+        emit_prompt(&mut term, "$ first", 2, 0);
+        emit_prompt(&mut term, "$ second", 2, 1);
+        // Both prompt rows are now somewhere in scrollback; find the
+        // first one and verify its exit status.
+        let first = term
+            .active
+            .grid
+            .rows
+            .iter()
+            .find(|r| r.prompt_start)
+            .expect("first prompt row survived");
+        assert_eq!(first.exit_status, Some(0));
+    }
+
+    #[test]
+    fn scroll_to_prev_prompt_moves_viewport() {
+        let mut term = Terminal::new(10, 4, 200, 16);
+        emit_prompt(&mut term, "$ a", 3, 0);
+        emit_prompt(&mut term, "$ b", 3, 0);
+        emit_prompt(&mut term, "$ c", 3, 0);
+        // Starts at live (offset = 0). Prev should scroll back to an
+        // earlier prompt.
+        let before = term.active.offset;
+        term.scroll_to_prev_prompt();
+        assert!(
+            term.active.offset > before,
+            "prev should scroll the viewport into history"
+        );
+    }
+
+    #[test]
+    fn scroll_to_prev_prompt_silent_with_no_marks() {
+        let mut term = Terminal::new(10, 4, 100, 16);
+        term.process(b"plain\noutput\nwithout\nshell integration\n");
+        let before = term.active.offset;
+        term.scroll_to_prev_prompt();
+        assert_eq!(
+            term.active.offset, before,
+            "no marks → offset must not change"
+        );
+    }
+
+    #[test]
+    fn scroll_to_next_prompt_walks_forward() {
+        let mut term = Terminal::new(10, 4, 200, 16);
+        emit_prompt(&mut term, "$ a", 3, 0);
+        emit_prompt(&mut term, "$ b", 3, 0);
+        emit_prompt(&mut term, "$ c", 3, 0);
+        // Scroll all the way back, then walk forward.
+        term.active.offset = term.active.grid.scrollback_len(&term.viewport);
+        let start = term.active.offset;
+        term.scroll_to_next_prompt();
+        assert!(
+            term.active.offset < start,
+            "next should move the viewport toward live"
+        );
+    }
+
+    #[test]
+    fn scroll_to_next_prompt_silent_at_last_prompt() {
+        let mut term = Terminal::new(10, 4, 200, 16);
+        emit_prompt(&mut term, "$ only", 3, 0);
+        // At live there's no next prompt — repeated presses shouldn't
+        // bounce the viewport.
+        let before = term.active.offset;
+        term.scroll_to_next_prompt();
+        assert_eq!(term.active.offset, before);
+    }
+
+    #[test]
+    fn prompt_marks_ride_reflow_shrink_then_grow() {
+        // 20-col viewport, prompt + long command that will soft-wrap when
+        // shrunk. After a shrink/grow round-trip the mark must end up
+        // exactly once, on the head of the (re-merged) logical line.
+        let mut term = Terminal::new(20, 6, 100, 16);
+        term.process(b"\x1b]133;A\x1b\\");
+        term.process(b"$ this is a long prompt line");
+        term.process(b"\x1b]133;B\x1b\\\n");
+        term.process(b"\x1b]133;D;0\x1b\\");
+
+        term.resize(8, 6); // forces soft-wrap
+        term.resize(20, 6); // re-merge
+
+        let prompt_rows: Vec<_> = term
+            .active
+            .grid
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.prompt_start)
+            .collect();
+        assert_eq!(
+            prompt_rows.len(),
+            1,
+            "exactly one prompt mark after reflow round-trip, got {}: {:#?}",
+            prompt_rows.len(),
+            prompt_rows
+                .iter()
+                .map(|(i, r)| (i, r.cells.iter().map(|c| c.as_str()).collect::<String>()))
+                .collect::<Vec<_>>()
+        );
+        // Exit status rode along with the prompt mark.
+        assert_eq!(prompt_rows[0].1.exit_status, Some(0));
+    }
+
+    #[test]
+    fn prompt_marks_do_not_duplicate_on_continuation_rows() {
+        // After a shrink, marks must live only on the *head* of each
+        // logical line — the row that is either the first row or comes
+        // right after a row whose `wrapped` flag is false. (`wrapped=true`
+        // means "this row spills into the next one", so the head of a
+        // soft-wrapped logical line is the one with `wrapped=true` whose
+        // predecessor has `wrapped=false`.)
+        let mut term = Terminal::new(20, 6, 100, 16);
+        term.process(b"\x1b]133;A\x1b\\");
+        term.process(b"$ a command that will definitely wrap");
+        term.process(b"\x1b]133;B\x1b\\\n");
+
+        term.resize(8, 6);
+
+        for i in 0..term.active.grid.rows.len() {
+            let is_head = i == 0 || !term.active.grid.rows[i - 1].wrapped;
+            if !is_head {
+                let row = &term.active.grid.rows[i];
+                assert!(
+                    !row.prompt_start,
+                    "continuation row {i} unexpectedly carries prompt_start"
+                );
+                assert!(
+                    !row.output_start,
+                    "continuation row {i} unexpectedly carries output_start"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn row_clear_drops_marks() {
+        let mut term = Terminal::new(10, 4, 100, 16);
+        emit_prompt(&mut term, "$ cmd", 1, 0);
+        // ED 2 wipes the entire visible area — including all rows' marks.
+        term.process(b"\x1b[2J");
+        let any_marks = term
+            .active
+            .grid
+            .rows
+            .iter()
+            .rev()
+            .take(term.viewport.rows as usize)
+            .any(|r| r.prompt_start || r.output_start || r.exit_status.is_some());
+        assert!(!any_marks, "ED 2 must drop marks on visible rows");
     }
 }

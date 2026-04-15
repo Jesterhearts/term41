@@ -20,6 +20,16 @@ use crate::vte::Params;
 const MAX_STACK: usize = 16;
 
 bitflags::bitflags! {
+    #[derive(Debug, Clone, Copy, PartialEq, Eq)]
+    pub struct KittyKeys: u8 {
+        const SHIFT = 0b0000_0001;
+        const ALT   = 0b0000_0010;
+        const CTRL  = 0b0000_0100;
+        const SUPER = 0b0000_1000;
+    }
+}
+
+bitflags::bitflags! {
     /// Flags advertised by the kitty keyboard protocol. Each bit toggles a
     /// distinct extension; apps OR together what they want.
     #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]

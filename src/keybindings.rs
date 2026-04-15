@@ -31,6 +31,14 @@ pub enum Action {
     /// the search query until Escape closes it; Enter / Shift+Enter step
     /// through the match list.
     OpenSearch,
+    /// Scroll the viewport to the previous OSC 133 shell-integration prompt
+    /// (the one above the current viewport top). Silent no-op when no
+    /// earlier prompt exists, so the binding doesn't flash on sessions
+    /// without shell integration.
+    ScrollPrevPrompt,
+    /// Scroll the viewport to the next OSC 133 prompt (below the current
+    /// viewport top).
+    ScrollNextPrompt,
 }
 
 /// One key, identified either by its winit `NamedKey` (Enter, F1, …) or by
@@ -84,6 +92,20 @@ impl Keybindings {
                     key: KeySpec::Char('f'),
                     mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
                     action: Action::OpenSearch,
+                },
+                // Ctrl+Shift+Up/Down walk through shell-integration
+                // prompts. They share a modifier family with the other
+                // scroll shortcuts (Shift+PageUp/PageDown) so the mental
+                // model stays "Shift family moves the viewport".
+                Keybinding {
+                    key: KeySpec::Named(NamedKey::ArrowUp),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::ScrollPrevPrompt,
+                },
+                Keybinding {
+                    key: KeySpec::Named(NamedKey::ArrowDown),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::ScrollNextPrompt,
                 },
             ],
         }

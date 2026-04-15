@@ -6,20 +6,33 @@ use percent_encoding::percent_decode;
 
 use crate::clipboard::Clipboard;
 use crate::clipboard::ClipboardKind;
+use crate::terminal::grid::Viewport;
 use crate::terminal::hyperlink::HyperlinkId;
 use crate::terminal::hyperlink::HyperlinkRegistry;
+use crate::terminal::screen::Screen;
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that OSC handlers
 /// are allowed to read or mutate. Passing a single context keeps the call
 /// signature stable as new OSC commands (8 hyperlinks, 7 cwd, 0/2 title, 4
 /// palette, …) get wired in.
+///
+/// `active_screen` is handed in whole (rather than borrowing its individual
+/// fields) so handlers that need both the grid and the cursor — like OSC 133
+/// shell integration — don't have to juggle multiple simultaneous borrows.
 pub(super) struct OscContext<'a> {
     pub clipboard: &'a mut Clipboard,
     pub pending_output: &'a mut Vec<u8>,
     pub current_directory: &'a mut Option<PathBuf>,
     pub hyperlinks: &'a mut HyperlinkRegistry,
-    pub current_hyperlink: &'a mut Option<HyperlinkId>,
+    pub active_screen: &'a mut Screen,
+    pub viewport: &'a Viewport,
     pub current_title: &'a mut Option<String>,
+    /// Absolute row index of the most recent OSC 133 `A` (prompt start).
+    /// An `OSC 133 D` stamps its exit code onto this row's exit_status so
+    /// the mark sits next to the prompt, not the end-of-output. `None`
+    /// before the first prompt and after the prompt row scrolls off the
+    /// front of scrollback.
+    pub current_prompt_row: &'a mut Option<u64>,
 }
 
 /// Split an OSC payload into its numeric command prefix and the remainder.
@@ -83,10 +96,116 @@ pub(super) fn handle_osc(
         // the same field. OSC 1 (icon name only) is intentionally ignored.
         b"0" | b"2" => handle_osc_title(rest, ctx.current_title),
         b"7" => handle_osc_7(rest, ctx.current_directory),
-        b"8" => handle_osc_8(rest, ctx.hyperlinks, ctx.current_hyperlink),
+        b"8" => handle_osc_8(
+            rest,
+            ctx.hyperlinks,
+            &mut ctx.active_screen.current_hyperlink,
+        ),
         b"52" => handle_osc_52(rest, ctx.clipboard, ctx.pending_output),
+        b"133" => handle_osc_133(
+            rest,
+            ctx.active_screen,
+            ctx.viewport,
+            ctx.current_prompt_row,
+        ),
         _ => {}
     }
+}
+
+/// OSC 133 — semantic prompt marks (a.k.a. "shell integration"). A
+/// cooperating shell (bash, zsh, fish, …) brackets its prompt and command
+/// output with:
+///
+/// ```text
+/// OSC 133 ; A ST   — prompt start
+/// OSC 133 ; B ST   — command start (user's typing begins)
+/// OSC 133 ; C ST   — command output start
+/// OSC 133 ; D [; exit_code] ST   — command finished
+/// ```
+///
+/// Terminals use these to offer prompt-to-prompt navigation, last-command
+/// selection, success/failure gutter markers, and similar. Only `A`, `C`,
+/// and `D` produce observable state here; `B` is parsed but intentionally
+/// not stored because its only use is column-precise "select command text"
+/// and the head-of-logical-line storage model doesn't give us that
+/// precision.
+///
+/// Payloads with extra `;key=value` args (iTerm2-style `aid=…`, `cl=…`,
+/// etc.) are ignored — we only honour the single-letter kind.
+fn handle_osc_133(
+    rest: &[u8],
+    screen: &mut Screen,
+    viewport: &Viewport,
+    current_prompt_row: &mut Option<u64>,
+) {
+    let (kind, args) = split_osc(rest);
+    match kind {
+        b"A" => {
+            let abs = mark_current_row(screen, viewport, |row| {
+                row.prompt_start = true;
+                // A fresh prompt invalidates any lingering exit_status from
+                // a prior occupant of this row (e.g. a recycled scrollback
+                // slot). The shell hasn't even shown the prompt yet.
+                row.exit_status = None;
+            });
+            *current_prompt_row = Some(abs);
+        }
+        b"B" => {
+            // Prompt end / command start. No state change — storage would
+            // only be useful for column-precise "select command" which we
+            // don't do yet.
+        }
+        b"C" => {
+            mark_current_row(screen, viewport, |row| {
+                row.output_start = true;
+            });
+        }
+        b"D" => {
+            let exit = parse_osc_133_d_exit(args);
+            if let Some(abs) = *current_prompt_row
+                && let Some(local) = absolute_to_local(screen, abs)
+            {
+                screen.grid.rows[local].exit_status = Some(exit);
+            }
+        }
+        _ => {}
+    }
+}
+
+/// Run `apply` on the row the cursor currently occupies and return that
+/// row's absolute index (stable under scrollback trimming). Factored out
+/// because every OSC 133 kind that stores a mark does the same lookup.
+fn mark_current_row(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    apply: impl FnOnce(&mut crate::terminal::row::Row),
+) -> u64 {
+    let local = screen.grid.active_row_index(&screen.cursor, viewport);
+    apply(&mut screen.grid.rows[local]);
+    (screen.grid.total_popped + local) as u64
+}
+
+/// Translate an absolute row index into a live grid offset, or `None` if
+/// the row has already fallen off the front of scrollback.
+fn absolute_to_local(
+    screen: &Screen,
+    abs: u64,
+) -> Option<usize> {
+    let popped = screen.grid.total_popped as u64;
+    let local = abs.checked_sub(popped)? as usize;
+    (local < screen.grid.rows.len()).then_some(local)
+}
+
+/// Parse the exit code from an OSC 133 `D` payload. Per the spec the first
+/// argument is the exit status; non-numeric or missing values are treated
+/// as success (`0`) so a shell that merely reports "command finished"
+/// without the numeric status doesn't accidentally paint every prompt red.
+fn parse_osc_133_d_exit(args: &[u8]) -> i32 {
+    let (first, _) = split_osc(args);
+    std::str::from_utf8(first)
+        .ok()
+        .and_then(|s| s.parse::<i32>().ok())
+        .unwrap_or(0)
 }
 
 /// OSC 0 / OSC 2 — set the window title. Empty payloads clear the title
@@ -240,20 +359,35 @@ mod tests {
         pending: Vec<u8>,
         cwd: Option<PathBuf>,
         registry: HyperlinkRegistry,
-        current_link: Option<HyperlinkId>,
+        screen: Screen,
+        viewport: Viewport,
         title: Option<String>,
+        prompt_row: Option<u64>,
     }
 
     impl Bag {
         fn new() -> Self {
+            Self::with_screen(4, 2)
+        }
+
+        fn with_screen(
+            cols: u32,
+            rows: u32,
+        ) -> Self {
             Self {
                 clipboard: Clipboard::in_memory(),
                 pending: Vec::new(),
                 cwd: None,
                 registry: HyperlinkRegistry::new(),
-                current_link: None,
+                screen: Screen::new(cols, rows, 100),
+                viewport: Viewport { rows, cols },
                 title: None,
+                prompt_row: None,
             }
+        }
+
+        fn current_link(&self) -> Option<HyperlinkId> {
+            self.screen.current_hyperlink
         }
 
         fn dispatch(
@@ -265,8 +399,10 @@ mod tests {
                 pending_output: &mut self.pending,
                 current_directory: &mut self.cwd,
                 hyperlinks: &mut self.registry,
-                current_hyperlink: &mut self.current_link,
+                active_screen: &mut self.screen,
+                viewport: &self.viewport,
                 current_title: &mut self.title,
+                current_prompt_row: &mut self.prompt_row,
             };
             handle_osc(payload, &mut ctx);
         }
@@ -423,7 +559,7 @@ mod tests {
     fn osc_8_sets_current_link_with_uri() {
         let mut bag = Bag::new();
         bag.dispatch(b"8;;https://example.com");
-        let id = bag.current_link.expect("link set");
+        let id = bag.current_link().expect("link set");
         assert_eq!(bag.registry.get(id), Some("https://example.com"));
     }
 
@@ -432,16 +568,16 @@ mod tests {
         let mut bag = Bag::new();
         bag.dispatch(b"8;;https://example.com");
         bag.dispatch(b"8;;");
-        assert!(bag.current_link.is_none());
+        assert!(bag.current_link().is_none());
     }
 
     #[test]
     fn osc_8_distinct_id_keys_separate_link_ids() {
         let mut bag = Bag::new();
         bag.dispatch(b"8;id=a;https://example.com");
-        let id_a = bag.current_link.unwrap();
+        let id_a = bag.current_link().unwrap();
         bag.dispatch(b"8;id=b;https://example.com");
-        let id_b = bag.current_link.unwrap();
+        let id_b = bag.current_link().unwrap();
         assert_ne!(id_a, id_b);
     }
 
@@ -490,10 +626,158 @@ mod tests {
     fn osc_8_same_id_reuses_link_id() {
         let mut bag = Bag::new();
         bag.dispatch(b"8;id=foo;https://example.com");
-        let id_first = bag.current_link.unwrap();
+        let id_first = bag.current_link().unwrap();
         bag.dispatch(b"8;;"); // close
         bag.dispatch(b"8;id=foo;https://example.com");
-        let id_again = bag.current_link.unwrap();
+        let id_again = bag.current_link().unwrap();
         assert_eq!(id_first, id_again);
+    }
+
+    // ---- OSC 133 — shell integration ----
+
+    impl Bag {
+        /// Move the test screen's cursor. The active row index is derived
+        /// from `cursor.row` + viewport, so OSC 133 landing points are
+        /// selected by moving the cursor before dispatching.
+        fn move_cursor(
+            &mut self,
+            col: u32,
+            row: u32,
+        ) {
+            self.screen.cursor.col = col;
+            self.screen.cursor.row = row;
+        }
+
+        fn row_at(
+            &self,
+            screen_row: u32,
+        ) -> &crate::terminal::row::Row {
+            let first_visible = self.screen.grid.rows.len() - self.viewport.rows as usize;
+            &self.screen.grid.rows[first_visible + screen_row as usize]
+        }
+    }
+
+    #[test]
+    fn osc_133_a_marks_prompt_row_and_records_prompt_pointer() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 2);
+        bag.dispatch(b"133;A");
+        assert!(bag.row_at(2).prompt_start);
+        assert_eq!(bag.prompt_row, Some(2));
+    }
+
+    #[test]
+    fn osc_133_b_is_parsed_without_storing() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 1);
+        bag.dispatch(b"133;B");
+        // B is deliberately a no-op at the storage layer — it shouldn't
+        // mark prompt/output rows or record a prompt pointer.
+        assert!(!bag.row_at(1).prompt_start);
+        assert!(!bag.row_at(1).output_start);
+        assert_eq!(bag.prompt_row, None);
+    }
+
+    #[test]
+    fn osc_133_c_marks_output_row() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 3);
+        bag.dispatch(b"133;C");
+        assert!(bag.row_at(3).output_start);
+    }
+
+    #[test]
+    fn osc_133_d_stamps_exit_status_onto_prompt_row() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 1);
+        bag.dispatch(b"133;A");
+        // Cursor moves with output; D arrives on a later row but the exit
+        // status must land on the prompt's row.
+        bag.move_cursor(5, 3);
+        bag.dispatch(b"133;D;42");
+        assert_eq!(bag.row_at(1).exit_status, Some(42));
+        assert_eq!(bag.row_at(3).exit_status, None);
+    }
+
+    #[test]
+    fn osc_133_d_defaults_exit_to_zero_when_missing() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 0);
+        bag.dispatch(b"133;A");
+        bag.dispatch(b"133;D");
+        assert_eq!(bag.row_at(0).exit_status, Some(0));
+    }
+
+    #[test]
+    fn osc_133_d_ignores_non_numeric_exit() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 0);
+        bag.dispatch(b"133;A");
+        // A shell that omits the numeric status (e.g. emits D;aid=xyz)
+        // still marks "command finished" — we pick success by default
+        // rather than painting every prompt red.
+        bag.dispatch(b"133;D;not-a-number");
+        assert_eq!(bag.row_at(0).exit_status, Some(0));
+    }
+
+    #[test]
+    fn osc_133_d_without_prior_a_is_silent() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(5, 2);
+        bag.dispatch(b"133;D;1");
+        // No A preceded → no row to stamp. Must not accidentally blow up
+        // or mark the current-cursor row.
+        for screen_row in 0..bag.viewport.rows {
+            assert_eq!(bag.row_at(screen_row).exit_status, None);
+        }
+    }
+
+    #[test]
+    fn osc_133_a_overwrites_previous_pending_prompt() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 0);
+        bag.dispatch(b"133;A");
+        bag.move_cursor(0, 2);
+        bag.dispatch(b"133;A");
+        // A-without-D sequences are common when shell integration is
+        // mid-transition: the second A should take over as the target of
+        // the next D, and the first row keeps its mark but no exit code.
+        bag.dispatch(b"133;D;7");
+        assert_eq!(bag.row_at(0).exit_status, None);
+        assert_eq!(bag.row_at(2).exit_status, Some(7));
+        assert!(bag.row_at(0).prompt_start);
+        assert!(bag.row_at(2).prompt_start);
+    }
+
+    #[test]
+    fn osc_133_ignores_extra_key_value_args() {
+        // iTerm2-style payloads include `aid=…`, `cl=…`, etc. We ignore
+        // them rather than reject, matching how other terminals behave.
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 1);
+        bag.dispatch(b"133;A;aid=abc;cl=m");
+        assert!(bag.row_at(1).prompt_start);
+        assert_eq!(bag.prompt_row, Some(1));
+    }
+
+    #[test]
+    fn osc_133_unknown_kind_is_silent() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 1);
+        bag.dispatch(b"133;Z");
+        assert!(!bag.row_at(1).prompt_start);
+        assert!(!bag.row_at(1).output_start);
+    }
+
+    #[test]
+    fn osc_133_a_clears_stale_exit_status_on_recycled_row() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 0);
+        bag.dispatch(b"133;A");
+        bag.dispatch(b"133;D;5");
+        // Same row later becomes a fresh prompt (e.g. in-place redraw).
+        bag.move_cursor(0, 0);
+        bag.dispatch(b"133;A");
+        assert_eq!(bag.row_at(0).exit_status, None);
     }
 }

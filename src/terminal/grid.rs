@@ -309,6 +309,12 @@ impl Grid {
                             attrs: self.rows[row].attrs.split_off(new_width as usize),
                             links: self.rows[row].links.split_off(new_width as usize),
                             wrapped: self.rows[row].wrapped,
+                            // Semantic marks only live on the head of a
+                            // logical line; the overflow continuation is
+                            // never the head, so it carries no marks.
+                            prompt_start: false,
+                            output_start: false,
+                            exit_status: None,
                         };
 
                         self.rows[row].wrapped = true;

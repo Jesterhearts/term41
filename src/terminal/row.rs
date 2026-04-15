@@ -29,8 +29,21 @@ pub struct Row {
     /// in [`HyperlinkRegistry`](super::HyperlinkRegistry) so adjacent cells
     /// of one link render as one underlined region.
     pub links: Vec<Option<HyperlinkId>>,
-    /// True if this row is a continuation of the previous row (soft wrap).
+    /// True if this row continues into the next row (soft wrap).
     pub wrapped: bool,
+    /// OSC 133 `A` was emitted on this row — shell prompt starts here.
+    /// Only set on the head of a logical line (the non-continuation row), so
+    /// reflow naturally keeps the mark with its prompt.
+    pub prompt_start: bool,
+    /// OSC 133 `C` was emitted on this row — command output starts here.
+    /// Mirrors `prompt_start`: head-of-logical-line only.
+    pub output_start: bool,
+    /// Exit status of the command whose prompt begins on this row, set when
+    /// an OSC 133 `D` arrives and can be resolved back to the matching
+    /// prompt. `None` when the command is still running, had no
+    /// shell-integration `D`, or when `D` arrived after the prompt row
+    /// scrolled out of history.
+    pub exit_status: Option<i32>,
 }
 
 impl Row {
@@ -43,6 +56,9 @@ impl Row {
             attrs: vec![CellAttrs::default(); n],
             links: vec![None; n],
             wrapped: false,
+            prompt_start: false,
+            output_start: false,
+            exit_status: None,
         }
     }
 
@@ -86,7 +102,13 @@ impl Row {
     }
 
     pub(super) fn clear(&mut self) {
-        self.clear_range(0..self.cells.len())
+        self.clear_range(0..self.cells.len());
+        // A full-row wipe drops the row's semantic (OSC 133) marks. Partial
+        // clears via `clear_range` leave them alone, so apps that use SGR to
+        // redraw a prompt line in place don't lose the mark mid-update.
+        self.prompt_start = false;
+        self.output_start = false;
+        self.exit_status = None;
     }
 
     /// Reset this row for reuse at the bottom of the grid — used when the
