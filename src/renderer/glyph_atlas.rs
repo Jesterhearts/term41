@@ -1,9 +1,11 @@
 //! Glyph atlas: a single 2D texture packed with rasterized glyphs, backed by
 //! a [`ShelfPacker`] and an LRU cache (`evictor::Lru`).
 //!
-//! `evictor` has no eviction callback, so eviction is driven explicitly: on
-//! allocation failure we `pop()` the LRU entry and return its region to the
-//! packer, and before insert we pop again if the cache is at capacity.
+//! Two separate resources constrain the atlas: the 1024² packer (which can
+//! fill up even with the cache well under capacity) and the cache's own
+//! entry limit. On packer exhaustion we explicitly `pop()` the LRU and
+//! free its region in a retry loop. On cache overflow we let `insert()`
+//! handle eviction and free the returned entry's packer region inline.
 
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
@@ -207,8 +209,7 @@ impl GlyphAtlas {
                 is_color: glyph.is_color,
                 alloc: None,
             };
-            make_room_in_cache(&mut self.cache, &mut self.packer);
-            self.cache.insert(key, slot);
+            release_evicted(&mut self.packer, self.cache.insert(key, slot));
             return Some(slot);
         }
 
@@ -235,8 +236,7 @@ impl GlyphAtlas {
             is_color: glyph.is_color,
             alloc: Some(alloc),
         };
-        make_room_in_cache(&mut self.cache, &mut self.packer);
-        self.cache.insert(key, slot);
+        release_evicted(&mut self.packer, self.cache.insert(key, slot));
         Some(slot)
     }
 }
@@ -256,16 +256,16 @@ fn evict_one(
     }
 }
 
-/// Make room for one insert. Evictor drops evicted entries silently, so we
-/// pop ourselves and free the atlas region before calling `insert`.
-fn make_room_in_cache(
-    cache: &mut Lru<GlyphKey, GlyphSlot>,
+/// Return the packer region owned by a cache entry that `insert()` just
+/// evicted, if any. Empty-glyph slots carry no allocation.
+fn release_evicted(
     packer: &mut ShelfPacker,
+    evicted: Option<GlyphSlot>,
 ) {
-    while cache.len() >= cache.capacity() {
-        if !evict_one(cache, packer) {
-            break;
-        }
+    if let Some(slot) = evicted
+        && let Some(alloc) = slot.alloc
+    {
+        packer.free(&alloc);
     }
 }
 

@@ -5,9 +5,10 @@
 //! `IMAGE_ATLAS_SIZE` on each side; each tile is packed independently. The
 //! renderer walks the cached tile list and emits one quad per tile.
 //!
-//! `evictor` has no eviction callback, so eviction is driven explicitly: on
-//! allocation failure this module pops the LRU entry and returns every tile
-//! region to the packer before retrying.
+//! Eviction has two triggers: a full packer (handled by popping the LRU
+//! and returning each of its tile regions to the shelf until the new
+//! allocation fits) and a full cache (handled by `insert()` returning the
+//! evicted entry, whose tiles we then free).
 
 use std::num::NonZeroUsize;
 
@@ -178,8 +179,12 @@ impl ImageAtlas {
             tiles.push(tile);
         }
 
-        make_room_in_cache(&mut self.cache, &mut self.packer);
-        self.cache.insert(key, ImageEntry { tiles });
+        let evicted = self.cache.insert(key, ImageEntry { tiles });
+        if let Some(entry) = evicted {
+            for tile in &entry.tiles {
+                self.packer.free(&tile.alloc);
+            }
+        }
         self.cache.get(&key)
     }
 }
@@ -244,17 +249,6 @@ fn evict_one(
             true
         }
         None => false,
-    }
-}
-
-fn make_room_in_cache(
-    cache: &mut Lru<u64, ImageEntry>,
-    packer: &mut ShelfPacker,
-) {
-    while cache.len() >= cache.capacity() {
-        if !evict_one(cache, packer) {
-            break;
-        }
     }
 }
 
