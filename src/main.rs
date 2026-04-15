@@ -732,13 +732,6 @@ impl ApplicationHandler<AppEvent> for App {
             _ => {}
         }
     }
-
-    fn about_to_wait(
-        &mut self,
-        _event_loop: &ActiveEventLoop,
-    ) {
-        self.request_redraw();
-    }
 }
 
 fn ctrl_byte(c: &str) -> Option<u8> {
