@@ -980,8 +980,26 @@ fn named_key_to_bytes(key: NamedKey) -> Option<Vec<u8>> {
     }
 }
 
+/// Parses positional CLI arguments into a command to run in the PTY.
+///
+/// `term41 <program> [args...]` runs the given program in place of the
+/// default shell. A leading `--` is consumed as an optional separator so
+/// that future term41 flags can coexist with commands whose arguments
+/// start with a dash. Returns `None` when no command was supplied.
+fn parse_command_args() -> Option<Vec<String>> {
+    let mut args = std::env::args();
+    let _argv0 = args.next();
+    let mut rest: Vec<String> = args.collect();
+    if rest.first().map(String::as_str) == Some("--") {
+        rest.remove(0);
+    }
+    if rest.is_empty() { None } else { Some(rest) }
+}
+
 fn main() {
     env_logger::init();
+
+    let command = parse_command_args();
 
     let config_path = config::config_file_path();
     let config = match config_path.as_deref() {
@@ -1000,6 +1018,7 @@ fn main() {
         INITIAL_ROWS as u16,
         font_system.cell_width as u16,
         font_system.cell_height as u16,
+        command,
         event_loop.create_proxy(),
     )
     .expect("failed to spawn PTY");

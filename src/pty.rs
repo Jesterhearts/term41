@@ -30,12 +30,15 @@ pub struct Pty {
 }
 
 impl Pty {
-    /// Spawns the user's default shell in a new PTY with the given grid size.
+    /// Spawns a child process in a new PTY with the given grid size. When
+    /// `command` is `Some`, the first element is the program and the rest are
+    /// its arguments; otherwise the user's default shell is launched.
     pub fn spawn(
         cols: u16,
         rows: u16,
         cell_width: u16,
         cell_height: u16,
+        command: Option<Vec<String>>,
         event_loop: EventLoopProxy<AppEvent>,
     ) -> io::Result<Self> {
         let pty_system = native_pty_system();
@@ -48,10 +51,19 @@ impl Pty {
             })
             .map_err(io::Error::other)?;
 
-        // new_default_prog resolves to $SHELL (or the passwd entry) on Unix
-        // and to %ComSpec%/cmd.exe on Windows, and arranges login-shell argv0
-        // semantics where applicable.
-        let mut cmd = CommandBuilder::new_default_prog();
+        let mut cmd = match command {
+            Some(argv) if !argv.is_empty() => {
+                let mut iter = argv.into_iter();
+                let program = iter.next().expect("argv non-empty");
+                let mut builder = CommandBuilder::new(program);
+                builder.args(iter);
+                builder
+            }
+            // new_default_prog resolves to $SHELL (or the passwd entry) on
+            // Unix and to %ComSpec%/cmd.exe on Windows, and arranges
+            // login-shell argv0 semantics where applicable.
+            _ => CommandBuilder::new_default_prog(),
+        };
         cmd.env("TERM", "xterm-256color");
         if let Ok(cwd) = std::env::current_dir() {
             cmd.cwd(cwd);
