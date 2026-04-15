@@ -1033,7 +1033,15 @@ impl Terminal {
     /// screen-relative row/col positions. `screen_row` is negative when the
     /// image's top edge is above the viewport so the renderer can offset the
     /// quad upward and let the GPU clip to the visible portion.
-    pub fn visible_images(&self) -> impl Iterator<Item = VisibleImage<'_>> {
+    ///
+    /// `now` anchors the animation clock: each animated image's frame index
+    /// is chosen from `now - placed_at`. Passing the same `now` to every
+    /// visible image in a render pass keeps the whole frame temporally
+    /// consistent.
+    pub fn visible_images(
+        &self,
+        now: Instant,
+    ) -> impl Iterator<Item = VisibleImage<'_>> {
         let viewport_top =
             self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
         let viewport_bottom = viewport_top + self.viewport.rows as usize;
@@ -1043,6 +1051,7 @@ impl Terminal {
             let img_rows = img.display_height.div_ceil(cell_height).max(1) as usize;
             let img_bottom = img.row + img_rows;
             if img.row < viewport_bottom && img_bottom > viewport_top {
+                let elapsed = now.saturating_duration_since(img.placed_at);
                 Some(VisibleImage {
                     image: &img.image,
                     id: img.id,
@@ -1050,6 +1059,7 @@ impl Terminal {
                     screen_col: img.col,
                     display_width: img.display_width,
                     display_height: img.display_height,
+                    frame_index: img.image.frame_at(elapsed),
                 })
             } else {
                 None
@@ -1222,6 +1232,7 @@ impl Terminal {
                                 col: self.active.cursor.col,
                                 display_width,
                                 display_height,
+                                placed_at: Instant::now(),
                             },
                         );
 
@@ -1387,6 +1398,7 @@ fn place_kitty_image(
             col: screen.cursor.col,
             display_width,
             display_height,
+            placed_at: Instant::now(),
         },
     );
 
@@ -1725,6 +1737,7 @@ fn place_iterm_image(
             col: screen.cursor.col,
             display_width,
             display_height,
+            placed_at: Instant::now(),
         },
     );
 
@@ -1965,16 +1978,13 @@ mod tests {
         term.active.images.insert(
             id,
             PlacedImage {
-                image: crate::image::DecodedImage {
-                    pixels: vec![],
-                    width: 1,
-                    height: height_px,
-                },
+                image: crate::image::DecodedImage::single_frame(1, height_px, vec![]),
                 id,
                 row,
                 col,
                 display_width: 1,
                 display_height: height_px,
+                placed_at: Instant::now(),
             },
         );
         id

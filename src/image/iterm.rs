@@ -23,7 +23,7 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
 use crate::image::DecodedImage;
-use crate::image::decode_png;
+use crate::image::decode_image;
 
 /// A `width=` / `height=` value. iTerm2 distinguishes the unit by suffix:
 /// bare digits = cells, `px` suffix = pixels, `%` suffix = viewport fraction,
@@ -204,11 +204,12 @@ fn decode_base64(s: &[u8]) -> Option<Vec<u8>> {
     BASE64.decode(&filtered).ok()
 }
 
-/// Decode an iTerm2 image payload into an [`DecodedImage`]. Only PNG is
-/// supported today; other raster formats return `None` and the caller
-/// silently drops the image.
+/// Decode an iTerm2 image payload into a [`DecodedImage`]. PNG is always
+/// supported; with the `ffmpeg` cargo feature animated GIF is recognized
+/// as well. Other raster formats return `None` and the caller silently
+/// drops the image.
 pub fn decode_payload(data: &[u8]) -> Option<DecodedImage> {
-    decode_png(data)
+    decode_image(data)
 }
 
 /// Accumulator for a `MultipartFile` → `FilePart*` → `FileEnd` sequence.

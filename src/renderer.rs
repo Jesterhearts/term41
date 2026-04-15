@@ -788,11 +788,14 @@ impl Renderer {
         let mut image_vertices: Vec<ImageVertex> = Vec::new();
         let mut image_indices: Vec<u32> = Vec::new();
 
-        for vis in terminal.visible_images() {
-            let entry = match self
-                .image_atlas
-                .ensure_cached(&self.queue, vis.id, vis.image)
-            {
+        let now = std::time::Instant::now();
+        for vis in terminal.visible_images(now) {
+            let entry = match self.image_atlas.ensure_cached(
+                &self.queue,
+                vis.id,
+                vis.frame_index,
+                vis.image,
+            ) {
                 Some(e) => e,
                 None => continue,
             };

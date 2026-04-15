@@ -49,11 +49,9 @@ pub fn parse_sixel(
         );
     }
 
-    let mut image = DecodedImage {
-        pixels: vec![0; max_w * rows.len() * 6 * 4],
-        width: max_w as u32,
-        height: rows.len() as u32 * 6,
-    };
+    let width = max_w as u32;
+    let height = rows.len() as u32 * 6;
+    let mut pixels = vec![0u8; max_w * rows.len() * 6 * 4];
 
     for (idy, row) in rows.into_iter().enumerate() {
         let default_color = row.default_color;
@@ -65,15 +63,15 @@ pub fn parse_sixel(
                 .enumerate()
             {
                 let pixel_row = idy * 6 + offset_y;
-                image.pixels[(pixel_row * max_w + idx) * 4] = pixel.red;
-                image.pixels[(pixel_row * max_w + idx) * 4 + 1] = pixel.green;
-                image.pixels[(pixel_row * max_w + idx) * 4 + 2] = pixel.blue;
-                image.pixels[(pixel_row * max_w + idx) * 4 + 3] = pixel.alpha;
+                pixels[(pixel_row * max_w + idx) * 4] = pixel.red;
+                pixels[(pixel_row * max_w + idx) * 4 + 1] = pixel.green;
+                pixels[(pixel_row * max_w + idx) * 4 + 2] = pixel.blue;
+                pixels[(pixel_row * max_w + idx) * 4 + 3] = pixel.alpha;
             }
         }
     }
 
-    image
+    DecodedImage::single_frame(width, height, pixels)
 }
 
 fn process_data(

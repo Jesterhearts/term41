@@ -126,17 +126,27 @@ impl ImageAtlas {
         &self.bind_group_layout
     }
 
-    /// Look up an image in the cache, tiling and uploading on miss. Returns
-    /// `None` only if a tile cannot be packed even after full eviction
-    /// (impossible given that tiles are bounded by the atlas size).
+    /// Look up a specific frame of an image in the cache, tiling and
+    /// uploading on miss. Returns `None` only if a tile cannot be packed
+    /// even after full eviction (impossible given that tiles are bounded
+    /// by the atlas size) or the requested frame index is out of range.
+    ///
+    /// Static images pass `frame_index = 0`; animated images pass the
+    /// current frame index, and each frame is packed independently under
+    /// a composite `(image_id, frame_index)` cache key. This means a
+    /// 20-frame animation occupies up to 20 atlas entries, and LRU
+    /// eviction can rotate them like any other cached image.
     pub fn ensure_cached(
         &mut self,
         queue: &wgpu::Queue,
-        id: u64,
+        image_id: u64,
+        frame_index: usize,
         image: &DecodedImage,
     ) -> Option<&ImageEntry> {
-        if self.cache.contains_key(&id) {
-            return self.cache.get(&id);
+        let frame = image.frames.get(frame_index)?;
+        let key = atlas_key(image_id, frame_index);
+        if self.cache.contains_key(&key) {
+            return self.cache.get(&key);
         }
 
         let regions = tile_regions(image.width, image.height, IMAGE_ATLAS_SIZE);
@@ -158,20 +168,32 @@ impl ImageAtlas {
                         self.packer.free(&prior.alloc);
                     }
                     warn!(
-                        "image {id} tile {}x{} does not fit in atlas",
+                        "image {image_id} frame {frame_index} tile {}x{} does not fit in atlas",
                         region.width, region.height
                     );
                     return None;
                 }
             };
-            upload_tile(queue, &self.texture, &tile, image);
+            upload_tile(queue, &self.texture, &tile, image.width, &frame.pixels);
             tiles.push(tile);
         }
 
         make_room_in_cache(&mut self.cache, &mut self.packer);
-        self.cache.insert(id, ImageEntry { tiles });
-        self.cache.get(&id)
+        self.cache.insert(key, ImageEntry { tiles });
+        self.cache.get(&key)
     }
+}
+
+/// Pack `(image_id, frame_index)` into the atlas's `u64` cache key. The
+/// low 16 bits hold the frame index (max 65k frames — far beyond any
+/// realistic animation); the rest holds the image id. The layout keeps
+/// static images (frame 0) from colliding with animated images since the
+/// shift puts every image at a different base offset.
+fn atlas_key(
+    image_id: u64,
+    frame_index: usize,
+) -> u64 {
+    (image_id << 16) | (frame_index as u64 & 0xFFFF)
 }
 
 /// A sub-rectangle of a source image that fits within one atlas tile.
@@ -240,14 +262,15 @@ fn upload_tile(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     tile: &ImageTile,
-    image: &DecodedImage,
+    image_width: u32,
+    pixels: &[u8],
 ) {
     // Point write_texture at the sub-rectangle by offsetting into the source
     // buffer; `bytes_per_row` stays at the full image stride so wgpu walks
     // the right distance between rows.
     let bytes_per_pixel = 4;
-    let row_stride = image.width * bytes_per_pixel;
-    let offset = (tile.src_y * image.width + tile.src_x) as usize * bytes_per_pixel as usize;
+    let row_stride = image_width * bytes_per_pixel;
+    let offset = (tile.src_y * image_width + tile.src_x) as usize * bytes_per_pixel as usize;
 
     queue.write_texture(
         wgpu::TexelCopyTextureInfo {
@@ -260,7 +283,7 @@ fn upload_tile(
             },
             aspect: wgpu::TextureAspect::All,
         },
-        &image.pixels[offset..],
+        &pixels[offset..],
         wgpu::TexelCopyBufferLayout {
             offset: 0,
             bytes_per_row: Some(row_stride),

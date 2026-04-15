@@ -295,11 +295,7 @@ fn decode_rgb(
         rgba.push(255);
     }
 
-    Some(DecodedImage {
-        pixels: rgba,
-        width,
-        height,
-    })
+    Some(DecodedImage::single_frame(width, height, rgba))
 }
 
 fn decode_rgba(
@@ -312,11 +308,11 @@ fn decode_rgba(
         return None;
     }
 
-    Some(DecodedImage {
-        pixels: data[..expected].to_vec(),
+    Some(DecodedImage::single_frame(
         width,
         height,
-    })
+        data[..expected].to_vec(),
+    ))
 }
 
 /// Apply source-rectangle cropping to a decoded image.
@@ -341,18 +337,18 @@ pub fn crop_source_rect(
         return image;
     }
 
+    // Cropping is only sensible for static single-frame images; the kitty
+    // protocol doesn't transmit animations, so this code never needs to
+    // track cropping across a frame sequence.
+    let src_pixels = &image.frames[0].pixels;
     let mut pixels = Vec::with_capacity(src_w as usize * src_h as usize * 4);
     for row in src_y..src_y + src_h {
         let start = (row as usize * image.width as usize + src_x as usize) * 4;
         let end = start + src_w as usize * 4;
-        pixels.extend_from_slice(&image.pixels[start..end]);
+        pixels.extend_from_slice(&src_pixels[start..end]);
     }
 
-    DecodedImage {
-        pixels,
-        width: src_w,
-        height: src_h,
-    }
+    DecodedImage::single_frame(src_w, src_h, pixels)
 }
 
 // ---------------------------------------------------------------------------
@@ -601,7 +597,7 @@ mod tests {
         let image = decode_payload(&cmd, b64.as_bytes()).unwrap();
         assert_eq!(image.width, 2);
         assert_eq!(image.height, 1);
-        assert_eq!(image.pixels, pixels);
+        assert_eq!(image.frames[0].pixels, pixels);
     }
 
     #[test]
@@ -621,19 +617,15 @@ mod tests {
         let image = decode_payload(&cmd, b64.as_bytes()).unwrap();
         assert_eq!(image.width, 2);
         assert_eq!(image.height, 1);
-        assert_eq!(image.pixels, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+        assert_eq!(image.frames[0].pixels, vec![255, 0, 0, 255, 0, 255, 0, 255]);
     }
 
     #[test]
     fn crop_identity() {
-        let image = DecodedImage {
-            pixels: vec![1, 2, 3, 4, 5, 6, 7, 8],
-            width: 2,
-            height: 1,
-        };
+        let image = DecodedImage::single_frame(2, 1, vec![1, 2, 3, 4, 5, 6, 7, 8]);
         let cmd = KittyCommand::default();
         let cropped = crop_source_rect(image.clone(), &cmd);
-        assert_eq!(cropped.pixels, image.pixels);
+        assert_eq!(cropped.frames[0].pixels, image.frames[0].pixels);
     }
 
     #[test]

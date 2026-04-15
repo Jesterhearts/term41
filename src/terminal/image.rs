@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::time::Instant;
 
 use crate::image::DecodedImage;
 use crate::terminal::row::Row;
@@ -19,6 +20,10 @@ pub struct PlacedImage {
     /// Final rendered pixel height. For sixel this matches `image.height`;
     /// for kitty this can differ when the app requested `r=` rows of display.
     pub display_height: u32,
+    /// Wall-clock timestamp of placement. Drives the animation clock for
+    /// multi-frame images (`Instant::now() - placed_at` modulo
+    /// `image.cycle_duration()` selects the current frame).
+    pub placed_at: Instant,
 }
 
 /// A reference to an image visible in the current viewport.
@@ -36,6 +41,9 @@ pub struct VisibleImage<'a> {
     pub display_width: u32,
     /// Final rendered pixel height (see [`PlacedImage::display_height`]).
     pub display_height: u32,
+    /// Index into `image.frames` to render right now. Always `0` for static
+    /// images; selected by [`DecodedImage::frame_at`] for animated ones.
+    pub frame_index: usize,
 }
 
 /// Remove any existing image that would overlap a new image placed at
