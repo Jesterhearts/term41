@@ -86,10 +86,14 @@ pub(super) fn put_ascii_run(
 
         let row = &mut screen.grid.rows[r];
         let chunk = &run[i..i + chunk_len];
-        // Clone out of the precomputed ASCII table. The parser guarantees
-        // bytes are 0x20..=0x7E, so the subtraction can't wrap.
+        // Hoist the LazyLock deref so the inner loop sees a plain
+        // `&[SmolStr; 95]`; the parser guarantees each byte is 0x20..=0x7E
+        // so the bounds check on the table index is provably redundant.
+        let table: &[SmolStr; 95] = &ASCII_CELLS;
         for (cell, &b) in row.cells[col..col + chunk_len].iter_mut().zip(chunk) {
-            *cell = ASCII_CELLS[(b - 0x20) as usize].clone();
+            // SAFETY: parser emits PrintAscii only for bytes in 0x20..=0x7E,
+            // so (b - 0x20) is in 0..95 and the table index is in range.
+            *cell = unsafe { table.get_unchecked((b - 0x20) as usize) }.clone();
         }
         // Attributes are homogeneous across the run — let the compiler lower
         // each of these to a single memset-style fill.
