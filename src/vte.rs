@@ -129,6 +129,11 @@ pub enum Action<'d> {
     /// `parse()` calls (clipboard/image payloads are large) and are reassembled
     /// inside the parser.
     OscDispatch(Vec<u8>),
+    /// A complete APC (Application Program Command) string.
+    ///
+    /// Used by the kitty graphics protocol (`ESC _ G ...`). Payload contains
+    /// the raw bytes between the APC introducer and its terminator (ST).
+    ApcDispatch(Vec<u8>),
     /// Start of a DCS (Device Control String) — parameters are available.
     Hook { params: Params, action: char },
     /// A contiguous run of DCS passthrough data, borrowed from the input
@@ -161,6 +166,7 @@ enum RawAction {
         byte: u8,
     },
     OscDispatch(Vec<u8>),
+    ApcDispatch(Vec<u8>),
     Hook {
         params: Params,
         action: char,
@@ -248,6 +254,7 @@ enum State {
     DcsPassthrough,
     DcsIgnore,
     OscString,
+    ApcString,
     SosPmApcString,
 }
 
@@ -287,6 +294,10 @@ pub struct Parser {
     // OSC string accumulator — the payload is taken out on dispatch, leaving
     // an empty Vec ready to accept the next sequence without reallocating.
     osc_buf: Vec<u8>,
+
+    // APC string accumulator — same pattern as osc_buf. Used by the kitty
+    // graphics protocol (ESC _ G ...).
+    apc_buf: Vec<u8>,
 }
 
 impl Default for Parser {
@@ -313,6 +324,7 @@ impl Parser {
             utf8_len: 0,
             utf8_needed: 0,
             osc_buf: Vec::new(),
+            apc_buf: Vec::new(),
         }
     }
 
@@ -430,6 +442,7 @@ impl Parser {
         match self.state {
             State::DcsPassthrough => Some(RawAction::Unhook),
             State::OscString => Some(RawAction::OscDispatch(std::mem::take(&mut self.osc_buf))),
+            State::ApcString => Some(RawAction::ApcDispatch(std::mem::take(&mut self.apc_buf))),
             _ => None,
         }
     }
@@ -481,7 +494,11 @@ impl Parser {
         // above). Skip C1 anywhere transitions while parsing a payload.
         let in_string_state = matches!(
             self.state,
-            State::OscString | State::DcsPassthrough | State::DcsIgnore | State::SosPmApcString,
+            State::OscString
+                | State::ApcString
+                | State::DcsPassthrough
+                | State::DcsIgnore
+                | State::SosPmApcString,
         );
         if !in_string_state {
             match byte {
@@ -507,9 +524,14 @@ impl Parser {
                     self.state = State::OscString;
                     return exit;
                 }
-                0x98 | 0x9E | 0x9F => {
+                0x98 | 0x9E => {
                     let exit = self.exit_action();
                     self.state = State::SosPmApcString;
+                    return exit;
+                }
+                0x9F => {
+                    let exit = self.exit_action();
+                    self.state = State::ApcString;
                     return exit;
                 }
                 0x80..=0x8F | 0x91..=0x97 | 0x99 | 0x9A => {
@@ -541,6 +563,7 @@ impl Parser {
             State::DcsPassthrough => self.dcs_passthrough(byte),
             State::DcsIgnore => self.dcs_ignore(byte),
             State::OscString => self.osc_string(byte),
+            State::ApcString => self.apc_string(byte),
             State::SosPmApcString => self.sos_pm_apc(byte),
         }
     }
@@ -560,7 +583,8 @@ impl Parser {
             // correct.
             0x20..=0x7E => {
                 let buf = [byte];
-                let s = std::str::from_utf8(&buf).unwrap();
+                // SAFETY: single ascii byte guaranteed to be valid UTF-8.
+                let s = unsafe { std::str::from_utf8_unchecked(&buf) };
                 Some(RawAction::Print(SmolStr::new_inline(s)))
             }
             0x7F => None,
@@ -631,8 +655,12 @@ impl Parser {
                 self.state = State::DcsEntry;
                 None
             }
-            0x58 | 0x5E | 0x5F => {
+            0x58 | 0x5E => {
                 self.state = State::SosPmApcString;
+                None
+            }
+            0x5F => {
+                self.state = State::ApcString;
                 None
             }
             0x5B => {
@@ -948,6 +976,25 @@ impl Parser {
         }
     }
 
+    fn apc_string(
+        &mut self,
+        byte: u8,
+    ) -> Option<RawAction> {
+        match byte {
+            // BEL terminates the APC string (same xterm extension as OSC).
+            0x07 => {
+                self.state = State::Ground;
+                Some(RawAction::ApcDispatch(std::mem::take(&mut self.apc_buf)))
+            }
+            _ => {
+                if self.apc_buf.len() < MAX_OSC_LEN {
+                    self.apc_buf.push(byte);
+                }
+                None
+            }
+        }
+    }
+
     fn sos_pm_apc(
         &mut self,
         _byte: u8,
@@ -987,6 +1034,26 @@ impl<'a> Iterator for ParseIter<'a> {
                 if n > 0 {
                     self.pos += n;
                     return Some(Action::PrintAscii(&self.data[start..start + n]));
+                }
+            }
+
+            // APC fast path: kitty graphics payloads are base64 (all
+            // printable ASCII). Batch the run and buffer it directly,
+            // avoiding per-byte dispatch through the state machine.
+            if self.parser.state == State::ApcString && self.pos < self.data.len() {
+                let start = self.pos;
+                let n = self
+                    .parser
+                    .arch
+                    .dispatch(ScanPrintable(&self.data[start..]));
+                if n > 0 {
+                    let buf = &self.data[start..start + n];
+                    let remaining = MAX_OSC_LEN.saturating_sub(self.parser.apc_buf.len());
+                    self.parser
+                        .apc_buf
+                        .extend_from_slice(&buf[..buf.len().min(remaining)]);
+                    self.pos += n;
+                    continue;
                 }
             }
 
@@ -1042,6 +1109,7 @@ impl<'a> ParseIter<'a> {
                 byte,
             },
             RawAction::OscDispatch(data) => Action::OscDispatch(data),
+            RawAction::ApcDispatch(data) => Action::ApcDispatch(data),
             RawAction::Hook { params, action } => Action::Hook { params, action },
             // The byte that produced this was at self.pos - 1.
             RawAction::PutByte => Action::Put(&self.data[self.pos - 1..self.pos]),
@@ -1075,6 +1143,7 @@ mod tests {
         Csi(Vec<u8>, char),
         Esc(Vec<u8>, u8),
         Osc(Vec<u8>),
+        Apc(Vec<u8>),
         Hook(char),
         Put(Vec<u8>),
         Unhook,
@@ -1098,6 +1167,7 @@ mod tests {
                     byte,
                 } => Owned::Esc(intermediates.as_slice().to_vec(), byte),
                 Action::OscDispatch(d) => Owned::Osc(d),
+                Action::ApcDispatch(d) => Owned::Apc(d),
                 Action::Hook { action, .. } => Owned::Hook(action),
                 Action::Put(b) => Owned::Put(b.to_vec()),
                 Action::Unhook => Owned::Unhook,

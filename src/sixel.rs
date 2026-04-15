@@ -6,7 +6,7 @@ use palette::Srgba;
 use crate::vte;
 
 #[derive(Debug, Clone)]
-pub struct SixelImage {
+pub struct DecodedImage {
     pub pixels: Vec<u8>,
     pub width: u32,
     pub height: u32,
@@ -31,7 +31,7 @@ impl SixelRow {
 pub fn parse_sixel(
     params: vte::Params,
     string: Vec<u8>,
-) -> SixelImage {
+) -> DecodedImage {
     let mut palette = default_palette();
     let mut palette_entry = 0;
 
@@ -55,7 +55,7 @@ pub fn parse_sixel(
         );
     }
 
-    let mut image = SixelImage {
+    let mut image = DecodedImage {
         pixels: vec![0; max_w * rows.len() * 6 * 4],
         width: max_w as u32,
         height: rows.len() as u32 * 6,

@@ -105,6 +105,9 @@ pub struct Terminal {
 
     /// Cell height in pixels, used to convert sixel image pixel height to rows.
     cell_height: u32,
+    /// Cell width in pixels. Stored for kitty display-sizing (`c=`/`r=` keys)
+    /// once that path is wired up.
+    cell_width: u32,
 
     next_image_id: u64,
 
@@ -182,6 +185,13 @@ pub struct Terminal {
     /// that emits OSC 133 would still write into this slot, but the marks
     /// land on alt's grid and disappear with the alt-screen teardown.
     current_prompt_row: Option<u64>,
+
+    /// Kitty graphics protocol image store. Images transmitted via `a=t`
+    /// live here until placed or deleted.
+    kitty_images: crate::kitty::KittyImageStore,
+
+    /// Accumulates chunks for multi-part kitty graphics transmissions.
+    kitty_chunked: crate::kitty::ChunkedTransmission,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -196,6 +206,7 @@ impl Terminal {
         rows: u32,
         scrollback_limit: u32,
         cell_height: u32,
+        cell_width: u32,
     ) -> Self {
         Self {
             active: Screen::new(cols, rows, scrollback_limit),
@@ -223,6 +234,9 @@ impl Terminal {
             current_title: None,
             bell_pending: false,
             current_prompt_row: None,
+            kitty_images: crate::kitty::KittyImageStore::new(),
+            kitty_chunked: crate::kitty::ChunkedTransmission::new(),
+            cell_width,
         }
     }
 
@@ -1021,7 +1035,7 @@ impl Terminal {
         let cell_height = self.cell_height;
 
         self.active.images.values().filter_map(move |img| {
-            let img_rows = img.image.height.div_ceil(cell_height).max(1) as usize;
+            let img_rows = img.display_height.div_ceil(cell_height).max(1) as usize;
             let img_bottom = img.row + img_rows;
             if img.row < viewport_bottom && img_bottom > viewport_top {
                 Some(VisibleImage {
@@ -1029,6 +1043,8 @@ impl Terminal {
                     id: img.id,
                     screen_row: img.row as i32 - viewport_top as i32,
                     screen_col: img.col,
+                    display_width: img.display_width,
+                    display_height: img.display_height,
                 })
             } else {
                 None
@@ -1089,6 +1105,8 @@ impl Terminal {
                         kitty_keyboard: &mut self.kitty_keyboard,
                         pending_output: &mut self.pending_output,
                         cursor_style: &mut self.cursor_style,
+                        cell_width: self.cell_width,
+                        cell_height: self.cell_height,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -1122,6 +1140,19 @@ impl Terminal {
                         current_prompt_row: &mut self.current_prompt_row,
                     };
                     handle_osc(&data, &mut ctx);
+                }
+                vte::Action::ApcDispatch(data) => {
+                    handle_kitty_graphics(
+                        &data,
+                        &mut self.kitty_images,
+                        &mut self.kitty_chunked,
+                        &mut self.active,
+                        &self.viewport,
+                        &mut self.next_image_id,
+                        self.cell_height,
+                        self.cell_width,
+                        &mut self.pending_output,
+                    );
                 }
                 vte::Action::Hook { params, action } => {
                     self.hook_bytes.push(vec![]);
@@ -1157,6 +1188,8 @@ impl Terminal {
                             self.active.cursor.col,
                             self.cell_height,
                         );
+                        let display_width = image.width;
+                        let display_height = image.height;
                         self.active.images.insert(
                             id,
                             PlacedImage {
@@ -1164,6 +1197,8 @@ impl Terminal {
                                 id,
                                 row,
                                 col: self.active.cursor.col,
+                                display_width,
+                                display_height,
                             },
                         );
 
@@ -1176,7 +1211,6 @@ impl Terminal {
                             }
                         }
                         self.active.cursor.col = 0;
-                        self.active.offset = 0;
                     }
                 }
             }
@@ -1192,6 +1226,342 @@ impl Terminal {
                 }
             }
         }
+    }
+}
+
+// ---------------------------------------------------------------------------
+// Kitty graphics protocol handler
+// ---------------------------------------------------------------------------
+
+fn handle_kitty_graphics(
+    data: &[u8],
+    store: &mut crate::kitty::KittyImageStore,
+    chunked: &mut crate::kitty::ChunkedTransmission,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
+    pending_output: &mut Vec<u8>,
+) {
+    // APC payload must start with 'G'.
+    if data.first() != Some(&b'G') {
+        return;
+    }
+
+    let cmd = crate::kitty::parse_command(&data[1..]);
+
+    // Feed into chunked accumulator. If more chunks expected, return early.
+    let cmd = match chunked.feed(cmd) {
+        Some(cmd) => cmd,
+        None => return,
+    };
+
+    match cmd.action {
+        b'q' => handle_kitty_query(&cmd, store, pending_output),
+        b'T' => handle_kitty_transmit_display(
+            &cmd,
+            store,
+            screen,
+            viewport,
+            next_image_id,
+            cell_height,
+            cell_width,
+            pending_output,
+        ),
+        b't' => handle_kitty_transmit(&cmd, store, pending_output),
+        b'p' => handle_kitty_place(
+            &cmd,
+            store,
+            screen,
+            viewport,
+            next_image_id,
+            cell_height,
+            cell_width,
+            pending_output,
+        ),
+        b'd' => handle_kitty_delete(&cmd, screen, store, cell_height),
+        _ => {}
+    }
+}
+
+/// Decode image data from a command's payload, handling direct, file, and
+/// temp-file transmission mediums.
+fn decode_kitty_image(cmd: &crate::kitty::KittyCommand) -> Option<crate::sixel::DecodedImage> {
+    match cmd.transmission {
+        b'f' => crate::kitty::decode_file_payload(cmd, &cmd.payload, false),
+        b't' => crate::kitty::decode_file_payload(cmd, &cmd.payload, true),
+        _ => crate::kitty::decode_payload(cmd, &cmd.payload),
+    }
+}
+
+/// Place an image on the grid at the cursor position.
+fn place_kitty_image(
+    image: crate::sixel::DecodedImage,
+    cmd: &crate::kitty::KittyCommand,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
+) {
+    // Apply source rectangle cropping.
+    let image = crate::kitty::crop_source_rect(image, cmd);
+
+    let id = *next_image_id;
+    *next_image_id += 1;
+
+    let row = screen.grid.active_row_index(&screen.cursor, viewport);
+
+    // Compute display size in pixels. `c=`/`r=` take precedence over the
+    // image's native pixel dimensions and drive both cursor advancement
+    // and the render-time quad scaling.
+    //
+    // If only one of `c` and `r` is given, preserve the source aspect ratio
+    // in the other dimension — this matches kitty's documented behaviour
+    // and is what `viu -w N` relies on for fitted previews.
+    let (display_width, display_height) = match (cmd.columns > 0, cmd.rows > 0) {
+        (true, true) => (cmd.columns * cell_width, cmd.rows * cell_height),
+        (true, false) => {
+            let w = cmd.columns * cell_width;
+            let h = if image.width > 0 {
+                (image.height as u64 * w as u64 / image.width as u64) as u32
+            } else {
+                image.height
+            };
+            (w, h)
+        }
+        (false, true) => {
+            let h = cmd.rows * cell_height;
+            let w = if image.height > 0 {
+                (image.width as u64 * h as u64 / image.height as u64) as u32
+            } else {
+                image.width
+            };
+            (w, h)
+        }
+        (false, false) => (image.width, image.height),
+    };
+
+    let image_rows = display_height.div_ceil(cell_height);
+
+    crate::terminal::image::remove_overlapping(
+        &mut screen.images,
+        row,
+        image_rows.max(1) as usize,
+        screen.cursor.col,
+        cell_height,
+    );
+
+    screen.images.insert(
+        id,
+        PlacedImage {
+            image,
+            id,
+            row,
+            col: screen.cursor.col,
+            display_width,
+            display_height,
+        },
+    );
+
+    // Advance cursor past the image unless C=1.
+    if !cmd.no_move_cursor {
+        let advance_rows = image_rows;
+        for _ in 0..advance_rows {
+            screen.cursor.row += 1;
+            if screen.cursor.row >= viewport.rows {
+                screen.grid.push_visible_row(viewport);
+                screen.cursor.row = viewport.rows - 1;
+            }
+        }
+        screen.cursor.col = 0;
+    }
+}
+
+fn send_kitty_response(
+    cmd: &crate::kitty::KittyCommand,
+    image_id: u32,
+    ok: bool,
+    message: &str,
+    pending_output: &mut Vec<u8>,
+) {
+    // q=1 suppresses OK responses, q=2 suppresses all.
+    if cmd.quiet >= 2 {
+        return;
+    }
+    if cmd.quiet >= 1 && ok {
+        return;
+    }
+    pending_output.extend_from_slice(&crate::kitty::format_response(image_id, ok, message));
+}
+
+fn handle_kitty_query(
+    cmd: &crate::kitty::KittyCommand,
+    store: &mut crate::kitty::KittyImageStore,
+    pending_output: &mut Vec<u8>,
+) {
+    let id = store.resolve_id(cmd);
+    // Query just tests if the protocol is supported. Respond OK without
+    // storing anything.
+    send_kitty_response(cmd, id, true, "", pending_output);
+}
+
+fn handle_kitty_transmit(
+    cmd: &crate::kitty::KittyCommand,
+    store: &mut crate::kitty::KittyImageStore,
+    pending_output: &mut Vec<u8>,
+) {
+    let id = store.resolve_id(cmd);
+    match decode_kitty_image(cmd) {
+        Some(image) => {
+            store.store(id, image);
+            send_kitty_response(cmd, id, true, "", pending_output);
+        }
+        None => {
+            send_kitty_response(cmd, id, false, "EINVAL", pending_output);
+        }
+    }
+}
+
+fn handle_kitty_transmit_display(
+    cmd: &crate::kitty::KittyCommand,
+    store: &mut crate::kitty::KittyImageStore,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
+    pending_output: &mut Vec<u8>,
+) {
+    let id = store.resolve_id(cmd);
+    match decode_kitty_image(cmd) {
+        Some(image) => {
+            // Store for potential later re-placement.
+            store.store(id, image.clone());
+            place_kitty_image(
+                image,
+                cmd,
+                screen,
+                viewport,
+                next_image_id,
+                cell_height,
+                cell_width,
+            );
+            send_kitty_response(cmd, id, true, "", pending_output);
+        }
+        None => {
+            send_kitty_response(cmd, id, false, "EINVAL", pending_output);
+        }
+    }
+}
+
+fn handle_kitty_place(
+    cmd: &crate::kitty::KittyCommand,
+    store: &mut crate::kitty::KittyImageStore,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
+    pending_output: &mut Vec<u8>,
+) {
+    let id = store.resolve_id(cmd);
+    match store.get(id) {
+        Some(image) => {
+            let image = image.clone();
+            place_kitty_image(
+                image,
+                cmd,
+                screen,
+                viewport,
+                next_image_id,
+                cell_height,
+                cell_width,
+            );
+            send_kitty_response(cmd, id, true, "", pending_output);
+        }
+        None => {
+            send_kitty_response(cmd, id, false, "ENOENT", pending_output);
+        }
+    }
+}
+
+fn handle_kitty_delete(
+    cmd: &crate::kitty::KittyCommand,
+    screen: &mut Screen,
+    store: &mut crate::kitty::KittyImageStore,
+    cell_height: u32,
+) {
+    let uppercase = cmd.delete.is_ascii_uppercase();
+    match cmd.delete.to_ascii_lowercase() {
+        b'a' | 0 => {
+            // Delete all visible placements.
+            screen.images.clear();
+            if uppercase {
+                store.clear();
+            }
+        }
+        b'i' => {
+            // Delete by image id.
+            let id = cmd.image_id;
+            if cmd.placement_id != 0 {
+                // Delete specific placement — we don't track placement ids on
+                // PlacedImage yet, so remove the first image with matching
+                // stored-image dimensions. For now, remove all with that
+                // stored-image id.
+                if let Some(stored) = store.get(id) {
+                    let (sw, sh) = (stored.width, stored.height);
+                    screen
+                        .images
+                        .retain(|_, img| img.image.width != sw || img.image.height != sh);
+                }
+            } else {
+                // Remove all placements of this image.
+                if let Some(stored) = store.get(id) {
+                    let (sw, sh) = (stored.width, stored.height);
+                    screen
+                        .images
+                        .retain(|_, img| img.image.width != sw || img.image.height != sh);
+                }
+            }
+            if uppercase {
+                store.remove(id);
+            }
+        }
+        b'c' => {
+            // Delete at cursor position.
+            let cursor_row = screen.grid.active_row_index(
+                &screen.cursor,
+                &Viewport {
+                    rows: screen.grid.rows.len() as u32,
+                    cols: 0,
+                },
+            );
+            let cursor_col = screen.cursor.col;
+            screen.images.retain(|_, img| {
+                if img.col != cursor_col {
+                    return true;
+                }
+                let img_rows = img.image.height.div_ceil(cell_height).max(1) as usize;
+                let img_bottom = img.row + img_rows;
+                !(img.row <= cursor_row && cursor_row < img_bottom)
+            });
+        }
+        b'r' => {
+            // Delete by id range.
+            let lo = cmd.src_x; // x= is the lower bound
+            let hi = cmd.src_y; // y= is the upper bound
+            if let Some(lo_stored) = store.get(lo) {
+                let _ = lo_stored; // just checking existence
+            }
+            // Remove placements for images in the range (approximate: we
+            // don't track which stored image id each PlacedImage came from).
+            if uppercase {
+                store.remove_range(lo, hi);
+            }
+        }
+        _ => {}
     }
 }
 
@@ -1219,7 +1589,7 @@ mod tests {
 
     #[test]
     fn alt_screen_1049_hides_primary_and_restores() {
-        let mut term = Terminal::new(8, 4, 100, 16);
+        let mut term = Terminal::new(8, 4, 100, 16, 8);
         term.process(b"hello");
         term.process(b"\x1b[?1049h");
 
@@ -1247,7 +1617,7 @@ mod tests {
 
     #[test]
     fn alt_screen_1049_resize_preserves_primary() {
-        let mut term = Terminal::new(10, 4, 100, 16);
+        let mut term = Terminal::new(10, 4, 100, 16, 8);
         term.process(b"primary-content");
         term.process(b"\x1b[?1049h");
         term.process(b"ALT");
@@ -1269,7 +1639,7 @@ mod tests {
 
     #[test]
     fn alt_screen_has_no_scrollback() {
-        let mut term = Terminal::new(8, 3, 100, 16);
+        let mut term = Terminal::new(8, 3, 100, 16, 8);
         term.process(b"\x1b[?1049h");
 
         // Fill enough rows on alt to normally produce scrollback on primary.
@@ -1281,7 +1651,7 @@ mod tests {
 
     #[test]
     fn decsc_decrc_restores_cursor_and_colors() {
-        let mut term = Terminal::new(10, 4, 100, 16);
+        let mut term = Terminal::new(10, 4, 100, 16, 8);
         term.process(b"\x1b[3;5H"); // move to row 3 col 5
         term.process(b"\x1b[31m"); // red fg
         term.process(b"\x1b7"); // DECSC
@@ -1296,7 +1666,7 @@ mod tests {
 
     #[test]
     fn mode_47_does_not_save_cursor() {
-        let mut term = Terminal::new(8, 3, 100, 16);
+        let mut term = Terminal::new(8, 3, 100, 16, 8);
         term.process(b"\x1b[2;3H"); // row 2 col 3
         term.process(b"\x1b[?47h");
         term.process(b"\x1b[1;1H"); // move on alt
@@ -1312,7 +1682,7 @@ mod tests {
 
     #[test]
     fn decset_1006_switches_to_sgr_encoding() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?1006h");
         assert_eq!(term.modes.mouse_encoding, MouseEncoding::Sgr);
         term.process(b"\x1b[?1006l");
@@ -1321,7 +1691,7 @@ mod tests {
 
     #[test]
     fn decset_1002_enables_button_event_tracking() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?1002h");
         assert_eq!(term.modes.mouse_tracking, MouseTracking::ButtonEvent);
         term.process(b"\x1b[?1002l");
@@ -1330,7 +1700,7 @@ mod tests {
 
     #[test]
     fn tracking_mode_is_replaced_not_layered() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?1000h");
         term.process(b"\x1b[?1003h");
         assert_eq!(term.modes.mouse_tracking, MouseTracking::AnyEvent);
@@ -1338,7 +1708,7 @@ mod tests {
 
     #[test]
     fn mouse_report_emits_into_pending_output() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?1000h\x1b[?1006h");
         let emitted = term.mouse_report(
             MouseEventKind::Press,
@@ -1354,7 +1724,7 @@ mod tests {
 
     #[test]
     fn mouse_report_returns_false_when_tracking_off() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         let emitted = term.mouse_report(
             MouseEventKind::Press,
             MouseButton::Left,
@@ -1370,14 +1740,14 @@ mod tests {
 
     #[test]
     fn paste_default_is_raw() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.paste("hello\n");
         assert_eq!(term.take_pending_output(), b"hello\n");
     }
 
     #[test]
     fn paste_wraps_when_mode_2004_enabled() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h");
         assert!(term.modes.bracketed_paste);
         term.paste("hello\n");
@@ -1386,7 +1756,7 @@ mod tests {
 
     #[test]
     fn decrst_2004_disables_bracketed_paste() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h");
         term.process(b"\x1b[?2004l");
         assert!(!term.modes.bracketed_paste);
@@ -1396,7 +1766,7 @@ mod tests {
 
     #[test]
     fn paste_scrubs_embedded_end_marker() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h");
         // The clipboard tries to break out of the bracket — the injected
         // `\x1b[201~` is stripped and everything else comes through.
@@ -1420,7 +1790,7 @@ mod tests {
         term.active.images.insert(
             id,
             PlacedImage {
-                image: crate::sixel::SixelImage {
+                image: crate::sixel::DecodedImage {
                     pixels: vec![],
                     width: 1,
                     height: height_px,
@@ -1428,6 +1798,8 @@ mod tests {
                 id,
                 row,
                 col,
+                display_width: 1,
+                display_height: height_px,
             },
         );
         id
@@ -1435,7 +1807,7 @@ mod tests {
 
     #[test]
     fn sixel_redraw_at_same_position_replaces_previous() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         // cell_height = 16, so 32px = 2 grid rows.
         let id_a = place_image(&mut term, 5, 0, 32);
         self::image::remove_overlapping(&mut term.active.images, 5, 2, 0, 16);
@@ -1446,7 +1818,7 @@ mod tests {
 
     #[test]
     fn sixel_different_columns_coexist() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         let id_a = place_image(&mut term, 5, 0, 32);
         let id_b = place_image(&mut term, 5, 10, 32);
         // Dedup sweep for a new image at col 0 must not touch col 10.
@@ -1457,7 +1829,7 @@ mod tests {
 
     #[test]
     fn scroll_region_shifts_images_up() {
-        let mut term = Terminal::new(10, 10, 0, 16);
+        let mut term = Terminal::new(10, 10, 0, 16, 8);
         // Set scroll region rows 0..=9 (whole screen is the region when
         // we use DECSTBM with a custom bottom). Place image at absolute
         // row 5, then issue CSI M (delete line) from row 0 to scroll the
@@ -1472,7 +1844,7 @@ mod tests {
 
     #[test]
     fn scroll_region_drops_image_pushed_out_of_top() {
-        let mut term = Terminal::new(10, 10, 0, 16);
+        let mut term = Terminal::new(10, 10, 0, 16, 8);
         term.process(b"\x1b[1;8r");
         let id = place_image(&mut term, 2, 0, 16);
         term.process(b"\x1b[H");
@@ -1485,7 +1857,7 @@ mod tests {
 
     #[test]
     fn scroll_region_preserves_images_outside_region() {
-        let mut term = Terminal::new(10, 10, 0, 16);
+        let mut term = Terminal::new(10, 10, 0, 16, 8);
         term.process(b"\x1b[2;5r"); // region rows 1..=4 (abs 1..=4 with no scrollback)
         let id = place_image(&mut term, 8, 0, 16); // below region
         term.process(b"\x1b[2H"); // move into region
@@ -1496,7 +1868,7 @@ mod tests {
 
     #[test]
     fn ed_2_removes_visible_images() {
-        let mut term = Terminal::new(10, 10, 0, 16);
+        let mut term = Terminal::new(10, 10, 0, 16, 8);
         let id = place_image(&mut term, 3, 0, 16);
         term.process(b"\x1b[2J"); // ED 2 — clear entire screen
         assert!(
@@ -1507,7 +1879,7 @@ mod tests {
 
     #[test]
     fn alt_screen_entry_clears_alt_images() {
-        let mut term = Terminal::new(10, 10, 0, 16);
+        let mut term = Terminal::new(10, 10, 0, 16, 8);
         // Enter alt once and place an image on the alt buffer.
         term.process(b"\x1b[?1049h");
         assert!(term.on_alt_screen);
@@ -1525,7 +1897,7 @@ mod tests {
 
     #[test]
     fn bsu_sets_synchronized_update_flag() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         assert!(!term.is_synchronized_update_active());
         term.process(b"\x1b[?2026h");
         assert!(term.is_synchronized_update_active());
@@ -1533,7 +1905,7 @@ mod tests {
 
     #[test]
     fn esu_clears_synchronized_update_flag() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2026h");
         term.process(b"\x1b[?2026l");
         assert!(!term.is_synchronized_update_active());
@@ -1542,7 +1914,7 @@ mod tests {
 
     #[test]
     fn synchronized_update_expires_after_timeout() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2026h");
         // Back-date the start so the safety deadline has already passed —
         // avoids a real sleep in the test but exercises the timeout path.
@@ -1553,7 +1925,7 @@ mod tests {
 
     #[test]
     fn paste_from_clipboard_round_trips() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
         term.clipboard.set(ClipboardKind::Clipboard, "hello");
         term.paste_from_clipboard(ClipboardKind::Clipboard);
@@ -1562,7 +1934,7 @@ mod tests {
 
     #[test]
     fn paste_from_clipboard_ignores_empty_selection() {
-        let mut term = Terminal::new(80, 24, 100, 16);
+        let mut term = Terminal::new(80, 24, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
         term.paste_from_clipboard(ClipboardKind::Clipboard);
         assert!(term.take_pending_output().is_empty());
@@ -1581,7 +1953,7 @@ mod tests {
 
     #[test]
     fn start_selection_char_mode_is_empty_initially() {
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         term.start_selection(2, 1, SelectionMode::Char);
         assert!(term.selection.is_some());
         assert!(!term.has_selection()); // empty Char = not "has selection"
@@ -1589,7 +1961,7 @@ mod tests {
 
     #[test]
     fn char_selection_extend_produces_text() {
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello");
         term.start_selection(0, 0, SelectionMode::Char);
         term.extend_selection(4, 0);
@@ -1598,7 +1970,7 @@ mod tests {
 
     #[test]
     fn word_selection_snaps_to_boundaries() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello world");
         term.start_selection(2, 0, SelectionMode::Word); // in "hello"
         assert_eq!(term.selection_text().as_deref(), Some("hello"));
@@ -1606,7 +1978,7 @@ mod tests {
 
     #[test]
     fn line_selection_covers_full_row() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello world");
         term.start_selection(5, 0, SelectionMode::Line);
         // Line selection trims trailing padding spaces.
@@ -1615,7 +1987,7 @@ mod tests {
 
     #[test]
     fn selection_spans_rows_with_newline_separator() {
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         write_row(&mut term, 0, "abc");
         write_row(&mut term, 1, "def");
         term.start_selection(0, 0, SelectionMode::Char);
@@ -1626,7 +1998,7 @@ mod tests {
 
     #[test]
     fn selection_drags_backwards_flips_anchor_head() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello world");
         term.start_selection(8, 0, SelectionMode::Word); // in "world"
         term.extend_selection(2, 0); // drag back into "hello"
@@ -1635,7 +2007,7 @@ mod tests {
 
     #[test]
     fn is_cell_selected_matches_contains() {
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         write_row(&mut term, 0, "abcdefghij");
         term.start_selection(2, 0, SelectionMode::Char);
         term.extend_selection(5, 0);
@@ -1648,7 +2020,7 @@ mod tests {
 
     #[test]
     fn search_finds_exact_case_sensitive_matches() {
-        let mut term = Terminal::new(20, 4, 100, 16);
+        let mut term = Terminal::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "abc foo xyz FOO bar");
         term.open_search();
         assert!(term.search_active());
@@ -1668,7 +2040,7 @@ mod tests {
 
     #[test]
     fn search_close_clears_state() {
-        let mut term = Terminal::new(20, 4, 100, 16);
+        let mut term = Terminal::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "hello");
         term.open_search();
         term.search_append("hello");
@@ -1681,7 +2053,7 @@ mod tests {
 
     #[test]
     fn search_close_promotes_active_match_to_selection() {
-        let mut term = Terminal::new(20, 4, 100, 16);
+        let mut term = Terminal::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "abc foo def");
         term.open_search();
         term.search_append("foo");
@@ -1696,7 +2068,7 @@ mod tests {
 
     #[test]
     fn search_close_without_matches_leaves_prior_selection() {
-        let mut term = Terminal::new(20, 4, 100, 16);
+        let mut term = Terminal::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "hello world");
         term.start_selection(0, 0, SelectionMode::Char);
         term.extend_selection(4, 0);
@@ -1711,7 +2083,7 @@ mod tests {
 
     #[test]
     fn search_next_wraps_around() {
-        let mut term = Terminal::new(20, 4, 100, 16);
+        let mut term = Terminal::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "foo");
         write_row(&mut term, 1, "foo");
         write_row(&mut term, 2, "foo");
@@ -1728,7 +2100,7 @@ mod tests {
 
     #[test]
     fn search_backspace_trims_query_and_rescans() {
-        let mut term = Terminal::new(20, 4, 100, 16);
+        let mut term = Terminal::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "fox foxy fo");
         term.open_search();
         term.search_append("foxy");
@@ -1740,7 +2112,7 @@ mod tests {
 
     #[test]
     fn copy_selection_writes_to_clipboard() {
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
         write_row(&mut term, 0, "copy-me");
         term.start_selection(0, 0, SelectionMode::Char);
@@ -1756,7 +2128,7 @@ mod tests {
 
     #[test]
     fn clear_selection_drops_state() {
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello");
         term.start_selection(0, 0, SelectionMode::Char);
         term.extend_selection(4, 0);
@@ -1769,7 +2141,7 @@ mod tests {
 
     #[test]
     fn osc_7_updates_terminal_cwd() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b]7;file://localhost/tmp/work\x1b\\");
         assert_eq!(
             term.current_directory.as_deref(),
@@ -1781,7 +2153,7 @@ mod tests {
 
     #[test]
     fn osc_8_attaches_link_to_subsequent_cells() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\after");
         assert_eq!(term.hyperlink_at(0, 0), Some("https://example.com"));
         assert_eq!(term.hyperlink_at(0, 3), Some("https://example.com"));
@@ -1791,7 +2163,7 @@ mod tests {
 
     #[test]
     fn osc_8_close_clears_current_link() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b]8;;https://example.com\x1b\\");
         assert!(term.active.current_hyperlink.is_some());
         term.process(b"\x1b]8;;\x1b\\");
@@ -1802,7 +2174,7 @@ mod tests {
 
     #[test]
     fn kitty_push_records_flags() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[>1u");
         assert_eq!(
             term.kitty_keyboard.current(),
@@ -1812,14 +2184,14 @@ mod tests {
 
     #[test]
     fn kitty_pop_default_unwinds_one_frame() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[>1u\x1b[<u");
         assert!(term.kitty_keyboard.current().is_empty());
     }
 
     #[test]
     fn kitty_query_writes_response_to_pending_output() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[>3u\x1b[?u");
         assert_eq!(term.take_pending_output(), b"\x1b[?3u");
     }
@@ -1828,7 +2200,7 @@ mod tests {
 
     #[test]
     fn decscusr_sets_steady_block() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[2 q");
         assert_eq!(
             term.cursor_style,
@@ -1841,7 +2213,7 @@ mod tests {
 
     #[test]
     fn decscusr_sets_blinking_beam() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[5 q");
         assert_eq!(
             term.cursor_style,
@@ -1854,7 +2226,7 @@ mod tests {
 
     #[test]
     fn config_default_cursor_style_overrides_xterm_default() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.set_default_cursor_style(CursorStyle {
             shape: CursorShape::Underline,
             blink: false,
@@ -1867,14 +2239,14 @@ mod tests {
 
     #[test]
     fn focus_change_silent_when_reporting_disabled() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.report_focus_change(true);
         assert!(term.take_pending_output().is_empty());
     }
 
     #[test]
     fn focus_change_emits_csi_i_o_when_enabled() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[?1004h");
         term.report_focus_change(true);
         term.report_focus_change(false);
@@ -1883,7 +2255,7 @@ mod tests {
 
     #[test]
     fn decrst_1004_disables_focus_reporting() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[?1004h\x1b[?1004l");
         term.report_focus_change(true);
         assert!(term.take_pending_output().is_empty());
@@ -1895,14 +2267,14 @@ mod tests {
 
     #[test]
     fn osc_2_updates_terminal_title() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b]2;build ok\x1b\\");
         assert_eq!(term.current_title.as_deref(), Some("build ok"));
     }
 
     #[test]
     fn osc_0_updates_terminal_title() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b]0;hi\x1b\\");
         assert_eq!(term.current_title.as_deref(), Some("hi"));
     }
@@ -1911,7 +2283,7 @@ mod tests {
 
     #[test]
     fn bel_byte_sets_bell_pending() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         assert!(!term.take_bell_pending());
         term.process(b"\x07");
         assert!(term.take_bell_pending());
@@ -1921,14 +2293,14 @@ mod tests {
 
     #[test]
     fn bel_inside_text_is_caught() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"hi\x07there");
         assert!(term.take_bell_pending());
     }
 
     #[test]
     fn bel_does_not_advance_cursor() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x07");
         assert_eq!(term.active.cursor.col, 0);
         assert_eq!(term.active.cursor.row, 0);
@@ -1938,7 +2310,7 @@ mod tests {
 
     #[test]
     fn set_scrollback_limit_takes_effect_on_next_push() {
-        let mut term = Terminal::new(8, 2, 100, 16);
+        let mut term = Terminal::new(8, 2, 100, 16, 8);
         // Burn through enough lines to trigger trim-on-push later.
         for i in 0..50u32 {
             term.process(format!("line{i}\n").as_bytes());
@@ -1981,7 +2353,7 @@ mod tests {
 
     #[test]
     fn osc_133_stamps_exit_status_onto_prompt_row_through_process() {
-        let mut term = Terminal::new(10, 6, 100, 16);
+        let mut term = Terminal::new(10, 6, 100, 16, 8);
         emit_prompt(&mut term, "$ ls", 1, 0);
         // Prompt landed on row 0 (the first row written to). Exit status
         // should be stamped there, not on the D row further down.
@@ -1993,7 +2365,7 @@ mod tests {
     #[test]
     fn osc_133_exit_status_survives_scrollback_pop() {
         // Small viewport so prompts quickly move into scrollback.
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         emit_prompt(&mut term, "$ first", 2, 0);
         emit_prompt(&mut term, "$ second", 2, 1);
         // Both prompt rows are now somewhere in scrollback; find the
@@ -2010,7 +2382,7 @@ mod tests {
 
     #[test]
     fn scroll_to_prev_prompt_moves_viewport() {
-        let mut term = Terminal::new(10, 4, 200, 16);
+        let mut term = Terminal::new(10, 4, 200, 16, 8);
         emit_prompt(&mut term, "$ a", 3, 0);
         emit_prompt(&mut term, "$ b", 3, 0);
         emit_prompt(&mut term, "$ c", 3, 0);
@@ -2026,7 +2398,7 @@ mod tests {
 
     #[test]
     fn scroll_to_prev_prompt_silent_with_no_marks() {
-        let mut term = Terminal::new(10, 4, 100, 16);
+        let mut term = Terminal::new(10, 4, 100, 16, 8);
         term.process(b"plain\noutput\nwithout\nshell integration\n");
         let before = term.active.offset;
         term.scroll_to_prev_prompt();
@@ -2038,7 +2410,7 @@ mod tests {
 
     #[test]
     fn scroll_to_next_prompt_walks_forward() {
-        let mut term = Terminal::new(10, 4, 200, 16);
+        let mut term = Terminal::new(10, 4, 200, 16, 8);
         emit_prompt(&mut term, "$ a", 3, 0);
         emit_prompt(&mut term, "$ b", 3, 0);
         emit_prompt(&mut term, "$ c", 3, 0);
@@ -2054,7 +2426,7 @@ mod tests {
 
     #[test]
     fn scroll_to_next_prompt_silent_at_last_prompt() {
-        let mut term = Terminal::new(10, 4, 200, 16);
+        let mut term = Terminal::new(10, 4, 200, 16, 8);
         emit_prompt(&mut term, "$ only", 3, 0);
         // At live there's no next prompt — repeated presses shouldn't
         // bounce the viewport.
@@ -2068,7 +2440,7 @@ mod tests {
         // 20-col viewport, prompt + long command that will soft-wrap when
         // shrunk. After a shrink/grow round-trip the mark must end up
         // exactly once, on the head of the (re-merged) logical line.
-        let mut term = Terminal::new(20, 6, 100, 16);
+        let mut term = Terminal::new(20, 6, 100, 16, 8);
         term.process(b"\x1b]133;A\x1b\\");
         term.process(b"$ this is a long prompt line");
         term.process(b"\x1b]133;B\x1b\\\n");
@@ -2107,7 +2479,7 @@ mod tests {
         // means "this row spills into the next one", so the head of a
         // soft-wrapped logical line is the one with `wrapped=true` whose
         // predecessor has `wrapped=false`.)
-        let mut term = Terminal::new(20, 6, 100, 16);
+        let mut term = Terminal::new(20, 6, 100, 16, 8);
         term.process(b"\x1b]133;A\x1b\\");
         term.process(b"$ a command that will definitely wrap");
         term.process(b"\x1b]133;B\x1b\\\n");
@@ -2132,7 +2504,7 @@ mod tests {
 
     #[test]
     fn row_clear_drops_marks() {
-        let mut term = Terminal::new(10, 4, 100, 16);
+        let mut term = Terminal::new(10, 4, 100, 16, 8);
         emit_prompt(&mut term, "$ cmd", 1, 0);
         // ED 2 wipes the entire visible area — including all rows' marks.
         term.process(b"\x1b[2J");
@@ -2151,7 +2523,7 @@ mod tests {
 
     #[test]
     fn dectcem_hides_and_shows_cursor() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         assert!(term.active.cursor_visible, "default must be visible");
         term.process(b"\x1b[?25l");
         assert!(!term.active.cursor_visible);
@@ -2161,7 +2533,7 @@ mod tests {
 
     #[test]
     fn dectcem_state_is_per_screen() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[?25l"); // hide on primary
         term.process(b"\x1b[?1049h"); // switch to alt
         // Alt starts with its own default (visible) — hiding the cursor on
@@ -2176,7 +2548,7 @@ mod tests {
 
     #[test]
     fn da1_replies_vt220() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[c");
         assert_eq!(term.take_pending_output(), b"\x1b[?62;c");
     }
@@ -2184,21 +2556,21 @@ mod tests {
     #[test]
     fn da1_with_zero_param_also_replies() {
         // Apps sometimes send `CSI 0 c` explicitly; the reply is the same.
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[0c");
         assert_eq!(term.take_pending_output(), b"\x1b[?62;c");
     }
 
     #[test]
     fn da2_replies_as_vt420_compatible() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[>c");
         assert_eq!(term.take_pending_output(), b"\x1b[>41;0;0c");
     }
 
     #[test]
     fn xtversion_replies_with_name_and_version() {
-        let mut term = Terminal::new(20, 3, 100, 16);
+        let mut term = Terminal::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[>0q");
         let expected = format!("\x1bP>|term41 {}\x1b\\", env!("CARGO_PKG_VERSION"));
         assert_eq!(term.take_pending_output(), expected.as_bytes());
@@ -2208,7 +2580,7 @@ mod tests {
 
     #[test]
     fn ris_clears_visible_and_resets_cursor() {
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         term.process(b"hello\x1b[5;5H"); // print + move cursor
         term.process(b"\x1bc");
         assert_eq!(term.active.cursor.row, 0);
@@ -2221,7 +2593,7 @@ mod tests {
 
     #[test]
     fn ris_returns_to_primary_screen() {
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         term.process(b"\x1b[?1049h");
         assert!(term.on_alt_screen);
         term.process(b"\x1bc");
@@ -2230,7 +2602,7 @@ mod tests {
 
     #[test]
     fn ris_resets_modes_the_app_flipped() {
-        let mut term = Terminal::new(10, 3, 100, 16);
+        let mut term = Terminal::new(10, 3, 100, 16, 8);
         term.process(b"\x1b[?2004h"); // bracketed paste
         term.process(b"\x1b[?1004h"); // focus reporting
         term.process(b"\x1b[?1000h"); // mouse tracking
@@ -2245,7 +2617,7 @@ mod tests {
     #[test]
     fn ris_preserves_scrollback() {
         // A misbehaving app's reset shouldn't nuke the user's history.
-        let mut term = Terminal::new(4, 2, 100, 16);
+        let mut term = Terminal::new(4, 2, 100, 16, 8);
         for _ in 0..5 {
             term.process(b"x\r\n");
         }

@@ -1,22 +1,29 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
-use crate::sixel::SixelImage;
+use crate::sixel::DecodedImage;
 use crate::terminal::row::Row;
 
 #[derive(Debug, Clone)]
 pub struct PlacedImage {
-    pub image: SixelImage,
+    pub image: DecodedImage,
     pub id: u64,
     /// Absolute row index in `grid.rows` where the image top-left is placed.
     pub row: usize,
     /// Column position of the image top-left.
     pub col: u32,
+    /// Final rendered pixel width. For sixel this matches `image.width`; for
+    /// kitty this can differ when the app requested `c=` columns of display
+    /// and the renderer scales the quad to fit.
+    pub display_width: u32,
+    /// Final rendered pixel height. For sixel this matches `image.height`;
+    /// for kitty this can differ when the app requested `r=` rows of display.
+    pub display_height: u32,
 }
 
 /// A reference to an image visible in the current viewport.
 pub struct VisibleImage<'a> {
-    pub image: &'a SixelImage,
+    pub image: &'a DecodedImage,
     pub id: u64,
     /// Row of the image's top edge relative to the top of the viewport.
     /// Negative when the image's top is scrolled above the viewport; the
@@ -25,6 +32,10 @@ pub struct VisibleImage<'a> {
     pub screen_row: i32,
     /// Column position.
     pub screen_col: u32,
+    /// Final rendered pixel width (see [`PlacedImage::display_width`]).
+    pub display_width: u32,
+    /// Final rendered pixel height (see [`PlacedImage::display_height`]).
+    pub display_height: u32,
 }
 
 /// Remove any existing image that would overlap a new image placed at

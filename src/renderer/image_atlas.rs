@@ -15,7 +15,7 @@ use evictor::Lru;
 
 use crate::renderer::shelf::Allocation;
 use crate::renderer::shelf::ShelfPacker;
-use crate::sixel::SixelImage;
+use crate::sixel::DecodedImage;
 
 pub const IMAGE_ATLAS_SIZE: u32 = 2048;
 pub const IMAGE_ATLAS_LAYERS: u32 = 64;
@@ -133,7 +133,7 @@ impl ImageAtlas {
         &mut self,
         queue: &wgpu::Queue,
         id: u64,
-        image: &SixelImage,
+        image: &DecodedImage,
     ) -> Option<&ImageEntry> {
         if self.cache.contains_key(&id) {
             return self.cache.get(&id);
@@ -240,7 +240,7 @@ fn upload_tile(
     queue: &wgpu::Queue,
     texture: &wgpu::Texture,
     tile: &ImageTile,
-    image: &SixelImage,
+    image: &DecodedImage,
 ) {
     // Point write_texture at the sub-rectangle by offsetting into the source
     // buffer; `bytes_per_row` stays at the full image stride so wgpu walks

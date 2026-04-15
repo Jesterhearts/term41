@@ -33,6 +33,8 @@ pub(super) struct CsiContext<'a> {
     pub kitty_keyboard: &'a mut KittyKeyboardState,
     pub pending_output: &'a mut Vec<u8>,
     pub cursor_style: &'a mut CursorStyle,
+    pub cell_width: u32,
+    pub cell_height: u32,
 }
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that ESC handlers
@@ -101,7 +103,6 @@ pub(super) fn put_ascii_run(
         return;
     }
 
-    screen.offset = 0;
     let fg = screen.fg;
     let bg = screen.bg;
     let attrs = screen.attrs;
@@ -165,9 +166,7 @@ pub(super) fn put_char(
     // continuations contribute 0 bytes) and renders the ligature if the
     // font has one.
     if raw_width == 0 {
-        if try_extend_prev_cell(screen, viewport, &s) {
-            screen.offset = 0;
-        }
+        try_extend_prev_cell(screen, viewport, &s);
         return;
     }
 
@@ -179,9 +178,6 @@ pub(super) fn put_char(
     if screen.cursor.col + width as u32 > viewport.cols {
         soft_wrap(screen, viewport);
     }
-
-    // New output resets the viewport to the live edge.
-    screen.offset = 0;
 
     let fg = screen.fg;
     let bg = screen.bg;
@@ -287,20 +283,20 @@ fn try_extend_prev_cell(
     screen: &mut Screen,
     viewport: &Viewport,
     s: &str,
-) -> bool {
+) {
     let (prev_row, mut prev_col) = if screen.cursor.col > 0 && screen.cursor.col <= viewport.cols {
         let row = screen.grid.active_row_index(&screen.cursor, viewport);
         (row, (screen.cursor.col - 1) as usize)
     } else if screen.cursor.col == 0 {
         let row = screen.grid.active_row_index(&screen.cursor, viewport);
         if row == 0 || !screen.grid.rows[row].wrapped {
-            return false;
+            return;
         }
         let prev_row = row - 1;
         let last_col = screen.grid.rows[prev_row].cells.len().saturating_sub(1);
         (prev_row, last_col)
     } else {
-        return false;
+        return;
     };
 
     // Skip wide-glyph continuation cells to reach the anchor.
@@ -310,7 +306,7 @@ fn try_extend_prev_cell(
 
     let prev = &screen.grid.rows[prev_row].cells[prev_col];
     if prev.as_str() == " " || prev.is_empty() {
-        return false;
+        return;
     }
 
     // Fold without widening the cell. VS16 etc. can bump `unicode-width` on
@@ -324,11 +320,10 @@ fn try_extend_prev_cell(
     combined.push_str(prev);
     combined.push_str(s);
     if combined.graphemes(true).count() != 1 {
-        return false;
+        return;
     }
 
     screen.grid.rows[prev_row].cells[prev_col] = SmolStr::new(&combined);
-    true
 }
 
 pub(super) fn execute(
@@ -466,6 +461,70 @@ pub(super) fn csi_dispatch(
         return;
     }
 
+    // DSR — Device Status Report. `CSI 5 n` checks that the terminal is alive;
+    // `CSI 6 n` asks for the cursor position. Image viewers (viu, chafa) send
+    // `CSI 6 n` after rendering and block on stdin waiting for the reply.
+    if action == 'n' {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        match ps {
+            5 => {
+                ctx.pending_output.extend_from_slice(b"\x1b[0n");
+            }
+            6 => {
+                // Report is 1-based.
+                let row = ctx.screen.cursor.row + 1;
+                let col = ctx.screen.cursor.col + 1;
+                write!(ctx.pending_output, "\x1b[{row};{col}R")
+                    .expect("write to Vec is infallible");
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    // CSI Ps t — window manipulation + size queries (xterm). Image viewers
+    // like viu and chafa send the pixel-size reports (14/16) before
+    // transmitting and block on stdin until they arrive.
+    if action == 't' {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        match ps {
+            14 => {
+                // Report window size in pixels: CSI 4 ; height ; width t.
+                let h = ctx.viewport.rows * ctx.cell_height;
+                let w = ctx.viewport.cols * ctx.cell_width;
+                write!(ctx.pending_output, "\x1b[4;{h};{w}t").expect("write to Vec is infallible");
+            }
+            16 => {
+                // Report cell size in pixels: CSI 6 ; height ; width t.
+                write!(
+                    ctx.pending_output,
+                    "\x1b[6;{};{}t",
+                    ctx.cell_height, ctx.cell_width
+                )
+                .expect("write to Vec is infallible");
+            }
+            18 => {
+                // Report terminal size in cells: CSI 8 ; rows ; cols t.
+                write!(
+                    ctx.pending_output,
+                    "\x1b[8;{};{}t",
+                    ctx.viewport.rows, ctx.viewport.cols
+                )
+                .expect("write to Vec is infallible");
+            }
+            _ => {}
+        }
+        return;
+    }
+
     let screen = &mut *ctx.screen;
     let viewport = ctx.viewport;
     let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
@@ -585,7 +644,6 @@ pub(super) fn csi_dispatch(
             screen.cursor.row = 0;
             screen.cursor.col = 0;
         }
-        'n' => {}
         _ => {}
     }
 }
@@ -721,6 +779,8 @@ mod tests {
                         kitty_keyboard: &mut kitty_keyboard,
                         pending_output: &mut pending_output,
                         cursor_style: &mut cursor_style,
+                        cell_width: 8,
+                        cell_height: 16,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -794,14 +854,6 @@ mod tests {
             screen.grid.rows[screen.grid.active_row_index(&screen.cursor, &viewport) - 1].wrapped
         );
         assert_eq!(&row_text(&screen, &viewport, 1)[..1], "k");
-    }
-
-    #[test]
-    fn put_char_resets_scrollback_offset() {
-        let (mut screen, viewport) = setup();
-        screen.offset = 5;
-        put_char(&mut screen, &viewport, SmolStr::new_inline("x"));
-        assert_eq!(screen.offset, 0);
     }
 
     #[test]

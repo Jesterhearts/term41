@@ -800,12 +800,27 @@ impl Renderer {
             let base_x = vis.screen_col as f32 * cell_w + gutter_px;
             let base_y = vis.screen_row as f32 * cell_h;
 
+            // Scale factor from source-image pixels to display pixels. For
+            // sixel these are equal; kitty's `c=`/`r=` keys can request a
+            // smaller (or larger) display than the source, and we honor that
+            // by scaling the quad rather than resampling the pixels.
+            let scale_x = if vis.image.width > 0 {
+                vis.display_width as f32 / vis.image.width as f32
+            } else {
+                1.0
+            };
+            let scale_y = if vis.image.height > 0 {
+                vis.display_height as f32 / vis.image.height as f32
+            } else {
+                1.0
+            };
+
             for tile in &entry.tiles {
                 let a = &tile.alloc;
-                let x = base_x + tile.src_x as f32;
-                let y = base_y + tile.src_y as f32;
-                let w = a.width as f32;
-                let h = a.height as f32;
+                let x = base_x + tile.src_x as f32 * scale_x;
+                let y = base_y + tile.src_y as f32 * scale_y;
+                let w = a.width as f32 * scale_x;
+                let h = a.height as f32 * scale_y;
 
                 let u0 = a.x as f32 / IMAGE_ATLAS_SIZE as f32;
                 let v0 = a.y as f32 / IMAGE_ATLAS_SIZE as f32;
