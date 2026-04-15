@@ -27,6 +27,10 @@ pub enum Action {
     Copy,
     /// Paste the system clipboard at the cursor.
     Paste,
+    /// Open the search-in-scrollback bar. Subsequent keystrokes type into
+    /// the search query until Escape closes it; Enter / Shift+Enter step
+    /// through the match list.
+    OpenSearch,
 }
 
 /// One key, identified either by its winit `NamedKey` (Enter, F1, …) or by
@@ -75,6 +79,11 @@ impl Keybindings {
                     key: KeySpec::Char('v'),
                     mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
                     action: Action::Paste,
+                },
+                Keybinding {
+                    key: KeySpec::Char('f'),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::OpenSearch,
                 },
             ],
         }

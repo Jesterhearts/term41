@@ -7,6 +7,7 @@ mod font;
 mod keybindings;
 mod pty;
 mod renderer;
+mod search;
 mod selection;
 mod sixel;
 mod terminal;
@@ -298,6 +299,47 @@ impl App {
                 self.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
                 self.flush_pending();
             }
+            Action::OpenSearch => {
+                self.terminal.open_search();
+            }
+        }
+    }
+
+    /// Route a keystroke into the search bar. Escape closes, Backspace
+    /// trims the query, Enter / Shift+Enter navigate matches, and printable
+    /// characters are appended to the query. Every other key is swallowed
+    /// so the host doesn't accidentally write the key to the PTY behind
+    /// the bar's back.
+    fn handle_search_input(
+        &mut self,
+        event: &winit::event::KeyEvent,
+    ) {
+        match &event.logical_key {
+            Key::Named(NamedKey::Escape) => {
+                self.terminal.close_search();
+            }
+            Key::Named(NamedKey::Backspace) => {
+                self.terminal.search_backspace();
+            }
+            Key::Named(NamedKey::Enter) => {
+                if self.modifiers.shift_key() {
+                    self.terminal.search_prev();
+                } else {
+                    self.terminal.search_next();
+                }
+            }
+            Key::Named(NamedKey::Space) => {
+                // Space arrives as a named key on most winit backends, not
+                // as `Key::Character(" ")`, so multi-word queries need this
+                // explicit arm or the space is silently swallowed.
+                self.terminal.search_append(" ");
+            }
+            Key::Character(s) => {
+                // Feed the text verbatim — winit has already applied
+                // Shift/AltGr to produce the character the user sees.
+                self.terminal.search_append(s);
+            }
+            _ => {}
         }
     }
 
@@ -601,6 +643,16 @@ impl ApplicationHandler<AppEvent> for App {
 
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
+                    return;
+                }
+
+                // Search-bar routing runs ahead of keybindings and PTY
+                // encoding so every keystroke while the bar is open lands
+                // in the query buffer — including plain letters that would
+                // otherwise produce PTY input. Escape closes; Enter /
+                // Shift+Enter step through matches.
+                if self.terminal.search_active() {
+                    self.handle_search_input(&event);
                     return;
                 }
 

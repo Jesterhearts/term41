@@ -55,6 +55,28 @@ fn pack_color(
     u32::from_be_bytes([c.red, c.green, c.blue, alpha])
 }
 
+/// Linearly interpolate between two sRGB byte colours in component space.
+/// `t = 0` returns `a`, `t = 1` returns `b`. Kept byte-space on purpose —
+/// the renderer already treats the existing cell fg/bg as sRGB8 throughout,
+/// so a gamma-correct blend would be inconsistent with the rest of the
+/// pipeline and is overkill for the search-bar highlight use case.
+fn blend(
+    a: Srgb<u8>,
+    b: Srgb<u8>,
+    t: f32,
+) -> Srgb<u8> {
+    let lerp = |x: u8, y: u8| -> u8 {
+        (x as f32 + (y as f32 - x as f32) * t)
+            .clamp(0.0, 255.0)
+            .round() as u8
+    };
+    Srgb::new(
+        lerp(a.red, b.red),
+        lerp(a.green, b.green),
+        lerp(a.blue, b.blue),
+    )
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -429,26 +451,43 @@ impl Renderer {
         // need the position for the overlay quad).
         let cursor_state = self.cursor_state(terminal);
 
+        // While the search bar is open, skip the bottom row entirely — the
+        // bar paints its own opaque bg there and we don't want the terminal
+        // row's bg quad or glyphs leaking through between the label's
+        // letterforms.
+        let skip_bottom_row = terminal.search_active();
+
         for row in 0..terminal.viewport.rows {
+            if skip_bottom_row && row == terminal.viewport.rows - 1 {
+                continue;
+            }
             let y = row as f32 * cell_h;
 
             // Background quads for the whole row.
             let grid_row = terminal.visible_row(row);
             for col in 0..terminal.viewport.cols {
                 let x = col as f32 * cell_w;
-                // A cell is rendered with inverted fg/bg when it is selected
-                // OR when it sits under a visible block cursor — both cases
-                // want the cell's text to read as its own bg-on-fg, so we
-                // collapse them into one bool.
+                // A cell is rendered with altered fg/bg when it is selected,
+                // matches the search query, or sits under a visible block
+                // cursor. Selection / non-active match / block cursor fully
+                // invert — the glyph reads as its own bg-on-fg. The focused
+                // search match is softer: bg is halfway between the cell's
+                // fg and bg so the user can spot which hit is active at a
+                // glance without the strong pop of a full inversion.
                 let selected = terminal.is_cell_selected(row, col);
+                let matched = terminal.is_cell_match(row, col);
+                let active_match = terminal.is_cell_active_match(row, col);
                 let block_cursor_here = cursor_state.is_block_at(row, col);
-                let inverted = selected || block_cursor_here;
-                let bg_cell = if inverted {
-                    &grid_row.fg[col as usize]
+                let cell_fg = grid_row.fg[col as usize];
+                let cell_bg = grid_row.bg[col as usize];
+                let bg_effective = if active_match {
+                    blend(cell_fg, cell_bg, 0.5)
+                } else if selected || matched || block_cursor_here {
+                    cell_fg
                 } else {
-                    &grid_row.bg[col as usize]
+                    cell_bg
                 };
-                let bg_color = pack_color(bg_cell, self.bg_alpha);
+                let bg_color = pack_color(&bg_effective, self.bg_alpha);
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
                     BgVertex {
@@ -584,14 +623,24 @@ impl Renderer {
                 let shear = if synth_italic { 0.2126_f32 } else { 0.0 };
                 let shear_at = |vy: f32| -> f32 { shear * (baseline_y - vy) };
 
-                let inverted = terminal.is_cell_selected(row, sg.col as u32)
-                    || cursor_state.is_block_at(row, sg.col as u32);
-                let fg_cell = if inverted {
-                    &grid_row.bg[sg.col as usize]
+                // Match the bg-pass logic: selection / non-active match /
+                // block cursor fully invert the text, the active match
+                // keeps the normal fg so it reads naturally against the
+                // softened bg.
+                let selected = terminal.is_cell_selected(row, sg.col as u32);
+                let matched = terminal.is_cell_match(row, sg.col as u32);
+                let active_match = terminal.is_cell_active_match(row, sg.col as u32);
+                let block_cursor_here = cursor_state.is_block_at(row, sg.col as u32);
+                let cell_fg = grid_row.fg[sg.col as usize];
+                let cell_bg = grid_row.bg[sg.col as usize];
+                let fg_effective = if active_match {
+                    cell_fg
+                } else if selected || matched || block_cursor_here {
+                    cell_bg
                 } else {
-                    &grid_row.fg[sg.col as usize]
+                    cell_fg
                 };
-                let fg_color = pack_color(fg_cell, 255);
+                let fg_color = pack_color(&fg_effective, 255);
                 let flags: u32 = if slot.is_color { 1 } else { 0 };
                 let fi = fg_vertices.len() as u32;
                 fg_vertices.extend_from_slice(&[
@@ -661,6 +710,19 @@ impl Renderer {
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
             }
         }
+
+        // ---- Search bar overlay ----
+        // Drawn last in the glyph pass so it paints over the bottom row of
+        // whatever the terminal was showing. Only fires while the search
+        // bar is open; when closed, this path is a cheap early return.
+        self.render_search_bar(
+            font_system,
+            terminal,
+            &mut bg_vertices,
+            &mut bg_indices,
+            &mut fg_vertices,
+            &mut fg_indices,
+        );
 
         // ---- Build image quads ----
         let mut image_vertices: Vec<ImageVertex> = Vec::new();
@@ -866,6 +928,182 @@ impl Renderer {
     /// each one rather than a single blended pulse).
     pub fn notify_bell(&mut self) {
         self.bell_started = Some(Instant::now());
+    }
+
+    /// Paint the bottom-of-viewport search bar. The bar is a dark quad
+    /// stretching across the viewport's last row, with a prompt + typed
+    /// query + match counter shaped through the normal glyph atlas. A
+    /// small caret marks the query's end so the user can see where their
+    /// next keystroke will land.
+    fn render_search_bar(
+        &mut self,
+        font_system: &mut FontSystem,
+        terminal: &Terminal,
+        bg_vertices: &mut Vec<BgVertex>,
+        bg_indices: &mut Vec<u32>,
+        fg_vertices: &mut Vec<FgVertex>,
+        fg_indices: &mut Vec<u32>,
+    ) {
+        let Some(search) = terminal.search_state() else {
+            return;
+        };
+
+        let cell_w = font_system.cell_width as f32;
+        let cell_h = font_system.cell_height as f32;
+        let baseline = font_system.baseline_offset();
+        let cols = terminal.viewport.cols;
+        let rows = terminal.viewport.rows;
+        if rows == 0 || cols == 0 {
+            return;
+        }
+
+        // Build the visible label. The counter only appears once there are
+        // matches to count — an empty query draws just the prompt so the
+        // user sees something immediately on `Ctrl+Shift+F`.
+        let counter = if search.matches.is_empty() {
+            if search.query.is_empty() {
+                String::new()
+            } else {
+                "  (no match)".to_string()
+            }
+        } else {
+            format!("  ({}/{})", search.active_idx + 1, search.matches.len())
+        };
+        let label = format!("Find: {}{}", search.query, counter);
+
+        // Truncate to fit the viewport width. We measure by char count —
+        // one cell per char is the same approximation we use throughout
+        // the ASCII-dominant pieces of this code.
+        let max_chars = cols as usize;
+        let label_chars: Vec<char> = label.chars().take(max_chars).collect();
+
+        // Caret sits at the end of the typed query, in column terms. The
+        // prompt is exactly "Find: " (6 chars); the caret lives right
+        // after the query text, clamped to the truncated label width.
+        let prompt_len = "Find: ".chars().count() as u32;
+        let caret_col = (prompt_len + search.query.chars().count() as u32).min(cols - 1);
+
+        // Bar background: a dark opaque strip across the last row.
+        let bar_y = (rows - 1) as f32 * cell_h;
+        let bar_w = cols as f32 * cell_w;
+        let bar_bg = pack_color(&palette::Srgb::new(24, 24, 32), 255);
+        let bi = bg_vertices.len() as u32;
+        bg_vertices.extend_from_slice(&[
+            BgVertex {
+                pos: [0.0, bar_y],
+                color: bar_bg,
+            },
+            BgVertex {
+                pos: [bar_w, bar_y],
+                color: bar_bg,
+            },
+            BgVertex {
+                pos: [0.0, bar_y + cell_h],
+                color: bar_bg,
+            },
+            BgVertex {
+                pos: [bar_w, bar_y + cell_h],
+                color: bar_bg,
+            },
+        ]);
+        bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+
+        // Caret: a thin bright bar at the query insertion point so the
+        // user can see where their next keystroke will go.
+        let caret_x = caret_col as f32 * cell_w;
+        let caret_w = (cell_w * 0.1).max(1.0);
+        let caret_color = pack_color(&palette::Srgb::new(220, 220, 220), 255);
+        let bi = bg_vertices.len() as u32;
+        bg_vertices.extend_from_slice(&[
+            BgVertex {
+                pos: [caret_x, bar_y + cell_h * 0.1],
+                color: caret_color,
+            },
+            BgVertex {
+                pos: [caret_x + caret_w, bar_y + cell_h * 0.1],
+                color: caret_color,
+            },
+            BgVertex {
+                pos: [caret_x, bar_y + cell_h * 0.9],
+                color: caret_color,
+            },
+            BgVertex {
+                pos: [caret_x + caret_w, bar_y + cell_h * 0.9],
+                color: caret_color,
+            },
+        ]);
+        bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+
+        // Label glyphs. Shape through the normal text pipeline so the bar
+        // respects whatever font variants are loaded and goes through the
+        // atlas LRU like any other glyph.
+        let cells: Vec<smol_str::SmolStr> = label_chars
+            .iter()
+            .map(|c| {
+                let mut buf = [0u8; 4];
+                smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
+            })
+            .collect();
+        let attrs = vec![crate::terminal::CellAttrs::default(); cells.len()];
+        let shaped = font_system.shape_row(&cells, &attrs);
+
+        let label_fg = pack_color(&palette::Srgb::new(220, 220, 220), 255);
+        for sg in &shaped {
+            let slot = match self.glyph_atlas.ensure_cached(
+                &self.queue,
+                font_system,
+                sg.font_index,
+                sg.glyph_id,
+                sg.cells_wide,
+                false,
+            ) {
+                Some(e) => e,
+                None => continue,
+            };
+            if slot.is_empty() {
+                continue;
+            }
+
+            let sx = slot.x();
+            let sy = slot.y();
+            let sw = slot.width();
+            let sh = slot.height();
+
+            let gx = sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+            let gy = bar_y + baseline - slot.bearing_y as f32 - sg.y_offset;
+            let gw = sw as f32;
+            let gh = sh as f32;
+            let flags: u32 = if slot.is_color { 1 } else { 0 };
+
+            let fi = fg_vertices.len() as u32;
+            fg_vertices.extend_from_slice(&[
+                FgVertex {
+                    pos: [gx, gy],
+                    uv: [sx as f32, sy as f32],
+                    color: label_fg,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw, gy],
+                    uv: [(sx + sw) as f32, sy as f32],
+                    color: label_fg,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx, gy + gh],
+                    uv: [sx as f32, (sy + sh) as f32],
+                    color: label_fg,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw, gy + gh],
+                    uv: [(sx + sw) as f32, (sy + sh) as f32],
+                    color: label_fg,
+                    flags,
+                },
+            ]);
+            fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+        }
     }
 
     /// Resolve "is the cursor visible right now and what does it look like"

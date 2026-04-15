@@ -33,6 +33,8 @@ pub use self::row::Row;
 pub use self::screen::Screen;
 use crate::clipboard::Clipboard;
 use crate::clipboard::ClipboardKind;
+use crate::search::MatchSpan;
+use crate::search::SearchState;
 use crate::selection::Selection;
 use crate::selection::SelectionMode;
 use crate::selection::SelectionPoint;
@@ -100,6 +102,12 @@ pub struct Terminal {
     /// Active text selection, if any. Positions use absolute row indices so
     /// the selection stays locked to content across scrollback trimming.
     pub selection: Option<Selection>,
+
+    /// Search-in-scrollback state: open/closed, query text, match cache.
+    /// When `active`, the host reroutes keyboard events into this struct
+    /// instead of writing them to the PTY. Lives on the terminal so both
+    /// the match renderer and the scroll-to-match navigator can touch it.
+    pub search: SearchState,
 
     /// Last directory reported by the foreground shell via OSC 7. None when
     /// no shell has reported, or after a remote-session shell sent an empty
@@ -184,6 +192,7 @@ impl Terminal {
             mouse_encoding: MouseEncoding::Default,
             bracketed_paste: false,
             selection: None,
+            search: SearchState::new(),
             current_directory: None,
             hyperlinks: HyperlinkRegistry::new(),
             kitty_keyboard: KittyKeyboardState::new(),
@@ -474,6 +483,231 @@ impl Terminal {
             row: abs_row,
             col: screen_col,
         })
+    }
+
+    /// Open the search bar. Clears any leftover query and matches so a
+    /// re-open starts from a clean slate.
+    pub fn open_search(&mut self) {
+        self.search.active = true;
+        self.search.query.clear();
+        self.search.matches.clear();
+        self.search.active_idx = 0;
+    }
+
+    /// Close the search bar and drop its state. If a match was focused at
+    /// close time, promote it to the active selection — users expect the
+    /// hit they just navigated to to stay visibly marked (and be ready
+    /// for `Ctrl+Shift+C`) once they leave the bar. When no match was
+    /// focused the existing selection, if any, stays put.
+    pub fn close_search(&mut self) {
+        if let Some(&active) = self.search.matches.get(self.search.active_idx) {
+            let anchor = SelectionPoint {
+                row: active.row,
+                col: active.start_col,
+            };
+            let head = SelectionPoint {
+                row: active.row,
+                col: active.end_col,
+            };
+            self.selection = Some(Selection {
+                anchor,
+                head,
+                mode: SelectionMode::Char,
+                origin: anchor,
+            });
+        }
+        self.search.active = false;
+        self.search.query.clear();
+        self.search.matches.clear();
+        self.search.active_idx = 0;
+    }
+
+    pub fn search_active(&self) -> bool {
+        self.search.active
+    }
+
+    /// Read-only view of search state, for the overlay renderer. `None`
+    /// when the bar isn't open — nothing for the host to draw.
+    pub fn search_state(&self) -> Option<&SearchState> {
+        if self.search.active {
+            Some(&self.search)
+        } else {
+            None
+        }
+    }
+
+    /// Append `s` to the current query and rescan. Intended for text input
+    /// events while the bar is open — multi-byte paste is fine, control
+    /// bytes and newlines aren't filtered here but the host only calls this
+    /// with printable input.
+    pub fn search_append(
+        &mut self,
+        s: &str,
+    ) {
+        if !self.search.active {
+            return;
+        }
+        self.search.query.push_str(s);
+        self.refresh_search();
+    }
+
+    /// Drop the last character of the query. No-op on empty query so the
+    /// host doesn't have to guard the keystroke.
+    pub fn search_backspace(&mut self) {
+        if !self.search.active {
+            return;
+        }
+        self.search.query.pop();
+        self.refresh_search();
+    }
+
+    /// Jump to the next match, wrapping from the last back to the first.
+    /// Scrolls the viewport so the new active match is visible.
+    pub fn search_next(&mut self) {
+        if !self.search.active || self.search.matches.is_empty() {
+            return;
+        }
+        self.search.active_idx = (self.search.active_idx + 1) % self.search.matches.len();
+        self.scroll_to_active_match();
+    }
+
+    /// Jump to the previous match, wrapping from the first to the last.
+    pub fn search_prev(&mut self) {
+        if !self.search.active || self.search.matches.is_empty() {
+            return;
+        }
+        let n = self.search.matches.len();
+        self.search.active_idx = (self.search.active_idx + n - 1) % n;
+        self.scroll_to_active_match();
+    }
+
+    /// Render-time query: should the cell at the given viewport position
+    /// be highlighted as a search match?
+    pub fn is_cell_match(
+        &self,
+        screen_row: u32,
+        screen_col: u32,
+    ) -> bool {
+        if !self.search.active || self.search.matches.is_empty() {
+            return false;
+        }
+        let abs_row = self.screen_row_to_absolute(screen_row);
+        self.search
+            .matches
+            .iter()
+            .any(|m| m.contains(abs_row, screen_col))
+    }
+
+    /// Render-time query: is the given viewport cell part of the *active*
+    /// match — the one `search_next`/`search_prev` just landed on? The
+    /// renderer paints these with a softer blend so the user can tell the
+    /// focused hit apart from the other inverted matches at a glance.
+    pub fn is_cell_active_match(
+        &self,
+        screen_row: u32,
+        screen_col: u32,
+    ) -> bool {
+        if !self.search.active {
+            return false;
+        }
+        let Some(active) = self.search.matches.get(self.search.active_idx) else {
+            return false;
+        };
+        let abs_row = self.screen_row_to_absolute(screen_row);
+        active.contains(abs_row, screen_col)
+    }
+
+    /// Rescan the grid for the current query and, after the match list
+    /// rebuilds, focus the first match at or after the current viewport —
+    /// the natural place a user expects their incremental-search cursor to
+    /// land. Called after every query edit.
+    fn refresh_search(&mut self) {
+        self.recompute_matches();
+        if self.search.matches.is_empty() {
+            self.search.active_idx = 0;
+            return;
+        }
+        let viewport_top = self.screen_row_to_absolute(0);
+        self.search.active_idx = self
+            .search
+            .matches
+            .iter()
+            .position(|m| m.row >= viewport_top)
+            .unwrap_or(0);
+        self.scroll_to_active_match();
+    }
+
+    /// Walk every row in the primary grid, concatenate its cells into a
+    /// byte string, and record every `match_indices` hit as a `MatchSpan`.
+    /// Matching is byte-literal so queries stay case-sensitive; wide-glyph
+    /// continuation cells contribute zero bytes and drop out of the mapping
+    /// naturally.
+    fn recompute_matches(&mut self) {
+        self.search.matches.clear();
+        if self.search.query.is_empty() {
+            return;
+        }
+        let q = self.search.query.as_str();
+        let popped = self.active.grid.total_popped as u64;
+        let mut text = String::new();
+        let mut cell_byte_starts: Vec<usize> = Vec::new();
+        for (local, row) in self.active.grid.rows.iter().enumerate() {
+            text.clear();
+            cell_byte_starts.clear();
+            cell_byte_starts.reserve(row.cells.len());
+            for cell in &row.cells {
+                cell_byte_starts.push(text.len());
+                text.push_str(cell);
+            }
+            if text.len() < q.len() {
+                continue;
+            }
+            let abs_row = popped + local as u64;
+            for (byte, _) in text.match_indices(q) {
+                let start_col = cell_byte_starts
+                    .partition_point(|&s| s <= byte)
+                    .saturating_sub(1) as u32;
+                let end_byte = byte + q.len();
+                let end_col = cell_byte_starts
+                    .partition_point(|&s| s < end_byte)
+                    .saturating_sub(1) as u32;
+                self.search.matches.push(MatchSpan {
+                    row: abs_row,
+                    start_col,
+                    end_col,
+                });
+            }
+        }
+    }
+
+    /// Move the viewport so the currently-focused match sits near the
+    /// middle of the screen. No-op when the match has already scrolled off
+    /// the front of scrollback (defensive — happens only if recompute
+    /// missed a trim).
+    fn scroll_to_active_match(&mut self) {
+        let Some(m) = self.search.matches.get(self.search.active_idx).copied() else {
+            return;
+        };
+        let popped = self.active.grid.total_popped as u64;
+        let Some(local) = m.row.checked_sub(popped) else {
+            return;
+        };
+        let local = local as usize;
+        let grid_len = self.active.grid.rows.len();
+        if local >= grid_len {
+            return;
+        }
+        let rows = self.viewport.rows as usize;
+        if grid_len <= rows {
+            self.active.offset = 0;
+            return;
+        }
+        let ideal_top = local.saturating_sub(rows / 2);
+        let max_top = grid_len - rows;
+        let top = ideal_top.min(max_top);
+        let offset = (grid_len - rows - top) as u32;
+        let max_offset = self.active.grid.scrollback_len(&self.viewport);
+        self.active.offset = offset.min(max_offset);
     }
 
     /// Extract selection text. Trailing padding spaces on intermediate /
@@ -1352,6 +1586,98 @@ mod tests {
         assert!(term.is_cell_selected(0, 5));
         assert!(!term.is_cell_selected(0, 6));
         assert!(!term.is_cell_selected(1, 3));
+    }
+
+    #[test]
+    fn search_finds_exact_case_sensitive_matches() {
+        let mut term = Terminal::new(20, 4, 100, 16);
+        write_row(&mut term, 0, "abc foo xyz FOO bar");
+        term.open_search();
+        assert!(term.search_active());
+        term.search_append("foo");
+        // Only the lowercase occurrence matches.
+        assert_eq!(term.search.matches.len(), 1);
+        let m = term.search.matches[0];
+        assert_eq!((m.start_col, m.end_col), (4, 6));
+        assert!(term.is_cell_match(0, 4));
+        assert!(term.is_cell_match(0, 5));
+        assert!(term.is_cell_match(0, 6));
+        assert!(!term.is_cell_match(0, 3));
+        assert!(!term.is_cell_match(0, 7));
+        // The uppercase run must stay un-highlighted.
+        assert!(!term.is_cell_match(0, 12));
+    }
+
+    #[test]
+    fn search_close_clears_state() {
+        let mut term = Terminal::new(20, 4, 100, 16);
+        write_row(&mut term, 0, "hello");
+        term.open_search();
+        term.search_append("hello");
+        assert_eq!(term.search.matches.len(), 1);
+        term.close_search();
+        assert!(!term.search_active());
+        assert!(term.search.matches.is_empty());
+        assert!(term.search.query.is_empty());
+    }
+
+    #[test]
+    fn search_close_promotes_active_match_to_selection() {
+        let mut term = Terminal::new(20, 4, 100, 16);
+        write_row(&mut term, 0, "abc foo def");
+        term.open_search();
+        term.search_append("foo");
+        term.close_search();
+        // Selection now covers the match columns 4..=6.
+        assert!(term.is_cell_selected(0, 4));
+        assert!(term.is_cell_selected(0, 5));
+        assert!(term.is_cell_selected(0, 6));
+        assert!(!term.is_cell_selected(0, 3));
+        assert!(!term.is_cell_selected(0, 7));
+    }
+
+    #[test]
+    fn search_close_without_matches_leaves_prior_selection() {
+        let mut term = Terminal::new(20, 4, 100, 16);
+        write_row(&mut term, 0, "hello world");
+        term.start_selection(0, 0, SelectionMode::Char);
+        term.extend_selection(4, 0);
+        assert!(term.has_selection());
+        term.open_search();
+        term.search_append("zzz"); // no match
+        term.close_search();
+        // Pre-existing selection must still be intact.
+        assert!(term.is_cell_selected(0, 0));
+        assert!(term.is_cell_selected(0, 4));
+    }
+
+    #[test]
+    fn search_next_wraps_around() {
+        let mut term = Terminal::new(20, 4, 100, 16);
+        write_row(&mut term, 0, "foo");
+        write_row(&mut term, 1, "foo");
+        write_row(&mut term, 2, "foo");
+        term.open_search();
+        term.search_append("foo");
+        assert_eq!(term.search.matches.len(), 3);
+        let start_idx = term.search.active_idx;
+        term.search_next();
+        term.search_next();
+        term.search_next();
+        // Three steps from start returns to start.
+        assert_eq!(term.search.active_idx, start_idx);
+    }
+
+    #[test]
+    fn search_backspace_trims_query_and_rescans() {
+        let mut term = Terminal::new(20, 4, 100, 16);
+        write_row(&mut term, 0, "fox foxy fo");
+        term.open_search();
+        term.search_append("foxy");
+        assert_eq!(term.search.matches.len(), 1);
+        term.search_backspace(); // query is now "fox"
+        // "fox" hits both "fox" and the start of "foxy".
+        assert_eq!(term.search.matches.len(), 2);
     }
 
     #[test]
