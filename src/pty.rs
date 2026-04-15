@@ -132,7 +132,7 @@ fn pump_reader(
     mut reader: Box<dyn Read + Send>,
     tx: mpsc::Sender<Vec<u8>>,
 ) {
-    let mut buf = vec![0u8; 64 * 1024];
+    let mut buf = vec![0u8; 128 * 1024];
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,

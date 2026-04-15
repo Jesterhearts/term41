@@ -397,12 +397,16 @@ impl App {
     }
 
     fn read_pty_output(&mut self) {
+        let time_slice = Instant::now() + Duration::from_millis(5);
         let mut buf = [0u8; 128 * 1024];
         while let Ok(n) = self.pty.read(&mut buf) {
             if n == 0 {
                 break;
             }
             self.terminal.process(&buf[..n]);
+            if Instant::now() >= time_slice {
+                break;
+            }
         }
         // Drain any bytes the terminal itself queued for the PTY (OSC 52
         // query responses and similar). Do this after the read loop so we
@@ -464,6 +468,10 @@ impl ApplicationHandler<AppEvent> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        event_loop.set_control_flow(ControlFlow::WaitUntil(
+            Instant::now() + Duration::from_millis(8),
+        ));
+
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
