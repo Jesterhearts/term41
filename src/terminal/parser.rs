@@ -82,9 +82,8 @@ pub(super) fn put_ascii_run(
         // Break a wide anchor severed by the left edge of the chunk. The
         // right-edge case is covered by passing chunk_len to
         // break_wide_glyphs_around_write.
-        break_wide_glyphs_around_write(&mut screen.grid.rows[r], col, chunk_len);
-
         let row = &mut screen.grid.rows[r];
+        break_wide_glyphs_around_write(row, col, chunk_len);
         let chunk = &run[i..i + chunk_len];
         // Hoist the LazyLock deref so the inner loop sees a plain
         // `&[SmolStr; 95]`; the parser guarantees each byte is 0x20..=0x7E
