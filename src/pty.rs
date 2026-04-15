@@ -1,15 +1,20 @@
-use std::collections::VecDeque;
 use std::io;
 use std::io::Read;
 use std::io::Write;
-use std::sync::mpsc;
 use std::thread;
 
-use portable_pty::Child;
+use cueue::cueue;
+use portable_pty::ChildKiller;
 use portable_pty::CommandBuilder;
 use portable_pty::MasterPty;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
+use winit::event_loop::EventLoopProxy;
+
+use crate::AppEvent;
+
+pub const MAX_BUFFER: usize = 128 * 1024 * 1024;
+pub const MAX_READ_CHUNK: usize = 128 * 1024;
 
 /// A pseudo-terminal connected to a child shell process.
 ///
@@ -19,10 +24,9 @@ use portable_pty::native_pty_system;
 /// blocking the UI loop.
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
+    child_killer: Box<dyn ChildKiller>,
     writer: Box<dyn Write + Send>,
-    child: Box<dyn Child + Send + Sync>,
-    rx: mpsc::Receiver<Vec<u8>>,
-    pending: VecDeque<u8>,
+    rx: cueue::Reader<u8>,
 }
 
 impl Pty {
@@ -30,14 +34,17 @@ impl Pty {
     pub fn spawn(
         cols: u16,
         rows: u16,
+        cell_width: u16,
+        cell_height: u16,
+        event_loop: EventLoopProxy<AppEvent>,
     ) -> io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
                 rows,
                 cols,
-                pixel_width: 0,
-                pixel_height: 0,
+                pixel_width: cell_width,
+                pixel_height: cell_height,
             })
             .map_err(io::Error::other)?;
 
@@ -46,8 +53,11 @@ impl Pty {
         // semantics where applicable.
         let mut cmd = CommandBuilder::new_default_prog();
         cmd.env("TERM", "xterm-256color");
+        if let Ok(cwd) = std::env::current_dir() {
+            cmd.cwd(cwd);
+        }
 
-        let child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
+        let mut child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
         // Drop our handle on the slave so the child is the only side keeping
         // it open; that way closing the master at shutdown delivers SIGHUP
         // (or the ConPTY equivalent) cleanly.
@@ -56,18 +66,27 @@ impl Pty {
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
 
-        let (tx, rx) = mpsc::channel::<Vec<u8>>();
+        let (read_tx, rx) = cueue(MAX_BUFFER)?;
+        let event_loop_ = event_loop.clone();
         thread::Builder::new()
             .name("pty-reader".into())
-            .spawn(move || pump_reader(reader, tx))
+            .spawn(move || pump_reader(reader, read_tx, event_loop_))
+            .map_err(io::Error::other)?;
+
+        let child_killer = child.clone_killer();
+        thread::Builder::new()
+            .name("child-watcher".into())
+            .spawn(move || {
+                let _ = child.wait();
+                let _ = event_loop.send_event(AppEvent::ChildExited);
+            })
             .map_err(io::Error::other)?;
 
         Ok(Self {
             master: pair.master,
+            child_killer,
             writer,
-            child,
             rx,
-            pending: VecDeque::new(),
         })
     }
 
@@ -76,35 +95,22 @@ impl Pty {
     pub fn read(
         &mut self,
         buf: &mut [u8],
-    ) -> io::Result<usize> {
-        if self.pending.is_empty() {
-            match self.rx.try_recv() {
-                Ok(chunk) => self.pending.extend(chunk),
-                // Empty: nothing pending right now. Disconnected: reader
-                // thread exited (child closed its end); treat as EOF — keep
-                // returning 0 so the UI loop stays responsive until the user
-                // closes the window.
-                Err(mpsc::TryRecvError::Empty | mpsc::TryRecvError::Disconnected) => return Ok(0),
-            }
-        }
-
-        let n = buf.len().min(self.pending.len());
-        let (head, tail) = self.pending.as_slices();
-        let from_head = n.min(head.len());
-        buf[..from_head].copy_from_slice(&head[..from_head]);
-        if n > from_head {
-            buf[from_head..n].copy_from_slice(&tail[..n - from_head]);
-        }
-        self.pending.drain(..n);
-        Ok(n)
+    ) -> usize {
+        let data = self
+            .rx
+            .limited_read_chunk(buf.len().min(MAX_READ_CHUNK) as u64);
+        let read_len = data.len();
+        buf[..read_len].copy_from_slice(data);
+        self.rx.commit();
+        read_len
     }
 
     /// Write bytes to the PTY (sends input to the shell).
     pub fn write(
         &mut self,
         data: &[u8],
-    ) -> io::Result<usize> {
-        self.writer.write(data)
+    ) -> io::Result<()> {
+        self.writer.write_all(data)
     }
 
     /// Notify the PTY of a terminal resize.
@@ -124,22 +130,37 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        let _ = self.child.kill();
+        let _ = self.child_killer.kill();
     }
 }
 
 fn pump_reader(
     mut reader: Box<dyn Read + Send>,
-    tx: mpsc::Sender<Vec<u8>>,
+    mut tx: cueue::Writer<u8>,
+    event_loop: EventLoopProxy<AppEvent>,
 ) {
-    let mut buf = vec![0u8; 128 * 1024];
+    let mut buf = [0u8; MAX_READ_CHUNK];
+
     loop {
         match reader.read(&mut buf) {
             Ok(0) => break,
             Ok(n) => {
-                if tx.send(buf[..n].to_vec()).is_err() {
-                    break;
+                let mut written = 0;
+                loop {
+                    match tx.write_chunk().write(&buf[written..n]) {
+                        Ok(m) => {
+                            written += m;
+                            tx.commit(m);
+                            if written >= n {
+                                break;
+                            }
+                            thread::yield_now();
+                        }
+                        Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
+                        Err(_) => return,
+                    }
                 }
+                let _ = event_loop.send_event(AppEvent::DataReady);
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,

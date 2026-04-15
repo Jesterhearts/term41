@@ -1,6 +1,7 @@
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use wgpu::PowerPreference;
 
 use crate::keybindings::Keybinding;
 use crate::keybindings::KeybindingConfig;
@@ -48,6 +49,9 @@ struct ConfigFile {
     /// command's exit status. Defaults to on; disable for a pure
     /// terminal-text view or when the shell doesn't emit OSC 133 at all.
     gutter: Option<bool>,
+    /// Preferred power mode for the GPU. See wgpu::PowerPreference docs for
+    /// details.
+    power_preference: Option<PowerPreference>,
 }
 
 pub struct Config {
@@ -58,9 +62,8 @@ pub struct Config {
     pub cursor_style: CursorStyle,
     pub keybindings: Keybindings,
     pub bell: BellMode,
-    /// Whether to show the shell-integration gutter on the left edge. See
-    /// [`ConfigFile::gutter`] for the rationale.
     pub gutter: bool,
+    pub power_preference: PowerPreference,
 }
 
 impl Default for Config {
@@ -74,6 +77,7 @@ impl Default for Config {
             keybindings: Keybindings::defaults(),
             bell: BellMode::default(),
             gutter: true,
+            power_preference: PowerPreference::default(),
         }
     }
 }
@@ -117,6 +121,7 @@ fn parse_config(
         keybindings,
         bell,
         gutter: file.gutter.unwrap_or(true),
+        power_preference: file.power_preference.unwrap_or_default(),
     }
 }
 

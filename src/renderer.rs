@@ -8,6 +8,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use palette::Srgb;
+use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::window::Window;
@@ -128,9 +129,9 @@ impl Renderer {
     pub async fn new(
         window: Arc<Window>,
         font_system: &mut FontSystem,
-        _terminal: &Terminal,
         opacity: f32,
         gutter_enabled: bool,
+        power_preference: PowerPreference,
     ) -> Self {
         let size = window.inner_size();
 
@@ -139,6 +140,7 @@ impl Renderer {
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
                 compatible_surface: Some(&surface),
+                power_preference,
                 ..Default::default()
             })
             .await

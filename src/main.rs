@@ -32,6 +32,7 @@ use terminal::MouseButton as TermMouseButton;
 use terminal::MouseEventKind;
 use terminal::MouseModifiers;
 use terminal::Terminal;
+use wgpu::PowerPreference;
 use winit::application::ApplicationHandler;
 use winit::dpi::PhysicalPosition;
 use winit::event::ElementState;
@@ -59,6 +60,8 @@ const INITIAL_ROWS: u32 = 24;
 enum AppEvent {
     /// The config file changed on disk and should be re-read + applied.
     ReloadConfig,
+    DataReady,
+    ChildExited,
 }
 
 struct App {
@@ -67,6 +70,8 @@ struct App {
     terminal: Terminal,
     font_system: FontSystem,
     pty: Pty,
+    proxy: EventLoopProxy<AppEvent>,
+
     opacity: f32,
     /// Path to the config file we'll reload on `AppEvent::ReloadConfig`.
     /// `None` means we couldn't even resolve a config dir at startup, so
@@ -85,6 +90,7 @@ struct App {
     /// changes without having to probe the renderer (which may not exist
     /// yet before `resumed` runs).
     gutter_enabled: bool,
+    power_preference: PowerPreference,
     /// Last title we pushed to the OS via `Window::set_title`. Compared
     /// against `terminal.current_title` each frame so we only call
     /// `set_title` when something actually changed (the call hops to the
@@ -162,9 +168,10 @@ impl App {
     fn new(
         pty: Pty,
         config: Config,
+        font_system: FontSystem,
+        proxy: EventLoopProxy<AppEvent>,
         config_path: Option<PathBuf>,
     ) -> Self {
-        let font_system = FontSystem::new(config.fonts.as_deref(), config.font_size);
         let mut terminal = Terminal::new(
             INITIAL_COLS,
             INITIAL_ROWS,
@@ -178,6 +185,7 @@ impl App {
             terminal,
             font_system,
             pty,
+            proxy,
             opacity: config.opacity,
             config_path,
             boot_fonts: config.fonts.clone(),
@@ -186,6 +194,7 @@ impl App {
             keybindings: config.keybindings,
             bell_mode: config.bell,
             gutter_enabled: config.gutter,
+            power_preference: config.power_preference,
             applied_title: None,
             modifiers: winit::keyboard::ModifiersState::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
@@ -220,7 +229,7 @@ impl App {
         // created yet (pre-`resumed` reloads).
         if cfg.gutter != self.gutter_enabled {
             self.gutter_enabled = cfg.gutter;
-            if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+            if let (Some(renderer), Some(window)) = (self.renderer.as_mut(), &self.window) {
                 renderer.set_gutter_enabled(cfg.gutter);
                 let size = window.inner_size();
                 let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
@@ -248,6 +257,12 @@ impl App {
             warn!(
                 "config: opacity changed ({} → {}); restart to apply",
                 self.boot_opacity, cfg.opacity
+            );
+        }
+        if self.power_preference != cfg.power_preference {
+            warn!(
+                "config: power_preference changed ({:?} → {:?}); restart to apply",
+                self.power_preference, cfg.power_preference
             );
         }
     }
@@ -282,7 +297,7 @@ impl App {
         match self.bell_mode {
             BellMode::Off => {}
             BellMode::Visual => {
-                if let Some(renderer) = &mut self.renderer {
+                if let Some(renderer) = self.renderer.as_mut() {
                     renderer.notify_bell();
                 }
             }
@@ -437,23 +452,20 @@ impl App {
 
     fn read_pty_output(&mut self) {
         let time_slice = Instant::now() + Duration::from_millis(5);
-        let mut buf = [0u8; 128 * 1024];
-        while let Ok(n) = self.pty.read(&mut buf) {
-            if n == 0 {
+        let mut buf = [0u8; 4 * 1024];
+        loop {
+            let read = self.pty.read(&mut buf);
+            if read == 0 {
                 break;
             }
-            self.terminal.process(&buf[..n]);
+            self.terminal.process(&buf[..read]);
             if Instant::now() >= time_slice {
+                let _ = self.proxy.send_event(AppEvent::DataReady);
                 break;
             }
         }
-        // Drain any bytes the terminal itself queued for the PTY (OSC 52
-        // query responses and similar). Do this after the read loop so we
-        // batch replies across a whole input chunk.
-        let reply = self.terminal.take_pending_output();
-        if !reply.is_empty() {
-            let _ = self.pty.write(&reply);
-        }
+
+        self.request_redraw();
     }
 
     fn request_redraw(&self) {
@@ -466,11 +478,15 @@ impl App {
 impl ApplicationHandler<AppEvent> for App {
     fn user_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         event: AppEvent,
     ) {
         match event {
             AppEvent::ReloadConfig => self.reload_config(),
+            AppEvent::DataReady => self.read_pty_output(),
+            AppEvent::ChildExited => {
+                event_loop.exit();
+            }
         }
     }
 
@@ -490,16 +506,17 @@ impl ApplicationHandler<AppEvent> for App {
             .with_inner_size(winit::dpi::PhysicalSize::new(pixel_width, pixel_height));
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-        let renderer = pollster::block_on(Renderer::new(
-            Arc::clone(&window),
+
+        let window_ = window.clone();
+
+        self.renderer = Some(pollster::block_on(Renderer::new(
+            window_,
             &mut self.font_system,
-            &self.terminal,
             self.opacity,
             self.gutter_enabled,
-        ));
-
+            self.power_preference,
+        )));
         self.window = Some(window);
-        self.renderer = Some(renderer);
     }
 
     fn window_event(
@@ -508,17 +525,13 @@ impl ApplicationHandler<AppEvent> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        event_loop.set_control_flow(ControlFlow::WaitUntil(
-            Instant::now() + Duration::from_millis(8),
-        ));
-
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
             }
 
             WindowEvent::Resized(size) => {
-                if let Some(renderer) = &mut self.renderer {
+                if let Some(renderer) = self.renderer.as_mut() {
                     renderer.resize(size);
                     // The gutter steals pixels from the left edge; subtract
                     // them before dividing into cells so col 0 of the
@@ -758,7 +771,6 @@ impl ApplicationHandler<AppEvent> for App {
             }
 
             WindowEvent::RedrawRequested => {
-                self.read_pty_output();
                 self.sync_window_title();
                 self.dispatch_bell();
                 // Mode 2026: while a synchronized update is open, parse PTY
@@ -766,16 +778,21 @@ impl ApplicationHandler<AppEvent> for App {
                 // frame. The timeout inside `is_synchronized_update_active`
                 // keeps us from freezing if the app never sends ESU.
                 if !self.terminal.is_synchronized_update_active()
-                    && let Some(renderer) = &mut self.renderer
+                    && let Some(renderer) = self.renderer.as_mut()
                 {
                     renderer.render(&mut self.font_system, &self.terminal);
                 }
 
+                event_loop.set_control_flow(ControlFlow::WaitUntil(
+                    Instant::now() + Duration::from_millis(8),
+                ));
                 self.request_redraw();
             }
 
             _ => {}
         }
+
+        self.flush_pending();
     }
 }
 
@@ -943,12 +960,21 @@ fn main() {
         Some(p) => config::load_from(p),
         None => Config::default(),
     };
-    let pty = Pty::spawn(INITIAL_COLS as u16, INITIAL_ROWS as u16).expect("failed to spawn PTY");
 
     let event_loop: EventLoop<AppEvent> = EventLoop::with_user_event()
         .build()
         .expect("create event loop");
-    event_loop.set_control_flow(ControlFlow::Wait);
+
+    let font_system = FontSystem::new(config.fonts.clone(), config.font_size);
+
+    let pty = Pty::spawn(
+        INITIAL_COLS as u16,
+        INITIAL_ROWS as u16,
+        font_system.cell_width as u16,
+        font_system.cell_height as u16,
+        event_loop.create_proxy(),
+    )
+    .expect("failed to spawn PTY");
 
     // Spawn the file watcher before running the loop so we don't miss a
     // save during startup. The watcher owns its own thread (via notify)
@@ -957,7 +983,13 @@ fn main() {
         spawn_config_watcher(path.clone(), event_loop.create_proxy());
     }
 
-    let mut app = App::new(pty, config, config_path);
+    let mut app = App::new(
+        pty,
+        config,
+        font_system,
+        event_loop.create_proxy(),
+        config_path,
+    );
     event_loop.run_app(&mut app).expect("run event loop");
 }
 
@@ -1025,7 +1057,6 @@ fn spawn_config_watcher(
             // drive the callback. Dropping `watcher` here would unsubscribe
             // immediately, so we keep it alive by parking forever.
             std::thread::park();
-            drop(watcher);
         })
         .expect("spawn config watcher");
 }
