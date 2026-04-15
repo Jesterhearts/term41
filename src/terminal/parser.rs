@@ -31,6 +31,61 @@ const TAB_WIDTH: u32 = 8;
 /// unknown.
 const SCS_INTERMEDIATES: &[u8] = b"()*+";
 
+/// Fast path for a batched run of printable ASCII bytes (0x20..=0x7E).
+///
+/// Skips the grapheme/width machinery `put_char` needs — every byte is
+/// width-1 and can't fold into a neighbour. Breaks wide-anchor invariants at
+/// only the run's two edges (interior cells are entirely overwritten, so any
+/// anchors they held are destroyed outright).
+pub(super) fn put_ascii_run(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    run: &[u8],
+) {
+    if run.is_empty() {
+        return;
+    }
+
+    screen.offset = 0;
+    let fg = screen.fg;
+    let bg = screen.bg;
+    let link = screen.current_hyperlink;
+
+    let mut i = 0;
+    while i < run.len() {
+        // Pre-wrap: a cursor parked past the last column wraps before
+        // writing, matching put_char's soft-wrap behaviour.
+        if screen.cursor.col >= viewport.cols {
+            soft_wrap(screen, viewport);
+        }
+
+        let r = screen.grid.active_row_index(&screen.cursor, viewport);
+        let col = screen.cursor.col as usize;
+        let remaining_cols = (viewport.cols - screen.cursor.col) as usize;
+        let chunk_len = (run.len() - i).min(remaining_cols);
+
+        // Break a wide anchor severed by the left edge of the chunk. The
+        // right-edge case is covered by passing chunk_len to
+        // break_wide_glyphs_around_write.
+        break_wide_glyphs_around_write(&mut screen.grid.rows[r], col, chunk_len);
+
+        let row = &mut screen.grid.rows[r];
+        for k in 0..chunk_len {
+            // Bytes 0x20..=0x7E are valid single-byte UTF-8 so the conversion
+            // can't fail; the upstream parser guarantees the range.
+            let b = run[i + k];
+            let buf = [b];
+            let s = std::str::from_utf8(&buf).unwrap();
+            row.cells[col + k] = SmolStr::new_inline(s);
+            row.fg[col + k] = fg;
+            row.bg[col + k] = bg;
+            row.links[col + k] = link;
+        }
+        screen.cursor.col += chunk_len as u32;
+        i += chunk_len;
+    }
+}
+
 pub(super) fn put_char(
     screen: &mut Screen,
     viewport: &Viewport,
@@ -450,6 +505,7 @@ mod tests {
         let mut parser = Parser::new();
         for action in parser.parse(input) {
             match action {
+                Action::PrintAscii(run) => put_ascii_run(screen, viewport, run),
                 Action::Print(s) => put_char(screen, viewport, s),
                 Action::Execute(b) => execute(screen, viewport, b),
                 Action::CsiDispatch {

@@ -46,6 +46,7 @@ use crate::terminal::osc::handle_osc;
 use crate::terminal::parser::csi_dispatch;
 use crate::terminal::parser::esc_dispatch;
 use crate::terminal::parser::execute;
+use crate::terminal::parser::put_ascii_run;
 use crate::terminal::parser::put_char;
 use crate::terminal::screen::resize_screen;
 use crate::terminal::screen::restore_cursor_slot;
@@ -732,6 +733,9 @@ impl Terminal {
             let popped_before = self.active.grid.total_popped;
 
             match action {
+                vte::Action::PrintAscii(run) => {
+                    put_ascii_run(&mut self.active, &self.viewport, run)
+                }
                 vte::Action::Print(c) => put_char(&mut self.active, &self.viewport, c),
                 vte::Action::Execute(byte) => {
                     if byte == 0x07 {
@@ -830,9 +834,9 @@ impl Terminal {
                     self.hook_params.push(params);
                     self.hook_action.push(action);
                 }
-                vte::Action::Put(byte) => {
+                vte::Action::Put(bytes) => {
                     if let Some(last) = self.hook_bytes.last_mut() {
-                        last.push(byte);
+                        last.extend_from_slice(bytes);
                     }
                 }
                 vte::Action::Unhook => {
