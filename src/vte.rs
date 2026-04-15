@@ -449,7 +449,9 @@ impl Parser {
             self.state = State::Ground;
         }
 
-        // Anywhere transitions (fire regardless of current state).
+        // 7-bit anywhere transitions. CAN/SUB/ESC are 7-bit controls that
+        // fire regardless of state — including string states, because
+        // that's how 7-bit hosts terminate an OSC/DCS (ESC \ sequence).
         match byte {
             0x18 | 0x1A => {
                 let exit = self.exit_action();
@@ -466,43 +468,61 @@ impl Parser {
                 self.state = State::Escape;
                 return exit;
             }
-            0x90 => {
-                let exit = self.exit_action();
-                self.clear_params();
-                self.state = State::DcsEntry;
-                return exit;
-            }
-            0x9B => {
-                let exit = self.exit_action();
-                self.clear_params();
-                self.state = State::CsiEntry;
-                return exit;
-            }
-            0x9C => {
-                let exit = self.exit_action();
-                self.state = State::Ground;
-                return exit;
-            }
-            0x9D => {
-                let exit = self.exit_action();
-                self.state = State::OscString;
-                return exit;
-            }
-            0x98 | 0x9E | 0x9F => {
-                let exit = self.exit_action();
-                self.state = State::SosPmApcString;
-                return exit;
-            }
-            0x80..=0x8F | 0x91..=0x97 | 0x99 | 0x9A => {
-                let exit = self.exit_action();
-                self.state = State::Ground;
-                if let Some(exit) = exit {
-                    self.pending_execute = Some(byte);
-                    return Some(exit);
-                }
-                return Some(RawAction::Execute(byte));
-            }
             _ => {}
+        }
+
+        // 8-bit C1 anywhere transitions. These bytes (0x80..=0x9F) double
+        // as UTF-8 continuation bytes, so firing them inside a string
+        // payload truncates the payload mid-codepoint — e.g. an OSC 0 with
+        // title "✳" (U+2733, UTF-8 `\xe2\x9c\xb3`) would terminate at the
+        // `\x9c` byte because that's the 8-bit encoding of ST. String
+        // states carry opaque payload bytes; the only valid terminators
+        // there are BEL (handled by `osc_string`) and 7-bit ESC \ (handled
+        // above). Skip C1 anywhere transitions while parsing a payload.
+        let in_string_state = matches!(
+            self.state,
+            State::OscString | State::DcsPassthrough | State::DcsIgnore | State::SosPmApcString,
+        );
+        if !in_string_state {
+            match byte {
+                0x90 => {
+                    let exit = self.exit_action();
+                    self.clear_params();
+                    self.state = State::DcsEntry;
+                    return exit;
+                }
+                0x9B => {
+                    let exit = self.exit_action();
+                    self.clear_params();
+                    self.state = State::CsiEntry;
+                    return exit;
+                }
+                0x9C => {
+                    let exit = self.exit_action();
+                    self.state = State::Ground;
+                    return exit;
+                }
+                0x9D => {
+                    let exit = self.exit_action();
+                    self.state = State::OscString;
+                    return exit;
+                }
+                0x98 | 0x9E | 0x9F => {
+                    let exit = self.exit_action();
+                    self.state = State::SosPmApcString;
+                    return exit;
+                }
+                0x80..=0x8F | 0x91..=0x97 | 0x99 | 0x9A => {
+                    let exit = self.exit_action();
+                    self.state = State::Ground;
+                    if let Some(exit) = exit {
+                        self.pending_execute = Some(byte);
+                        return Some(exit);
+                    }
+                    return Some(RawAction::Execute(byte));
+                }
+                _ => {}
+            }
         }
 
         // State-specific handling.
@@ -1117,6 +1137,39 @@ mod tests {
         let out = osc_payloads(&input);
         assert_eq!(out.len(), 1);
         assert_eq!(out[0].len(), MAX_OSC_LEN);
+    }
+
+    #[test]
+    fn osc_preserves_utf8_with_c1_continuation_bytes() {
+        // U+2733 ✳ encodes to \xe2\x9c\xb3. The \x9c byte is also the 8-bit
+        // encoding of ST (String Terminator). A VT500-accurate parser with
+        // anywhere-transitions on 0x9C would truncate the payload at the
+        // \x9c and dispatch a half-codepoint — which is exactly what Claude
+        // Code, tmux status lines, and any shell with emoji in PS1 hit.
+        // The payload must survive intact.
+        let out = osc_payloads(b"\x1b]0;\xe2\x9c\xb3 Claude Code\x07");
+        assert_eq!(out, vec![b"0;\xe2\x9c\xb3 Claude Code".to_vec()]);
+    }
+
+    #[test]
+    fn osc_preserves_cyrillic_payload() {
+        // U+0410 А encodes to \xd0\x90. \x90 is 8-bit DCS. A legacy anywhere
+        // transition would switch to DcsEntry mid-OSC and lose the rest of
+        // the title to a phantom DCS.
+        let out = osc_payloads(b"\x1b]2;\xd0\x90\xd0\xbb\xd0\xb0\x07");
+        assert_eq!(out, vec![b"2;\xd0\x90\xd0\xbb\xd0\xb0".to_vec()]);
+    }
+
+    #[test]
+    fn osc_still_terminates_on_bel_and_st_after_fix() {
+        // Regression guard: the UTF-8 fix must not break legitimate
+        // terminators. BEL (0x07) and 7-bit ESC \ (0x1B 0x5C) still end
+        // the payload and dispatch it.
+        assert_eq!(osc_payloads(b"\x1b]0;ascii\x07"), vec![b"0;ascii".to_vec()]);
+        assert_eq!(
+            osc_payloads(b"\x1b]0;ascii\x1b\\"),
+            vec![b"0;ascii".to_vec()]
+        );
     }
 
     #[test]

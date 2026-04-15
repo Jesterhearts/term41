@@ -30,8 +30,20 @@ pub use self::mouse::MouseEncoding;
 pub use self::mouse::MouseEventKind;
 pub use self::mouse::MouseModifiers;
 pub use self::mouse::MouseTracking;
+use self::mouse::encode_mouse_event;
+use self::mouse::should_report;
+use self::osc::OscContext;
+use self::osc::handle_osc;
+use self::parser::CsiContext;
+use self::parser::EscContext;
+use self::parser::csi_dispatch;
+use self::parser::esc_dispatch;
+use self::parser::execute;
+use self::parser::put_ascii_run;
+use self::parser::put_char;
 pub use self::row::Row;
 pub use self::screen::Screen;
+use self::screen::resize_screen;
 use crate::clipboard::Clipboard;
 use crate::clipboard::ClipboardKind;
 use crate::search::MatchSpan;
@@ -42,23 +54,43 @@ use crate::selection::SelectionPoint;
 use crate::selection::expand_to_line;
 use crate::selection::expand_to_word;
 use crate::sixel::parse_sixel;
-use crate::terminal::keyboard::handle_kitty_keyboard;
-use crate::terminal::mouse::apply_mouse_mode;
-use crate::terminal::mouse::encode_mouse_event;
-use crate::terminal::mouse::should_report;
-use crate::terminal::osc::OscContext;
-use crate::terminal::osc::handle_osc;
-use crate::terminal::parser::csi_dispatch;
-use crate::terminal::parser::esc_dispatch;
-use crate::terminal::parser::execute;
-use crate::terminal::parser::put_ascii_run;
-use crate::terminal::parser::put_char;
-use crate::terminal::screen::resize_screen;
-use crate::terminal::screen::restore_cursor_slot;
-use crate::terminal::screen::save_cursor_slot;
-use crate::terminal::screen::set_private_mode;
 use crate::vte;
 use crate::vte::Params;
+
+/// Terminal-level modes toggled by escape sequences (DECSET/DECRST, mode
+/// 2004, mode 2026, etc.) and reset together by RIS. Grouping them keeps
+/// the `Terminal` struct focused and lets handler functions accept a single
+/// `&mut TerminalModes` instead of five separate parameters.
+#[derive(Debug)]
+pub(super) struct TerminalModes {
+    /// Currently-active mouse tracking mode requested by the app via DECSET.
+    pub mouse_tracking: MouseTracking,
+    /// Wire encoding used for mouse events.
+    pub mouse_encoding: MouseEncoding,
+    /// Mode 2004 — when enabled, pasted text is wrapped in
+    /// `\x1b[200~ ... \x1b[201~` so apps can distinguish it from typed input.
+    pub bracketed_paste: bool,
+    /// Mode `?1004` — when enabled, focus changes are reported to the
+    /// foreground app as `\x1b[I` (focus in) and `\x1b[O` (focus out).
+    pub focus_reporting: bool,
+    /// Mode 2026 — Synchronized Output (BSU/ESU). `Some(t)` from the moment
+    /// `CSI ? 2026 h` arrives until either `CSI ? 2026 l` clears it or the
+    /// [`SYNCHRONIZED_UPDATE_TIMEOUT`] safety deadline passes; otherwise
+    /// `None`.
+    pub synchronized_update_since: Option<Instant>,
+}
+
+impl TerminalModes {
+    fn new() -> Self {
+        Self {
+            mouse_tracking: MouseTracking::Off,
+            mouse_encoding: MouseEncoding::Default,
+            bracketed_paste: false,
+            focus_reporting: false,
+            synchronized_update_since: None,
+        }
+    }
+}
 
 #[derive(Debug)]
 pub struct Terminal {
@@ -90,15 +122,9 @@ pub struct Terminal {
     /// event loop after each [`process`](Self::process) call.
     pending_output: Vec<u8>,
 
-    /// Currently-active mouse tracking mode requested by the app via DECSET.
-    mouse_tracking: MouseTracking,
-
-    /// Wire encoding used for mouse events.
-    mouse_encoding: MouseEncoding,
-
-    /// Mode 2004 — when enabled, pasted text is wrapped in
-    /// `\x1b[200~ ... \x1b[201~` so apps can distinguish it from typed input.
-    bracketed_paste: bool,
+    /// Terminal-level modes toggled by escape sequences (DECSET/DECRST,
+    /// mode 2004, mode 2026, etc.) and reset together by RIS.
+    pub(super) modes: TerminalModes,
 
     /// Active text selection, if any. Positions use absolute row indices so
     /// the selection stays locked to content across scrollback trimming.
@@ -131,12 +157,6 @@ pub struct Terminal {
     /// blink phase itself is owned by the renderer.
     pub cursor_style: CursorStyle,
 
-    /// Mode `?1004` — when enabled, focus changes are reported to the
-    /// foreground app as `\x1b[I` (focus in) and `\x1b[O` (focus out). The
-    /// event loop calls [`Self::report_focus_change`] on every winit
-    /// `Focused` event; that method gates emission on this flag.
-    focus_reporting: bool,
-
     /// Title last reported by the foreground app via OSC 0 / OSC 2.
     /// `None` means no app has set a title (or one explicitly cleared
     /// it); the host applies its default ("term41") in that case.
@@ -149,15 +169,6 @@ pub struct Terminal {
     /// noisy app that bells in a tight loop should still get one
     /// per-frame response, not a queue that backs up forever.
     bell_pending: bool,
-
-    /// Mode 2026 — Synchronized Output (BSU/ESU). `Some(t)` from the moment
-    /// `CSI ? 2026 h` arrives until either `CSI ? 2026 l` clears it or the
-    /// [`SYNCHRONIZED_UPDATE_TIMEOUT`] safety deadline passes; otherwise
-    /// `None`. The host consults [`Self::is_synchronized_update_active`] to
-    /// decide whether to skip the frame. State still updates during a BSU —
-    /// only the render is deferred, so the eventual ESU (or timeout) lands
-    /// on a fully-parsed frame.
-    synchronized_update_since: Option<Instant>,
 
     /// Absolute row index of the most recent OSC 133 `A` (prompt-start)
     /// mark. An OSC 133 `D` resolves to this row and stamps its exit code
@@ -202,19 +213,15 @@ impl Terminal {
             hook_action: vec![],
             clipboard: Clipboard::new(),
             pending_output: Vec::new(),
-            mouse_tracking: MouseTracking::Off,
-            mouse_encoding: MouseEncoding::Default,
-            bracketed_paste: false,
+            modes: TerminalModes::new(),
             selection: None,
             search: SearchState::new(),
             current_directory: None,
             hyperlinks: HyperlinkRegistry::new(),
             kitty_keyboard: KittyKeyboardState::new(),
             cursor_style: CursorStyle::default(),
-            focus_reporting: false,
             current_title: None,
             bell_pending: false,
-            synchronized_update_since: None,
             current_prompt_row: None,
         }
     }
@@ -224,7 +231,8 @@ impl Terminal {
     /// The host should skip rendering while this returns `true` so partial
     /// frames (e.g. mid-scroll, mid-reflow) are never presented.
     pub fn is_synchronized_update_active(&self) -> bool {
-        self.synchronized_update_since
+        self.modes
+            .synchronized_update_since
             .is_some_and(|start| start.elapsed() < SYNCHRONIZED_UPDATE_TIMEOUT)
     }
 
@@ -287,7 +295,7 @@ impl Terminal {
         &mut self,
         focused: bool,
     ) {
-        if !self.focus_reporting {
+        if !self.modes.focus_reporting {
             return;
         }
         // Per xterm: CSI I on focus gain, CSI O on focus loss.
@@ -812,7 +820,7 @@ impl Terminal {
         text: &str,
     ) {
         const PASTE_END: &str = "\x1b[201~";
-        if self.bracketed_paste {
+        if self.modes.bracketed_paste {
             self.pending_output.extend_from_slice(b"\x1b[200~");
             for chunk in text.split(PASTE_END) {
                 self.pending_output.extend_from_slice(chunk.as_bytes());
@@ -846,7 +854,7 @@ impl Terminal {
 
     /// Returns true if the app has requested any mouse tracking mode.
     pub fn mouse_tracking_enabled(&self) -> bool {
-        !matches!(self.mouse_tracking, MouseTracking::Off)
+        !matches!(self.modes.mouse_tracking, MouseTracking::Off)
     }
 
     /// Report a mouse event to the foreground app. Returns true if an event
@@ -863,11 +871,11 @@ impl Terminal {
         row: u32,
         mods: MouseModifiers,
     ) -> bool {
-        if !should_report(self.mouse_tracking, kind, button) {
+        if !should_report(self.modes.mouse_tracking, kind, button) {
             return false;
         }
         encode_mouse_event(
-            self.mouse_encoding,
+            self.modes.mouse_encoding,
             kind,
             button,
             col + 1,
@@ -1060,85 +1068,47 @@ impl Terminal {
                 }
                 vte::Action::Print(c) => put_char(&mut self.active, &self.viewport, c),
                 vte::Action::Execute(byte) => {
-                    if byte == 0x07 {
-                        // BEL: surface to the host. The parser already
-                        // swallows BEL inside execute(), but routing it
-                        // here lets us notify the windowing layer (urgent
-                        // hint, visual flash) without coupling the
-                        // Screen module to that decision.
-                        self.bell_pending = true;
-                    } else {
-                        execute(&mut self.active, &self.viewport, byte);
-                    }
+                    execute(
+                        &mut self.active,
+                        &self.viewport,
+                        byte,
+                        &mut self.bell_pending,
+                    );
                 }
                 vte::Action::CsiDispatch {
                     params,
                     intermediates,
                     action,
                 } => {
-                    let is = intermediates.as_slice();
-                    if is == b"?" && (action == 'h' || action == 'l') {
-                        let enable = action == 'h';
-                        for p in params.iter() {
-                            if p[0] == 2004 {
-                                self.bracketed_paste = enable;
-                            } else if p[0] == 1004 {
-                                self.focus_reporting = enable;
-                            } else if p[0] == 2026 {
-                                // BSU refreshes the deadline; ESU clears it.
-                                // Refreshing on a nested BSU matches the
-                                // contour spec's "keep the window open" rule
-                                // for apps that chain updates.
-                                self.synchronized_update_since = enable.then(Instant::now);
-                            } else if !apply_mouse_mode(
-                                p[0],
-                                enable,
-                                &mut self.mouse_tracking,
-                                &mut self.mouse_encoding,
-                            ) {
-                                set_private_mode(
-                                    p[0],
-                                    enable,
-                                    &mut self.active,
-                                    &mut self.stash,
-                                    &self.viewport,
-                                    &mut self.on_alt_screen,
-                                );
-                            }
-                        }
-                    } else if action == 'u' && matches!(is, b">" | b"<" | b"=" | b"?") {
-                        handle_kitty_keyboard(
-                            is[0],
-                            &params,
-                            &mut self.kitty_keyboard,
-                            &mut self.pending_output,
-                        );
-                    } else if action == 'q' && is == b" " {
-                        // DECSCUSR. The space intermediate is mandatory; the
-                        // single param picks shape+blink (0/1=blink block,
-                        // 2=block, 3/4=underline, 5/6=beam).
-                        let ps = params
-                            .iter()
-                            .next()
-                            .and_then(|g| g.first().copied())
-                            .unwrap_or(0);
-                        self.cursor_style.apply_decscusr(ps);
-                    } else {
-                        csi_dispatch(&mut self.active, &self.viewport, &params, is, action);
-                    }
+                    let mut ctx = CsiContext {
+                        screen: &mut self.active,
+                        stash: &mut self.stash,
+                        viewport: &self.viewport,
+                        on_alt_screen: &mut self.on_alt_screen,
+                        modes: &mut self.modes,
+                        kitty_keyboard: &mut self.kitty_keyboard,
+                        pending_output: &mut self.pending_output,
+                        cursor_style: &mut self.cursor_style,
+                    };
+                    csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
                 vte::Action::EscDispatch {
                     intermediates,
                     byte,
                 } => {
-                    let is = intermediates.as_slice();
-                    if is.is_empty() && byte == b'7' {
-                        save_cursor_slot(&mut self.active);
-                    } else if is.is_empty() && byte == b'8' {
-                        restore_cursor_slot(&mut self.active, &self.viewport);
-                    } else {
-                        esc_dispatch(&mut self.active, &self.viewport, is, byte);
-                    }
+                    let mut ctx = EscContext {
+                        screen: &mut self.active,
+                        stash: &mut self.stash,
+                        viewport: &self.viewport,
+                        on_alt_screen: &mut self.on_alt_screen,
+                        modes: &mut self.modes,
+                        kitty_keyboard: &mut self.kitty_keyboard,
+                        cursor_style: &mut self.cursor_style,
+                        current_title: &mut self.current_title,
+                        current_prompt_row: &mut self.current_prompt_row,
+                        bell_pending: &mut self.bell_pending,
+                    };
+                    esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
                 vte::Action::OscDispatch(data) => {
                     let mut ctx = OscContext {
@@ -1344,18 +1314,18 @@ mod tests {
     fn decset_1006_switches_to_sgr_encoding() {
         let mut term = Terminal::new(80, 24, 100, 16);
         term.process(b"\x1b[?1006h");
-        assert_eq!(term.mouse_encoding, MouseEncoding::Sgr);
+        assert_eq!(term.modes.mouse_encoding, MouseEncoding::Sgr);
         term.process(b"\x1b[?1006l");
-        assert_eq!(term.mouse_encoding, MouseEncoding::Default);
+        assert_eq!(term.modes.mouse_encoding, MouseEncoding::Default);
     }
 
     #[test]
     fn decset_1002_enables_button_event_tracking() {
         let mut term = Terminal::new(80, 24, 100, 16);
         term.process(b"\x1b[?1002h");
-        assert_eq!(term.mouse_tracking, MouseTracking::ButtonEvent);
+        assert_eq!(term.modes.mouse_tracking, MouseTracking::ButtonEvent);
         term.process(b"\x1b[?1002l");
-        assert_eq!(term.mouse_tracking, MouseTracking::Off);
+        assert_eq!(term.modes.mouse_tracking, MouseTracking::Off);
     }
 
     #[test]
@@ -1363,7 +1333,7 @@ mod tests {
         let mut term = Terminal::new(80, 24, 100, 16);
         term.process(b"\x1b[?1000h");
         term.process(b"\x1b[?1003h");
-        assert_eq!(term.mouse_tracking, MouseTracking::AnyEvent);
+        assert_eq!(term.modes.mouse_tracking, MouseTracking::AnyEvent);
     }
 
     #[test]
@@ -1409,7 +1379,7 @@ mod tests {
     fn paste_wraps_when_mode_2004_enabled() {
         let mut term = Terminal::new(80, 24, 100, 16);
         term.process(b"\x1b[?2004h");
-        assert!(term.bracketed_paste);
+        assert!(term.modes.bracketed_paste);
         term.paste("hello\n");
         assert_eq!(term.take_pending_output(), b"\x1b[200~hello\n\x1b[201~");
     }
@@ -1419,7 +1389,7 @@ mod tests {
         let mut term = Terminal::new(80, 24, 100, 16);
         term.process(b"\x1b[?2004h");
         term.process(b"\x1b[?2004l");
-        assert!(!term.bracketed_paste);
+        assert!(!term.modes.bracketed_paste);
         term.paste("hi");
         assert_eq!(term.take_pending_output(), b"hi");
     }
@@ -1567,7 +1537,7 @@ mod tests {
         term.process(b"\x1b[?2026h");
         term.process(b"\x1b[?2026l");
         assert!(!term.is_synchronized_update_active());
-        assert!(term.synchronized_update_since.is_none());
+        assert!(term.modes.synchronized_update_since.is_none());
     }
 
     #[test]
@@ -1576,7 +1546,7 @@ mod tests {
         term.process(b"\x1b[?2026h");
         // Back-date the start so the safety deadline has already passed —
         // avoids a real sleep in the test but exercises the timeout path.
-        term.synchronized_update_since =
+        term.modes.synchronized_update_since =
             Some(Instant::now() - SYNCHRONIZED_UPDATE_TIMEOUT - Duration::from_millis(1));
         assert!(!term.is_synchronized_update_active());
     }
@@ -2175,5 +2145,114 @@ mod tests {
             .take(term.viewport.rows as usize)
             .any(|r| r.prompt_start || r.output_start || r.exit_status.is_some());
         assert!(!any_marks, "ED 2 must drop marks on visible rows");
+    }
+
+    // ---- DECTCEM cursor visibility (?25) ----
+
+    #[test]
+    fn dectcem_hides_and_shows_cursor() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        assert!(term.active.cursor_visible, "default must be visible");
+        term.process(b"\x1b[?25l");
+        assert!(!term.active.cursor_visible);
+        term.process(b"\x1b[?25h");
+        assert!(term.active.cursor_visible);
+    }
+
+    #[test]
+    fn dectcem_state_is_per_screen() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[?25l"); // hide on primary
+        term.process(b"\x1b[?1049h"); // switch to alt
+        // Alt starts with its own default (visible) — hiding the cursor on
+        // the primary screen must not bleed through to alt.
+        assert!(term.active.cursor_visible);
+        term.process(b"\x1b[?1049l"); // back to primary
+        // Primary's hidden state survives the round trip.
+        assert!(!term.active.cursor_visible);
+    }
+
+    // ---- Device Attribute queries ----
+
+    #[test]
+    fn da1_replies_vt220() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?62;c");
+    }
+
+    #[test]
+    fn da1_with_zero_param_also_replies() {
+        // Apps sometimes send `CSI 0 c` explicitly; the reply is the same.
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[0c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?62;c");
+    }
+
+    #[test]
+    fn da2_replies_as_vt420_compatible() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[>c");
+        assert_eq!(term.take_pending_output(), b"\x1b[>41;0;0c");
+    }
+
+    #[test]
+    fn xtversion_replies_with_name_and_version() {
+        let mut term = Terminal::new(20, 3, 100, 16);
+        term.process(b"\x1b[>0q");
+        let expected = format!("\x1bP>|term41 {}\x1b\\", env!("CARGO_PKG_VERSION"));
+        assert_eq!(term.take_pending_output(), expected.as_bytes());
+    }
+
+    // ---- RIS (ESC c) ----
+
+    #[test]
+    fn ris_clears_visible_and_resets_cursor() {
+        let mut term = Terminal::new(10, 3, 100, 16);
+        term.process(b"hello\x1b[5;5H"); // print + move cursor
+        term.process(b"\x1bc");
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
+        // Visible content is gone.
+        for r in term.active.grid.rows.iter().rev().take(3) {
+            assert_eq!(r.content_len(), 0);
+        }
+    }
+
+    #[test]
+    fn ris_returns_to_primary_screen() {
+        let mut term = Terminal::new(10, 3, 100, 16);
+        term.process(b"\x1b[?1049h");
+        assert!(term.on_alt_screen);
+        term.process(b"\x1bc");
+        assert!(!term.on_alt_screen);
+    }
+
+    #[test]
+    fn ris_resets_modes_the_app_flipped() {
+        let mut term = Terminal::new(10, 3, 100, 16);
+        term.process(b"\x1b[?2004h"); // bracketed paste
+        term.process(b"\x1b[?1004h"); // focus reporting
+        term.process(b"\x1b[?1000h"); // mouse tracking
+        term.process(b"\x1b[?25l"); // hide cursor
+        term.process(b"\x1bc");
+        assert!(!term.modes.bracketed_paste);
+        assert!(!term.modes.focus_reporting);
+        assert_eq!(term.modes.mouse_tracking, MouseTracking::Off);
+        assert!(term.active.cursor_visible);
+    }
+
+    #[test]
+    fn ris_preserves_scrollback() {
+        // A misbehaving app's reset shouldn't nuke the user's history.
+        let mut term = Terminal::new(4, 2, 100, 16);
+        for _ in 0..5 {
+            term.process(b"x\r\n");
+        }
+        let rows_before = term.active.grid.rows.len();
+        assert!(rows_before > 2, "setup should have produced scrollback");
+        term.process(b"\x1bc");
+        // Rows count stays the same — visible area cleared in place, history kept.
+        assert_eq!(term.active.grid.rows.len(), rows_before);
     }
 }

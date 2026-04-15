@@ -1,14 +1,54 @@
+use std::io::Write;
 use std::sync::LazyLock;
+use std::time::Instant;
 
 use smol_str::SmolStr;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 
+use crate::terminal::TerminalModes;
+use crate::terminal::attrs::CellAttrs;
+use crate::terminal::color;
 use crate::terminal::color::apply_sgr;
+use crate::terminal::cursor::CursorStyle;
+use crate::terminal::grid;
 use crate::terminal::grid::Viewport;
+use crate::terminal::keyboard::KittyKeyboardState;
+use crate::terminal::keyboard::handle_kitty_keyboard;
+use crate::terminal::mouse::apply_mouse_mode;
 use crate::terminal::row::Row;
+use crate::terminal::screen;
 use crate::terminal::screen::Screen;
 use crate::vte;
+
+/// Bundles the bits of [`Terminal`](super::Terminal) state that CSI handlers
+/// need beyond the active screen. Keeps the call signature stable as new CSI
+/// sequences get wired in.
+pub(super) struct CsiContext<'a> {
+    pub screen: &'a mut Screen,
+    pub stash: &'a mut Screen,
+    pub viewport: &'a Viewport,
+    pub on_alt_screen: &'a mut bool,
+    pub modes: &'a mut TerminalModes,
+    pub kitty_keyboard: &'a mut KittyKeyboardState,
+    pub pending_output: &'a mut Vec<u8>,
+    pub cursor_style: &'a mut CursorStyle,
+}
+
+/// Bundles the bits of [`Terminal`](super::Terminal) state that ESC handlers
+/// need beyond the active screen. RIS in particular resets nearly everything.
+pub(super) struct EscContext<'a> {
+    pub screen: &'a mut Screen,
+    pub stash: &'a mut Screen,
+    pub viewport: &'a Viewport,
+    pub on_alt_screen: &'a mut bool,
+    pub modes: &'a mut TerminalModes,
+    pub kitty_keyboard: &'a mut KittyKeyboardState,
+    pub cursor_style: &'a mut CursorStyle,
+    pub current_title: &'a mut Option<String>,
+    pub current_prompt_row: &'a mut Option<u64>,
+    pub bell_pending: &'a mut bool,
+}
 
 /// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
 /// `put_ascii_run` clones out of this table instead of constructing a fresh
@@ -295,6 +335,7 @@ pub(super) fn execute(
     screen: &mut Screen,
     viewport: &Viewport,
     byte: u8,
+    bell_pending: &mut bool,
 ) {
     match byte {
         b'\n' => {
@@ -324,22 +365,109 @@ pub(super) fn execute(
             let next = (screen.cursor.col / TAB_WIDTH + 1) * TAB_WIDTH;
             screen.cursor.col = next.min(viewport.cols - 1);
         }
-        BEL | NUL => {}
+        BEL => {
+            *bell_pending = true;
+        }
+        NUL => {}
         _ => {}
     }
 }
 
 pub(super) fn csi_dispatch(
-    screen: &mut Screen,
-    viewport: &Viewport,
+    ctx: &mut CsiContext<'_>,
     params: &vte::Params,
     intermediates: &[u8],
     action: char,
 ) {
+    // -- Sequences that carry intermediates ----------------------------------
+
+    if intermediates == b"?" && matches!(action, 'h' | 'l') {
+        let enable = action == 'h';
+        for p in params.iter() {
+            if p[0] == 2004 {
+                ctx.modes.bracketed_paste = enable;
+            } else if p[0] == 1004 {
+                ctx.modes.focus_reporting = enable;
+            } else if p[0] == 2026 {
+                // BSU refreshes the deadline; ESU clears it. Refreshing on a
+                // nested BSU matches the contour spec's "keep the window open"
+                // rule for apps that chain updates.
+                ctx.modes.synchronized_update_since = enable.then(Instant::now);
+            } else if !apply_mouse_mode(
+                p[0],
+                enable,
+                &mut ctx.modes.mouse_tracking,
+                &mut ctx.modes.mouse_encoding,
+            ) {
+                screen::set_private_mode(
+                    p[0],
+                    enable,
+                    ctx.screen,
+                    ctx.stash,
+                    ctx.viewport,
+                    ctx.on_alt_screen,
+                );
+            }
+        }
+        return;
+    }
+
+    if action == 'u' && matches!(intermediates, b">" | b"<" | b"=" | b"?") {
+        handle_kitty_keyboard(
+            intermediates[0],
+            params,
+            ctx.kitty_keyboard,
+            ctx.pending_output,
+        );
+        return;
+    }
+
+    if action == 'q' && intermediates == b" " {
+        // DECSCUSR. The space intermediate is mandatory; the single param
+        // picks shape+blink (0/1=blink block, 2=block, 3/4=underline, 5/6=beam).
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        ctx.cursor_style.apply_decscusr(ps);
+        return;
+    }
+
+    if action == 'q' && intermediates == b">" {
+        // XTVERSION (xterm name/version query). Apps use the reply to gate
+        // behavior on known-good terminals.
+        write!(
+            ctx.pending_output,
+            "\x1bP>|term41 {}\x1b\\",
+            env!("CARGO_PKG_VERSION"),
+        )
+        .expect("write to Vec is infallible");
+        return;
+    }
+
+    if action == 'c' && intermediates == b">" {
+        // DA2 (Secondary Device Attributes).
+        ctx.pending_output.extend_from_slice(b"\x1b[>41;0;0c");
+        return;
+    }
+
+    // -- No-intermediates sequences -----------------------------------------
+
     if !intermediates.is_empty() {
         return;
     }
 
+    // DA1 needs pending_output, which lives on ctx rather than on the screen.
+    // Handle it before borrowing ctx.screen for the screen-only match below.
+    if action == 'c' {
+        // DA1 (Primary Device Attributes). Reply as a VT220 (62).
+        ctx.pending_output.extend_from_slice(b"\x1b[?62;c");
+        return;
+    }
+
+    let screen = &mut *ctx.screen;
+    let viewport = ctx.viewport;
     let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
     let cursor = &mut screen.cursor;
 
@@ -457,14 +585,13 @@ pub(super) fn csi_dispatch(
             screen.cursor.row = 0;
             screen.cursor.col = 0;
         }
-        'n' | 'c' => {}
+        'n' => {}
         _ => {}
     }
 }
 
 pub(super) fn esc_dispatch(
-    screen: &mut Screen,
-    viewport: &Viewport,
+    ctx: &mut EscContext<'_>,
     intermediates: &[u8],
     byte: u8,
 ) {
@@ -474,22 +601,58 @@ pub(super) fn esc_dispatch(
     {
         return;
     }
+    if !intermediates.is_empty() {
+        return;
+    }
 
     match byte {
+        b'7' => screen::save_cursor_slot(ctx.screen),
+        b'8' => screen::restore_cursor_slot(ctx.screen, ctx.viewport),
         b'c' => {
-            todo!()
+            // RIS (Reset to Initial State). Drop the app's terminal state
+            // back to power-on defaults — every mode the app might have
+            // flipped, plus the visible screen. Scrollback is preserved: a
+            // misbehaving app's reset shouldn't take the user's history.
+            //
+            // Return to primary first so subsequent resets land on the screen
+            // the user will actually see, and so a crashed alt-screen TUI
+            // doesn't strand us there.
+            if *ctx.on_alt_screen {
+                std::mem::swap(ctx.screen, ctx.stash);
+                *ctx.on_alt_screen = false;
+            }
+            screen::clear_visible(ctx.screen, ctx.viewport);
+            screen::clear_visible(ctx.stash, ctx.viewport);
+            for s in [&mut *ctx.screen, &mut *ctx.stash] {
+                s.cursor = grid::Cursor::default();
+                s.fg = color::default_fg();
+                s.bg = color::default_bg();
+                s.attrs = CellAttrs::default();
+                s.scroll_top = 0;
+                s.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+                s.offset = 0;
+                s.saved_cursor = None;
+                s.current_hyperlink = None;
+                s.cursor_visible = true;
+            }
+            *ctx.modes = TerminalModes::new();
+            *ctx.kitty_keyboard = KittyKeyboardState::new();
+            *ctx.cursor_style = CursorStyle::default();
+            *ctx.current_title = None;
+            *ctx.current_prompt_row = None;
+            *ctx.bell_pending = false;
         }
         b'M' => {
-            if screen.cursor.row == screen.scroll_top {
-                screen.grid.scroll_down_in_region(
-                    viewport,
-                    &mut screen.images,
-                    screen.scroll_top,
-                    screen.scroll_bottom,
+            if ctx.screen.cursor.row == ctx.screen.scroll_top {
+                ctx.screen.grid.scroll_down_in_region(
+                    ctx.viewport,
+                    &mut ctx.screen.images,
+                    ctx.screen.scroll_top,
+                    ctx.screen.scroll_bottom,
                     1,
                 );
-            } else if screen.cursor.row > 0 {
-                screen.cursor.row -= 1;
+            } else if ctx.screen.cursor.row > 0 {
+                ctx.screen.cursor.row -= 1;
             }
         }
         b'=' | b'>' => {}
@@ -502,6 +665,8 @@ mod tests {
     use palette::Srgb;
 
     use super::*;
+    use crate::terminal::cursor::CursorStyle;
+    use crate::terminal::keyboard::KittyKeyboardState;
     use crate::terminal::screen::Screen;
     use crate::vte::Action;
     use crate::vte::Parser;
@@ -527,23 +692,55 @@ mod tests {
         viewport: &Viewport,
     ) {
         let mut parser = Parser::new();
+        let mut stash = Screen::new(viewport.cols, viewport.rows, 0);
+        let mut on_alt_screen = false;
+        let mut modes = TerminalModes::new();
+        let mut kitty_keyboard = KittyKeyboardState::new();
+        let mut pending_output = Vec::new();
+        let mut cursor_style = CursorStyle::default();
+        let mut bell_pending = false;
+        let mut current_title = None;
+        let mut current_prompt_row = None;
+
         for action in parser.parse(input) {
             match action {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run),
                 Action::Print(s) => put_char(screen, viewport, s),
-                Action::Execute(b) => execute(screen, viewport, b),
+                Action::Execute(b) => execute(screen, viewport, b, &mut bell_pending),
                 Action::CsiDispatch {
                     params,
                     intermediates,
                     action,
                 } => {
-                    csi_dispatch(screen, viewport, &params, intermediates.as_slice(), action);
+                    let mut ctx = CsiContext {
+                        screen,
+                        stash: &mut stash,
+                        viewport,
+                        on_alt_screen: &mut on_alt_screen,
+                        modes: &mut modes,
+                        kitty_keyboard: &mut kitty_keyboard,
+                        pending_output: &mut pending_output,
+                        cursor_style: &mut cursor_style,
+                    };
+                    csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
                 Action::EscDispatch {
                     intermediates,
                     byte,
                 } => {
-                    esc_dispatch(screen, viewport, intermediates.as_slice(), byte);
+                    let mut ctx = EscContext {
+                        screen,
+                        stash: &mut stash,
+                        viewport,
+                        on_alt_screen: &mut on_alt_screen,
+                        modes: &mut modes,
+                        kitty_keyboard: &mut kitty_keyboard,
+                        cursor_style: &mut cursor_style,
+                        current_title: &mut current_title,
+                        current_prompt_row: &mut current_prompt_row,
+                        bell_pending: &mut bell_pending,
+                    };
+                    esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
                 _ => {}
             }
@@ -676,7 +873,7 @@ mod tests {
         feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &viewport);
         assert_eq!(screen.cursor.col, 1);
 
-        execute(&mut screen, &viewport, BS);
+        execute(&mut screen, &viewport, BS, &mut false);
         assert_eq!(screen.cursor.col, 0);
 
         // A full rub-out of `\b \b` from bash lands us back at col 0 with
@@ -810,7 +1007,7 @@ mod tests {
     #[test]
     fn execute_lf_moves_cursor_down() {
         let (mut screen, viewport) = setup();
-        execute(&mut screen, &viewport, b'\n');
+        execute(&mut screen, &viewport, b'\n', &mut false);
         assert_eq!(screen.cursor.row, 1);
     }
 
@@ -820,7 +1017,7 @@ mod tests {
         screen.cursor.row = screen.scroll_bottom;
         let rows_before = screen.grid.rows.len();
 
-        execute(&mut screen, &viewport, b'\n');
+        execute(&mut screen, &viewport, b'\n', &mut false);
 
         assert_eq!(screen.cursor.row, screen.scroll_bottom);
         assert_eq!(screen.grid.rows.len(), rows_before + 1);
@@ -830,7 +1027,7 @@ mod tests {
     fn execute_cr_resets_col_to_zero() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 5;
-        execute(&mut screen, &viewport, b'\r');
+        execute(&mut screen, &viewport, b'\r', &mut false);
         assert_eq!(screen.cursor.col, 0);
     }
 
@@ -838,22 +1035,22 @@ mod tests {
     fn execute_bs_saturates_at_zero() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 2;
-        execute(&mut screen, &viewport, BS);
+        execute(&mut screen, &viewport, BS, &mut false);
         assert_eq!(screen.cursor.col, 1);
-        execute(&mut screen, &viewport, BS);
-        execute(&mut screen, &viewport, BS);
-        execute(&mut screen, &viewport, BS);
+        execute(&mut screen, &viewport, BS, &mut false);
+        execute(&mut screen, &viewport, BS, &mut false);
+        execute(&mut screen, &viewport, BS, &mut false);
         assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
     fn execute_tab_advances_to_next_tab_stop() {
         let (mut screen, viewport) = setup();
-        execute(&mut screen, &viewport, b'\t');
+        execute(&mut screen, &viewport, b'\t', &mut false);
         assert_eq!(screen.cursor.col, TAB_WIDTH);
 
         screen.cursor.col = 3;
-        execute(&mut screen, &viewport, b'\t');
+        execute(&mut screen, &viewport, b'\t', &mut false);
         assert_eq!(screen.cursor.col, TAB_WIDTH);
     }
 
@@ -861,17 +1058,28 @@ mod tests {
     fn execute_tab_clamps_at_rightmost_column() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = TEST_COLS - 1;
-        execute(&mut screen, &viewport, b'\t');
+        execute(&mut screen, &viewport, b'\t', &mut false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
 
     #[test]
-    fn execute_bel_and_nul_are_noops() {
+    fn execute_bel_sets_bell_pending() {
+        let (mut screen, viewport) = setup();
+        let mut bell = false;
+        screen.cursor.col = 3;
+        screen.cursor.row = 2;
+        execute(&mut screen, &viewport, BEL, &mut bell);
+        assert!(bell);
+        assert_eq!(screen.cursor.col, 3);
+        assert_eq!(screen.cursor.row, 2);
+    }
+
+    #[test]
+    fn execute_nul_is_noop() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 3;
         screen.cursor.row = 2;
-        execute(&mut screen, &viewport, BEL);
-        execute(&mut screen, &viewport, NUL);
+        execute(&mut screen, &viewport, NUL, &mut false);
         assert_eq!(screen.cursor.col, 3);
         assert_eq!(screen.cursor.row, 2);
     }

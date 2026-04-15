@@ -1174,7 +1174,7 @@ impl Renderer {
         &self,
         terminal: &Terminal,
     ) -> CursorRenderState {
-        if terminal.active.offset != 0 {
+        if terminal.active.offset != 0 || !terminal.active.cursor_visible {
             return CursorRenderState::Hidden;
         }
         let style = terminal.cursor_style;

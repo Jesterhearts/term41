@@ -280,8 +280,14 @@ impl App {
             return;
         };
         match want {
-            Some(t) => window.set_title(t),
-            None => window.set_title("term41"),
+            Some(t) => {
+                debug!("sync_window_title: set to {t:?}");
+                window.set_title(t);
+            }
+            None => {
+                debug!("sync_window_title: cleared to default");
+                window.set_title("term41");
+            }
         }
         self.applied_title = want.map(str::to_owned);
     }

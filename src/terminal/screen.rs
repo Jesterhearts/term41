@@ -53,6 +53,11 @@ pub struct Screen {
     /// Lives on the screen, not the terminal, so a link span open on the
     /// primary screen doesn't bleed into the alt screen and vice versa.
     pub current_hyperlink: Option<HyperlinkId>,
+    /// DECTCEM (`?25`) cursor visibility. `true` by default (xterm's initial
+    /// state); an app hides the cursor with `CSI ? 25 l` and restores it with
+    /// `CSI ? 25 h`. Per-screen so an alt-screen full-screen TUI that hides
+    /// the cursor doesn't leave the primary screen hidden on exit.
+    pub cursor_visible: bool,
 }
 
 impl Screen {
@@ -81,6 +86,7 @@ impl Screen {
             images: BTreeMap::new(),
             saved_cursor: None,
             current_hyperlink: None,
+            cursor_visible: true,
         }
     }
 }
@@ -167,6 +173,7 @@ pub(super) fn set_private_mode(
     on_alt: &mut bool,
 ) {
     match mode {
+        25 => active.cursor_visible = enable,
         47 => switch_screen(enable, active, stash, on_alt),
         1047 => {
             // xterm clears the alt buffer when leaving via 1047l so stale
