@@ -151,9 +151,8 @@ impl Row {
         let copy_len = ((other.content_len() as usize).saturating_sub(src.start))
             .min((self.len() as usize).saturating_sub(dest_offset))
             .min(src.len());
-        for i in 0..copy_len {
-            self.cells[dest_offset + i] = other.cells[src.start + i].clone();
-        }
+        self.cells[dest_offset..dest_offset + copy_len]
+            .clone_from_slice(&other.cells[src.start..src.start + copy_len]);
         self.fg[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.fg[src.start..src.start + copy_len]);
         self.bg[dest_offset..dest_offset + copy_len]
