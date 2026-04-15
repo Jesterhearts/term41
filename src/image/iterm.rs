@@ -28,18 +28,13 @@ use crate::image::decode_png;
 /// A `width=` / `height=` value. iTerm2 distinguishes the unit by suffix:
 /// bare digits = cells, `px` suffix = pixels, `%` suffix = viewport fraction,
 /// literal `auto` (or anything unparseable) = use the intrinsic dimension.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Dimension {
+    #[default]
     Auto,
     Cells(u32),
     Pixels(u32),
     Percent(u32),
-}
-
-impl Default for Dimension {
-    fn default() -> Self {
-        Dimension::Auto
-    }
 }
 
 impl Dimension {
