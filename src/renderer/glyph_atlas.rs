@@ -18,11 +18,14 @@ use crate::renderer::shelf::ShelfPacker;
 pub const ATLAS_SIZE: u32 = 1024;
 const CACHE_CAPACITY: usize = 2048;
 
-/// `(font_index, glyph_id, cells_wide)`. Cluster span is part of the key
-/// because colour rasterisers size their output to the cluster's visual
-/// footprint — the same `glyph_id` rendered at width 1 versus width 2
-/// yields different bitmaps.
-pub type GlyphKey = (usize, u16, u8);
+/// `(font_index, glyph_id, cells_wide, synthetic_bold)`. Cluster span is
+/// part of the key because colour rasterisers size their output to the
+/// cluster's visual footprint — the same `glyph_id` rendered at width 1
+/// versus width 2 yields different bitmaps. The trailing bool distinguishes
+/// the synthetic-bold variant of a colour glyph (dilated coverage) from
+/// the unmodified raster, so the same glyph can live twice in the atlas
+/// without colliding under the same key.
+pub type GlyphKey = (usize, u16, u8, bool);
 
 /// A cached glyph: its atlas region plus the font metrics needed to position
 /// the quad. Empty glyphs (zero-size whitespace) carry no allocation.
@@ -170,6 +173,10 @@ impl GlyphAtlas {
 
     /// Look up a glyph in the cache or rasterize and upload on miss. Returns
     /// `None` only if the glyph is larger than the atlas itself.
+    ///
+    /// `synthetic_bold` is only honoured when the underlying face is a colour
+    /// font — stems on outline fonts would smear unpleasantly under a blind
+    /// bitmap dilation, so the caller's request is silently dropped there.
     pub fn ensure_cached(
         &mut self,
         queue: &wgpu::Queue,
@@ -177,14 +184,21 @@ impl GlyphAtlas {
         font_index: usize,
         glyph_id: u16,
         cells_wide: u8,
+        synthetic_bold: bool,
     ) -> Option<GlyphSlot> {
-        let key = (font_index, glyph_id, cells_wide);
+        // Outline glyphs never take the synthetic-bold path, so collapse the
+        // key bit to avoid double-caching the same raster under two keys.
+        let synthetic_bold = synthetic_bold && font_system.font_is_color(font_index);
+        let key = (font_index, glyph_id, cells_wide, synthetic_bold);
 
         if let Some(slot) = self.cache.get(&key).copied() {
             return Some(slot);
         }
 
-        let glyph = font_system.rasterize_glyph(font_index, glyph_id, cells_wide as u32);
+        let mut glyph = font_system.rasterize_glyph(font_index, glyph_id, cells_wide as u32);
+        if synthetic_bold {
+            dilate_alpha(&mut glyph);
+        }
 
         if glyph.width == 0 || glyph.height == 0 {
             let slot = GlyphSlot {
@@ -251,6 +265,34 @@ fn make_room_in_cache(
     while cache.len() >= cache.capacity() {
         if !evict_one(cache, packer) {
             break;
+        }
+    }
+}
+
+/// Horizontally dilate an RGBA glyph's coverage by one pixel to fake bold
+/// weight. Colour rasters that look like `[r,g,b,a]` per pixel get each
+/// channel's value max'd with its left/right neighbour, which thickens
+/// strokes without disturbing hue. The result is intentionally crude —
+/// outline paths should come from a real bold font when one exists; this
+/// is only the fallback for COLR/CBDT/sbix glyphs (usually emoji or icon
+/// fonts) where a real bold variant almost never ships.
+fn dilate_alpha(glyph: &mut RasterizedGlyph) {
+    let w = glyph.width as usize;
+    let h = glyph.height as usize;
+    if w == 0 || h == 0 {
+        return;
+    }
+    let src = glyph.bitmap.clone();
+    let dst = &mut glyph.bitmap;
+    for y in 0..h {
+        for x in 0..w {
+            let i = (y * w + x) * 4;
+            for c in 0..4 {
+                let here = src[i + c];
+                let left = if x > 0 { src[i - 4 + c] } else { 0 };
+                let right = if x + 1 < w { src[i + 4 + c] } else { 0 };
+                dst[i + c] = here.max(left).max(right);
+            }
         }
     }
 }

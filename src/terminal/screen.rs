@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 
 use palette::Srgb;
 
+use crate::terminal::attrs::CellAttrs;
 use crate::terminal::color::default_bg;
 use crate::terminal::color::default_fg;
 use crate::terminal::grid::Cursor;
@@ -22,6 +23,7 @@ pub struct SavedCursor {
     pub cursor: Cursor,
     pub fg: Srgb<u8>,
     pub bg: Srgb<u8>,
+    pub attrs: CellAttrs,
 }
 
 /// State for a single screen buffer (primary or alt). The terminal holds
@@ -33,6 +35,10 @@ pub struct Screen {
     pub cursor: Cursor,
     pub fg: Srgb<u8>,
     pub bg: Srgb<u8>,
+    /// Current text attributes (bold/italic/underline) applied to new cell
+    /// writes. Managed via SGR — updated by `apply_sgr`, snapshotted into
+    /// `SavedCursor` on DECSC.
+    pub attrs: CellAttrs,
     /// Top row of the scroll region (0-indexed, inclusive).
     pub scroll_top: u32,
     /// Bottom row of the scroll region (0-indexed, inclusive).
@@ -68,6 +74,7 @@ impl Screen {
             cursor: Cursor::default(),
             fg: default_fg(),
             bg: default_bg(),
+            attrs: CellAttrs::default(),
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             offset: 0,
@@ -85,6 +92,7 @@ pub(super) fn save_cursor_slot(screen: &mut Screen) {
         cursor: screen.cursor,
         fg: screen.fg,
         bg: screen.bg,
+        attrs: screen.attrs,
     });
 }
 
@@ -101,6 +109,7 @@ pub(super) fn restore_cursor_slot(
             screen.cursor.col = saved.cursor.col.min(viewport.cols.saturating_sub(1));
             screen.fg = saved.fg;
             screen.bg = saved.bg;
+            screen.attrs = saved.attrs;
         }
         None => {
             screen.cursor.row = 0;

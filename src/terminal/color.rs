@@ -1,5 +1,6 @@
 use palette::Srgb;
 
+use crate::terminal::attrs::CellAttrs;
 use crate::vte;
 
 /// First palette index of the 6×6×6 RGB color cube in the 256-color palette.
@@ -78,10 +79,13 @@ pub(super) const fn ansi_color(index: u8) -> Srgb<u8> {
     }
 }
 
-/// Apply SGR (Select Graphic Rendition) parameters to the current fg/bg colors.
+/// Apply SGR (Select Graphic Rendition) parameters to the current fg/bg
+/// colors and text attributes. `CSI m` with no params (or param 0) is a full
+/// reset — colors go back to defaults and every attribute flag clears.
 pub(super) fn apply_sgr(
     fg: &mut Srgb<u8>,
     bg: &mut Srgb<u8>,
+    attrs: &mut CellAttrs,
     params: &vte::Params,
 ) {
     let params: Vec<u16> = params.iter().map(|p| p[0]).collect();
@@ -89,6 +93,7 @@ pub(super) fn apply_sgr(
     if params.is_empty() {
         *fg = default_fg();
         *bg = default_bg();
+        *attrs = CellAttrs::default();
         return;
     }
 
@@ -98,7 +103,16 @@ pub(super) fn apply_sgr(
             0 => {
                 *fg = default_fg();
                 *bg = default_bg();
+                *attrs = CellAttrs::default();
             }
+            1 => attrs.insert(CellAttrs::BOLD),
+            3 => attrs.insert(CellAttrs::ITALIC),
+            4 => attrs.insert(CellAttrs::UNDERLINE),
+            // SGR 22 resets both bold and faint — we don't track faint, so
+            // this is just a bold clear.
+            22 => attrs.remove(CellAttrs::BOLD),
+            23 => attrs.remove(CellAttrs::ITALIC),
+            24 => attrs.remove(CellAttrs::UNDERLINE),
             30..=37 => *fg = ansi_color((params[i] - 30) as u8),
             39 => *fg = default_fg(),
             40..=47 => *bg = ansi_color((params[i] - 40) as u8),
@@ -179,7 +193,18 @@ mod tests {
     fn apply(input: &[u8]) -> (Srgb<u8>, Srgb<u8>) {
         let mut fg = default_fg();
         let mut bg = default_bg();
-        apply_sgr(&mut fg, &mut bg, &parse_sgr(input));
+        let mut attrs = CellAttrs::default();
+        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(input));
+        (fg, bg)
+    }
+
+    fn apply_with_attrs(
+        input: &[u8],
+        attrs: &mut CellAttrs,
+    ) -> (Srgb<u8>, Srgb<u8>) {
+        let mut fg = default_fg();
+        let mut bg = default_bg();
+        apply_sgr(&mut fg, &mut bg, attrs, &parse_sgr(input));
         (fg, bg)
     }
 
@@ -223,18 +248,22 @@ mod tests {
     fn empty_sgr_resets_to_defaults() {
         let mut fg = Srgb::new(1, 2, 3);
         let mut bg = Srgb::new(4, 5, 6);
-        apply_sgr(&mut fg, &mut bg, &parse_sgr(b"\x1b[m"));
+        let mut attrs = CellAttrs::BOLD;
+        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[m"));
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
+        assert_eq!(attrs, CellAttrs::default());
     }
 
     #[test]
     fn sgr_0_resets_to_defaults() {
         let mut fg = Srgb::new(1, 2, 3);
         let mut bg = Srgb::new(4, 5, 6);
-        apply_sgr(&mut fg, &mut bg, &parse_sgr(b"\x1b[0m"));
+        let mut attrs = CellAttrs::BOLD;
+        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[0m"));
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
+        assert_eq!(attrs, CellAttrs::default());
     }
 
     #[test]
@@ -249,7 +278,8 @@ mod tests {
     fn sgr_39_restores_default_foreground() {
         let mut fg = Srgb::new(1, 2, 3);
         let mut bg = default_bg();
-        apply_sgr(&mut fg, &mut bg, &parse_sgr(b"\x1b[39m"));
+        let mut attrs = CellAttrs::default();
+        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[39m"));
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
@@ -266,7 +296,8 @@ mod tests {
     fn sgr_49_restores_default_background() {
         let mut fg = default_fg();
         let mut bg = Srgb::new(1, 2, 3);
-        apply_sgr(&mut fg, &mut bg, &parse_sgr(b"\x1b[49m"));
+        let mut attrs = CellAttrs::default();
+        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[49m"));
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
@@ -326,20 +357,52 @@ mod tests {
     }
 
     #[test]
-    fn sgr_non_color_code_leaves_colors_unchanged() {
-        let mut fg = default_fg();
-        let mut bg = default_bg();
-        // SGR 1 (bold) isn't handled here — colors must stay put.
-        apply_sgr(&mut fg, &mut bg, &parse_sgr(b"\x1b[1m"));
-        assert_eq!(fg, default_fg());
-        assert_eq!(bg, default_bg());
+    fn sgr_1_sets_bold() {
+        let mut attrs = CellAttrs::default();
+        apply_with_attrs(b"\x1b[1m", &mut attrs);
+        assert!(attrs.contains(CellAttrs::BOLD));
+        assert!(!attrs.contains(CellAttrs::ITALIC));
+    }
+
+    #[test]
+    fn sgr_3_sets_italic_and_4_sets_underline() {
+        let mut attrs = CellAttrs::default();
+        apply_with_attrs(b"\x1b[3;4m", &mut attrs);
+        assert!(attrs.contains(CellAttrs::ITALIC));
+        assert!(attrs.contains(CellAttrs::UNDERLINE));
+    }
+
+    #[test]
+    fn sgr_22_23_24_clear_individual_attrs() {
+        let mut attrs = CellAttrs::default();
+        apply_with_attrs(b"\x1b[1;3;4m", &mut attrs);
+        assert!(attrs.contains(CellAttrs::BOLD));
+        assert!(attrs.contains(CellAttrs::ITALIC));
+        assert!(attrs.contains(CellAttrs::UNDERLINE));
+
+        apply_with_attrs(b"\x1b[22m", &mut attrs);
+        assert!(!attrs.contains(CellAttrs::BOLD));
+        assert!(attrs.contains(CellAttrs::ITALIC));
+        assert!(attrs.contains(CellAttrs::UNDERLINE));
+
+        apply_with_attrs(b"\x1b[23;24m", &mut attrs);
+        assert_eq!(attrs, CellAttrs::default());
+    }
+
+    #[test]
+    fn sgr_0_clears_attrs() {
+        let mut attrs = CellAttrs::default();
+        apply_with_attrs(b"\x1b[1;3;4m", &mut attrs);
+        apply_with_attrs(b"\x1b[0m", &mut attrs);
+        assert_eq!(attrs, CellAttrs::default());
     }
 
     #[test]
     fn sgr_38_without_subtype_is_ignored() {
         let mut fg = default_fg();
         let mut bg = default_bg();
-        apply_sgr(&mut fg, &mut bg, &parse_sgr(b"\x1b[38m"));
+        let mut attrs = CellAttrs::default();
+        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[38m"));
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
@@ -348,8 +411,14 @@ mod tests {
     fn sgr_truncated_truecolor_is_ignored() {
         let mut fg = default_fg();
         let mut bg = default_bg();
+        let mut attrs = CellAttrs::default();
         // Missing the blue component.
-        apply_sgr(&mut fg, &mut bg, &parse_sgr(b"\x1b[38;2;10;20m"));
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &parse_sgr(b"\x1b[38;2;10;20m"),
+        );
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
@@ -358,8 +427,9 @@ mod tests {
     fn sgr_truncated_indexed_is_ignored() {
         let mut fg = default_fg();
         let mut bg = default_bg();
+        let mut attrs = CellAttrs::default();
         // `48;5` with no palette index.
-        apply_sgr(&mut fg, &mut bg, &parse_sgr(b"\x1b[48;5m"));
+        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[48;5m"));
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }

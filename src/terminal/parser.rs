@@ -64,6 +64,7 @@ pub(super) fn put_ascii_run(
     screen.offset = 0;
     let fg = screen.fg;
     let bg = screen.bg;
+    let attrs = screen.attrs;
     let link = screen.current_hyperlink;
 
     let mut i = 0;
@@ -98,6 +99,7 @@ pub(super) fn put_ascii_run(
         // each of these to a single memset-style fill.
         row.fg[col..col + chunk_len].fill(fg);
         row.bg[col..col + chunk_len].fill(bg);
+        row.attrs[col..col + chunk_len].fill(attrs);
         row.links[col..col + chunk_len].fill(link);
 
         screen.cursor.col += chunk_len as u32;
@@ -143,6 +145,7 @@ pub(super) fn put_char(
 
     let fg = screen.fg;
     let bg = screen.bg;
+    let attrs = screen.attrs;
     let link = screen.current_hyperlink;
     let r = screen.grid.active_row_index(&screen.cursor, viewport);
     let col = screen.cursor.col as usize;
@@ -156,11 +159,13 @@ pub(super) fn put_char(
     screen.grid.rows[r].cells[col] = s;
     screen.grid.rows[r].fg[col] = fg;
     screen.grid.rows[r].bg[col] = bg;
+    screen.grid.rows[r].attrs[col] = attrs;
     screen.grid.rows[r].links[col] = link;
     for i in 1..width {
         screen.grid.rows[r].cells[col + i] = continuation_cell();
         screen.grid.rows[r].fg[col + i] = fg;
         screen.grid.rows[r].bg[col + i] = bg;
+        screen.grid.rows[r].attrs[col + i] = attrs;
         screen.grid.rows[r].links[col + i] = link;
     }
     screen.cursor.col += width as u32;
@@ -371,7 +376,7 @@ pub(super) fn csi_dispatch(
             let mode = p.first().copied().unwrap_or(0);
             screen.grid.erase_in_line(&screen.cursor, viewport, mode);
         }
-        'm' => apply_sgr(&mut screen.fg, &mut screen.bg, params),
+        'm' => apply_sgr(&mut screen.fg, &mut screen.bg, &mut screen.attrs, params),
         'd' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             cursor.row = row.min(viewport.rows - 1);

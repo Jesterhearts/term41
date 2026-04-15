@@ -3,6 +3,7 @@ use std::ops::RangeBounds;
 use palette::Srgb;
 use smol_str::SmolStr;
 
+use crate::terminal::attrs::CellAttrs;
 use crate::terminal::color::default_bg;
 use crate::terminal::color::default_fg;
 use crate::terminal::hyperlink::HyperlinkId;
@@ -20,6 +21,9 @@ pub struct Row {
     pub cells: Vec<SmolStr>,
     pub fg: Vec<Srgb<u8>>,
     pub bg: Vec<Srgb<u8>>,
+    /// Per-cell text attributes (bold/italic/underline). Set from
+    /// `screen.attrs` at write time alongside `fg`/`bg`.
+    pub attrs: Vec<CellAttrs>,
     /// Hyperlink id per cell, set from the screen's current OSC 8 span at
     /// write time. `None` for plain cells; reused ids share the same target
     /// in [`HyperlinkRegistry`](super::HyperlinkRegistry) so adjacent cells
@@ -36,6 +40,7 @@ impl Row {
             cells: vec![blank_cell(); n],
             fg: vec![default_fg(); n],
             bg: vec![default_bg(); n],
+            attrs: vec![CellAttrs::default(); n],
             links: vec![None; n],
             wrapped: false,
         }
@@ -64,6 +69,7 @@ impl Row {
         self.cells.resize(new_len, blank_cell());
         self.fg.resize(new_len, default_fg());
         self.bg.resize(new_len, default_bg());
+        self.attrs.resize(new_len, CellAttrs::default());
         self.links.resize(new_len, None);
     }
 
@@ -75,6 +81,7 @@ impl Row {
         self.cells.truncate(new_len);
         self.fg.truncate(new_len);
         self.bg.truncate(new_len);
+        self.attrs.truncate(new_len);
         self.links.truncate(new_len);
     }
 
@@ -105,6 +112,7 @@ impl Row {
         self.cells[range.clone()].fill(blank_cell());
         self.fg[range.clone()].fill(default_fg());
         self.bg[range.clone()].fill(default_bg());
+        self.attrs[range.clone()].fill(CellAttrs::default());
         self.links[range].fill(None);
     }
 
@@ -130,6 +138,7 @@ impl Row {
         }
         self.fg.copy_within(src.clone(), dest);
         self.bg.copy_within(src.clone(), dest);
+        self.attrs.copy_within(src.clone(), dest);
         self.links.copy_within(src, dest);
     }
 
@@ -149,6 +158,8 @@ impl Row {
             .copy_from_slice(&other.fg[src.start..src.start + copy_len]);
         self.bg[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.bg[src.start..src.start + copy_len]);
+        self.attrs[dest_offset..dest_offset + copy_len]
+            .copy_from_slice(&other.attrs[src.start..src.start + copy_len]);
         self.links[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.links[src.start..src.start + copy_len]);
 

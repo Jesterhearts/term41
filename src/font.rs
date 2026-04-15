@@ -26,6 +26,8 @@ use read_fonts::tables::loca::Loca;
 use read_fonts::types::GlyphId;
 use smol_str::SmolStr;
 
+use crate::terminal::CellAttrs;
+
 /// The embedded Fairfax HD font (ultimate fallback).
 static FAIRFAX_HD: &[u8] = include_bytes!("../resources/fonts/FairfaxHD.ttf");
 
@@ -69,6 +71,25 @@ struct LoadedFont {
     /// over text fonts that might also have a monochrome outline for the
     /// same codepoint.
     is_color: bool,
+    /// True when the face was loaded as a bold weight variant (fontdb
+    /// weight ≥ 600). Combined with `is_italic` at render time to decide
+    /// whether a cell's BOLD attribute still needs synthesis on top.
+    is_bold: bool,
+    /// True when the face was loaded as an italic/oblique variant.
+    is_italic: bool,
+}
+
+/// The set of weight/style variants loaded for one user-requested family.
+/// `regular` is always present — if the regular weight/style can't be found,
+/// the family is dropped from the list outright. The other three variants
+/// are optional; a missing variant means the renderer falls back to the
+/// closest available face and synthesizes the missing style when possible.
+#[derive(Debug, Clone, Copy)]
+struct FamilyVariants {
+    regular: usize,
+    bold: Option<usize>,
+    italic: Option<usize>,
+    bold_italic: Option<usize>,
 }
 
 /// Key for the ShapePlan cache.
@@ -80,9 +101,14 @@ struct PlanKey {
 }
 
 /// Font system: manages an ordered list of fonts with fallback and plan
-/// caching.
+/// caching. Families are kept in user-declared order — the first entry is
+/// the primary text face; later entries provide fallback glyphs for cells
+/// the primary can't cover. Each family carries up to four (weight, style)
+/// variants; missing variants degrade to `regular` with synthesis at
+/// render time.
 pub struct FontSystem {
     fonts: Vec<LoadedFont>,
+    families: Vec<FamilyVariants>,
     plan_cache: HashMap<PlanKey, ShapePlan>,
     pub cell_width: u32,
     pub cell_height: u32,
@@ -95,7 +121,8 @@ impl FontSystem {
         fonts_config: Option<&str>,
         font_size: f32,
     ) -> Self {
-        let mut fonts = Vec::new();
+        let mut fonts: Vec<LoadedFont> = Vec::new();
+        let mut families: Vec<FamilyVariants> = Vec::new();
 
         if let Some(families_str) = fonts_config {
             let mut db = fontdb::Database::new();
@@ -113,28 +140,79 @@ impl FontSystem {
                     _ => fontdb::Family::Name(family_name),
                 };
 
-                let query = fontdb::Query {
-                    families: &[family],
-                    ..Default::default()
-                };
-
-                if let Some(id) = db.query(&query) {
-                    let loaded = db.with_face_data(id, |data, _face_index| load_font(data));
-                    if let Some(Some(font)) = loaded {
-                        info!("loaded font: {family_name}");
-                        fonts.push(font);
-                    }
-                } else {
+                let Some(regular) = load_family_variant(
+                    &db,
+                    &mut fonts,
+                    &family,
+                    fontdb::Weight::NORMAL,
+                    fontdb::Style::Normal,
+                    false,
+                    false,
+                ) else {
                     warn!("font not found: {family_name}");
-                }
+                    continue;
+                };
+                // Each optional variant is loaded only when fontdb can match
+                // the exact weight/style — fontdb's fuzzy query will happily
+                // return a regular face for a bold query, which would load
+                // the same file twice and do nothing useful.
+                let bold = load_family_variant(
+                    &db,
+                    &mut fonts,
+                    &family,
+                    fontdb::Weight::BOLD,
+                    fontdb::Style::Normal,
+                    true,
+                    false,
+                );
+                let italic = load_family_variant(
+                    &db,
+                    &mut fonts,
+                    &family,
+                    fontdb::Weight::NORMAL,
+                    fontdb::Style::Italic,
+                    false,
+                    true,
+                );
+                let bold_italic = load_family_variant(
+                    &db,
+                    &mut fonts,
+                    &family,
+                    fontdb::Weight::BOLD,
+                    fontdb::Style::Italic,
+                    true,
+                    true,
+                );
+                info!(
+                    "loaded font family: {family_name} (bold={} italic={} bold_italic={})",
+                    bold.is_some(),
+                    italic.is_some(),
+                    bold_italic.is_some()
+                );
+                families.push(FamilyVariants {
+                    regular,
+                    bold,
+                    italic,
+                    bold_italic,
+                });
             }
         }
 
-        // Always append embedded Fairfax HD as ultimate fallback.
-        fonts.push(load_font(FAIRFAX_HD).expect("embedded font must load"));
+        // Always append embedded Fairfax HD as ultimate fallback. It ships
+        // only a regular face; cells that want bold/italic from the fallback
+        // route get the regular glyph plus any synthesis the renderer can
+        // still apply on top.
+        let fairfax_idx = fonts.len();
+        fonts.push(load_font(FAIRFAX_HD, false, false).expect("embedded font must load"));
+        families.push(FamilyVariants {
+            regular: fairfax_idx,
+            bold: None,
+            italic: None,
+            bold_italic: None,
+        });
 
-        // Compute cell metrics from the first font.
-        let primary = &fonts[0];
+        // Compute cell metrics from the first family's regular face.
+        let primary = &fonts[families[0].regular];
         let rf = read_fonts::FontRef::new(&primary.data).expect("parse font");
         let hhea = rf.hhea().expect("hhea table");
         let hmtx = rf.hmtx().expect("hmtx table");
@@ -153,12 +231,43 @@ impl FontSystem {
 
         Self {
             fonts,
+            families,
             plan_cache: HashMap::new(),
             cell_width,
             cell_height,
             font_size,
             ascent,
         }
+    }
+
+    /// Whether `font_index`'s face was loaded as a bold weight. The renderer
+    /// combines this with a cell's BOLD attribute to decide if the COLR
+    /// synthesis path should kick in on top of the rasterized glyph.
+    pub fn font_is_bold(
+        &self,
+        font_index: usize,
+    ) -> bool {
+        self.fonts.get(font_index).is_some_and(|f| f.is_bold)
+    }
+
+    /// Whether `font_index`'s face was loaded as an italic/oblique variant.
+    /// When false and the cell wants italic, the renderer synthesizes
+    /// italic by shearing the glyph quad.
+    pub fn font_is_italic(
+        &self,
+        font_index: usize,
+    ) -> bool {
+        self.fonts.get(font_index).is_some_and(|f| f.is_italic)
+    }
+
+    /// Whether `font_index` is a colour-glyph font (COLR/CBDT/sbix/SVG).
+    /// Synthetic bold is only safe to apply here — outline fonts would
+    /// smear stems unpleasantly under a blind bitmap dilation.
+    pub fn font_is_color(
+        &self,
+        font_index: usize,
+    ) -> bool {
+        self.fonts.get(font_index).is_some_and(|f| f.is_color)
     }
 
     pub fn grid_size(
@@ -185,7 +294,8 @@ impl FontSystem {
 
     /// Shape an entire terminal row with font fallback and plan caching.
     /// Takes `&[SmolStr]` directly from the terminal's SoA storage — each
-    /// cell is one grapheme cluster.
+    /// cell is one grapheme cluster — plus parallel `&[CellAttrs]` so each
+    /// cell can pick the bold/italic variant of the primary family.
     ///
     /// Emoji clusters (ending in VS16 or whose first codepoint falls in a
     /// known emoji-presentation range) are shaped in a dedicated first pass
@@ -193,9 +303,16 @@ impl FontSystem {
     /// monochrome outline of `U+2764 HEAVY BLACK HEART` would otherwise win
     /// the race against a colour-emoji font and render a narrow lifeless
     /// glyph in place of the emoji the user pasted.
+    ///
+    /// Text cells pick a preferred face from the first family's variant
+    /// table (bold/italic/bold_italic, falling back to regular with
+    /// `synthetic_*` flags set when the variant is missing). Pass 0 only
+    /// accepts the cell's preferred face, so a bold cell takes its bold
+    /// glyph even when a fallback family also carries the same codepoint.
     pub fn shape_row(
         &mut self,
         cells: &[SmolStr],
+        attrs: &[CellAttrs],
     ) -> Vec<ShapedGlyph> {
         if cells.is_empty() {
             return vec![];
@@ -215,13 +332,36 @@ impl FontSystem {
 
         let wants_color: Vec<bool> = cells.iter().map(|c| cluster_prefers_color(c)).collect();
 
+        // Preferred face per cell on pass 0. `Some(idx)` pins the cell to
+        // that exact face (text cells lock the variant that matches their
+        // attributes). `None` lets pass 0 accept any colour font — colour
+        // fonts rarely ship weight/style variants, so emoji preference is
+        // still resolved by `loaded.is_color` like the original logic.
+        let preferred: Vec<Option<usize>> = cells
+            .iter()
+            .enumerate()
+            .map(|(col, _)| {
+                if wants_color[col] {
+                    None
+                } else {
+                    let a = attrs[col];
+                    let (idx, _, _) = pick_variant(
+                        &self.families,
+                        a.contains(CellAttrs::BOLD),
+                        a.contains(CellAttrs::ITALIC),
+                    );
+                    Some(idx)
+                }
+            })
+            .collect();
+
         // Track which columns still need a glyph (for fallback).
         let mut has_glyph = vec![false; cells.len()];
         let mut result: Vec<ShapedGlyph> = Vec::with_capacity(cells.len());
 
-        // Two passes: first only accept a glyph when the font's "colour"
-        // classification matches the cluster's preference. Second pass lets
-        // any remaining uncovered cell take whichever font has a glyph.
+        // Two passes: first only accept a glyph from the cell's preferred
+        // face (variant-matched, or colour-matched for emoji). Second pass
+        // lets any remaining uncovered cell take whichever font has a glyph.
         for pass in 0..2 {
             for (font_idx, loaded) in self.fonts.iter().enumerate() {
                 let font_ref = match FontRef::new(&loaded.data) {
@@ -279,9 +419,21 @@ impl FontSystem {
                         continue;
                     }
 
-                    // Pass 0: require font type to match cluster preference.
-                    if pass == 0 && wants_color[col as usize] != loaded.is_color {
-                        continue;
+                    // Pass 0: text cells pin to their preferred variant;
+                    // emoji clusters accept any colour font.
+                    if pass == 0 {
+                        match preferred[col as usize] {
+                            Some(pref_idx) => {
+                                if font_idx != pref_idx {
+                                    continue;
+                                }
+                            }
+                            None => {
+                                if !loaded.is_color {
+                                    continue;
+                                }
+                            }
+                        }
                     }
 
                     // Mark all columns consumed by this glyph (handles
@@ -460,7 +612,11 @@ fn empty_glyph() -> RasterizedGlyph {
     }
 }
 
-fn load_font(data: &[u8]) -> Option<LoadedFont> {
+fn load_font(
+    data: &[u8],
+    is_bold: bool,
+    is_italic: bool,
+) -> Option<LoadedFont> {
     let data = Arc::new(data.to_vec());
     let font_ref = FontRef::new(&data).ok()?;
     let shaper_data = ShaperData::new(&font_ref);
@@ -476,7 +632,79 @@ fn load_font(data: &[u8]) -> Option<LoadedFont> {
         shaper_data,
         units_per_em,
         is_color,
+        is_bold,
+        is_italic,
     })
+}
+
+/// Look up a face in `db` that matches `family` with *exactly* the requested
+/// weight and style. fontdb's `query()` will fuzzy-match (a BOLD query falls
+/// back to a NORMAL face when no bold is available); we reject those fuzzy
+/// hits so a missing variant stays missing and the caller can record it as
+/// `None` in the family table.
+fn load_family_variant(
+    db: &fontdb::Database,
+    fonts: &mut Vec<LoadedFont>,
+    family: &fontdb::Family,
+    weight: fontdb::Weight,
+    style: fontdb::Style,
+    is_bold: bool,
+    is_italic: bool,
+) -> Option<usize> {
+    let query = fontdb::Query {
+        families: std::slice::from_ref(family),
+        weight,
+        stretch: fontdb::Stretch::Normal,
+        style,
+    };
+    let id = db.query(&query)?;
+    let face = db.face(id)?;
+    if face.weight != weight || face.style != style {
+        return None;
+    }
+    let loaded = db.with_face_data(id, |data, _| load_font(data, is_bold, is_italic))??;
+    let idx = fonts.len();
+    fonts.push(loaded);
+    Some(idx)
+}
+
+/// Pick the face that should shape a cell with the given attributes, walking
+/// `families` in user-declared order. Returns `(font_index, synth_bold,
+/// synth_italic)` — synth flags are set when the chosen face doesn't natively
+/// cover the requested style and the renderer should fake it on top.
+///
+/// Degradation prefers preserving the rarer style: for BOLD|ITALIC with only
+/// a bold face available, keep bold and synthesize italic via vertex shear;
+/// with only an italic face, keep italic and synthesize bold (COLR only).
+fn pick_variant(
+    families: &[FamilyVariants],
+    want_bold: bool,
+    want_italic: bool,
+) -> (usize, bool, bool) {
+    let family = &families[0];
+    let exact = match (want_bold, want_italic) {
+        (false, false) => Some(family.regular),
+        (true, false) => family.bold,
+        (false, true) => family.italic,
+        (true, true) => family.bold_italic,
+    };
+    if let Some(idx) = exact {
+        return (idx, false, false);
+    }
+    match (want_bold, want_italic) {
+        (true, true) => {
+            if let Some(idx) = family.bold {
+                return (idx, false, true);
+            }
+            if let Some(idx) = family.italic {
+                return (idx, true, false);
+            }
+            (family.regular, true, true)
+        }
+        (true, false) => (family.regular, true, false),
+        (false, true) => (family.regular, false, true),
+        (false, false) => (family.regular, false, false),
+    }
 }
 
 fn charmap_lookup(
@@ -789,7 +1017,8 @@ mod tests {
                     SmolStr::new_inline(c.encode_utf8(&mut buf))
                 })
                 .collect();
-            let shaped = fs.shape_row(&cells);
+            let attrs = vec![CellAttrs::default(); cells.len()];
+            let shaped = fs.shape_row(&cells, &attrs);
             for sg in &shaped {
                 let cell = &cells[sg.col as usize];
                 if cell == " " {

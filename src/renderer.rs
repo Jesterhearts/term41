@@ -369,7 +369,8 @@ impl Renderer {
                 smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
             })
             .collect();
-        let shaped = font_system.shape_row(&ascii_cells);
+        let ascii_attrs = vec![crate::terminal::CellAttrs::default(); ascii_cells.len()];
+        let shaped = font_system.shape_row(&ascii_cells, &ascii_attrs);
         for sg in &shaped {
             renderer.glyph_atlas.ensure_cached(
                 &renderer.queue,
@@ -377,6 +378,7 @@ impl Renderer {
                 sg.font_index,
                 sg.glyph_id,
                 sg.cells_wide,
+                false,
             );
         }
 
@@ -468,13 +470,17 @@ impl Renderer {
                 ]);
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
 
-                // OSC 8 hyperlink underline. Stack a thin opaque quad at the
-                // baseline of cells that carry a link so users can see what
-                // is clickable. Uses the cell foreground colour so the line
-                // tracks the surrounding text and stays visible against any
-                // theme. Drawn in the bg pass so the glyph still paints over
-                // any pixels the underline would otherwise eat.
-                if grid_row.links[col as usize].is_some() {
+                // Underline quad. Drawn for either of two sources:
+                //   * OSC 8 hyperlinks — so the user can see what's clickable.
+                //   * SGR underline (CSI 4m) — the normal text attribute.
+                // Either case stacks a thin quad at the cell baseline using
+                // the foreground colour; a cell that carries both still
+                // only draws the line once. Sits in the bg pass so the
+                // glyph paints over any pixels the line would otherwise eat.
+                let has_link = grid_row.links[col as usize].is_some();
+                let has_attr_underline =
+                    grid_row.attrs[col as usize].contains(crate::terminal::CellAttrs::UNDERLINE);
+                if has_link || has_attr_underline {
                     let underline_color = pack_color(&grid_row.fg[col as usize], 255);
                     let thickness = (cell_h * 0.06).max(1.0);
                     let uy = y + cell_h - thickness;
@@ -527,16 +533,29 @@ impl Renderer {
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
             }
 
-            // Shape the entire row for foreground glyphs — borrows &[char] directly.
-            let shaped = font_system.shape_row(&grid_row.cells);
+            // Shape the entire row for foreground glyphs — borrows the cell
+            // strings and their attribute bitmasks directly so each cell can
+            // pick its bold/italic variant of the primary family.
+            let shaped = font_system.shape_row(&grid_row.cells, &grid_row.attrs);
 
             for sg in &shaped {
+                let cell_attrs = grid_row.attrs[sg.col as usize];
+                let wants_bold = cell_attrs.contains(crate::terminal::CellAttrs::BOLD);
+                let wants_italic = cell_attrs.contains(crate::terminal::CellAttrs::ITALIC);
+                // Synth flags: true when the cell asks for a style the face
+                // the shaper actually used doesn't natively cover. The atlas
+                // only acts on `synth_bold` for colour fonts; italic
+                // synthesis is a vertex-level shear below.
+                let synth_bold = wants_bold && !font_system.font_is_bold(sg.font_index);
+                let synth_italic = wants_italic && !font_system.font_is_italic(sg.font_index);
+
                 let slot = match self.glyph_atlas.ensure_cached(
                     &self.queue,
                     font_system,
                     sg.font_index,
                     sg.glyph_id,
                     sg.cells_wide,
+                    synth_bold,
                 ) {
                     Some(e) => e,
                     None => continue,
@@ -556,6 +575,15 @@ impl Renderer {
                 let gw = sw as f32;
                 let gh = sh as f32;
 
+                // Fake italic by shearing the glyph quad around the cell
+                // baseline: vertices above the baseline shift right, below
+                // shift left. The baseline pins so glyph rows stay aligned
+                // with neighbouring regular text. The shear factor is the
+                // tangent of ~12°, a common italic angle.
+                let baseline_y = y + baseline;
+                let shear = if synth_italic { 0.2126_f32 } else { 0.0 };
+                let shear_at = |vy: f32| -> f32 { shear * (baseline_y - vy) };
+
                 let inverted = terminal.is_cell_selected(row, sg.col as u32)
                     || cursor_state.is_block_at(row, sg.col as u32);
                 let fg_cell = if inverted {
@@ -568,25 +596,25 @@ impl Renderer {
                 let fi = fg_vertices.len() as u32;
                 fg_vertices.extend_from_slice(&[
                     FgVertex {
-                        pos: [gx, gy],
+                        pos: [gx + shear_at(gy), gy],
                         uv: [sx as f32, sy as f32],
                         color: fg_color,
                         flags,
                     },
                     FgVertex {
-                        pos: [gx + gw, gy],
+                        pos: [gx + gw + shear_at(gy), gy],
                         uv: [(sx + sw) as f32, sy as f32],
                         color: fg_color,
                         flags,
                     },
                     FgVertex {
-                        pos: [gx, gy + gh],
+                        pos: [gx + shear_at(gy + gh), gy + gh],
                         uv: [sx as f32, (sy + sh) as f32],
                         color: fg_color,
                         flags,
                     },
                     FgVertex {
-                        pos: [gx + gw, gy + gh],
+                        pos: [gx + gw + shear_at(gy + gh), gy + gh],
                         uv: [(sx + sw) as f32, (sy + sh) as f32],
                         color: fg_color,
                         flags,

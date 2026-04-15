@@ -306,6 +306,7 @@ impl Grid {
                             cells: self.rows[row].cells.split_off(new_width as usize),
                             fg: self.rows[row].fg.split_off(new_width as usize),
                             bg: self.rows[row].bg.split_off(new_width as usize),
+                            attrs: self.rows[row].attrs.split_off(new_width as usize),
                             links: self.rows[row].links.split_off(new_width as usize),
                             wrapped: self.rows[row].wrapped,
                         };
