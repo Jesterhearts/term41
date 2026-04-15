@@ -192,6 +192,10 @@ pub struct Terminal {
 
     /// Accumulates chunks for multi-part kitty graphics transmissions.
     kitty_chunked: crate::image::kitty::ChunkedTransmission,
+
+    /// Accumulates chunks for multi-part iTerm2 graphics transmissions
+    /// (`MultipartFile` → `FilePart*` → `FileEnd`).
+    iterm_chunked: crate::image::iterm::ChunkedTransmission,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -236,6 +240,7 @@ impl Terminal {
             current_prompt_row: None,
             kitty_images: crate::image::kitty::KittyImageStore::new(),
             kitty_chunked: crate::image::kitty::ChunkedTransmission::new(),
+            iterm_chunked: crate::image::iterm::ChunkedTransmission::new(),
             cell_width,
         }
     }
@@ -1129,17 +1134,35 @@ impl Terminal {
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
                 vte::Action::OscDispatch(data) => {
-                    let mut ctx = OscContext {
-                        clipboard: &mut self.clipboard,
-                        pending_output: &mut self.pending_output,
-                        current_directory: &mut self.current_directory,
-                        hyperlinks: &mut self.hyperlinks,
-                        active_screen: &mut self.active,
-                        viewport: &self.viewport,
-                        current_title: &mut self.current_title,
-                        current_prompt_row: &mut self.current_prompt_row,
-                    };
-                    handle_osc(&data, &mut ctx);
+                    // iTerm2 image protocol rides on OSC 1337. Route it next
+                    // to the other graphics protocols (kitty on APC, sixel
+                    // on DCS) rather than through the text-OSC dispatcher,
+                    // which doesn't carry cursor / cell-size state.
+                    if let Some(rest) = data.strip_prefix(b"1337;")
+                        && is_iterm_image_cmd(rest)
+                    {
+                        handle_iterm_graphics(
+                            rest,
+                            &mut self.iterm_chunked,
+                            &mut self.active,
+                            &self.viewport,
+                            &mut self.next_image_id,
+                            self.cell_height,
+                            self.cell_width,
+                        );
+                    } else {
+                        let mut ctx = OscContext {
+                            clipboard: &mut self.clipboard,
+                            pending_output: &mut self.pending_output,
+                            current_directory: &mut self.current_directory,
+                            hyperlinks: &mut self.hyperlinks,
+                            active_screen: &mut self.active,
+                            viewport: &self.viewport,
+                            current_title: &mut self.current_title,
+                            current_prompt_row: &mut self.current_prompt_row,
+                        };
+                        handle_osc(&data, &mut ctx);
+                    }
                 }
                 vte::Action::ApcDispatch(data) => {
                     handle_kitty_graphics(
@@ -1564,6 +1587,156 @@ fn handle_kitty_delete(
             }
         }
         _ => {}
+    }
+}
+
+// ---------------------------------------------------------------------------
+// iTerm2 graphics protocol handler (OSC 1337 ; File= / MultipartFile= / …)
+// ---------------------------------------------------------------------------
+
+/// True when an OSC 1337 subcommand (after the `1337;` prefix) is part of
+/// the iTerm2 inline-image protocol. OSC 1337 is also used by iTerm2 for
+/// shell integration, notifications, and other extensions — routing only
+/// the image subcommands keeps those out of this handler.
+fn is_iterm_image_cmd(rest: &[u8]) -> bool {
+    rest.starts_with(b"File=")
+        || rest.starts_with(b"MultipartFile=")
+        || rest.starts_with(b"FilePart=")
+        || rest == b"FileEnd"
+}
+
+/// Dispatch an iTerm2 graphics OSC 1337 subcommand. `rest` is the OSC
+/// payload with the leading `1337;` already consumed.
+fn handle_iterm_graphics(
+    rest: &[u8],
+    chunked: &mut crate::image::iterm::ChunkedTransmission,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
+) {
+    if let Some(cmd) = crate::image::iterm::parse_file(rest) {
+        if let Some(image) = crate::image::iterm::decode_payload(&cmd.payload) {
+            place_iterm_image(
+                cmd,
+                image,
+                screen,
+                viewport,
+                next_image_id,
+                cell_height,
+                cell_width,
+            );
+        }
+        return;
+    }
+    if let Some(header) = crate::image::iterm::parse_multipart_start(rest) {
+        chunked.begin(header);
+        return;
+    }
+    if let Some(chunk) = crate::image::iterm::parse_file_part(rest) {
+        chunked.push(chunk);
+        return;
+    }
+    if crate::image::iterm::is_file_end(rest)
+        && let Some(cmd) = chunked.finish()
+        && let Some(image) = crate::image::iterm::decode_payload(&cmd.payload)
+    {
+        place_iterm_image(
+            cmd,
+            image,
+            screen,
+            viewport,
+            next_image_id,
+            cell_height,
+            cell_width,
+        );
+    }
+}
+
+/// Place an iTerm2 image on the grid at the cursor position, resolving
+/// `width`/`height` (cells, pixels, percent, or auto) into final display
+/// pixels and advancing the cursor past the image unless `doNotMoveCursor`
+/// is set.
+fn place_iterm_image(
+    cmd: crate::image::iterm::ItermCommand,
+    image: crate::image::DecodedImage,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
+) {
+    // The spec default for `inline` is 0 ("download silently"). A terminal
+    // that can't offer a download UI has nothing useful to do with a hidden
+    // image — drop rather than silently render what the sender said not to.
+    if !cmd.inline {
+        return;
+    }
+
+    let viewport_px_w = viewport.cols * cell_width;
+    let viewport_px_h = viewport.rows * cell_height;
+
+    let w_given = !matches!(cmd.width, crate::image::iterm::Dimension::Auto);
+    let h_given = !matches!(cmd.height, crate::image::iterm::Dimension::Auto);
+
+    let mut display_width = cmd.width.to_pixels(cell_width, viewport_px_w, image.width);
+    let mut display_height = cmd
+        .height
+        .to_pixels(cell_height, viewport_px_h, image.height);
+
+    // When only one axis is specified and preserveAspectRatio is on,
+    // derive the other from the source image's aspect ratio. With both
+    // axes given, honour the sender verbatim (they asked for a stretch).
+    if cmd.preserve_aspect_ratio && w_given != h_given && image.width > 0 && image.height > 0 {
+        if w_given {
+            display_height =
+                (display_width as u64 * image.height as u64 / image.width as u64) as u32;
+        } else {
+            display_width =
+                (display_height as u64 * image.width as u64 / image.height as u64) as u32;
+        }
+    }
+
+    if display_width == 0 || display_height == 0 {
+        return;
+    }
+
+    let id = *next_image_id;
+    *next_image_id += 1;
+
+    let row = screen.grid.active_row_index(&screen.cursor, viewport);
+    let image_rows = display_height.div_ceil(cell_height);
+
+    crate::terminal::image::remove_overlapping(
+        &mut screen.images,
+        row,
+        image_rows.max(1) as usize,
+        screen.cursor.col,
+        cell_height,
+    );
+
+    screen.images.insert(
+        id,
+        PlacedImage {
+            image,
+            id,
+            row,
+            col: screen.cursor.col,
+            display_width,
+            display_height,
+        },
+    );
+
+    if !cmd.do_not_move_cursor {
+        for _ in 0..image_rows {
+            screen.cursor.row += 1;
+            if screen.cursor.row >= viewport.rows {
+                screen.grid.push_visible_row(viewport);
+                screen.cursor.row = viewport.rows - 1;
+            }
+        }
+        screen.cursor.col = 0;
     }
 }
 

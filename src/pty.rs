@@ -65,6 +65,13 @@ impl Pty {
             _ => CommandBuilder::new_default_prog(),
         };
         cmd.env("TERM", "xterm-256color");
+        // Advertise iTerm2 in TERM_PROGRAM so clients that gate inline-image
+        // output on a hardcoded allowlist (viu, chafa, rich, etc.) emit the
+        // iTerm2 OSC 1337 protocol — which we now implement. The app
+        // would otherwise fall back to half-blocks even though we could
+        // render full images.
+        cmd.env("TERM_PROGRAM", "iTerm.app");
+        cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
         if let Ok(cwd) = std::env::current_dir() {
             cmd.cwd(cwd);
         }
