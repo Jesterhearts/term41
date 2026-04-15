@@ -104,6 +104,13 @@ pub struct Renderer {
     /// Cleared back to `None` once the flash is past its fade-out window;
     /// `notify_bell` re-arms it.
     bell_started: Option<Instant>,
+
+    /// Show the OSC 133 shell-integration gutter on the left edge. When
+    /// `true`, a thin strip reserves pixels to the left of col 0 and
+    /// [`Self::gutter_width_px`] returns the actual width (derived from
+    /// the current cell metrics); when `false` the gutter is fully
+    /// collapsed and every caller gets `0`.
+    gutter_enabled: bool,
 }
 
 /// Half-period of the cursor blink. xterm uses 530ms by default; 500 lands
@@ -123,6 +130,7 @@ impl Renderer {
         font_system: &mut FontSystem,
         _terminal: &Terminal,
         opacity: f32,
+        gutter_enabled: bool,
     ) -> Self {
         let size = window.inner_size();
 
@@ -379,6 +387,7 @@ impl Renderer {
             bg_alpha: (opacity.clamp(0.0, 1.0) * 255.0) as u8,
             started: Instant::now(),
             bell_started: None,
+            gutter_enabled,
         };
 
         renderer.update_screen_size(size);
@@ -420,6 +429,36 @@ impl Renderer {
         self.update_screen_size(size);
     }
 
+    /// Configure whether the shell-integration gutter is drawn. Returns
+    /// `true` when the setting actually changed, so the host can decide
+    /// whether to push a resize through the grid/pty (changing gutter
+    /// visibility shifts how many cells fit in the window).
+    pub fn set_gutter_enabled(
+        &mut self,
+        enabled: bool,
+    ) -> bool {
+        if self.gutter_enabled == enabled {
+            return false;
+        }
+        self.gutter_enabled = enabled;
+        true
+    }
+
+    /// Width reserved for the gutter at the given cell width, in pixels.
+    /// Returns `0` when disabled so callers can add it unconditionally.
+    /// Scaled to `cell_width / 3` (min 4px) so the gutter stays
+    /// proportional across font-size changes without ever collapsing to
+    /// a hairline that wouldn't fit a visible dot.
+    pub fn gutter_width_px(
+        &self,
+        cell_width: u32,
+    ) -> u32 {
+        if !self.gutter_enabled {
+            return 0;
+        }
+        (cell_width / 3).max(12)
+    }
+
     fn update_screen_size(
         &self,
         size: PhysicalSize<u32>,
@@ -439,6 +478,10 @@ impl Renderer {
         let cell_w = font_system.cell_width as f32;
         let cell_h = font_system.cell_height as f32;
         let baseline = font_system.baseline_offset();
+        // Every cell / image / cursor x-coord is offset by the gutter so
+        // col 0 starts just to the right of the reserved strip. When the
+        // gutter is disabled this is `0.0`, so the offset is harmless.
+        let gutter_px = self.gutter_width_px(font_system.cell_width) as f32;
 
         let mut bg_vertices: Vec<BgVertex> = Vec::new();
         let mut bg_indices: Vec<u32> = Vec::new();
@@ -466,7 +509,7 @@ impl Renderer {
             // Background quads for the whole row.
             let grid_row = terminal.visible_row(row);
             for col in 0..terminal.viewport.cols {
-                let x = col as f32 * cell_w;
+                let x = col as f32 * cell_w + gutter_px;
                 // A cell is rendered with altered fg/bg when it is selected,
                 // matches the search query, or sits under a visible block
                 // cursor. Selection / non-active match / block cursor fully
@@ -550,22 +593,23 @@ impl Renderer {
             // glyph keeps its normal colour and the bar paints behind /
             // beside the character rather than over it.
             if let Some(overlay) = cursor_state.bar_overlay_at(row, &grid_row.fg, cell_w, cell_h) {
+                let ox = overlay.x + gutter_px;
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
                     BgVertex {
-                        pos: [overlay.x, overlay.y],
+                        pos: [ox, overlay.y],
                         color: overlay.color,
                     },
                     BgVertex {
-                        pos: [overlay.x + overlay.w, overlay.y],
+                        pos: [ox + overlay.w, overlay.y],
                         color: overlay.color,
                     },
                     BgVertex {
-                        pos: [overlay.x, overlay.y + overlay.h],
+                        pos: [ox, overlay.y + overlay.h],
                         color: overlay.color,
                     },
                     BgVertex {
-                        pos: [overlay.x + overlay.w, overlay.y + overlay.h],
+                        pos: [ox + overlay.w, overlay.y + overlay.h],
                         color: overlay.color,
                     },
                 ]);
@@ -609,7 +653,7 @@ impl Renderer {
                 let sw = slot.width();
                 let sh = slot.height();
 
-                let gx = sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+                let gx = sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset + gutter_px;
                 let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
                 let gw = sw as f32;
                 let gh = sh as f32;
@@ -711,6 +755,20 @@ impl Renderer {
             }
         }
 
+        // ---- Shell-integration gutter markers ----
+        // Painted before the search bar so the bar overlays the gutter on
+        // its own row (the search bar is a full-width overlay and doesn't
+        // care about cell columns underneath it).
+        if gutter_px > 0.0 {
+            render_gutter_markers(
+                terminal,
+                gutter_px,
+                cell_h,
+                &mut bg_vertices,
+                &mut bg_indices,
+            );
+        }
+
         // ---- Search bar overlay ----
         // Drawn last in the glyph pass so it paints over the bottom row of
         // whatever the terminal was showing. Only fires while the search
@@ -737,7 +795,7 @@ impl Renderer {
                 None => continue,
             };
 
-            let base_x = vis.screen_col as f32 * cell_w;
+            let base_x = vis.screen_col as f32 * cell_w + gutter_px;
             let base_y = vis.screen_row as f32 * cell_h;
 
             for tile in &entry.tiles {
@@ -1222,5 +1280,78 @@ impl CursorRenderState {
                 })
             }
         }
+    }
+}
+
+/// Paint one status bar per visible prompt row. Each bar spans the full
+/// height of the row so the prompt boundary is obvious even at a glance,
+/// and fills most of the gutter width with a small horizontal margin so
+/// the coloured column doesn't butt up against col 0 of the text.
+///
+/// Colors:
+///
+/// * **Green** — command finished with exit `0`.
+/// * **Red** — command finished with a non-zero exit code.
+/// * **Gray** — prompt seen but no `D` yet: either the command is still
+///   running, the shell doesn't emit `D`, or the command was superseded by the
+///   next prompt before D arrived. All three look the same at the terminal
+///   layer, so we show one "unknown" colour for all of them.
+///
+/// Drawn as plain rectangular quads in the bg pass so we don't need an
+/// extra pipeline.
+fn render_gutter_markers(
+    terminal: &Terminal,
+    gutter_px: f32,
+    cell_h: f32,
+    bg_vertices: &mut Vec<BgVertex>,
+    bg_indices: &mut Vec<u32>,
+) {
+    // Leave a small horizontal margin on both sides so the bar doesn't
+    // touch either the window edge or the first text column.
+    let bar_w = (gutter_px * 0.6).max(3.0);
+    let bar_x = (gutter_px - bar_w) * 0.5;
+    let bar_h = cell_h * 0.9;
+    let bar_y = (cell_h - bar_h) * 0.5;
+
+    const SUCCESS: [u8; 3] = [80, 200, 120];
+    const FAILURE: [u8; 3] = [220, 80, 80];
+    const RUNNING: [u8; 3] = [140, 140, 140];
+
+    for row_idx in 0..terminal.viewport.rows {
+        let row = terminal.visible_row(row_idx);
+        if !row.prompt_start {
+            continue;
+        }
+        let rgb = match row.exit_status {
+            Some(0) => SUCCESS,
+            Some(_) => FAILURE,
+            None => RUNNING,
+        };
+        let color = u32::from_be_bytes([rgb[0], rgb[1], rgb[2], 255]);
+
+        let y0 = row_idx as f32 * cell_h + bar_y;
+        let y1 = y0 + bar_h;
+        let x0 = bar_x;
+        let x1 = x0 + bar_w;
+        let bi = bg_vertices.len() as u32;
+        bg_vertices.extend_from_slice(&[
+            BgVertex {
+                pos: [x0, y0],
+                color,
+            },
+            BgVertex {
+                pos: [x1, y0],
+                color,
+            },
+            BgVertex {
+                pos: [x0, y1],
+                color,
+            },
+            BgVertex {
+                pos: [x1, y1],
+                color,
+            },
+        ]);
+        bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
     }
 }

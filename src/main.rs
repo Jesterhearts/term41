@@ -80,6 +80,11 @@ struct App {
     boot_opacity: f32,
     keybindings: keybindings::Keybindings,
     bell_mode: BellMode,
+    /// Whether the shell-integration gutter is currently enabled. Mirrored
+    /// on [`Renderer`] but also kept here so `reload_config` can detect
+    /// changes without having to probe the renderer (which may not exist
+    /// yet before `resumed` runs).
+    gutter_enabled: bool,
     /// Last title we pushed to the OS via `Window::set_title`. Compared
     /// against `terminal.current_title` each frame so we only call
     /// `set_title` when something actually changed (the call hops to the
@@ -180,6 +185,7 @@ impl App {
             boot_opacity: config.opacity,
             keybindings: config.keybindings,
             bell_mode: config.bell,
+            gutter_enabled: config.gutter,
             applied_title: None,
             modifiers: winit::keyboard::ModifiersState::default(),
             mouse_pos: PhysicalPosition::new(0.0, 0.0),
@@ -207,6 +213,24 @@ impl App {
         self.terminal.set_scrollback_limit(cfg.scrollback_lines);
         self.keybindings = cfg.keybindings;
         self.bell_mode = cfg.bell;
+
+        // Toggling the gutter changes how many text columns fit in the
+        // window, so after flipping the flag on the renderer we replay
+        // the resize path. Skipped silently if the renderer hasn't been
+        // created yet (pre-`resumed` reloads).
+        if cfg.gutter != self.gutter_enabled {
+            self.gutter_enabled = cfg.gutter;
+            if let (Some(renderer), Some(window)) = (&mut self.renderer, &self.window) {
+                renderer.set_gutter_enabled(cfg.gutter);
+                let size = window.inner_size();
+                let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
+                let usable_width = size.width.saturating_sub(gutter_px);
+                let (cols, rows) = self.font_system.grid_dimensions(usable_width, size.height);
+                self.terminal.resize(cols, rows);
+                self.pty.resize(cols as u16, rows as u16);
+            }
+            self.request_redraw();
+        }
 
         if cfg.fonts != self.boot_fonts {
             warn!(
@@ -354,8 +378,16 @@ impl App {
         &self,
         pos: PhysicalPosition<f64>,
     ) -> (u32, u32) {
-        let x = pos.x.max(0.0) as u32;
+        let raw_x = pos.x.max(0.0) as u32;
         let y = pos.y.max(0.0) as u32;
+        // Clicks inside the gutter map to col 0 (clamp-to-left) so users
+        // don't accidentally start selections on the gutter strip.
+        let gutter_px = self
+            .renderer
+            .as_ref()
+            .map(|r| r.gutter_width_px(self.font_system.cell_width))
+            .unwrap_or(0);
+        let x = raw_x.saturating_sub(gutter_px);
         let cols = self.terminal.viewport.cols.saturating_sub(1);
         let rows = self.terminal.viewport.rows.saturating_sub(1);
         (
@@ -463,6 +495,7 @@ impl ApplicationHandler<AppEvent> for App {
             &mut self.font_system,
             &self.terminal,
             self.opacity,
+            self.gutter_enabled,
         ));
 
         self.window = Some(window);
@@ -487,7 +520,12 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = &mut self.renderer {
                     renderer.resize(size);
-                    let (cols, rows) = self.font_system.grid_dimensions(size.width, size.height);
+                    // The gutter steals pixels from the left edge; subtract
+                    // them before dividing into cells so col 0 of the
+                    // grid is the first *text* column, not the gutter.
+                    let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
+                    let usable_width = size.width.saturating_sub(gutter_px);
+                    let (cols, rows) = self.font_system.grid_dimensions(usable_width, size.height);
                     self.terminal.resize(cols, rows);
                     self.pty.resize(cols as u16, rows as u16);
                 }

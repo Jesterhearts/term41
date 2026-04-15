@@ -43,6 +43,11 @@ struct ConfigFile {
     keybindings: Option<Vec<KeybindingConfig>>,
     /// Bell behaviour: `off`, `visual`, or `urgent`.
     bell: Option<String>,
+    /// Show the shell-integration gutter on the left edge — a thin strip
+    /// where OSC 133 prompt rows get a coloured dot marking the last
+    /// command's exit status. Defaults to on; disable for a pure
+    /// terminal-text view or when the shell doesn't emit OSC 133 at all.
+    gutter: Option<bool>,
 }
 
 pub struct Config {
@@ -53,6 +58,9 @@ pub struct Config {
     pub cursor_style: CursorStyle,
     pub keybindings: Keybindings,
     pub bell: BellMode,
+    /// Whether to show the shell-integration gutter on the left edge. See
+    /// [`ConfigFile::gutter`] for the rationale.
+    pub gutter: bool,
 }
 
 impl Default for Config {
@@ -65,6 +73,7 @@ impl Default for Config {
             cursor_style: CursorStyle::default(),
             keybindings: Keybindings::defaults(),
             bell: BellMode::default(),
+            gutter: true,
         }
     }
 }
@@ -77,17 +86,26 @@ pub fn load_from(path: &std::path::Path) -> Config {
         Ok(s) => s,
         Err(_) => return Config::default(),
     };
+    parse_config(&contents, &path.display())
+}
 
-    let file: ConfigFile = match toml::from_str(&contents) {
+/// Parse a config TOML string into a [`Config`]. Split out from
+/// [`load_from`] so tests can exercise the mapping logic without touching
+/// the filesystem.
+fn parse_config(
+    contents: &str,
+    source: &dyn std::fmt::Display,
+) -> Config {
+    let file: ConfigFile = match toml::from_str(contents) {
         Ok(f) => f,
         Err(e) => {
-            warn!("failed to parse {}: {e}", path.display());
+            warn!("failed to parse {source}: {e}");
             return Config::default();
         }
     };
 
     let cursor_style = build_cursor_style(file.cursor_shape.as_deref(), file.cursor_blink);
-    let keybindings = build_keybindings(file.keybindings, &path.display());
+    let keybindings = build_keybindings(file.keybindings, source);
     let bell = build_bell_mode(file.bell.as_deref());
 
     Config {
@@ -98,6 +116,7 @@ pub fn load_from(path: &std::path::Path) -> Config {
         cursor_style,
         keybindings,
         bell,
+        gutter: file.gutter.unwrap_or(true),
     }
 }
 
@@ -172,4 +191,36 @@ fn build_cursor_style(
 
 fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("term41").join("config.toml"))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn parse(s: &str) -> Config {
+        parse_config(s, &"<test>")
+    }
+
+    #[test]
+    fn gutter_defaults_to_enabled_when_absent() {
+        assert!(parse("").gutter);
+    }
+
+    #[test]
+    fn gutter_honours_explicit_false() {
+        assert!(!parse("gutter = false").gutter);
+    }
+
+    #[test]
+    fn gutter_honours_explicit_true() {
+        assert!(parse("gutter = true").gutter);
+    }
+
+    #[test]
+    fn malformed_toml_falls_back_to_defaults_with_gutter_on() {
+        // A typo shouldn't silently leave gutter off; the whole config
+        // resets to defaults, and the default gutter state is on.
+        let cfg = parse("gutter = \"yes-please\"");
+        assert!(cfg.gutter);
+    }
 }
