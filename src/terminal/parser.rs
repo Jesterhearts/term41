@@ -1,3 +1,5 @@
+use std::sync::LazyLock;
+
 use smol_str::SmolStr;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -7,6 +9,19 @@ use crate::terminal::grid::Viewport;
 use crate::terminal::row::Row;
 use crate::terminal::screen::Screen;
 use crate::vte;
+
+/// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
+/// `put_ascii_run` clones out of this table instead of constructing a fresh
+/// `SmolStr` per byte — inline-backed clones are a short memcpy, so the table
+/// eliminates repeated `from_utf8` validation and the inline copy constructor
+/// call per cell.
+static ASCII_CELLS: LazyLock<[SmolStr; 95]> = LazyLock::new(|| {
+    std::array::from_fn(|i| {
+        let b = 0x20u8 + i as u8;
+        // SAFETY: b is in 0x20..=0x7E which is valid single-byte UTF-8.
+        SmolStr::new_inline(unsafe { std::str::from_utf8_unchecked(std::slice::from_ref(&b)) })
+    })
+});
 
 /// Sentinel for the second (and beyond) cell of a wide glyph. Distinct from
 /// the default blank (`" "`) so neighbour cleanup can tell them apart.
@@ -70,17 +85,18 @@ pub(super) fn put_ascii_run(
         break_wide_glyphs_around_write(&mut screen.grid.rows[r], col, chunk_len);
 
         let row = &mut screen.grid.rows[r];
-        for k in 0..chunk_len {
-            // Bytes 0x20..=0x7E are valid single-byte UTF-8 so the conversion
-            // can't fail; the upstream parser guarantees the range.
-            let b = run[i + k];
-            let buf = [b];
-            let s = std::str::from_utf8(&buf).unwrap();
-            row.cells[col + k] = SmolStr::new_inline(s);
-            row.fg[col + k] = fg;
-            row.bg[col + k] = bg;
-            row.links[col + k] = link;
+        let chunk = &run[i..i + chunk_len];
+        // Clone out of the precomputed ASCII table. The parser guarantees
+        // bytes are 0x20..=0x7E, so the subtraction can't wrap.
+        for (cell, &b) in row.cells[col..col + chunk_len].iter_mut().zip(chunk) {
+            *cell = ASCII_CELLS[(b - 0x20) as usize].clone();
         }
+        // Attributes are homogeneous across the run — let the compiler lower
+        // each of these to a single memset-style fill.
+        row.fg[col..col + chunk_len].fill(fg);
+        row.bg[col..col + chunk_len].fill(bg);
+        row.links[col..col + chunk_len].fill(link);
+
         screen.cursor.col += chunk_len as u32;
         i += chunk_len;
     }
