@@ -1,7 +1,7 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
-use crate::sixel::DecodedImage;
+use crate::image::DecodedImage;
 use crate::terminal::row::Row;
 
 #[derive(Debug, Clone)]

@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
-use crate::sixel::DecodedImage;
+use crate::image::DecodedImage;
 
 // ---------------------------------------------------------------------------
 // Parsed command

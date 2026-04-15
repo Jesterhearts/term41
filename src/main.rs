@@ -4,13 +4,12 @@
 mod clipboard;
 mod config;
 mod font;
+mod image;
 mod keybindings;
-mod kitty;
 mod pty;
 mod renderer;
 mod search;
 mod selection;
-mod sixel;
 mod terminal;
 mod vte;
 

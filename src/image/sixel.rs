@@ -3,14 +3,8 @@ use palette::Hsla;
 use palette::IntoColor;
 use palette::Srgba;
 
+use crate::image::DecodedImage;
 use crate::vte;
-
-#[derive(Debug, Clone)]
-pub struct DecodedImage {
-    pub pixels: Vec<u8>,
-    pub width: u32,
-    pub height: u32,
-}
 
 struct SixelRow {
     default_color: Srgba<u8>,

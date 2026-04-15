@@ -13,9 +13,9 @@ use std::num::NonZeroUsize;
 
 use evictor::Lru;
 
+use crate::image::DecodedImage;
 use crate::renderer::shelf::Allocation;
 use crate::renderer::shelf::ShelfPacker;
-use crate::sixel::DecodedImage;
 
 pub const IMAGE_ATLAS_SIZE: u32 = 2048;
 pub const IMAGE_ATLAS_LAYERS: u32 = 64;

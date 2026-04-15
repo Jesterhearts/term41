@@ -46,6 +46,7 @@ pub use self::screen::Screen;
 use self::screen::resize_screen;
 use crate::clipboard::Clipboard;
 use crate::clipboard::ClipboardKind;
+use crate::image::sixel::parse_sixel;
 use crate::search::MatchSpan;
 use crate::search::SearchState;
 use crate::selection::Selection;
@@ -53,7 +54,6 @@ use crate::selection::SelectionMode;
 use crate::selection::SelectionPoint;
 use crate::selection::expand_to_line;
 use crate::selection::expand_to_word;
-use crate::sixel::parse_sixel;
 use crate::vte;
 use crate::vte::Params;
 
@@ -188,10 +188,10 @@ pub struct Terminal {
 
     /// Kitty graphics protocol image store. Images transmitted via `a=t`
     /// live here until placed or deleted.
-    kitty_images: crate::kitty::KittyImageStore,
+    kitty_images: crate::image::kitty::KittyImageStore,
 
     /// Accumulates chunks for multi-part kitty graphics transmissions.
-    kitty_chunked: crate::kitty::ChunkedTransmission,
+    kitty_chunked: crate::image::kitty::ChunkedTransmission,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -234,8 +234,8 @@ impl Terminal {
             current_title: None,
             bell_pending: false,
             current_prompt_row: None,
-            kitty_images: crate::kitty::KittyImageStore::new(),
-            kitty_chunked: crate::kitty::ChunkedTransmission::new(),
+            kitty_images: crate::image::kitty::KittyImageStore::new(),
+            kitty_chunked: crate::image::kitty::ChunkedTransmission::new(),
             cell_width,
         }
     }
@@ -1235,8 +1235,8 @@ impl Terminal {
 
 fn handle_kitty_graphics(
     data: &[u8],
-    store: &mut crate::kitty::KittyImageStore,
-    chunked: &mut crate::kitty::ChunkedTransmission,
+    store: &mut crate::image::kitty::KittyImageStore,
+    chunked: &mut crate::image::kitty::ChunkedTransmission,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -1249,7 +1249,7 @@ fn handle_kitty_graphics(
         return;
     }
 
-    let cmd = crate::kitty::parse_command(&data[1..]);
+    let cmd = crate::image::kitty::parse_command(&data[1..]);
 
     // Feed into chunked accumulator. If more chunks expected, return early.
     let cmd = match chunked.feed(cmd) {
@@ -1287,18 +1287,20 @@ fn handle_kitty_graphics(
 
 /// Decode image data from a command's payload, handling direct, file, and
 /// temp-file transmission mediums.
-fn decode_kitty_image(cmd: &crate::kitty::KittyCommand) -> Option<crate::sixel::DecodedImage> {
+fn decode_kitty_image(
+    cmd: &crate::image::kitty::KittyCommand
+) -> Option<crate::image::DecodedImage> {
     match cmd.transmission {
-        b'f' => crate::kitty::decode_file_payload(cmd, &cmd.payload, false),
-        b't' => crate::kitty::decode_file_payload(cmd, &cmd.payload, true),
-        _ => crate::kitty::decode_payload(cmd, &cmd.payload),
+        b'f' => crate::image::kitty::decode_file_payload(cmd, &cmd.payload, false),
+        b't' => crate::image::kitty::decode_file_payload(cmd, &cmd.payload, true),
+        _ => crate::image::kitty::decode_payload(cmd, &cmd.payload),
     }
 }
 
 /// Place an image on the grid at the cursor position.
 fn place_kitty_image(
-    image: crate::sixel::DecodedImage,
-    cmd: &crate::kitty::KittyCommand,
+    image: crate::image::DecodedImage,
+    cmd: &crate::image::kitty::KittyCommand,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -1306,7 +1308,7 @@ fn place_kitty_image(
     cell_width: u32,
 ) {
     // Apply source rectangle cropping.
-    let image = crate::kitty::crop_source_rect(image, cmd);
+    let image = crate::image::kitty::crop_source_rect(image, cmd);
 
     let id = *next_image_id;
     *next_image_id += 1;
@@ -1380,7 +1382,7 @@ fn place_kitty_image(
 }
 
 fn send_kitty_response(
-    cmd: &crate::kitty::KittyCommand,
+    cmd: &crate::image::kitty::KittyCommand,
     image_id: u32,
     ok: bool,
     message: &str,
@@ -1393,12 +1395,12 @@ fn send_kitty_response(
     if cmd.quiet >= 1 && ok {
         return;
     }
-    pending_output.extend_from_slice(&crate::kitty::format_response(image_id, ok, message));
+    pending_output.extend_from_slice(&crate::image::kitty::format_response(image_id, ok, message));
 }
 
 fn handle_kitty_query(
-    cmd: &crate::kitty::KittyCommand,
-    store: &mut crate::kitty::KittyImageStore,
+    cmd: &crate::image::kitty::KittyCommand,
+    store: &mut crate::image::kitty::KittyImageStore,
     pending_output: &mut Vec<u8>,
 ) {
     let id = store.resolve_id(cmd);
@@ -1408,8 +1410,8 @@ fn handle_kitty_query(
 }
 
 fn handle_kitty_transmit(
-    cmd: &crate::kitty::KittyCommand,
-    store: &mut crate::kitty::KittyImageStore,
+    cmd: &crate::image::kitty::KittyCommand,
+    store: &mut crate::image::kitty::KittyImageStore,
     pending_output: &mut Vec<u8>,
 ) {
     let id = store.resolve_id(cmd);
@@ -1425,8 +1427,8 @@ fn handle_kitty_transmit(
 }
 
 fn handle_kitty_transmit_display(
-    cmd: &crate::kitty::KittyCommand,
-    store: &mut crate::kitty::KittyImageStore,
+    cmd: &crate::image::kitty::KittyCommand,
+    store: &mut crate::image::kitty::KittyImageStore,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -1457,8 +1459,8 @@ fn handle_kitty_transmit_display(
 }
 
 fn handle_kitty_place(
-    cmd: &crate::kitty::KittyCommand,
-    store: &mut crate::kitty::KittyImageStore,
+    cmd: &crate::image::kitty::KittyCommand,
+    store: &mut crate::image::kitty::KittyImageStore,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -1488,9 +1490,9 @@ fn handle_kitty_place(
 }
 
 fn handle_kitty_delete(
-    cmd: &crate::kitty::KittyCommand,
+    cmd: &crate::image::kitty::KittyCommand,
     screen: &mut Screen,
-    store: &mut crate::kitty::KittyImageStore,
+    store: &mut crate::image::kitty::KittyImageStore,
     cell_height: u32,
 ) {
     let uppercase = cmd.delete.is_ascii_uppercase();
@@ -1790,7 +1792,7 @@ mod tests {
         term.active.images.insert(
             id,
             PlacedImage {
-                image: crate::sixel::DecodedImage {
+                image: crate::image::DecodedImage {
                     pixels: vec![],
                     width: 1,
                     height: height_px,
