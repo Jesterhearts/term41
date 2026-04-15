@@ -42,12 +42,18 @@ impl Grid {
         &mut self,
         viewport: &Viewport,
     ) {
-        self.rows.push_back(Row::new(viewport.cols));
-
+        // Once the scrollback buffer is full, recycle the oldest row rather
+        // than dropping its four Vec allocations and reallocating a fresh
+        // row: during text-heavy output (e.g. `ls -laR`) this is a steady
+        // state and the free/alloc pair shows up in profiles.
         let max_rows = viewport.rows as usize + self.scrollback_limit as usize;
-        if self.rows.len() > max_rows {
-            self.rows.pop_front();
+        if self.rows.len() >= max_rows && max_rows > 0 {
+            let mut recycled = self.rows.pop_front().expect("max_rows > 0");
+            recycled.reset_for_reuse(viewport.cols);
+            self.rows.push_back(recycled);
             self.total_popped += 1;
+        } else {
+            self.rows.push_back(Row::new(viewport.cols));
         }
     }
 

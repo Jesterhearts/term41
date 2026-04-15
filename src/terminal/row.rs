@@ -82,6 +82,22 @@ impl Row {
         self.clear_range(0..self.cells.len())
     }
 
+    /// Reset this row for reuse at the bottom of the grid — used when the
+    /// scrollback limit is hit and we'd otherwise drop+reallocate the
+    /// row's four backing vectors. Resizes to `cols` if the viewport width
+    /// changed, blanks every cell, and clears the soft-wrap marker.
+    pub(super) fn reset_for_reuse(
+        &mut self,
+        cols: u32,
+    ) {
+        let n = cols as usize;
+        if self.cells.len() != n {
+            self.resize(cols);
+        }
+        self.clear();
+        self.wrapped = false;
+    }
+
     pub(super) fn clear_range(
         &mut self,
         range: std::ops::Range<usize>,
