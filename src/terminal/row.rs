@@ -8,7 +8,7 @@ use crate::terminal::color::default_fg;
 use crate::terminal::hyperlink::HyperlinkId;
 
 /// Inline SmolStr for the default blank cell. Cheap to clone.
-pub(super) fn blank_cell() -> SmolStr {
+pub(super) const fn blank_cell() -> SmolStr {
     SmolStr::new_inline(" ")
 }
 
@@ -102,9 +102,7 @@ impl Row {
         &mut self,
         range: std::ops::Range<usize>,
     ) {
-        for cell in &mut self.cells[range.clone()] {
-            *cell = blank_cell();
-        }
+        self.cells[range.clone()].fill(blank_cell());
         self.fg[range.clone()].fill(default_fg());
         self.bg[range.clone()].fill(default_bg());
         self.links[range].fill(None);
