@@ -283,14 +283,6 @@ impl FontSystem {
             .is_color
     }
 
-    pub fn grid_size(
-        &self,
-        cols: u32,
-        rows: u32,
-    ) -> (u32, u32) {
-        (cols * self.cell_width, rows * self.cell_height)
-    }
-
     pub fn grid_dimensions(
         &self,
         pixel_width: u32,

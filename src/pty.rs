@@ -2,9 +2,12 @@ use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
+use std::sync::mpsc;
 use std::thread;
+use std::thread::Thread;
 
 use cueue::cueue;
 use portable_pty::ChildKiller;
@@ -12,9 +15,7 @@ use portable_pty::CommandBuilder;
 use portable_pty::MasterPty;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
-use winit::event_loop::EventLoopProxy;
 
-use crate::AppEvent;
 use crate::TabId;
 
 pub const MAX_BUFFER: usize = 2 * 1024 * 1024;
@@ -25,20 +26,16 @@ pub const MAX_READ_CHUNK: usize = 128 * 1024;
 /// Wraps `portable-pty` so the same code path handles forkpty on Unix and
 /// ConPTY on Windows. portable-pty exposes a blocking reader, so a worker
 /// thread pumps bytes into a channel and `read` drains it without ever
-/// blocking the UI loop.
+/// blocking the render loop.
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
     child_killer: Box<dyn ChildKiller>,
     writer: Box<dyn Write + Send>,
     rx: cueue::Reader<u8>,
     /// Coalesce flag shared with the pty-reader thread. The reader
-    /// only posts `DataReady` on the false→true transition, so a burst
-    /// of reads queues a single event instead of one-per-read — which
-    /// otherwise let the reader flood the event loop and starve redraw.
-    /// The main thread clears it at the top of its drain; if the drain
-    /// bails on its time slice with bytes still in the ring, the main
-    /// thread re-arms and re-posts so the leftover doesn't sit stale
-    /// waiting for the child to write again.
+    /// only unparks the render thread on the false→true transition, so
+    /// a burst of reads produces a single wakeup instead of one per read.
+    /// The render thread clears it at the top of its drain.
     pending_read: Arc<AtomicBool>,
 }
 
@@ -46,6 +43,10 @@ impl Pty {
     /// Spawns a child process in a new PTY with the given grid size. When
     /// `command` is `Some`, the first element is the program and the rest are
     /// its arguments; otherwise the user's default shell is launched.
+    ///
+    /// `render_thread` is set once the render thread starts; the PTY reader
+    /// and child-watcher threads use it to unpark the render thread when
+    /// data arrives or the child exits.
     pub fn spawn(
         tab_id: TabId,
         cols: u16,
@@ -54,7 +55,8 @@ impl Pty {
         cell_height: u16,
         command: Option<Vec<String>>,
         cwd: Option<std::path::PathBuf>,
-        event_loop: EventLoopProxy<AppEvent>,
+        render_thread: Arc<OnceLock<Thread>>,
+        child_exit_tx: mpsc::Sender<TabId>,
     ) -> io::Result<Self> {
         let pty_system = native_pty_system();
         let pair = pty_system
@@ -109,10 +111,10 @@ impl Pty {
         let pending_read = Arc::new(AtomicBool::new(false));
         let pending_read_ = pending_read.clone();
 
-        let event_loop_ = event_loop.clone();
+        let render_thread_ = render_thread.clone();
         thread::Builder::new()
             .name("pty-reader".into())
-            .spawn(move || pump_reader(tab_id, reader, read_tx, event_loop_, pending_read_))
+            .spawn(move || pump_reader(reader, read_tx, render_thread_, pending_read_))
             .map_err(io::Error::other)?;
 
         let child_killer = child.clone_killer();
@@ -120,7 +122,10 @@ impl Pty {
             .name("child-watcher".into())
             .spawn(move || {
                 let _ = child.wait();
-                let _ = event_loop.send_event(AppEvent::ChildExited(tab_id));
+                let _ = child_exit_tx.send(tab_id);
+                if let Some(t) = render_thread.get() {
+                    t.unpark();
+                }
             })
             .map_err(io::Error::other)?;
 
@@ -133,23 +138,16 @@ impl Pty {
         })
     }
 
-    /// Release the coalesce flag so the reader is free to post a fresh
-    /// `DataReady` if it writes more data. Call at the top of a drain —
-    /// if the reader races us during the drain, we see its data in the
-    /// ring this pass, and its event re-enters us cleanly next pass.
+    /// Release the coalesce flag so the reader is free to unpark the render
+    /// thread again. Call at the top of a drain — if the reader races us
+    /// during the drain, we see its data in the ring this pass, and its
+    /// wakeup re-enters us cleanly next pass.
     pub fn clear_pending(&self) {
         self.pending_read.store(false, Ordering::Release);
     }
 
-    /// Mark a `DataReady` as in flight. Returns `true` when the caller
-    /// is responsible for actually posting the event (flag was false),
-    /// `false` when one is already pending (reader beat us to it).
-    pub fn arm_pending(&self) -> bool {
-        !self.pending_read.swap(true, Ordering::AcqRel)
-    }
-
     /// Non-blocking read of bytes received from the PTY. Returns 0 when no
-    /// data is currently available so callers can poll in the event loop.
+    /// data is currently available so callers can poll in the render loop.
     pub fn read(
         &mut self,
         buf: &mut [u8],
@@ -193,10 +191,9 @@ impl Drop for Pty {
 }
 
 fn pump_reader(
-    tab_id: TabId,
     mut reader: Box<dyn Read + Send>,
     mut tx: cueue::Writer<u8>,
-    event_loop: EventLoopProxy<AppEvent>,
+    render_thread: Arc<OnceLock<Thread>>,
     pending_read: Arc<AtomicBool>,
 ) {
     let mut buf = [0u8; MAX_READ_CHUNK];
@@ -220,8 +217,10 @@ fn pump_reader(
                         Err(_) => return,
                     }
                 }
-                if !pending_read.swap(true, Ordering::AcqRel) {
-                    let _ = event_loop.send_event(AppEvent::DataReady(tab_id));
+                if !pending_read.swap(true, Ordering::AcqRel)
+                    && let Some(t) = render_thread.get()
+                {
+                    t.unpark();
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,

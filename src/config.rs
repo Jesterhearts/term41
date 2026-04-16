@@ -9,23 +9,49 @@ use crate::keybindings::Keybindings;
 use crate::terminal::CursorShape;
 use crate::terminal::CursorStyle;
 
-const DEFAULT_SCROLLBACK: u32 = 10_000;
+pub const DEFAULT_SCROLLBACK: u32 = 10_000;
+
+/// VSync mode for frame presentation. See the `vsync` config key and the
+/// `Config::vsync` field for details.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum VSync {
+    /// Let the OS decide when to present frames. This is the default and
+    /// usually means "sync to the display's refresh rate", but some
+    /// platforms may choose a different strategy.
+    Auto,
+    /// Try using fast-vsync or similar techniques to present frames immediately
+    /// when they're ready, without screen tearing.
+    Fast,
+    /// Present frames as soon as they're ready, even if that means
+    /// tearing.
+    Off,
+    /// Wait for the next vertical blanking interval before presenting each
+    /// frame. Eliminates tearing at the cost of increased latency and
+    /// potential stuttering if the render time exceeds the display's refresh
+    /// period.
+    On,
+}
 
 /// What to do when the foreground app rings the bell (BEL / `\x07`).
 ///
 /// Default is [`BellMode::Off`] because shells like bash ring the bell on
 /// completion-ambiguity by default — most users find that surprising
 /// rather than useful out of the box.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum BellMode {
     /// Ignore the bell entirely.
     #[default]
+    #[serde(alias = "none", alias = "false")]
     Off,
     /// Briefly flash the screen.
+    #[serde(alias = "flash")]
     Visual,
     /// Ask the compositor to mark the window as needing attention
     /// (taskbar bobbing on macOS, urgency hint on X11/Wayland). Quiet
     /// when the window is focused; eye-catching when it isn't.
+    #[serde(alias = "attention")]
     Urgent,
 }
 
@@ -43,7 +69,7 @@ struct ConfigFile {
     /// disables all bindings — useful for debugging conflicts.
     keybindings: Option<Vec<KeybindingConfig>>,
     /// Bell behaviour: `off`, `visual`, or `urgent`.
-    bell: Option<String>,
+    bell: Option<BellMode>,
     /// Show the shell-integration gutter on the left edge — a thin strip
     /// where OSC 133 prompt rows get a coloured dot marking the last
     /// command's exit status. Defaults to on; disable for a pure
@@ -52,6 +78,8 @@ struct ConfigFile {
     /// Preferred power mode for the GPU. See wgpu::PowerPreference docs for
     /// details.
     power_preference: Option<PowerPreference>,
+    /// Whether to enable vsync.
+    vsync: Option<VSync>,
 }
 
 pub struct Config {
@@ -64,6 +92,7 @@ pub struct Config {
     pub bell: BellMode,
     pub gutter: bool,
     pub power_preference: PowerPreference,
+    pub vsync: VSync,
 }
 
 impl Default for Config {
@@ -78,6 +107,7 @@ impl Default for Config {
             bell: BellMode::default(),
             gutter: true,
             power_preference: PowerPreference::default(),
+            vsync: VSync::Auto,
         }
     }
 }
@@ -110,7 +140,6 @@ fn parse_config(
 
     let cursor_style = build_cursor_style(file.cursor_shape.as_deref(), file.cursor_blink);
     let keybindings = build_keybindings(file.keybindings, source);
-    let bell = build_bell_mode(file.bell.as_deref());
 
     Config {
         opacity: file.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
@@ -119,27 +148,10 @@ fn parse_config(
         scrollback_lines: file.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
         cursor_style,
         keybindings,
-        bell,
+        bell: file.bell.unwrap_or_default(),
         gutter: file.gutter.unwrap_or(true),
         power_preference: file.power_preference.unwrap_or_default(),
-    }
-}
-
-/// Map the optional `bell = "..."` toml field onto a [`BellMode`]. Unknown
-/// values warn and default to off so a typo can't silently turn the bell
-/// on (or off) against the user's intent.
-fn build_bell_mode(raw: Option<&str>) -> BellMode {
-    let Some(s) = raw else {
-        return BellMode::default();
-    };
-    match s.to_ascii_lowercase().as_str() {
-        "off" | "none" | "false" => BellMode::Off,
-        "visual" | "flash" => BellMode::Visual,
-        "urgent" | "attention" => BellMode::Urgent,
-        other => {
-            warn!("unknown bell mode {other:?}; falling back to off");
-            BellMode::Off
-        }
+        vsync: file.vsync.unwrap_or(VSync::Auto),
     }
 }
 
