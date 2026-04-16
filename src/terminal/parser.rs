@@ -644,6 +644,22 @@ pub(super) fn csi_dispatch(
             screen.cursor.row = 0;
             screen.cursor.col = 0;
         }
+        's' => {
+            // SCOSC — save cursor position. Shares the DECSC slot, so an
+            // app that mixes `CSI s` with `ESC 7` reads back whichever
+            // write came last. Scripts that overlay a live-updating region
+            // (progress bars, sixel plots) rely on this plus SCORC to
+            // anchor their output; without it every repaint stacks below
+            // the previous one.
+            screen::save_cursor_slot(screen);
+        }
+        'u' => {
+            // SCORC — restore cursor position. The kitty keyboard `CSI u`
+            // variants all carry an intermediate (`>`, `<`, `=`, `?`) and
+            // are caught above; a plain no-intermediate `CSI u` is
+            // unambiguously the restore form.
+            screen::restore_cursor_slot(screen, viewport);
+        }
         _ => {}
     }
 }
@@ -1222,6 +1238,56 @@ mod tests {
     fn csi_f_is_alias_of_h() {
         let (mut screen, viewport) = setup();
         feed(b"\x1b[2;3f", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn csi_s_saves_and_csi_u_restores_cursor() {
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[2;3H\x1b[s", &mut screen, &viewport);
+        // Move elsewhere after saving.
+        feed(b"\x1b[4;5H", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 3);
+        assert_eq!(screen.cursor.col, 4);
+        feed(b"\x1b[u", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn csi_u_without_prior_save_homes_cursor() {
+        // Matches DECRC semantics: no saved slot → cursor homes to 0,0.
+        // Live-updating scripts that call `CSI u` on the first paint
+        // before any `CSI s` get predictable behaviour instead of a
+        // surprise no-op that leaves the cursor mid-screen.
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[2;3H", &mut screen, &viewport);
+        feed(b"\x1b[u", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 0);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    #[test]
+    fn csi_s_shares_slot_with_esc_7() {
+        // SCOSC and DECSC write the same slot, so an `ESC 8` after a
+        // `CSI s` restores the CSI-written position.
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[2;3H\x1b[s", &mut screen, &viewport);
+        feed(b"\x1b[4;5H", &mut screen, &viewport);
+        feed(b"\x1b8", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn csi_u_does_not_trip_kitty_keyboard_path() {
+        // The kitty CSI-u path requires an intermediate (`>`, `<`, `=`,
+        // `?`). A plain `CSI u` must fall through to SCORC — this test
+        // guards against anyone re-ordering the kitty check in front of
+        // the SCORC arm.
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[2;3H\x1b[s\x1b[4;5H\x1b[u", &mut screen, &viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 2);
     }
