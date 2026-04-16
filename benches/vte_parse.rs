@@ -17,7 +17,7 @@ use criterion::Criterion;
 use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
-use term41::vte::Parser;
+use vtepp::Parser;
 
 fn ascii_heavy_corpus() -> Vec<u8> {
     // Deterministic: repeat a fixed paragraph until we exceed a PTY read-sized

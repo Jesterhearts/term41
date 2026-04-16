@@ -11,7 +11,7 @@
 
 use std::io::Write;
 
-use crate::vte::Params;
+use vtepp::Params;
 
 /// Cap on stack depth. Apps push/pop in pairs around things like inner shells
 /// and TUI panes; a single misbehaving program could otherwise grow this
@@ -231,13 +231,15 @@ pub(super) fn handle_kitty_keyboard(
 
 #[cfg(test)]
 mod dispatch_tests {
+    use vtepp::Action;
+    use vtepp::Parser;
+
     use super::*;
-    use crate::vte;
 
     fn parse_csi(input: &[u8]) -> (u8, Params) {
-        let mut parser = vte::Parser::new();
+        let mut parser = Parser::new();
         for action in parser.parse(input) {
-            if let vte::Action::CsiDispatch {
+            if let Action::CsiDispatch {
                 params,
                 intermediates,
                 action,

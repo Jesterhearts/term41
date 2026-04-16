@@ -16,6 +16,10 @@ use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
 
+use vtepp::Action;
+use vtepp::Params;
+use vtepp::Parser;
+
 pub use self::attrs::CellAttrs;
 pub use self::color::default_bg;
 pub use self::color::default_fg;
@@ -57,8 +61,6 @@ use crate::selection::SelectionMode;
 use crate::selection::SelectionPoint;
 use crate::selection::expand_to_line;
 use crate::selection::expand_to_word;
-use crate::vte;
-use crate::vte::Params;
 
 /// Per-prompt metadata recorded from OSC 133 B/C/D sequences. Keyed by
 /// the absolute row of the prompt (`A` mark) in
@@ -146,7 +148,7 @@ pub struct Terminal {
 
     next_image_id: u64,
 
-    parser: vte::Parser,
+    parser: Parser,
     hook_bytes: Vec<Vec<u8>>,
     hook_params: Vec<Params>,
     hook_action: Vec<char>,
@@ -261,7 +263,7 @@ impl Terminal {
             viewport: Viewport { rows, cols },
             on_alt_screen: false,
             cell_height,
-            parser: vte::Parser::new(),
+            parser: Parser::new(),
             next_image_id: 0,
             hook_bytes: vec![],
             hook_params: vec![],
@@ -1358,11 +1360,9 @@ impl Terminal {
             let popped_before = self.active.grid.total_popped;
 
             match action {
-                vte::Action::PrintAscii(run) => {
-                    put_ascii_run(&mut self.active, &self.viewport, run)
-                }
-                vte::Action::Print(c) => put_char(&mut self.active, &self.viewport, c),
-                vte::Action::Execute(byte) => {
+                Action::PrintAscii(run) => put_ascii_run(&mut self.active, &self.viewport, run),
+                Action::Print(c) => put_char(&mut self.active, &self.viewport, c),
+                Action::Execute(byte) => {
                     execute(
                         &mut self.active,
                         &self.viewport,
@@ -1370,7 +1370,7 @@ impl Terminal {
                         &mut self.bell_pending,
                     );
                 }
-                vte::Action::CsiDispatch {
+                Action::CsiDispatch {
                     params,
                     intermediates,
                     action,
@@ -1389,7 +1389,7 @@ impl Terminal {
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
-                vte::Action::EscDispatch {
+                Action::EscDispatch {
                     intermediates,
                     byte,
                 } => {
@@ -1407,7 +1407,7 @@ impl Terminal {
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
-                vte::Action::OscDispatch(data) => {
+                Action::OscDispatch(data) => {
                     // iTerm2 image protocol rides on OSC 1337. Route it next
                     // to the other graphics protocols (kitty on APC, sixel
                     // on DCS) rather than through the text-OSC dispatcher,
@@ -1439,7 +1439,7 @@ impl Terminal {
                         handle_osc(&data, &mut ctx);
                     }
                 }
-                vte::Action::ApcDispatch(data) => {
+                Action::ApcDispatch(data) => {
                     handle_kitty_graphics(
                         &data,
                         &mut self.kitty_images,
@@ -1452,17 +1452,17 @@ impl Terminal {
                         &mut self.pending_output,
                     );
                 }
-                vte::Action::Hook { params, action } => {
+                Action::Hook { params, action } => {
                     self.hook_bytes.push(vec![]);
                     self.hook_params.push(params);
                     self.hook_action.push(action);
                 }
-                vte::Action::Put(bytes) => {
+                Action::Put(bytes) => {
                     if let Some(last) = self.hook_bytes.last_mut() {
                         last.extend_from_slice(bytes);
                     }
                 }
-                vte::Action::Unhook => {
+                Action::Unhook => {
                     let bytes = self.hook_bytes.pop().unwrap();
                     let params = self.hook_params.pop().unwrap();
                     let action = self.hook_action.pop().unwrap();

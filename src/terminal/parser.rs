@@ -5,6 +5,7 @@ use std::time::Instant;
 use smol_str::SmolStr;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
+use vtepp::Params;
 
 use crate::terminal::TerminalModes;
 use crate::terminal::attrs::CellAttrs;
@@ -19,7 +20,6 @@ use crate::terminal::mouse::apply_mouse_mode;
 use crate::terminal::row::Row;
 use crate::terminal::screen;
 use crate::terminal::screen::Screen;
-use crate::vte;
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that CSI handlers
 /// need beyond the active screen. Keeps the call signature stable as new CSI
@@ -370,7 +370,7 @@ pub(super) fn execute(
 
 pub(super) fn csi_dispatch(
     ctx: &mut CsiContext<'_>,
-    params: &vte::Params,
+    params: &Params,
     intermediates: &[u8],
     action: char,
 ) {
@@ -737,13 +737,13 @@ pub(super) fn esc_dispatch(
 #[cfg(test)]
 mod tests {
     use palette::Srgb;
+    use vtepp::Action;
+    use vtepp::Parser;
 
     use super::*;
     use crate::terminal::cursor::CursorStyle;
     use crate::terminal::keyboard::KittyKeyboardState;
     use crate::terminal::screen::Screen;
-    use crate::vte::Action;
-    use crate::vte::Parser;
 
     const TEST_COLS: u32 = 10;
     const TEST_ROWS: u32 = 4;

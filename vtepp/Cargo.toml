@@ -1,0 +1,8 @@
+[package]
+name    = "vtepp"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+pulp     = "0.22.2"
+smol_str = "0.3.6"

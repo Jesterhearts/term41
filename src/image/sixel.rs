@@ -2,9 +2,9 @@ use atoi::FromRadix10;
 use palette::Hsla;
 use palette::IntoColor;
 use palette::Srgba;
+use vtepp::Params;
 
 use crate::image::DecodedImage;
-use crate::vte;
 
 struct SixelRow {
     default_color: Srgba<u8>,
@@ -23,7 +23,7 @@ impl SixelRow {
 }
 
 pub fn parse_sixel(
-    params: vte::Params,
+    params: Params,
     string: Vec<u8>,
 ) -> DecodedImage {
     let mut palette = default_palette();

@@ -11,7 +11,6 @@ mod renderer;
 mod search;
 mod selection;
 mod terminal;
-mod vte;
 
 use std::path::PathBuf;
 use std::sync::Arc;

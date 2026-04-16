@@ -1,7 +1,7 @@
 use palette::Srgb;
+use vtepp::Params;
 
 use crate::terminal::attrs::CellAttrs;
-use crate::vte;
 
 /// First palette index of the 6×6×6 RGB color cube in the 256-color palette.
 const CUBE_PALETTE_START: u8 = 16;
@@ -86,7 +86,7 @@ pub(super) fn apply_sgr(
     fg: &mut Srgb<u8>,
     bg: &mut Srgb<u8>,
     attrs: &mut CellAttrs,
-    params: &vte::Params,
+    params: &Params,
 ) {
     let params: Vec<u16> = params.iter().map(|p| p[0]).collect();
 
@@ -169,13 +169,14 @@ fn parse_extended_color(
 
 #[cfg(test)]
 mod tests {
+    use vtepp::Action;
+    use vtepp::Parser;
+
     use super::*;
-    use crate::vte::Action;
-    use crate::vte::Parser;
 
     /// Drive the VTE parser over `input` and return the `Params` from the
     /// first CSI `m` dispatch it produces.
-    fn parse_sgr(input: &[u8]) -> vte::Params {
+    fn parse_sgr(input: &[u8]) -> Params {
         let mut parser = Parser::new();
         parser
             .parse(input)
