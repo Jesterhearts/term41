@@ -389,7 +389,7 @@ impl RenderHost {
             let bg_animated = self
                 .renderer
                 .as_mut()
-                .is_some_and(|r| r.advance_background_frame(Instant::now()));
+                .is_some_and(|r| r.advance_background_frame());
             self.render_frame();
 
             if bg_animated {

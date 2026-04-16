@@ -602,14 +602,11 @@ impl Renderer {
     /// or when no background is loaded. Returns `true` when the background
     /// is animated (caller should keep the render loop ticking instead of
     /// blocking on input idleness).
-    pub fn advance_background_frame(
-        &mut self,
-        now: Instant,
-    ) -> bool {
+    pub fn advance_background_frame(&mut self) -> bool {
         let Some(bg) = self.background.as_mut() else {
             return false;
         };
-        bg.frame_advance(&self.queue, now);
+        bg.frame_advance(&self.queue);
         bg.is_animated()
     }
 

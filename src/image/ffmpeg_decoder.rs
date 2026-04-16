@@ -294,83 +294,22 @@ fn open_in_memory(data: Vec<u8>) -> Option<MemInput> {
 
 /// Decode an animated GIF byte buffer into a [`DecodedImage`]. Returns
 /// `None` when ffmpeg init fails, the probe rejects the input, or no
-/// frames decode cleanly.
+/// frames decode cleanly. Loads *every* frame into memory up front —
+/// used only by inline-image protocols, where the content is small and
+/// the per-frame storage is bounded by the protocol itself. Backgrounds
+/// use [`FrameReader`] directly instead so a multi-GB video doesn't
+/// need to fit in RAM.
 pub fn decode(data: &[u8]) -> Option<DecodedImage> {
-    if !ensure_init() {
-        warn!("ffmpeg init failed; cannot decode GIF");
-        return None;
-    }
-
-    let mut mem = open_in_memory(data.to_vec())?;
-    decode_frames(&mut mem.input)
-}
-
-fn decode_frames(ictx: &mut Input) -> Option<DecodedImage> {
-    let (stream_index, time_base, mut decoder) = {
-        let stream = ictx.streams().best(Type::Video)?;
-        let idx = stream.index();
-        let tb = stream.time_base();
-        let ctx = ff::codec::context::Context::from_parameters(stream.parameters()).ok()?;
-        let dec = ctx.decoder().video().ok()?;
-        (idx, tb, dec)
-    };
-
-    let width = decoder.width();
-    let height = decoder.height();
-    if width == 0 || height == 0 {
-        return None;
-    }
-
-    let mut scaler = SwsContext::get(
-        decoder.format(),
-        width,
-        height,
-        Pixel::RGBA,
-        width,
-        height,
-        SwsFlags::BILINEAR,
-    )
-    .ok()?;
-
+    let mut reader = FrameReader::open(data.to_vec())?;
+    let width = reader.width;
+    let height = reader.height;
     let mut frames: Vec<Frame> = Vec::new();
-
-    // For GIF, each packet decodes to exactly one frame, so capturing
-    // the packet duration before `send_packet` and handing it to the
-    // drain pass gives each decoded frame the correct presentation delay.
-    for (stream, packet) in ictx.packets() {
-        if stream.index() != stream_index {
-            continue;
-        }
-        let packet_duration = packet.duration();
-        if decoder.send_packet(&packet).is_err() {
-            continue;
-        }
-        drain_decoder(
-            &mut decoder,
-            &mut scaler,
-            packet_duration,
-            time_base,
-            width,
-            height,
-            &mut frames,
-        );
+    while let Some((pixels, delay)) = reader.next_frame() {
+        frames.push(Frame { pixels, delay });
     }
-
-    let _ = decoder.send_eof();
-    drain_decoder(
-        &mut decoder,
-        &mut scaler,
-        0,
-        time_base,
-        width,
-        height,
-        &mut frames,
-    );
-
     if frames.is_empty() {
         return None;
     }
-
     Some(DecodedImage {
         width,
         height,
@@ -378,35 +317,192 @@ fn decode_frames(ictx: &mut Input) -> Option<DecodedImage> {
     })
 }
 
-fn drain_decoder(
-    decoder: &mut ff::decoder::Video,
-    scaler: &mut SwsContext,
-    packet_duration: i64,
+/// Pull-based video-stream reader. Owns the ffmpeg state (input,
+/// decoder, scaler) for one input and hands out decoded RGBA frames on
+/// demand. Build with [`FrameReader::open`], pull with [`next_frame`]
+/// (EOF-terminating) or [`next_frame_looping`] (seeks back to start on
+/// EOF for endless playback).
+///
+/// Designed for the background decoder thread: keep memory use bounded
+/// regardless of stream length. A 30-second 1080p video holds one
+/// frame in `pending_rgba` plus whatever the GPU upload path has
+/// buffered — not the whole movie.
+pub struct FrameReader {
+    pub width: u32,
+    pub height: u32,
+    mem: MemInput,
+    stream_index: usize,
     time_base: ff::Rational,
-    width: u32,
-    height: u32,
-    frames: &mut Vec<Frame>,
-) {
-    let mut frame = VideoFrame::empty();
-    while decoder.receive_frame(&mut frame).is_ok() {
-        let mut rgba = VideoFrame::empty();
-        if scaler.run(&frame, &mut rgba).is_err() {
-            continue;
+    decoder: ff::decoder::Video,
+    scaler: SwsContext,
+    /// Reusable holding cell for the scaled RGBA output so we don't
+    /// reallocate a fresh `VideoFrame` every pull.
+    pending_rgba: VideoFrame,
+    /// Whether the demuxer has hit EOF and the decoder has been flushed.
+    /// `next_frame` returns `None` once the decoder has drained all its
+    /// remaining frames past EOF; `next_frame_looping` observes the EOF
+    /// and seeks to the start before calling again.
+    finished: bool,
+}
+
+impl FrameReader {
+    /// Open `data` as a streaming input. Returns `None` if ffmpeg init
+    /// fails, the bytes don't probe as a recognised format, or the
+    /// codec can't be initialised.
+    pub fn open(data: Vec<u8>) -> Option<Self> {
+        if !ensure_init() {
+            warn!("ffmpeg init failed; cannot decode");
+            return None;
+        }
+        let mem = open_in_memory(data)?;
+        Self::init(mem)
+    }
+
+    fn init(mem: MemInput) -> Option<Self> {
+        let (stream_index, time_base, decoder) = {
+            let stream = mem.input.streams().best(Type::Video)?;
+            let idx = stream.index();
+            let tb = stream.time_base();
+            let ctx = ff::codec::context::Context::from_parameters(stream.parameters()).ok()?;
+            let dec = ctx.decoder().video().ok()?;
+            (idx, tb, dec)
+        };
+        let width = decoder.width();
+        let height = decoder.height();
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let scaler = SwsContext::get(
+            decoder.format(),
+            width,
+            height,
+            Pixel::RGBA,
+            width,
+            height,
+            SwsFlags::BILINEAR,
+        )
+        .ok()?;
+        Some(Self {
+            width,
+            height,
+            mem,
+            stream_index,
+            time_base,
+            decoder,
+            scaler,
+            pending_rgba: VideoFrame::empty(),
+            finished: false,
+        })
+    }
+
+    /// Pull the next decoded RGBA frame and its on-screen presentation
+    /// delay. Returns `None` at end of stream; subsequent calls keep
+    /// returning `None` until `seek_to_start` rewinds.
+    pub fn next_frame(&mut self) -> Option<(Vec<u8>, Duration)> {
+        if self.finished {
+            return None;
+        }
+        // First, drain whatever the decoder has buffered from prior
+        // packets. This is common for B-frame-reordering codecs; GIFs
+        // won't have any pending frames here but the loop is cheap.
+        if let Some(frame) = self.pop_ready_frame(0) {
+            return Some(frame);
         }
 
-        // Tightly-packed rows: drop ffmpeg's stride padding so the image
-        // atlas's flat `width * 4`-per-row assumption holds.
-        let stride = rgba.stride(0);
-        let row_bytes = (width as usize) * 4;
-        let src = rgba.data(0);
-        let mut pixels = Vec::with_capacity(row_bytes * height as usize);
-        for y in 0..height as usize {
+        // Otherwise, read packets until the decoder produces a frame or
+        // the demuxer hits EOF.
+        loop {
+            let packet = {
+                let mut iter = self.mem.input.packets();
+                loop {
+                    match iter.next() {
+                        Some((stream, packet)) => {
+                            if stream.index() == self.stream_index {
+                                break Some(packet);
+                            }
+                        }
+                        None => break None,
+                    }
+                }
+            };
+            match packet {
+                Some(pkt) => {
+                    let duration = pkt.duration();
+                    if self.decoder.send_packet(&pkt).is_err() {
+                        // Bad packet; keep trying with the next one.
+                        continue;
+                    }
+                    if let Some(frame) = self.pop_ready_frame(duration) {
+                        return Some(frame);
+                    }
+                }
+                None => {
+                    // Demuxer is out of packets. Flush the decoder and
+                    // drain any remaining frames (B-frame tail); once
+                    // that's empty we're truly done until a seek.
+                    let _ = self.decoder.send_eof();
+                    let tail = self.pop_ready_frame(0);
+                    if tail.is_none() {
+                        self.finished = true;
+                    }
+                    return tail;
+                }
+            }
+        }
+    }
+
+    /// Pull the next frame, seeking back to the start of the stream on
+    /// EOF. Used by the background decoder thread for endless loops —
+    /// GIFs and videos both cycle via this path.
+    pub fn next_frame_looping(&mut self) -> Option<(Vec<u8>, Duration)> {
+        if let Some(frame) = self.next_frame() {
+            return Some(frame);
+        }
+        if !self.seek_to_start() {
+            return None;
+        }
+        self.next_frame()
+    }
+
+    /// Rewind to the first frame of the stream. Flushes the decoder so
+    /// stale B-frame references are dropped, then tells the demuxer to
+    /// seek to timestamp 0. Returns `false` when the demuxer refuses
+    /// the seek — rare for well-formed files, but possible with weird
+    /// mid-stream-only formats.
+    pub fn seek_to_start(&mut self) -> bool {
+        self.decoder.flush();
+        let ok = self.mem.input.seek(0, ..).is_ok();
+        if ok {
+            self.finished = false;
+        }
+        ok
+    }
+
+    /// Drain one frame from the decoder's output queue if ready. Packs
+    /// the scaled RGBA into a freshly-owned `Vec<u8>` and returns it
+    /// along with the presentation delay derived from the source
+    /// packet's duration (fallback to 100 ms for GIFs that forgot).
+    fn pop_ready_frame(
+        &mut self,
+        packet_duration: i64,
+    ) -> Option<(Vec<u8>, Duration)> {
+        let mut frame = VideoFrame::empty();
+        if self.decoder.receive_frame(&mut frame).is_err() {
+            return None;
+        }
+        if self.scaler.run(&frame, &mut self.pending_rgba).is_err() {
+            return None;
+        }
+        let stride = self.pending_rgba.stride(0);
+        let row_bytes = (self.width as usize) * 4;
+        let src = self.pending_rgba.data(0);
+        let mut pixels = Vec::with_capacity(row_bytes * self.height as usize);
+        for y in 0..self.height as usize {
             let row_start = y * stride;
             pixels.extend_from_slice(&src[row_start..row_start + row_bytes]);
         }
-
-        let delay = duration_from_timebase(packet_duration, time_base);
-        frames.push(Frame { pixels, delay });
+        let delay = duration_from_timebase(packet_duration, self.time_base);
+        Some((pixels, delay))
     }
 }
 
@@ -493,5 +589,38 @@ mod tests {
     #[test]
     fn rejects_empty_bytes() {
         assert!(decode(&[]).is_none());
+    }
+
+    #[test]
+    fn frame_reader_next_frame_returns_none_at_eof() {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(TWO_FRAME_GIF_B64)
+            .unwrap();
+        let mut reader = FrameReader::open(bytes).expect("open");
+        assert!(reader.next_frame().is_some(), "frame 1");
+        assert!(reader.next_frame().is_some(), "frame 2");
+        assert!(reader.next_frame().is_none(), "EOF after 2 frames");
+        // Repeated calls stay at EOF until a seek.
+        assert!(reader.next_frame().is_none(), "still EOF");
+    }
+
+    #[test]
+    fn frame_reader_next_frame_looping_wraps_around() {
+        use base64::Engine;
+        let bytes = base64::engine::general_purpose::STANDARD
+            .decode(TWO_FRAME_GIF_B64)
+            .unwrap();
+        let mut reader = FrameReader::open(bytes).expect("open");
+        // Pull a full cycle plus a third frame — the third should be
+        // frame 1 of the next loop, not None.
+        let f1 = reader.next_frame_looping().expect("frame 1");
+        let f2 = reader.next_frame_looping().expect("frame 2");
+        let f3 = reader.next_frame_looping().expect("frame 1 of loop 2");
+        assert_eq!(f1.0.len(), 8, "2×1 RGBA");
+        assert_eq!(f2.0.len(), 8);
+        assert_eq!(f3.0.len(), 8);
+        // Loop restart should land on frame 1 again — same pixel data as f1.
+        assert_eq!(f1.0, f3.0, "first-frame content matches across loops");
     }
 }

@@ -5,7 +5,7 @@ pub mod kitty;
 pub mod sixel;
 
 #[cfg(feature = "ffmpeg")]
-mod ffmpeg_decoder;
+pub(crate) mod ffmpeg_decoder;
 
 use std::time::Duration;
 

@@ -4,26 +4,39 @@
 //! linear-clamped sampler, a 4-vertex full-window quad, and the bookkeeping
 //! to swap the texture's pixels when an animated image advances frames.
 //!
-//! The `Renderer` draws this — when present — at the start of the bg pass,
-//! before any cell quads. The cell loop then skips quads for cells whose bg
-//! is the default colour, leaving the image visible through the "holes"
-//! while explicitly-coloured SGR cells overpaint it.
+//! Static images (PNG) decode once at load time; the texture is written
+//! and the job is done. Animated content (GIF today, video later) runs on
+//! a dedicated decoder thread that produces frames through a bounded
+//! [`sync_channel`]. The render thread drains the channel each cycle and
+//! uploads the newest buffered frame — so memory stays bounded at the
+//! channel capacity regardless of stream length. A 20-minute video uses
+//! the same RAM as a 2-second GIF.
 //!
-//! Single texture, swap-on-frame: animated GIFs re-upload the whole image
-//! when `frame_at` returns a different index. That trades GPU memory (one
-//! frame at a time) for upload bandwidth on every animation tick — fine
-//! for typical wallpaper sizes.
+//! The `Renderer` draws the background quad at the start of the bg pass,
+//! before any cell quads. The cell loop then skips bg quads for cells
+//! whose bg is the default colour, leaving the image visible through
+//! those "holes" while explicitly-coloured SGR cells overpaint it.
 
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Instant;
+use std::sync::mpsc;
+use std::thread::JoinHandle;
 
 use bytemuck::Pod;
 use bytemuck::Zeroable;
 use wgpu::util::DeviceExt;
 
-use crate::image::DecodedImage;
 use crate::image::decode_image;
+#[cfg(feature = "ffmpeg")]
+use crate::image::ffmpeg_decoder::FrameReader;
+
+/// How many decoded frames the decoder thread is allowed to get ahead of
+/// the render thread. Pre-buffering absorbs render-thread hiccups
+/// (GC pauses, scheduler jitter) without dropping playback; too-large a
+/// buffer just pins more RAM for no visual gain. Four frames at 1080p
+/// RGBA is ~32 MB always-resident — cheap compared to loading a whole
+/// GIF/video into RAM, the failure mode this module exists to avoid.
+const FRAME_BUFFER_CAPACITY: usize = 4;
 
 /// One vertex of the background quad: position in pixels, UV into the
 /// background texture (computed CPU-side for the chosen fit mode), and a
@@ -42,14 +55,9 @@ pub(crate) struct Background {
     /// Path the image was loaded from. Compared against the new config on
     /// reload so we only re-decode when the path actually changes.
     path: PathBuf,
-    image: DecodedImage,
-    /// Wall-clock anchor for the animation. `frame_at(now - placed_at)`
-    /// picks the current frame index; `Instant` keeps it monotonic across
-    /// system clock changes.
-    placed_at: Instant,
-    /// Frame currently sitting in `texture`. Stays on `frame_advance` calls
-    /// when the index hasn't changed so we skip the upload.
-    uploaded_frame: usize,
+    width: u32,
+    height: u32,
+    source: BackgroundSource,
     /// `background_opacity` config — RGB multiplier in `[0.0, 1.0]`.
     dim: f32,
 
@@ -64,10 +72,53 @@ pub(crate) struct Background {
     window_size: (u32, u32),
 }
 
+/// How `Background` gets its frames. Static images upload once at load
+/// time; streaming sources own a decoder thread that produces frames on
+/// demand through a bounded channel.
+enum BackgroundSource {
+    /// One-shot: the frame was uploaded at load time and `frame_advance`
+    /// is a no-op. Covers PNGs and anything else that decodes to a
+    /// single frame.
+    Static,
+    /// Multi-frame, decoded off-thread. `frame_advance` drains the
+    /// receiver each render cycle, discarding all but the newest frame
+    /// so a lagging render doesn't pile up a backlog.
+    Streaming {
+        rx: mpsc::Receiver<Vec<u8>>,
+        /// Held so the thread is joined (and its ffmpeg state dropped)
+        /// when `Background` is dropped or replaced. `Option` because
+        /// we take the handle out in `Drop` to run `join()`; during
+        /// normal operation it's always `Some`.
+        thread: Option<JoinHandle<()>>,
+    },
+}
+
+impl Drop for Background {
+    fn drop(&mut self) {
+        // Closing the channel makes the decoder thread's `send` fail on
+        // its next attempt, so it exits the loop cleanly. Joining here
+        // ensures ffmpeg teardown happens before we return — leaking
+        // decoder threads across config reloads would burn memory for
+        // nothing.
+        if let BackgroundSource::Streaming { thread, .. } = &mut self.source
+            && let Some(handle) = thread.take()
+        {
+            drop(std::mem::replace(
+                &mut self.source,
+                BackgroundSource::Static,
+            ));
+            let _ = handle.join();
+        }
+    }
+}
+
 impl Background {
-    /// Decode the image at `path` and build all GPU resources for it.
-    /// Returns `None` if the file can't be read or the bytes don't decode
-    /// into a supported format (PNG always; GIF behind the `ffmpeg` feature).
+    /// Decode or open the image at `path` and build all GPU resources
+    /// for it. Returns `None` if the file can't be read or the bytes
+    /// don't decode into a supported format (PNG always; GIF behind
+    /// the `ffmpeg` feature). Animated content (GIF, future video)
+    /// spawns a decoder thread so only a bounded number of frames sit
+    /// in RAM regardless of the stream's duration.
     pub(crate) fn load(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
@@ -79,13 +130,19 @@ impl Background {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
             Err(e) => {
-                // Logged at error so the default env_logger level surfaces
-                // it; a misspelled path or wrong permissions would
-                // otherwise look like a silently-broken feature.
                 error!("background image: failed to read {}: {e}", path.display());
                 return None;
             }
         };
+
+        // Format sniff: animated paths go to the streaming decoder;
+        // everything else decodes to one frame up front.
+        let is_animated = is_animated_format(&bytes);
+
+        if is_animated {
+            return Self::load_streaming(device, queue, layout, path, bytes, dim, window_size);
+        }
+
         let image = match decode_image(&bytes) {
             Some(img) => img,
             None => {
@@ -97,15 +154,115 @@ impl Background {
                 return None;
             }
         };
-
-        let texture = create_texture(device, image.width, image.height);
-        upload_frame(
+        let first = image.frames.into_iter().next()?;
+        Some(Self::build(
+            device,
             queue,
-            &texture,
+            layout,
+            path,
             image.width,
             image.height,
-            &image.frames[0].pixels,
+            &first.pixels,
+            BackgroundSource::Static,
+            dim,
+            window_size,
+        ))
+    }
+
+    #[cfg(feature = "ffmpeg")]
+    fn load_streaming(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        path: PathBuf,
+        bytes: Vec<u8>,
+        dim: f32,
+        window_size: (u32, u32),
+    ) -> Option<Self> {
+        // Decoder thread model: the `FrameReader` is opened, used, and
+        // dropped entirely on the decoder thread — it never crosses a
+        // thread boundary. Only `Send`-safe bytes (`Vec<u8>`, `u32`)
+        // flow back to the render thread, so we don't need an
+        // `unsafe impl Send` on ffmpeg state that might rely on
+        // thread-local quirks we can't see from the outside.
+        //
+        // Startup flow:
+        //   1. Spawn thread with raw bytes + a `meta` oneshot channel.
+        //   2. Thread opens FrameReader, pulls frame 1, ships `(width, height,
+        //      frame_1_pixels)` through `meta`.
+        //   3. Main thread blocks on `meta.recv` (fast — ffmpeg init
+        //      + 1-frame decode is ~5-20 ms), then builds GPU state
+        //      with the first frame uploaded synchronously.
+        //   4. Thread continues in its steady-state loop, shipping subsequent frames
+        //      through `frame_tx`.
+        let (meta_tx, meta_rx) = mpsc::channel::<Option<StreamMeta>>();
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<Vec<u8>>(FRAME_BUFFER_CAPACITY);
+        let path_for_thread = path.clone();
+        let thread = std::thread::Builder::new()
+            .name("bg-decoder".into())
+            .spawn(move || decoder_thread(bytes, meta_tx, frame_tx, &path_for_thread))
+            .ok()?;
+
+        let meta = match meta_rx.recv() {
+            Ok(Some(m)) => m,
+            _ => {
+                // Decoder reported failure or exited before sending meta
+                // (e.g. open failed). Join so ffmpeg state is torn down
+                // before we return, then surface a None load.
+                let _ = thread.join();
+                return None;
+            }
+        };
+
+        Some(Self::build(
+            device,
+            queue,
+            layout,
+            path,
+            meta.width,
+            meta.height,
+            &meta.first_pixels,
+            BackgroundSource::Streaming {
+                rx: frame_rx,
+                thread: Some(thread),
+            },
+            dim,
+            window_size,
+        ))
+    }
+
+    #[cfg(not(feature = "ffmpeg"))]
+    fn load_streaming(
+        _device: &wgpu::Device,
+        _queue: &wgpu::Queue,
+        _layout: &wgpu::BindGroupLayout,
+        path: PathBuf,
+        _bytes: Vec<u8>,
+        _dim: f32,
+        _window_size: (u32, u32),
+    ) -> Option<Self> {
+        error!(
+            "background image: {} looks animated but ffmpeg support isn't compiled in",
+            path.display()
         );
+        None
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn build(
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        layout: &wgpu::BindGroupLayout,
+        path: PathBuf,
+        width: u32,
+        height: u32,
+        first_pixels: &[u8],
+        source: BackgroundSource,
+        dim: f32,
+        window_size: (u32, u32),
+    ) -> Self {
+        let texture = create_texture(device, width, height);
+        upload_frame(queue, &texture, width, height, first_pixels);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("bg_image_sampler"),
@@ -134,7 +291,7 @@ impl Background {
             ],
         });
 
-        let vertices = fill_vertices(window_size, image.width, image.height, dim);
+        let vertices = fill_vertices(window_size, width, height, dim);
         let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("bg_image_verts"),
             contents: bytemuck::cast_slice(&vertices),
@@ -147,18 +304,18 @@ impl Background {
             usage: wgpu::BufferUsages::INDEX,
         });
 
-        Some(Self {
+        Self {
             path,
-            image,
-            placed_at: Instant::now(),
-            uploaded_frame: 0,
+            width,
+            height,
+            source,
             dim,
             texture,
             bind_group,
             vbuf,
             ibuf,
             window_size,
-        })
+        }
     }
 
     pub(crate) fn path(&self) -> &Path {
@@ -176,7 +333,7 @@ impl Background {
             return;
         }
         self.dim = dim;
-        let verts = fill_vertices(self.window_size, self.image.width, self.image.height, dim);
+        let verts = fill_vertices(self.window_size, self.width, self.height, dim);
         queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
     }
 
@@ -191,39 +348,44 @@ impl Background {
             return;
         }
         self.window_size = window_size;
-        let verts = fill_vertices(window_size, self.image.width, self.image.height, self.dim);
+        let verts = fill_vertices(window_size, self.width, self.height, self.dim);
         queue.write_buffer(&self.vbuf, 0, bytemuck::cast_slice(&verts));
     }
 
-    /// Move to the frame appropriate for `now`. For static images this is
-    /// always frame 0 — the first call uploads it, subsequent calls find
-    /// `uploaded_frame == 0` and skip. For animated images, re-uploads
-    /// when the frame index changes.
+    /// Swap in whatever frame the decoder thread has most recently
+    /// produced. For static sources this is a no-op (the single frame
+    /// was uploaded at load time). For streaming sources, drains the
+    /// channel and uploads the newest buffered frame — older ones are
+    /// discarded so a lagging render doesn't chase history.
     pub(crate) fn frame_advance(
         &mut self,
         queue: &wgpu::Queue,
-        now: Instant,
     ) {
-        let elapsed = now.saturating_duration_since(self.placed_at);
-        let frame_idx = self.image.frame_at(elapsed);
-        if frame_idx == self.uploaded_frame {
+        let BackgroundSource::Streaming { rx, .. } = &mut self.source else {
             return;
+        };
+        let mut latest: Option<Vec<u8>> = None;
+        loop {
+            match rx.try_recv() {
+                Ok(frame) => latest = Some(frame),
+                Err(mpsc::TryRecvError::Empty) => break,
+                Err(mpsc::TryRecvError::Disconnected) => {
+                    // Decoder thread exited (stream ended, error, etc.).
+                    // Current texture contents stick; no further updates.
+                    break;
+                }
+            }
         }
-        self.uploaded_frame = frame_idx;
-        upload_frame(
-            queue,
-            &self.texture,
-            self.image.width,
-            self.image.height,
-            &self.image.frames[frame_idx].pixels,
-        );
+        if let Some(frame) = latest {
+            upload_frame(queue, &self.texture, self.width, self.height, &frame);
+        }
     }
 
     /// Are we drawing more than one frame on a loop? The render thread
     /// needs to know to wake up between frames so animations actually
     /// progress instead of stalling on input idleness.
     pub(crate) fn is_animated(&self) -> bool {
-        self.image.is_animated()
+        matches!(self.source, BackgroundSource::Streaming { .. })
     }
 
     pub(crate) fn bind_group(&self) -> &wgpu::BindGroup {
@@ -237,6 +399,100 @@ impl Background {
     pub(crate) fn ibuf(&self) -> &wgpu::Buffer {
         &self.ibuf
     }
+}
+
+/// Stream initialisation handshake — everything the main thread needs
+/// before it can build the GPU resources for the background. Only
+/// `Send`-safe fields so no `unsafe impl Send` is needed anywhere.
+#[cfg(feature = "ffmpeg")]
+struct StreamMeta {
+    width: u32,
+    height: u32,
+    first_pixels: Vec<u8>,
+}
+
+/// Decoder thread body. Owns the `FrameReader` for its entire lifetime —
+/// never hands it out, never moves it. Ships only `Vec<u8>` pixels and
+/// `u32` dimensions back to the render thread. Structure:
+///
+///   1. `FrameReader::open(bytes)` — ffmpeg setup on this thread.
+///   2. Pull frame 1 for the initial-state handshake.
+///   3. Send `StreamMeta` → unblocks main thread's `load_streaming`.
+///   4. Sleep frame 1's presentation delay, then loop: pull next frame, send
+///      via `frame_tx`, sleep its delay. `next_frame_looping` seeks to start on
+///      EOF so the stream plays forever.
+///
+/// Any failure (open fails, no decodable frames, decoder unrecoverable)
+/// sends `None` on `meta_tx` if we haven't already ACKed meta, and
+/// exits. The thread's exit on unrecoverable errors is the user-visible
+/// behaviour of "the background froze on its last frame"; better than
+/// panicking on the background thread.
+#[cfg(feature = "ffmpeg")]
+fn decoder_thread(
+    bytes: Vec<u8>,
+    meta_tx: mpsc::Sender<Option<StreamMeta>>,
+    frame_tx: mpsc::SyncSender<Vec<u8>>,
+    path_for_log: &Path,
+) {
+    let Some(mut reader) = FrameReader::open(bytes) else {
+        let _ = meta_tx.send(None);
+        return;
+    };
+    let width = reader.width;
+    let height = reader.height;
+    let Some((first_pixels, first_delay)) = reader.next_frame() else {
+        let _ = meta_tx.send(None);
+        return;
+    };
+    if meta_tx
+        .send(Some(StreamMeta {
+            width,
+            height,
+            first_pixels,
+        }))
+        .is_err()
+    {
+        // Main thread dropped the meta receiver before we ACKed — they
+        // gave up on the load (unlikely, but handle it).
+        return;
+    }
+
+    // Main thread will sleep the first frame's delay itself? No — we
+    // sleep it here so the main thread can upload frame 1 immediately
+    // and we pace frame 2 correctly relative to it.
+    std::thread::sleep(first_delay);
+    loop {
+        let (pixels, delay) = match reader.next_frame_looping() {
+            Some(f) => f,
+            None => {
+                warn!(
+                    "background image: decoder exiting for {} (stream unrecoverable)",
+                    path_for_log.display()
+                );
+                return;
+            }
+        };
+        // `send` blocks when the channel is full — that's the backpressure
+        // that keeps us a bounded number of frames ahead of the renderer.
+        // If the channel closed the receiver dropped; exit cleanly.
+        if frame_tx.send(pixels).is_err() {
+            return;
+        }
+        std::thread::sleep(delay);
+    }
+}
+
+/// Sniff whether the bytes represent a format we treat as animated (and
+/// therefore route through the streaming decoder). Today that's just
+/// GIF; video containers will plug in here as the same animated path
+/// without further wiring. Unknown or non-matching formats fall back to
+/// the static path — `decode_image` will either handle them or report
+/// a clean "unsupported format" error there.
+fn is_animated_format(bytes: &[u8]) -> bool {
+    let Some(kind) = infer::get(bytes) else {
+        return false;
+    };
+    matches!(kind.mime_type(), "image/gif")
 }
 
 /// Bind group layout for the background pipeline: one texture + one
@@ -377,14 +633,12 @@ mod tests {
         img: (u32, u32),
     ) -> ([f32; 2], [f32; 2]) {
         let v = fill_vertices(window, img.0, img.1, 1.0);
-        // Top-left and bottom-right in UV space.
         (v[0].uv, v[3].uv)
     }
 
     #[test]
     fn matching_aspect_uses_full_image() {
         let (tl, br) = uvs((800, 400), (200, 100));
-        // Identical aspect → no cropping, UVs span [0, 1].
         assert!((tl[0] - 0.0).abs() < 1e-6);
         assert!((tl[1] - 0.0).abs() < 1e-6);
         assert!((br[0] - 1.0).abs() < 1e-6);
@@ -393,14 +647,9 @@ mod tests {
 
     #[test]
     fn wider_window_crops_image_height() {
-        // Window 4:1, image 1:1 → image scales to fill the width and
-        // crops vertically. UV.x stays full; UV.y centred crop.
         let (tl, br) = uvs((400, 100), (100, 100));
         assert!((tl[0] - 0.0).abs() < 1e-6);
         assert!((br[0] - 1.0).abs() < 1e-6);
-        // Image scaled by 4 (to match width). Image height = 400px,
-        // window height = 100px → crop 300px / 400px = 0.75 of UV
-        // height total, 0.375 each side.
         assert!((tl[1] - 0.375).abs() < 1e-6);
         assert!((br[1] - 0.625).abs() < 1e-6);
     }
@@ -412,5 +661,18 @@ mod tests {
         assert!((br[1] - 1.0).abs() < 1e-6);
         assert!((tl[0] - 0.375).abs() < 1e-6);
         assert!((br[0] - 0.625).abs() < 1e-6);
+    }
+
+    #[test]
+    fn sniffs_gif_as_animated() {
+        // GIF magic: "GIF89a" / "GIF87a".
+        assert!(is_animated_format(b"GIF89a\x00\x00"));
+        assert!(is_animated_format(b"GIF87a\x00\x00"));
+    }
+
+    #[test]
+    fn png_not_treated_as_animated() {
+        let png_magic = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0];
+        assert!(!is_animated_format(&png_magic));
     }
 }
