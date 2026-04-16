@@ -19,8 +19,10 @@
 
 use std::path::Path;
 use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
-use std::thread::JoinHandle;
+use std::time::Instant;
 
 use bytemuck::Pod;
 use bytemuck::Zeroable;
@@ -72,6 +74,13 @@ pub(crate) struct Background {
     window_size: (u32, u32),
 }
 
+struct Frame {
+    pixels: Vec<u8>,
+    delay: std::time::Duration,
+    width: u32,
+    height: u32,
+}
+
 /// How `Background` gets its frames. Static images upload once at load
 /// time; streaming sources own a decoder thread that produces frames on
 /// demand through a bounded channel.
@@ -84,12 +93,10 @@ enum BackgroundSource {
     /// receiver each render cycle, discarding all but the newest frame
     /// so a lagging render doesn't pile up a backlog.
     Streaming {
-        rx: mpsc::Receiver<Vec<u8>>,
-        /// Held so the thread is joined (and its ffmpeg state dropped)
-        /// when `Background` is dropped or replaced. `Option` because
-        /// we take the handle out in `Drop` to run `join()`; during
-        /// normal operation it's always `Some`.
-        thread: Option<JoinHandle<()>>,
+        rx: mpsc::Receiver<Frame>,
+        last_frame_at: Instant,
+        frame_delay: std::time::Duration,
+        shutdown: Arc<AtomicBool>,
     },
 }
 
@@ -100,14 +107,9 @@ impl Drop for Background {
         // ensures ffmpeg teardown happens before we return — leaking
         // decoder threads across config reloads would burn memory for
         // nothing.
-        if let BackgroundSource::Streaming { thread, .. } = &mut self.source
-            && let Some(handle) = thread.take()
-        {
-            drop(std::mem::replace(
-                &mut self.source,
-                BackgroundSource::Static,
-            ));
-            let _ = handle.join();
+        if let BackgroundSource::Streaming { shutdown, rx, .. } = &mut self.source {
+            shutdown.store(true, std::sync::atomic::Ordering::Release);
+            while rx.try_recv().is_ok() {}
         }
     }
 }
@@ -160,9 +162,12 @@ impl Background {
             queue,
             layout,
             path,
-            image.width,
-            image.height,
-            &first.pixels,
+            Frame {
+                pixels: first.pixels,
+                delay: first.delay,
+                width: image.width,
+                height: image.height,
+            },
             BackgroundSource::Static,
             dim,
             window_size,
@@ -195,36 +200,31 @@ impl Background {
         //      with the first frame uploaded synchronously.
         //   4. Thread continues in its steady-state loop, shipping subsequent frames
         //      through `frame_tx`.
-        let (meta_tx, meta_rx) = mpsc::channel::<Option<StreamMeta>>();
-        let (frame_tx, frame_rx) = mpsc::sync_channel::<Vec<u8>>(FRAME_BUFFER_CAPACITY);
+
+        let (size_tx, size_rx) = mpsc::sync_channel::<Frame>(1);
+        let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(FRAME_BUFFER_CAPACITY);
+        let shutdown = Arc::new(AtomicBool::new(false));
+        let shutdown_ = shutdown.clone();
         let path_for_thread = path.clone();
-        let thread = std::thread::Builder::new()
+        std::thread::Builder::new()
             .name("bg-decoder".into())
-            .spawn(move || decoder_thread(bytes, meta_tx, frame_tx, &path_for_thread))
+            .spawn(move || decoder_thread(bytes, size_tx, frame_tx, &path_for_thread, shutdown_))
             .ok()?;
 
-        let meta = match meta_rx.recv() {
-            Ok(Some(m)) => m,
-            _ => {
-                // Decoder reported failure or exited before sending meta
-                // (e.g. open failed). Join so ffmpeg state is torn down
-                // before we return, then surface a None load.
-                let _ = thread.join();
-                return None;
-            }
-        };
+        let meta = size_rx.recv().ok()?;
+        let delay = meta.delay;
 
         Some(Self::build(
             device,
             queue,
             layout,
             path,
-            meta.width,
-            meta.height,
-            &meta.first_pixels,
+            meta,
             BackgroundSource::Streaming {
                 rx: frame_rx,
-                thread: Some(thread),
+                last_frame_at: Instant::now(),
+                frame_delay: delay,
+                shutdown,
             },
             dim,
             window_size,
@@ -254,15 +254,13 @@ impl Background {
         queue: &wgpu::Queue,
         layout: &wgpu::BindGroupLayout,
         path: PathBuf,
-        width: u32,
-        height: u32,
-        first_pixels: &[u8],
+        first: Frame,
         source: BackgroundSource,
         dim: f32,
         window_size: (u32, u32),
     ) -> Self {
-        let texture = create_texture(device, width, height);
-        upload_frame(queue, &texture, width, height, first_pixels);
+        let texture = create_texture(device, first.width, first.height);
+        upload_frame(queue, &texture, first.width, first.height, &first.pixels);
 
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             label: Some("bg_image_sampler"),
@@ -291,7 +289,7 @@ impl Background {
             ],
         });
 
-        let vertices = fill_vertices(window_size, width, height, dim);
+        let vertices = fill_vertices(window_size, first.width, first.height, dim);
         let vbuf = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
             label: Some("bg_image_verts"),
             contents: bytemuck::cast_slice(&vertices),
@@ -306,8 +304,8 @@ impl Background {
 
         Self {
             path,
-            width,
-            height,
+            width: first.width,
+            height: first.height,
             source,
             dim,
             texture,
@@ -361,23 +359,30 @@ impl Background {
         &mut self,
         queue: &wgpu::Queue,
     ) {
-        let BackgroundSource::Streaming { rx, .. } = &mut self.source else {
+        let BackgroundSource::Streaming {
+            rx,
+            last_frame_at,
+            frame_delay,
+            ..
+        } = &mut self.source
+        else {
             return;
         };
-        let mut latest: Option<Vec<u8>> = None;
-        loop {
-            match rx.try_recv() {
-                Ok(frame) => latest = Some(frame),
-                Err(mpsc::TryRecvError::Empty) => break,
-                Err(mpsc::TryRecvError::Disconnected) => {
-                    // Decoder thread exited (stream ended, error, etc.).
-                    // Current texture contents stick; no further updates.
-                    break;
-                }
-            }
+
+        if last_frame_at.elapsed() < *frame_delay {
+            return;
         }
-        if let Some(frame) = latest {
-            upload_frame(queue, &self.texture, self.width, self.height, &frame);
+
+        if let Ok(frame) = rx.try_recv() {
+            upload_frame(
+                queue,
+                &self.texture,
+                frame.width,
+                frame.height,
+                &frame.pixels,
+            );
+            *last_frame_at = Instant::now();
+            *frame_delay = frame.delay;
         }
     }
 
@@ -401,16 +406,6 @@ impl Background {
     }
 }
 
-/// Stream initialisation handshake — everything the main thread needs
-/// before it can build the GPU resources for the background. Only
-/// `Send`-safe fields so no `unsafe impl Send` is needed anywhere.
-#[cfg(feature = "ffmpeg")]
-struct StreamMeta {
-    width: u32,
-    height: u32,
-    first_pixels: Vec<u8>,
-}
-
 /// Decoder thread body. Owns the `FrameReader` for its entire lifetime —
 /// never hands it out, never moves it. Ships only `Vec<u8>` pixels and
 /// `u32` dimensions back to the render thread. Structure:
@@ -430,37 +425,37 @@ struct StreamMeta {
 #[cfg(feature = "ffmpeg")]
 fn decoder_thread(
     bytes: Vec<u8>,
-    meta_tx: mpsc::Sender<Option<StreamMeta>>,
-    frame_tx: mpsc::SyncSender<Vec<u8>>,
+    size_tx: mpsc::SyncSender<Frame>,
+    frame_tx: mpsc::SyncSender<Frame>,
     path_for_log: &Path,
+    shutdown: Arc<AtomicBool>,
 ) {
     let Some(mut reader) = FrameReader::open(bytes) else {
-        let _ = meta_tx.send(None);
         return;
     };
+
     let width = reader.width;
     let height = reader.height;
-    let Some((first_pixels, first_delay)) = reader.next_frame() else {
-        let _ = meta_tx.send(None);
+    let Some((pixels, delay)) = reader.next_frame_looping() else {
+        warn!(
+            "background image: no decodable frames in {}",
+            path_for_log.display()
+        );
         return;
     };
-    if meta_tx
-        .send(Some(StreamMeta {
+
+    if size_tx
+        .send(Frame {
+            pixels,
+            delay,
             width,
             height,
-            first_pixels,
-        }))
+        })
         .is_err()
     {
-        // Main thread dropped the meta receiver before we ACKed — they
-        // gave up on the load (unlikely, but handle it).
         return;
-    }
+    };
 
-    // Main thread will sleep the first frame's delay itself? No — we
-    // sleep it here so the main thread can upload frame 1 immediately
-    // and we pace frame 2 correctly relative to it.
-    std::thread::sleep(first_delay);
     loop {
         let (pixels, delay) = match reader.next_frame_looping() {
             Some(f) => f,
@@ -472,13 +467,25 @@ fn decoder_thread(
                 return;
             }
         };
+
         // `send` blocks when the channel is full — that's the backpressure
         // that keeps us a bounded number of frames ahead of the renderer.
         // If the channel closed the receiver dropped; exit cleanly.
-        if frame_tx.send(pixels).is_err() {
+        if frame_tx
+            .send(Frame {
+                pixels,
+                delay,
+                width,
+                height,
+            })
+            .is_err()
+        {
             return;
         }
-        std::thread::sleep(delay);
+
+        if shutdown.load(std::sync::atomic::Ordering::Acquire) {
+            return;
+        }
     }
 }
 

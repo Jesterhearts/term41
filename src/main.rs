@@ -338,7 +338,7 @@ fn main() {
     let render_thread_handle_ = render_thread_handle.clone();
     // Spawn the render thread.
     let config_reload_ = config_reload.clone();
-    let render_handle = thread::Builder::new()
+    thread::Builder::new()
         .name("renderer".into())
         .spawn(move || {
             render_thread_handle_
@@ -379,8 +379,6 @@ fn main() {
         cell_height,
     };
     event_loop.run_app(&mut host).expect("run event loop");
-    drop(host);
-    let _ = render_handle.join();
 }
 
 fn spawn_config_watcher(
