@@ -13,12 +13,13 @@ pub const DEFAULT_SCROLLBACK: u32 = 10_000;
 
 /// VSync mode for frame presentation. See the `vsync` config key and the
 /// `Config::vsync` field for details.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
 pub enum VSync {
     /// Let the OS decide when to present frames. This is the default and
     /// usually means "sync to the display's refresh rate", but some
     /// platforms may choose a different strategy.
+    #[default]
     Auto,
     /// Try using fast-vsync or similar techniques to present frames immediately
     /// when they're ready, without screen tearing.
@@ -57,28 +58,49 @@ pub enum BellMode {
 
 #[derive(Deserialize)]
 struct ConfigFile {
+    #[serde(deserialize_with = "float_opt_clamp_0_1")]
+    #[serde(default)]
     opacity: Option<f32>,
+    #[serde(default)]
     fonts: Option<String>,
+    #[serde(deserialize_with = "float_opt")]
+    #[serde(default)]
     font_size: Option<f32>,
+    #[serde(deserialize_with = "u32_opt")]
+    #[serde(default)]
     scrollback_lines: Option<u32>,
     /// Cursor shape: `block`, `underline`, or `beam`.
-    cursor_shape: Option<String>,
+    #[serde(deserialize_with = "cursor_shape_opt")]
+    #[serde(default)]
+    cursor_shape: Option<CursorShape>,
     /// Whether the cursor blinks. Defaults to true.
+    #[serde(deserialize_with = "cursor_blink_opt")]
+    #[serde(default)]
     cursor_blink: Option<bool>,
     /// Replace the default keybindings entirely. Setting an empty array
     /// disables all bindings — useful for debugging conflicts.
+    #[serde(deserialize_with = "keybindings_opt")]
+    #[serde(default)]
     keybindings: Option<Vec<KeybindingConfig>>,
     /// Bell behaviour: `off`, `visual`, or `urgent`.
+    #[serde(deserialize_with = "bell_mode_opt")]
+    #[serde(default)]
     bell: Option<BellMode>,
     /// Show the shell-integration gutter on the left edge — a thin strip
     /// where OSC 133 prompt rows get a coloured dot marking the last
     /// command's exit status. Defaults to on; disable for a pure
     /// terminal-text view or when the shell doesn't emit OSC 133 at all.
+    #[serde(deserialize_with = "gutter_opt")]
+    #[serde(default)]
     gutter: Option<bool>,
     /// Preferred power mode for the GPU. See wgpu::PowerPreference docs for
     /// details.
+    #[serde(deserialize_with = "power_preference_opt")]
+    #[serde(default)]
     power_preference: Option<PowerPreference>,
     /// Whether to enable vsync.
+    #[serde(deserialize_with = "vsync_opt")]
+    #[serde(default)]
     vsync: Option<VSync>,
 }
 
@@ -138,7 +160,7 @@ fn parse_config(
         }
     };
 
-    let cursor_style = build_cursor_style(file.cursor_shape.as_deref(), file.cursor_blink);
+    let cursor_style = build_cursor_style(file.cursor_shape, file.cursor_blink);
     let keybindings = build_keybindings(file.keybindings, source);
 
     Config {
@@ -185,20 +207,12 @@ fn build_keybindings(
 /// back to [`CursorStyle::default`] when both are absent. Unknown shape names
 /// log a warning and default to block.
 fn build_cursor_style(
-    shape: Option<&str>,
+    shape: Option<CursorShape>,
     blink: Option<bool>,
 ) -> CursorStyle {
     let mut style = CursorStyle::default();
     if let Some(s) = shape {
-        style.shape = match s.to_ascii_lowercase().as_str() {
-            "block" => CursorShape::Block,
-            "underline" | "underscore" => CursorShape::Underline,
-            "beam" | "bar" | "ibeam" => CursorShape::Beam,
-            other => {
-                warn!("unknown cursor_shape {other:?}; falling back to block");
-                CursorShape::Block
-            }
-        };
+        style.shape = s;
     }
     if let Some(b) = blink {
         style.blink = b;
@@ -208,6 +222,145 @@ fn build_cursor_style(
 
 fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("term41").join("config.toml"))
+}
+
+fn float_opt_clamp_0_1<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<f32>::deserialize(deserializer) {
+        Ok(opt) => {
+            if let Some(f) = opt {
+                if !(0.0..=1.0).contains(&f) {
+                    warn!("float value {f} out of range [0.0, 1.0]; clamping");
+                }
+                Ok(Some(f.clamp(0.0, 1.0)))
+            } else {
+                Ok(None)
+            }
+        }
+        Err(e) => {
+            warn!("failed to parse float in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn float_opt<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<f32>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse float in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn u32_opt<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u32>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse integer in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn cursor_shape_opt<'de, D>(deserializer: D) -> Result<Option<CursorShape>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<CursorShape>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse cursor shape in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn cursor_blink_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<bool>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse cursor blink in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn keybindings_opt<'de, D>(deserializer: D) -> Result<Option<Vec<KeybindingConfig>>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<Vec<KeybindingConfig>>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse keybindings in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn bell_mode_opt<'de, D>(deserializer: D) -> Result<Option<BellMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<BellMode>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse bell mode in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn gutter_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<bool>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse gutter setting in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn power_preference_opt<'de, D>(deserializer: D) -> Result<Option<PowerPreference>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<PowerPreference>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse power preference in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn vsync_opt<'de, D>(deserializer: D) -> Result<Option<VSync>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<VSync>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse vsync setting in config: {e}");
+            Ok(None)
+        }
+    }
 }
 
 #[cfg(test)]

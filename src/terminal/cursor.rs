@@ -7,15 +7,22 @@
 //! separately so adding new shapes or a "force-disable blink" preference is a
 //! one-line change.
 
+use serde::Deserialize;
+
 /// Geometry of the cursor overlay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum CursorShape {
     /// Full-cell block. The glyph beneath inverts so the character stays
     /// readable.
+    #[default]
     Block,
     /// Thin horizontal bar at the bottom of the cell.
+    #[serde(alias = "underscore")]
     Underline,
     /// Thin vertical bar at the left edge of the cell.
+    #[serde(alias = "bar")]
+    #[serde(alias = "ibeam")]
     Beam,
 }
 
