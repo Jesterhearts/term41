@@ -1,0 +1,137 @@
+Terminal pixel-art sampler — exercises term41's legacy rasteriser.
+Every filled region should abut its neighbour without a visible seam.
+
+== Block Elements (U+2580–U+259F) ==
+
+Full / half blocks:
+████  ▀▀▀▀  ▄▄▄▄  ▌▌▌▌  ▐▐▐▐
+
+Lower N/8 fill (ramp 1..8):
+▁▂▃▄▅▆▇█▇▆▅▄▃▂▁
+
+Left N/8 fill (ramp 1..8):
+▏▎▍▌▋▊▉█▉▊▋▌▍▎▏
+
+Upper 1/8 and right 1/8:
+▔▔▔▔  ▕▕▕▕
+
+Shades (25% / 50% / 75%):
+░░░░ ▒▒▒▒ ▓▓▓▓ ████
+░▒▓█▓▒░
+░░▒▒▓▓██▓▓▒▒░░
+
+Quadrants — all 16 combinations, row by row:
+ ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█
+▘▝▖▗  ▘▖  ▝▗  ▘▗  ▝▖
+▙▛▜▟  ▚▞  ▀▄  ▌▐  ██
+
+Quadrant corners making a filled rectangle outline:
+▛▀▀▀▜
+▌   ▐
+▌   ▐
+▙▄▄▄▟
+
+== Braille (U+2800–U+28FF) ==
+
+Full-cell braille (should tile as a solid block, no gaps):
+⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿
+⣿⣿⣿⣿⣿⣿
+
+Partial braille — rows of dots:
+⠁⠁⠁⠁  ⠂⠂⠂⠂  ⠄⠄⠄⠄  ⡀⡀⡀⡀
+⠉⠉⠉⠉  ⠒⠒⠒⠒  ⠤⠤⠤⠤  ⣀⣀⣀⣀
+⠋⠉⠉⠉⠉⠛  (rounded top-row bar)
+⡇      ⢸  (left + right verticals)
+⣇⣀⣀⣀⣀⣸  (rounded bottom-row bar)
+
+Braille diagonal sweep:
+⠁⠂⠄⡀⠈⠐⠠⢀
+⠃⠆⡄⣀⠉⠒⠤⣀
+⠇⡆⣄⣀⠋⠖⡤⣀
+
+== Sextants (U+1FB00–U+1FB3B) ==
+
+Sample row of sextants (2×3 tile grid):
+🬀🬁🬂🬃🬄🬅🬆🬇🬈🬉🬊🬋🬌🬍🬎🬏🬐🬑🬒🬓🬔🬕🬖🬗🬘🬙🬚🬛🬜🬝🬞🬟
+🬠🬡🬢🬣🬤🬥🬦🬧🬨🬩🬪🬫🬬🬭🬮🬯🬰🬱🬲🬳🬴🬵🬶🬷🬸🬹🬺🬻
+
+Sextant rectangle (rows of top/middle/bottom filled tiles):
+🬃🬂🬃🬂🬃  (top row filled)
+🬎🬎🬎🬎🬎  (middle row)
+🬶🬶🬶🬶🬶  (bottom row)
+
+== SFLC 1/8 blocks (U+1FB70–U+1FB80, U+1FB82–U+1FB8F) ==
+
+Vertical 1/8 column sweep (col 1..8 with left & right edge blocks):
+▏🭰🭱🭲🭳🭴🭵▕
+Full horizontal sweep:
+▏🭰🭱🭲🭳🭴🭵▕🭰🭱🭲🭳🭴🭵▕
+
+Horizontal 1/8 row sweep (top..bottom):
+▔
+🭶
+🭷
+🭸
+🭹
+🭺
+🭻
+▁
+
+L-shaped 1/8 frames:
+🭽▔▔▔🭾
+▏   ▕
+▏   ▕
+🭼▁▁▁🭿
+
+Upper N/8 ramp (1/8..7/8):
+▔🭶🭷🭸🭹🭺🭻▁   (1/8 top, grading to 1/8 bottom via horizontals)
+▔🭸🭺▁        (compact ramp)
+▔🮂🮃▀🮄🮅🮆█    (upper 1..8/8 progression — U+2594, 1FB82, 1FB83, 2580, 1FB84, 1FB85, 1FB86, 2588)
+
+Right N/8 ramp:
+▕🮇🮈▐🮉🮊🮋█    (right 1..8/8 — U+2595, 1FB87, 1FB88, 2590, 1FB89, 1FB8A, 1FB8B, 2588)
+
+Shaded halves (half-block geometry at medium density):
+🮌🮌🮌🮌   (left)
+🮍🮍🮍🮍   (right)
+🮎🮎🮎🮎   (upper)
+🮏🮏🮏🮏   (lower)
+
+== Adjacency / tiling torture tests ==
+
+Horizontal tiling of left 1/8 blocks (should form a solid horizontal line
+at the very top of the row, no gaps, no seams):
+████████████████████████
+
+Vertical tiling of upper 1/8 blocks across four rows:
+▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
+🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶
+🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸
+▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
+
+Quadrant checkerboard (no seams between cells):
+▘▝▘▝▘▝▘▝
+▖▗▖▗▖▗▖▗
+
+Braille wall (full cell) plus partial border:
+⣿⣿⣿⣿⣿⣿⣿⣿
+⣿⡀⠀⠀⠀⠀⢀⣿
+⣿⠀⠀⠀⠀⠀⠀⣿
+⣿⠁⠀⠀⠀⠀⠈⣿
+⣿⣿⣿⣿⣿⣿⣿⣿
+
+Sextant wall plus partial interior:
+🬛🬛🬛🬛🬛🬛🬛🬛
+🬛🬀🬁🬂🬃🬄🬅🬛
+🬛🬆🬇🬈🬉🬊🬋🬛
+🬛🬛🬛🬛🬛🬛🬛🬛
+
+== Colour shades side by side ==
+
+░░▒▒▓▓██▓▓▒▒░░
+████████████████
+▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
+▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
+░░░░░░░░░░░░░░░░

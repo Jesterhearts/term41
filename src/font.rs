@@ -1,5 +1,6 @@
 mod bitmap;
 mod colr;
+mod legacy;
 mod svg;
 
 use std::collections::HashMap;
@@ -251,6 +252,9 @@ impl FontSystem {
         &self,
         font_index: usize,
     ) -> bool {
+        if font_index == legacy::FONT_INDEX {
+            return false;
+        }
         FONTS
             .wait()
             .get(font_index)
@@ -265,6 +269,9 @@ impl FontSystem {
         &self,
         font_index: usize,
     ) -> bool {
+        if font_index == legacy::FONT_INDEX {
+            return false;
+        }
         FONTS
             .wait()
             .get(font_index)
@@ -279,6 +286,9 @@ impl FontSystem {
         &self,
         font_index: usize,
     ) -> bool {
+        if font_index == legacy::FONT_INDEX {
+            return false;
+        }
         FONTS
             .wait()
             .get(font_index)
@@ -399,6 +409,37 @@ impl FontSystem {
         // Track which columns still need a glyph (for fallback).
         let mut has_glyph = vec![false; cells.len()];
         let mut result: Vec<ShapedGlyph> = Vec::with_capacity(cells.len());
+
+        // Pre-pass: intercept block elements, braille, sextants, and SFLC
+        // 1/8 blocks so they render through our own "fill the exact tile"
+        // rasteriser instead of a font glyph with gappy edges. Marking the
+        // cell as covered keeps subsequent shaping passes from overriding
+        // the synthetic glyph.
+        for (col, cell) in cells.iter().enumerate() {
+            if let Some(glyph_id) = legacy::encode_single(cell) {
+                result.push(ShapedGlyph {
+                    glyph_id,
+                    font_index: legacy::FONT_INDEX,
+                    col: col as u16,
+                    cells_wide: 1,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                });
+                has_glyph[col] = true;
+            }
+        }
+
+        // If the pre-pass covered every non-blank cell we can skip font
+        // shaping entirely — saves shaper setup for rows that are pure
+        // pixel-art.
+        let all_covered = has_glyph
+            .iter()
+            .enumerate()
+            .all(|(i, &has)| has || cells[i] == " " || cells[i].is_empty());
+        if all_covered {
+            assign_cells_wide(&mut result, cells.len() as u16);
+            return result;
+        }
 
         // Two passes: first only accept a glyph from the cell's preferred
         // face (variant-matched, or colour-matched for emoji). Second pass
@@ -534,6 +575,14 @@ impl FontSystem {
         glyph_index: u16,
         cells_wide: u32,
     ) -> RasterizedGlyph {
+        // Legacy shapes (block elements, braille, sextants, SFLC 1/8 blocks)
+        // bypass the font entirely — they render as cell-filling solid tiles
+        // so "pixel art" built from them tiles seamlessly across neighbouring
+        // cells. See `legacy` for the full codepoint list.
+        if font_index == legacy::FONT_INDEX {
+            return legacy::rasterize(glyph_index, self.cell_width, self.cell_height, self.ascent);
+        }
+
         let loaded = FONTS.wait().get(font_index).unwrap_or(&self.final_font);
         let scale = self.font_size / loaded.units_per_em;
 
