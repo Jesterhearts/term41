@@ -47,6 +47,67 @@ use crate::terminal::MouseModifiers;
 use crate::terminal::Terminal;
 
 // ---------------------------------------------------------------------------
+// Gutter popup — shown on click of a shell-integration gutter marker
+// ---------------------------------------------------------------------------
+
+/// Action the user can pick from the gutter popup menu.
+#[derive(Clone, Copy)]
+enum GutterMenuAction {
+    Rerun,
+    CopyCommand,
+    CopyCommandAndOutput,
+    CopyOutput,
+}
+
+/// A single item in the popup menu.
+struct GutterMenuItem {
+    label: &'static str,
+    action: GutterMenuAction,
+}
+
+const GUTTER_MENU_ITEMS: &[GutterMenuItem] = &[
+    GutterMenuItem {
+        label: "Rerun",
+        action: GutterMenuAction::Rerun,
+    },
+    GutterMenuItem {
+        label: "Copy command",
+        action: GutterMenuAction::CopyCommand,
+    },
+    GutterMenuItem {
+        label: "Copy cmd+output",
+        action: GutterMenuAction::CopyCommandAndOutput,
+    },
+    GutterMenuItem {
+        label: "Copy output",
+        action: GutterMenuAction::CopyOutput,
+    },
+];
+
+/// Width of the popup in cell units.
+const POPUP_WIDTH_CELLS: f32 = 20.0;
+
+/// State of the gutter popup while it is open.
+pub(crate) struct GutterPopup {
+    /// Absolute row of the prompt whose marker was clicked.
+    pub prompt_abs_row: u64,
+    /// Screen row (viewport-relative) where the marker sits.
+    pub screen_row: u32,
+    /// Duration formatted as a human-readable string, if available.
+    pub duration_text: Option<String>,
+    /// Currently hovered menu-item index (0..GUTTER_MENU_ITEMS.len()).
+    pub hovered_item: Option<usize>,
+}
+
+impl GutterPopup {
+    /// Number of rows the popup occupies (header + items).
+    fn total_rows(&self) -> usize {
+        let header = if self.duration_text.is_some() { 1 } else { 0 };
+        header + GUTTER_MENU_ITEMS.len()
+    }
+}
+
+// ---------------------------------------------------------------------------
 // RenderEvent — window thread → render thread (via cueue ring buffer)
 // ---------------------------------------------------------------------------
 
@@ -118,6 +179,9 @@ pub struct RenderHost {
     /// Last known window size in physical pixels. Updated on Resized events.
     window_size: (u32, u32),
 
+    /// Gutter popup menu, shown when a shell-integration marker is clicked.
+    gutter_popup: Option<GutterPopup>,
+
     should_exit: bool,
 }
 
@@ -158,6 +222,7 @@ impl RenderHost {
             click_count: 0,
             left_drag_active: false,
             window_size: (0, 0),
+            gutter_popup: None,
             should_exit: false,
         }
     }
@@ -288,6 +353,16 @@ impl RenderHost {
         &mut self,
         key: Key,
     ) {
+        // Dismiss gutter popup on any keypress.
+        if self.gutter_popup.is_some() {
+            self.close_gutter_popup();
+            // Escape is consumed; other keys fall through to their normal
+            // action so the user isn't forced to press twice.
+            if matches!(key, Key::Named(NamedKey::Escape)) {
+                return;
+            }
+        }
+
         // Search-bar routing runs ahead of keybindings and PTY encoding.
         if let Some(tab) = self.active_tab()
             && tab.terminal.search_active()
@@ -373,6 +448,15 @@ impl RenderHost {
         y: f64,
     ) {
         self.mouse_pos = (x, y);
+
+        // Update popup hover state.
+        if self.gutter_popup.is_some() {
+            let item = self.popup_item_at(x, y);
+            if let Some(popup) = self.gutter_popup.as_mut() {
+                popup.hovered_item = item;
+            }
+        }
+
         let cell = self.cell_at(x, y);
 
         if self.forward_mouse_to_app() {
@@ -412,7 +496,31 @@ impl RenderHost {
 
         // Clicks in the tab bar switch tabs instead of reaching the terminal.
         if pressed && button == MouseButton::Left && self.is_in_tab_bar() {
+            self.close_gutter_popup();
             self.handle_tab_bar_click();
+            return;
+        }
+
+        // Gutter popup interaction: clicks inside the popup fire the action;
+        // clicks outside dismiss it.
+        if pressed && button == MouseButton::Left && self.gutter_popup.is_some() {
+            if let Some(item) = self.popup_item_at(self.mouse_pos.0, self.mouse_pos.1) {
+                self.execute_popup_action(item);
+                return;
+            }
+            // Click was outside the popup — dismiss it.
+            self.close_gutter_popup();
+            // If the click was in the gutter again, fall through to open a
+            // new popup below; otherwise let the normal path handle it.
+            if !self.is_in_gutter() {
+                return;
+            }
+        }
+
+        // Left-click in the gutter opens the popup for the clicked row.
+        if pressed && button == MouseButton::Left && self.is_in_gutter() {
+            let (_, screen_row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+            self.open_gutter_popup(screen_row);
             return;
         }
 
@@ -492,6 +600,7 @@ impl RenderHost {
         raw_y: f64,
         pixels: bool,
     ) {
+        self.close_gutter_popup();
         let (x_lines, y_lines) = if pixels {
             let cw = self.font_system.cell_width as i32;
             let ch = self.font_system.cell_height as i32;
@@ -948,6 +1057,7 @@ impl RenderHost {
                 &mut self.font_system,
                 &self.tabs[active_idx].terminal,
                 &tab_infos,
+                self.gutter_popup.as_ref(),
             );
         }
     }
@@ -1076,6 +1186,162 @@ impl RenderHost {
         } else {
             1
         }
+    }
+
+    // -- Gutter popup -------------------------------------------------------
+
+    /// True when the mouse is in the gutter strip (left of col 0).
+    fn is_in_gutter(&self) -> bool {
+        let gutter_px = self
+            .renderer
+            .as_ref()
+            .map(|r| r.gutter_width_px(self.font_system.cell_width))
+            .unwrap_or(0);
+        gutter_px > 0 && (self.mouse_pos.0.max(0.0) as u32) < gutter_px
+    }
+
+    /// Compute the popup's pixel bounds: `(x, y, w, h)`.
+    fn popup_bounds(&self) -> Option<(f32, f32, f32, f32)> {
+        let popup = self.gutter_popup.as_ref()?;
+        let cell_w = self.font_system.cell_width as f32;
+        let cell_h = self.font_system.cell_height as f32;
+        let gutter_px = self
+            .renderer
+            .as_ref()
+            .map(|r| r.gutter_width_px(self.font_system.cell_width))
+            .unwrap_or(0) as f32;
+        let tab_bar_h = if self.tab_bar_visible() { cell_h } else { 0.0 };
+
+        let total_rows = popup.total_rows() as f32;
+        let popup_w = cell_w * POPUP_WIDTH_CELLS;
+        let popup_h = total_rows * cell_h;
+        let popup_x = gutter_px;
+        let popup_y =
+            (popup.screen_row as f32 * cell_h + tab_bar_h).min(self.window_size.1 as f32 - popup_h);
+        Some((popup_x, popup_y, popup_w, popup_h))
+    }
+
+    /// Which menu-item index (if any) the given pixel position hits.
+    fn popup_item_at(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> Option<usize> {
+        let (px, py, pw, ph) = self.popup_bounds()?;
+        let popup = self.gutter_popup.as_ref()?;
+        let cell_h = self.font_system.cell_height as f32;
+        let x = x as f32;
+        let y = y as f32;
+        if x < px || x > px + pw || y < py || y > py + ph {
+            return None;
+        }
+        let row_in_popup = ((y - py) / cell_h) as usize;
+        let header = if popup.duration_text.is_some() { 1 } else { 0 };
+        let item_idx = row_in_popup.checked_sub(header)?;
+        (item_idx < GUTTER_MENU_ITEMS.len()).then_some(item_idx)
+    }
+
+    /// Open the gutter popup for `screen_row`. Finds the owning prompt,
+    /// selects the command, and builds the popup state.
+    fn open_gutter_popup(
+        &mut self,
+        screen_row: u32,
+    ) {
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        let Some(prompt_abs) = tab.terminal.find_prompt_for_screen_row(screen_row) else {
+            return;
+        };
+        tab.terminal.select_command_at(prompt_abs);
+        let duration_text = tab
+            .terminal
+            .command_duration_at(prompt_abs)
+            .map(format_duration);
+        self.gutter_popup = Some(GutterPopup {
+            prompt_abs_row: prompt_abs,
+            screen_row,
+            duration_text,
+            hovered_item: None,
+        });
+    }
+
+    /// Dismiss the popup (if open).
+    fn close_gutter_popup(&mut self) {
+        if self.gutter_popup.take().is_some() {
+            if let Some(tab) = self.active_tab_mut() {
+                tab.terminal.clear_selection();
+            }
+        }
+    }
+
+    /// Execute the action from the popup at `item_idx` and close it.
+    fn execute_popup_action(
+        &mut self,
+        item_idx: usize,
+    ) {
+        let Some(popup) = self.gutter_popup.take() else {
+            return;
+        };
+        let action = GUTTER_MENU_ITEMS[item_idx].action;
+        match action {
+            GutterMenuAction::Rerun => {
+                if let Some(tab) = self.active_tab_mut() {
+                    if let Some(cmd) = tab.terminal.command_text_at(popup.prompt_abs_row) {
+                        let cmd = cmd.trim().to_owned();
+                        tab.terminal.clear_selection();
+                        tab.terminal.reset_viewport();
+                        tab.terminal.paste(&format!("{cmd}\r"));
+                    }
+                }
+                self.flush_pending();
+            }
+            GutterMenuAction::CopyCommand => {
+                if let Some(tab) = self.active_tab_mut() {
+                    if let Some(text) = tab.terminal.command_text_at(popup.prompt_abs_row) {
+                        tab.terminal.copy_to_clipboard(text.trim());
+                    }
+                    tab.terminal.clear_selection();
+                }
+            }
+            GutterMenuAction::CopyCommandAndOutput => {
+                if let Some(tab) = self.active_tab_mut() {
+                    if let Some(text) = tab
+                        .terminal
+                        .command_and_output_text_at(popup.prompt_abs_row)
+                    {
+                        tab.terminal.copy_to_clipboard(&text);
+                    }
+                    tab.terminal.clear_selection();
+                }
+            }
+            GutterMenuAction::CopyOutput => {
+                if let Some(tab) = self.active_tab_mut() {
+                    if let Some(text) = tab.terminal.output_text_at(popup.prompt_abs_row) {
+                        tab.terminal.copy_to_clipboard(&text);
+                    }
+                    tab.terminal.clear_selection();
+                }
+            }
+        }
+    }
+}
+
+/// Format a Duration as a human-readable string.
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{:.0}ms", secs * 1000.0)
+    } else if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else if secs < 3600.0 {
+        let m = (secs / 60.0).floor();
+        let s = secs - m * 60.0;
+        format!("{m:.0}m {s:.0}s")
+    } else {
+        let h = (secs / 3600.0).floor();
+        let m = ((secs - h * 3600.0) / 60.0).floor();
+        format!("{h:.0}h {m:.0}m")
     }
 }
 

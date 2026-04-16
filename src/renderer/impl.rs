@@ -13,6 +13,9 @@ use winit::window::Window;
 
 use crate::config::VSync;
 use crate::font::FontSystem;
+use crate::renderer::GUTTER_MENU_ITEMS;
+use crate::renderer::GutterPopup;
+use crate::renderer::POPUP_WIDTH_CELLS;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
@@ -503,6 +506,7 @@ impl Renderer {
         font_system: &mut FontSystem,
         terminal: &Terminal,
         tabs: &[TabInfo],
+        gutter_popup: Option<&GutterPopup>,
     ) {
         let cell_w = font_system.cell_width as f32;
         let cell_h = font_system.cell_height as f32;
@@ -518,6 +522,21 @@ impl Renderer {
         let mut fg_indices: Vec<u32> = Vec::new();
 
         let cursor_state = self.cursor_state(terminal);
+
+        // Pre-compute the popup's pixel bounds so we can clip terminal
+        // text that would otherwise bleed through the opaque panel.
+        let popup_clip: Option<(f32, f32, f32, f32)> = gutter_popup.map(|p| {
+            let header = if p.duration_text.is_some() { 1 } else { 0 };
+            let total = (header + GUTTER_MENU_ITEMS.len()) as f32;
+            let pw = cell_w * POPUP_WIDTH_CELLS;
+            let ph = total * cell_h;
+            let px = gutter_px;
+            let surface_h = self.surface_config.height as f32;
+            let py = (p.screen_row as f32 * cell_h + tab_bar_h)
+                .min(surface_h - ph)
+                .max(tab_bar_h);
+            (px, py, px + pw, py + ph)
+        });
 
         let skip_bottom_row = terminal.search_active();
 
@@ -644,6 +663,15 @@ impl Renderer {
             let shaped = font_system.shape_row(&grid_row.cells, &grid_row.attrs);
 
             for sg in &shaped {
+                // Skip glyphs that fall behind the popup panel so
+                // terminal text doesn't bleed through the overlay.
+                if let Some((cl, ct, cr, cb)) = popup_clip {
+                    let cx = sg.col as f32 * cell_w + gutter_px;
+                    if cx < cr && cx + cell_w > cl && y < cb && y + cell_h > ct {
+                        continue;
+                    }
+                }
+
                 let cell_attrs = grid_row.attrs[sg.col as usize];
                 let wants_bold = cell_attrs.contains(crate::terminal::CellAttrs::BOLD);
                 let wants_italic = cell_attrs.contains(crate::terminal::CellAttrs::ITALIC);
@@ -815,6 +843,22 @@ impl Renderer {
             &mut fg_vertices,
             &mut fg_indices,
         );
+
+        // ---- Gutter popup overlay ----
+        if let Some(popup) = gutter_popup {
+            self.render_gutter_popup(
+                font_system,
+                popup,
+                gutter_px,
+                cell_w,
+                cell_h,
+                tab_bar_h,
+                &mut bg_vertices,
+                &mut bg_indices,
+                &mut fg_vertices,
+                &mut fg_indices,
+            );
+        }
 
         // ---- Build image quads ----
         let mut image_vertices: Vec<ImageVertex> = Vec::new();
@@ -1397,6 +1441,233 @@ impl Renderer {
                     pos: [gx + gw, gy + gh],
                     uv: [(sx + sw) as f32, (sy + sh) as f32],
                     color: label_fg,
+                    flags,
+                },
+            ]);
+            fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+        }
+    }
+
+    /// Paint the gutter popup: a dark panel with an optional duration header
+    /// and four action items, one per row. The hovered item gets a brighter
+    /// background so the user sees where their click will land.
+    fn render_gutter_popup(
+        &mut self,
+        font_system: &mut FontSystem,
+        popup: &GutterPopup,
+        gutter_px: f32,
+        cell_w: f32,
+        cell_h: f32,
+        tab_bar_h: f32,
+        bg_vertices: &mut Vec<BgVertex>,
+        bg_indices: &mut Vec<u32>,
+        fg_vertices: &mut Vec<FgVertex>,
+        fg_indices: &mut Vec<u32>,
+    ) {
+        let baseline = font_system.baseline_offset();
+        let surface_h = self.surface_config.height as f32;
+
+        let header_rows = if popup.duration_text.is_some() { 1 } else { 0 };
+        let total_rows = header_rows + GUTTER_MENU_ITEMS.len();
+        let popup_w = cell_w * POPUP_WIDTH_CELLS;
+        let popup_h = total_rows as f32 * cell_h;
+        let popup_x = gutter_px;
+        let popup_y = (popup.screen_row as f32 * cell_h + tab_bar_h)
+            .min(surface_h - popup_h)
+            .max(tab_bar_h);
+
+        // Panel background.
+        let panel_bg = pack_color(&palette::Srgb::new(30, 30, 38), 255);
+        let bi = bg_vertices.len() as u32;
+        bg_vertices.extend_from_slice(&[
+            BgVertex {
+                pos: [popup_x, popup_y],
+                color: panel_bg,
+            },
+            BgVertex {
+                pos: [popup_x + popup_w, popup_y],
+                color: panel_bg,
+            },
+            BgVertex {
+                pos: [popup_x, popup_y + popup_h],
+                color: panel_bg,
+            },
+            BgVertex {
+                pos: [popup_x + popup_w, popup_y + popup_h],
+                color: panel_bg,
+            },
+        ]);
+        bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+
+        // Thin border at top and bottom.
+        let border_color = pack_color(&palette::Srgb::new(80, 80, 100), 255);
+        let border_h = 1.0_f32;
+        for by in [popup_y, popup_y + popup_h - border_h] {
+            let bi = bg_vertices.len() as u32;
+            bg_vertices.extend_from_slice(&[
+                BgVertex {
+                    pos: [popup_x, by],
+                    color: border_color,
+                },
+                BgVertex {
+                    pos: [popup_x + popup_w, by],
+                    color: border_color,
+                },
+                BgVertex {
+                    pos: [popup_x, by + border_h],
+                    color: border_color,
+                },
+                BgVertex {
+                    pos: [popup_x + popup_w, by + border_h],
+                    color: border_color,
+                },
+            ]);
+            bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+        }
+
+        let margin = cell_w * 0.5;
+        let max_chars = ((popup_w - margin * 2.0) / cell_w).max(1.0) as usize;
+
+        // Duration header.
+        if let Some(ref dur) = popup.duration_text {
+            let label: String = dur.chars().take(max_chars).collect();
+            let dim_fg = pack_color(&palette::Srgb::new(140, 140, 160), 255);
+            self.shape_popup_line(
+                font_system,
+                &label,
+                popup_x + margin,
+                popup_y,
+                baseline,
+                cell_w,
+                cell_h,
+                dim_fg,
+                fg_vertices,
+                fg_indices,
+            );
+        }
+
+        // Menu items.
+        let normal_fg = pack_color(&palette::Srgb::new(220, 220, 220), 255);
+        let hover_bg = pack_color(&palette::Srgb::new(55, 55, 70), 255);
+
+        for (i, item) in GUTTER_MENU_ITEMS.iter().enumerate() {
+            let row_y = popup_y + (header_rows + i) as f32 * cell_h;
+
+            // Hover highlight.
+            if popup.hovered_item == Some(i) {
+                let bi = bg_vertices.len() as u32;
+                bg_vertices.extend_from_slice(&[
+                    BgVertex {
+                        pos: [popup_x, row_y],
+                        color: hover_bg,
+                    },
+                    BgVertex {
+                        pos: [popup_x + popup_w, row_y],
+                        color: hover_bg,
+                    },
+                    BgVertex {
+                        pos: [popup_x, row_y + cell_h],
+                        color: hover_bg,
+                    },
+                    BgVertex {
+                        pos: [popup_x + popup_w, row_y + cell_h],
+                        color: hover_bg,
+                    },
+                ]);
+                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+            }
+
+            let label: String = item.label.chars().take(max_chars).collect();
+            self.shape_popup_line(
+                font_system,
+                &label,
+                popup_x + margin,
+                row_y,
+                baseline,
+                cell_w,
+                cell_h,
+                normal_fg,
+                fg_vertices,
+                fg_indices,
+            );
+        }
+    }
+
+    /// Shape a single line of popup text and push its glyph quads.
+    fn shape_popup_line(
+        &mut self,
+        font_system: &mut FontSystem,
+        text: &str,
+        x: f32,
+        y: f32,
+        baseline: f32,
+        cell_w: f32,
+        _cell_h: f32,
+        color: u32,
+        fg_vertices: &mut Vec<FgVertex>,
+        fg_indices: &mut Vec<u32>,
+    ) {
+        let cells: Vec<smol_str::SmolStr> = text
+            .chars()
+            .map(|c| {
+                let mut buf = [0u8; 4];
+                smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
+            })
+            .collect();
+        let attrs = vec![crate::terminal::CellAttrs::default(); cells.len()];
+        let shaped = font_system.shape_row(&cells, &attrs);
+
+        for sg in &shaped {
+            let slot = match self.glyph_atlas.ensure_cached(
+                &self.queue,
+                font_system,
+                sg.font_index,
+                sg.glyph_id,
+                sg.cells_wide,
+                false,
+            ) {
+                Some(e) => e,
+                None => continue,
+            };
+            if slot.is_empty() {
+                continue;
+            }
+
+            let sx = slot.x();
+            let sy = slot.y();
+            let sw = slot.width();
+            let sh = slot.height();
+
+            let gx = x + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+            let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
+            let gw = sw as f32;
+            let gh = sh as f32;
+            let flags: u32 = if slot.is_color { 1 } else { 0 };
+
+            let fi = fg_vertices.len() as u32;
+            fg_vertices.extend_from_slice(&[
+                FgVertex {
+                    pos: [gx, gy],
+                    uv: [sx as f32, sy as f32],
+                    color,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw, gy],
+                    uv: [(sx + sw) as f32, sy as f32],
+                    color,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx, gy + gh],
+                    uv: [sx as f32, (sy + sh) as f32],
+                    color,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw, gy + gh],
+                    uv: [(sx + sw) as f32, (sy + sh) as f32],
+                    color,
                     flags,
                 },
             ]);

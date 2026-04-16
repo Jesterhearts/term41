@@ -11,6 +11,7 @@ mod parser;
 mod row;
 mod screen;
 
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::time::Duration;
 use std::time::Instant;
@@ -58,6 +59,38 @@ use crate::selection::expand_to_line;
 use crate::selection::expand_to_word;
 use crate::vte;
 use crate::vte::Params;
+
+/// Per-prompt metadata recorded from OSC 133 B/C/D sequences. Keyed by
+/// the absolute row of the prompt (`A` mark) in
+/// [`Terminal::command_metas`]. Enables command selection, rerun, text
+/// extraction, and duration display in the gutter popup.
+#[derive(Debug)]
+pub struct CommandMeta {
+    /// Column where the user's command text begins (from OSC 133 `B`).
+    /// `None` when the shell doesn't emit `B`.
+    pub command_col: Option<u32>,
+    /// Absolute row where OSC 133 `B` fired. Usually the same as the
+    /// prompt row, but multi-line prompts can differ.
+    pub command_row: Option<u64>,
+    /// Absolute row where OSC 133 `C` fired (command output starts).
+    pub output_row: Option<u64>,
+    /// When execution started (timestamped at `C`).
+    pub started_at: Option<Instant>,
+    /// When the command finished (timestamped at `D`).
+    pub finished_at: Option<Instant>,
+}
+
+impl CommandMeta {
+    fn new() -> Self {
+        Self {
+            command_col: None,
+            command_row: None,
+            output_row: None,
+            started_at: None,
+            finished_at: None,
+        }
+    }
+}
 
 /// Terminal-level modes toggled by escape sequences (DECSET/DECRST, mode
 /// 2004, mode 2026, etc.) and reset together by RIS. Grouping them keeps
@@ -188,6 +221,11 @@ pub struct Terminal {
     /// land on alt's grid and disappear with the alt-screen teardown.
     current_prompt_row: Option<u64>,
 
+    /// Per-prompt metadata (command column, output row, timing). Keyed by
+    /// the absolute row of the prompt's `A` mark. Stale entries are pruned
+    /// when their rows fall off the front of scrollback.
+    pub(crate) command_metas: HashMap<u64, CommandMeta>,
+
     /// Kitty graphics protocol image store. Images transmitted via `a=t`
     /// live here until placed or deleted.
     kitty_images: crate::image::kitty::KittyImageStore,
@@ -240,6 +278,7 @@ impl Terminal {
             current_title: None,
             bell_pending: false,
             current_prompt_row: None,
+            command_metas: HashMap::new(),
             kitty_images: crate::image::kitty::KittyImageStore::new(),
             kitty_chunked: crate::image::kitty::ChunkedTransmission::new(),
             iterm_chunked: crate::image::iterm::ChunkedTransmission::new(),
@@ -1016,6 +1055,229 @@ impl Terminal {
         self.active.offset = offset.min(max_offset);
     }
 
+    // -- Gutter popup / command metadata queries ----------------------------
+
+    /// Walk backward from `screen_row` (0 = viewport top) to find the
+    /// nearest prompt-start row. Returns the absolute row of the prompt,
+    /// or `None` if no prompt exists above (or at) this row.
+    pub fn find_prompt_for_screen_row(
+        &self,
+        screen_row: u32,
+    ) -> Option<u64> {
+        let base =
+            self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
+        let start = base + screen_row as usize;
+        let popped = self.active.grid.total_popped as u64;
+        for i in (0..=start).rev() {
+            if self.active.grid.rows[i].prompt_start {
+                return Some(popped + i as u64);
+            }
+        }
+        None
+    }
+
+    /// Find the next prompt_start after `after_abs`.
+    fn find_next_prompt_after(
+        &self,
+        after_abs: u64,
+    ) -> Option<u64> {
+        let popped = self.active.grid.total_popped as u64;
+        let start = after_abs.checked_sub(popped)? as usize + 1;
+        for i in start..self.active.grid.rows.len() {
+            if self.active.grid.rows[i].prompt_start {
+                return Some(popped + i as u64);
+            }
+        }
+        None
+    }
+
+    /// Find the last row of the command's output — one before the next
+    /// prompt, or the end of the grid if no subsequent prompt exists.
+    fn command_end_abs(
+        &self,
+        prompt_abs: u64,
+    ) -> u64 {
+        if let Some(next) = self.find_next_prompt_after(prompt_abs) {
+            next.saturating_sub(1)
+        } else {
+            (self.active.grid.total_popped + self.active.grid.rows.len() - 1) as u64
+        }
+    }
+
+    /// Extract text spanning `[start_abs, start_col]..=[end_abs, EOL]`.
+    /// Trailing spaces are trimmed on each non-wrapped row; hard line
+    /// breaks emit `\n`.
+    fn extract_rows_text(
+        &self,
+        start_abs: u64,
+        start_col: u32,
+        end_abs: u64,
+    ) -> String {
+        let popped = self.active.grid.total_popped as u64;
+        let mut out = String::new();
+        for abs in start_abs..=end_abs {
+            let Some(local) = abs.checked_sub(popped).map(|l| l as usize) else {
+                continue;
+            };
+            if local >= self.active.grid.rows.len() {
+                break;
+            }
+            let row = &self.active.grid.rows[local];
+            let cs = if abs == start_abs {
+                start_col as usize
+            } else {
+                0
+            };
+            let ce = row.cells.len();
+            if cs >= ce {
+                if abs < end_abs && !row.wrapped {
+                    out.push('\n');
+                }
+                continue;
+            }
+            let mut seg = String::new();
+            for cell in &row.cells[cs..ce] {
+                seg.push_str(cell);
+            }
+            out.push_str(seg.trim_end_matches(' '));
+            if abs < end_abs && !row.wrapped {
+                out.push('\n');
+            }
+        }
+        out
+    }
+
+    /// The typed command text at `prompt_abs` (between B/prompt and C/next
+    /// prompt). Returns `None` if the prompt has scrolled off or no
+    /// command has been executed from this prompt yet.
+    pub fn command_text_at(
+        &self,
+        prompt_abs: u64,
+    ) -> Option<String> {
+        let meta = self.command_metas.get(&prompt_abs);
+        let start_col = meta.and_then(|m| m.command_col).unwrap_or(0);
+        let start_row = meta.and_then(|m| m.command_row).unwrap_or(prompt_abs);
+        let end_row = self.command_text_end(prompt_abs, meta);
+        if start_row > end_row {
+            return None;
+        }
+        let text = self.extract_rows_text(start_row, start_col, end_row);
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    /// Resolve the last row that belongs to "command text" (not output).
+    /// When the command has produced output (`C` was received), that row
+    /// is the clear boundary. Otherwise fall back to the next prompt, and
+    /// if there isn't one either (the user hasn't run anything yet) clamp
+    /// to the prompt row so the selection doesn't span the whole screen.
+    fn command_text_end(
+        &self,
+        prompt_abs: u64,
+        meta: Option<&CommandMeta>,
+    ) -> u64 {
+        if let Some(meta) = meta
+            && let Some(output) = meta.output_row
+        {
+            return output.saturating_sub(1);
+        }
+        if let Some(next) = self.find_next_prompt_after(prompt_abs) {
+            return next.saturating_sub(1);
+        }
+        // No output boundary and no subsequent prompt — nothing has been
+        // executed from this prompt yet.
+        prompt_abs
+    }
+
+    /// The output text for the command at `prompt_abs` (between C and next
+    /// prompt). `None` if no output boundary was recorded.
+    pub fn output_text_at(
+        &self,
+        prompt_abs: u64,
+    ) -> Option<String> {
+        let output_row = self.command_metas.get(&prompt_abs)?.output_row?;
+        let end_row = self.command_end_abs(prompt_abs);
+        if output_row > end_row {
+            return None;
+        }
+        let text = self.extract_rows_text(output_row, 0, end_row);
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    /// Command text + output combined.
+    pub fn command_and_output_text_at(
+        &self,
+        prompt_abs: u64,
+    ) -> Option<String> {
+        let meta = self.command_metas.get(&prompt_abs);
+        let start_col = meta.and_then(|m| m.command_col).unwrap_or(0);
+        let start_row = meta.and_then(|m| m.command_row).unwrap_or(prompt_abs);
+        let end_row = self.command_end_abs(prompt_abs);
+        if start_row > end_row {
+            return None;
+        }
+        let text = self.extract_rows_text(start_row, start_col, end_row);
+        if text.is_empty() { None } else { Some(text) }
+    }
+
+    /// How long the command at `prompt_abs` took, if both C and D were seen.
+    pub fn command_duration_at(
+        &self,
+        prompt_abs: u64,
+    ) -> Option<Duration> {
+        let meta = self.command_metas.get(&prompt_abs)?;
+        let start = meta.started_at?;
+        let end = meta.finished_at?;
+        Some(end.duration_since(start))
+    }
+
+    /// Select the command text for the prompt at `prompt_abs` so the user
+    /// sees which command the gutter popup refers to. Skips creating a
+    /// selection when there's no meaningful command text (e.g. a fresh
+    /// prompt before any command has been typed).
+    pub fn select_command_at(
+        &mut self,
+        prompt_abs: u64,
+    ) {
+        let meta = self.command_metas.get(&prompt_abs);
+        let start_col = meta.and_then(|m| m.command_col).unwrap_or(0);
+        let start_row = meta.and_then(|m| m.command_row).unwrap_or(prompt_abs);
+        let end_row = self.command_text_end(prompt_abs, meta);
+        if start_row > end_row {
+            return;
+        }
+        // Verify there's actual text before creating the selection.
+        let text = self.extract_rows_text(start_row, start_col, end_row);
+        if text.trim().is_empty() {
+            return;
+        }
+        let end_col = self
+            .absolute_row_to_local(end_row)
+            .map(|l| self.active.grid.rows[l].content_len().saturating_sub(1))
+            .unwrap_or(0);
+        let anchor = SelectionPoint {
+            row: start_row,
+            col: start_col,
+        };
+        let head = SelectionPoint {
+            row: end_row,
+            col: end_col,
+        };
+        self.selection = Some(Selection {
+            anchor,
+            head,
+            mode: SelectionMode::Char,
+            origin: anchor,
+        });
+    }
+
+    /// Copy arbitrary text to the system clipboard.
+    pub fn copy_to_clipboard(
+        &mut self,
+        text: &str,
+    ) {
+        self.clipboard.set(ClipboardKind::Clipboard, text);
+    }
+
     /// Scroll the viewport down (toward live). Returns actual lines scrolled.
     pub fn scroll_viewport_down(
         &mut self,
@@ -1172,6 +1434,7 @@ impl Terminal {
                             viewport: &self.viewport,
                             current_title: &mut self.current_title,
                             current_prompt_row: &mut self.current_prompt_row,
+                            command_metas: &mut self.command_metas,
                         };
                         handle_osc(&data, &mut ctx);
                     }
@@ -1260,6 +1523,9 @@ impl Terminal {
                 for img in self.active.images.values_mut() {
                     img.row -= newly_popped;
                 }
+                // Prune command metadata for prompts that scrolled off.
+                let min_abs = self.active.grid.total_popped as u64;
+                self.command_metas.retain(|&abs, _| abs >= min_abs);
             }
         }
     }

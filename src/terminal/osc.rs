@@ -1,4 +1,6 @@
+use std::collections::HashMap;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
@@ -6,6 +8,7 @@ use percent_encoding::percent_decode;
 
 use crate::clipboard::Clipboard;
 use crate::clipboard::ClipboardKind;
+use crate::terminal::CommandMeta;
 use crate::terminal::grid::Viewport;
 use crate::terminal::hyperlink::HyperlinkId;
 use crate::terminal::hyperlink::HyperlinkRegistry;
@@ -33,6 +36,9 @@ pub(super) struct OscContext<'a> {
     /// before the first prompt and after the prompt row scrolls off the
     /// front of scrollback.
     pub current_prompt_row: &'a mut Option<u64>,
+    /// Per-prompt metadata: command column (from B), output row (from C),
+    /// and timestamps for duration calculation.
+    pub command_metas: &'a mut HashMap<u64, CommandMeta>,
 }
 
 /// Split an OSC payload into its numeric command prefix and the remainder.
@@ -107,6 +113,7 @@ pub(super) fn handle_osc(
             ctx.active_screen,
             ctx.viewport,
             ctx.current_prompt_row,
+            ctx.command_metas,
         ),
         _ => {}
     }
@@ -124,11 +131,11 @@ pub(super) fn handle_osc(
 /// ```
 ///
 /// Terminals use these to offer prompt-to-prompt navigation, last-command
-/// selection, success/failure gutter markers, and similar. Only `A`, `C`,
-/// and `D` produce observable state here; `B` is parsed but intentionally
-/// not stored because its only use is column-precise "select command text"
-/// and the head-of-logical-line storage model doesn't give us that
-/// precision.
+/// selection, success/failure gutter markers, and similar. `A`, `B`, `C`,
+/// and `D` all produce observable state: `A` marks the prompt row, `B`
+/// records the column where the typed command begins, `C` marks the output
+/// start and timestamps execution, and `D` stamps exit status and finish
+/// time.
 ///
 /// Payloads with extra `;key=value` args (iTerm2-style `aid=…`, `cl=…`,
 /// etc.) are ignored — we only honour the single-letter kind.
@@ -137,6 +144,7 @@ fn handle_osc_133(
     screen: &mut Screen,
     viewport: &Viewport,
     current_prompt_row: &mut Option<u64>,
+    command_metas: &mut HashMap<u64, CommandMeta>,
 ) {
     let (kind, args) = split_osc(rest);
     match kind {
@@ -149,16 +157,30 @@ fn handle_osc_133(
                 row.exit_status = None;
             });
             *current_prompt_row = Some(abs);
+            // Seed the metadata entry so B/C/D can fill it in.
+            command_metas.insert(abs, CommandMeta::new());
         }
         b"B" => {
-            // Prompt end / command start. No state change — storage would
-            // only be useful for column-precise "select command" which we
-            // don't do yet.
+            // Prompt end / command start. Record the cursor column so
+            // "select command" can skip the prompt decoration.
+            if let Some(prompt_abs) = *current_prompt_row {
+                let abs = current_absolute_row(screen, viewport);
+                if let Some(meta) = command_metas.get_mut(&prompt_abs) {
+                    meta.command_col = Some(screen.cursor.col);
+                    meta.command_row = Some(abs);
+                }
+            }
         }
         b"C" => {
-            mark_current_row(screen, viewport, |row| {
+            let abs = mark_current_row(screen, viewport, |row| {
                 row.output_start = true;
             });
+            if let Some(prompt_abs) = *current_prompt_row {
+                if let Some(meta) = command_metas.get_mut(&prompt_abs) {
+                    meta.output_row = Some(abs);
+                    meta.started_at = Some(Instant::now());
+                }
+            }
         }
         b"D" => {
             let exit = parse_osc_133_d_exit(args);
@@ -166,6 +188,11 @@ fn handle_osc_133(
                 && let Some(local) = absolute_to_local(screen, abs)
             {
                 screen.grid.rows[local].exit_status = Some(exit);
+            }
+            if let Some(prompt_abs) = *current_prompt_row {
+                if let Some(meta) = command_metas.get_mut(&prompt_abs) {
+                    meta.finished_at = Some(Instant::now());
+                }
             }
         }
         _ => {}
@@ -182,6 +209,16 @@ fn mark_current_row(
 ) -> u64 {
     let local = screen.grid.active_row_index(&screen.cursor, viewport);
     apply(&mut screen.grid.rows[local]);
+    (screen.grid.total_popped + local) as u64
+}
+
+/// Return the absolute row index the cursor currently sits on, without
+/// mutating the row. Used by OSC 133 B to record the command start row.
+fn current_absolute_row(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> u64 {
+    let local = screen.grid.active_row_index(&screen.cursor, viewport);
     (screen.grid.total_popped + local) as u64
 }
 
@@ -363,6 +400,7 @@ mod tests {
         viewport: Viewport,
         title: Option<String>,
         prompt_row: Option<u64>,
+        command_metas: HashMap<u64, CommandMeta>,
     }
 
     impl Bag {
@@ -383,6 +421,7 @@ mod tests {
                 viewport: Viewport { rows, cols },
                 title: None,
                 prompt_row: None,
+                command_metas: HashMap::new(),
             }
         }
 
@@ -403,6 +442,7 @@ mod tests {
                 viewport: &self.viewport,
                 current_title: &mut self.title,
                 current_prompt_row: &mut self.prompt_row,
+                command_metas: &mut self.command_metas,
             };
             handle_osc(payload, &mut ctx);
         }
