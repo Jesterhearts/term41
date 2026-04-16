@@ -175,12 +175,15 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
     fn window_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
         let ev = match event {
-            WindowEvent::CloseRequested => RenderEvent::CloseRequested,
+            WindowEvent::CloseRequested => {
+                event_loop.exit();
+                RenderEvent::CloseRequested
+            }
 
             WindowEvent::Resized(size) => RenderEvent::Resized {
                 width: size.width,
