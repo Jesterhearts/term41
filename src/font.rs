@@ -831,10 +831,21 @@ fn charmap_lookup(
 // Rasterization via raqote
 // ---------------------------------------------------------------------------
 
+/// Supersample factor for outline glyph rasterization. Glyphs are
+/// rasterized at `SS × SS` the target resolution and then box-filter
+/// downsampled. `2` gives 4 coverage samples per output pixel — a
+/// significant AA improvement over binary on/off coverage at 1x — at
+/// the cost of ~4× raqote fill work per glyph. Glyph bitmaps are cached
+/// in the atlas, so the extra work only fires on the first render of
+/// each glyph at each size, not per-frame.
+const SUPERSAMPLE: i32 = 2;
+
 fn rasterize_simple_glyph(
     simple: &SimpleGlyph,
     scale: f32,
 ) -> RasterizedGlyph {
+    // 1× bounds — these define the output size and bearing so the glyph
+    // lands at the same position it would without supersampling.
     let x_min = (simple.x_min() as f32 * scale).floor();
     let y_max = (simple.y_max() as f32 * scale).ceil();
     let width = ((simple.x_max() as f32 * scale).ceil() - x_min) as i32 + 2;
@@ -844,8 +855,13 @@ fn rasterize_simple_glyph(
         return empty_glyph();
     }
 
-    let path = build_path(simple, scale, x_min, y_max);
-    let mut dt = DrawTarget::new(width, height);
+    // Rasterize at SS× resolution then downsample.
+    let ss = SUPERSAMPLE;
+    let ss_scale = scale * ss as f32;
+    let ss_w = width * ss;
+    let ss_h = height * ss;
+    let path = build_path(simple, ss_scale, x_min * ss as f32, y_max * ss as f32);
+    let mut dt = DrawTarget::new(ss_w, ss_h);
     dt.fill(
         &path,
         &Source::Solid(SolidSource::from_unpremultiplied_argb(255, 255, 255, 255)),
@@ -853,7 +869,7 @@ fn rasterize_simple_glyph(
     );
 
     RasterizedGlyph {
-        bitmap: alpha_mask_to_rgba(dt.get_data(), width, height),
+        bitmap: downsample_alpha(dt.get_data(), ss_w, ss_h, width, height, ss),
         width: width as u32,
         height: height as u32,
         bearing_x: x_min as i32,
@@ -862,21 +878,41 @@ fn rasterize_simple_glyph(
     }
 }
 
-/// Convert a raqote `DrawTarget` buffer (premultiplied ARGB in platform byte
-/// order) into an RGBA8 bitmap whose colour channels are zero. The atlas
-/// texture is RGBA, but outline glyphs only need coverage in the alpha
-/// channel — the shader picks up `.a` in the alpha-path branch and the
-/// colour path is not taken for `is_color = false` glyphs.
-fn alpha_mask_to_rgba(
+/// Box-filter downsample a supersampled raqote alpha buffer into an RGBA8
+/// bitmap whose colour channels are zero. Each output pixel averages the
+/// `ss × ss` block of source pixels that map to it, giving the glyph
+/// `ss²` levels of sub-pixel coverage — noticeably smoother stems and
+/// curves than the binary on/off coverage at 1×.
+///
+/// `pixels` is the raqote `DrawTarget::get_data()` buffer — premultiplied
+/// ARGB in platform byte order, `ss_w × ss_h` pixels. Output is
+/// `out_w × out_h` RGBA8 with `rgb = 0`.
+fn downsample_alpha(
     pixels: &[u32],
-    width: i32,
-    height: i32,
+    ss_w: i32,
+    ss_h: i32,
+    out_w: i32,
+    out_h: i32,
+    ss: i32,
 ) -> Vec<u8> {
-    let mut bitmap = vec![0u8; (width * height * 4) as usize];
-    for (i, &pixel) in pixels.iter().enumerate() {
-        // raqote stores ARGB in u32; the alpha byte is the top 8 bits.
-        let alpha = (pixel >> 24) as u8;
-        bitmap[i * 4 + 3] = alpha;
+    let mut bitmap = vec![0u8; (out_w * out_h * 4) as usize];
+    let area = (ss * ss) as u32;
+    for y in 0..out_h {
+        for x in 0..out_w {
+            let mut alpha_sum = 0u32;
+            for dy in 0..ss {
+                for dx in 0..ss {
+                    let sx = x * ss + dx;
+                    let sy = y * ss + dy;
+                    if sx < ss_w && sy < ss_h {
+                        let idx = (sy * ss_w + sx) as usize;
+                        // raqote stores ARGB in u32; alpha is the top 8 bits.
+                        alpha_sum += pixels[idx] >> 24;
+                    }
+                }
+            }
+            bitmap[((y * out_w + x) * 4 + 3) as usize] = (alpha_sum / area) as u8;
+        }
     }
     bitmap
 }
@@ -961,6 +997,7 @@ fn rasterize_composite_glyph(
     glyf: &read_fonts::tables::glyf::Glyf,
     scale: f32,
 ) -> RasterizedGlyph {
+    // 1× bounds for output.
     let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
     composite_bounds(composite, loca, glyf, scale, 0.0, 0.0, &mut bounds);
     let [x_min_all, y_min_all, x_max_all, y_max_all] = bounds;
@@ -978,13 +1015,27 @@ fn rasterize_composite_glyph(
         return empty_glyph();
     }
 
+    // Rasterize at SS× resolution then downsample.
+    let ss = SUPERSAMPLE;
+    let ss_scale = scale * ss as f32;
+    let ss_w = width * ss;
+    let ss_h = height * ss;
+
     let mut pb = PathBuilder::new();
     composite_to_path(
-        &mut pb, composite, loca, glyf, scale, x_min, y_max, 0.0, 0.0,
+        &mut pb,
+        composite,
+        loca,
+        glyf,
+        ss_scale,
+        x_min * ss as f32,
+        y_max * ss as f32,
+        0.0,
+        0.0,
     );
 
     let path = pb.finish();
-    let mut dt = DrawTarget::new(width, height);
+    let mut dt = DrawTarget::new(ss_w, ss_h);
     dt.fill(
         &path,
         &Source::Solid(SolidSource::from_unpremultiplied_argb(255, 255, 255, 255)),
@@ -992,7 +1043,7 @@ fn rasterize_composite_glyph(
     );
 
     RasterizedGlyph {
-        bitmap: alpha_mask_to_rgba(dt.get_data(), width, height),
+        bitmap: downsample_alpha(dt.get_data(), ss_w, ss_h, width, height, ss),
         width: width as u32,
         height: height as u32,
         bearing_x: x_min as i32,
