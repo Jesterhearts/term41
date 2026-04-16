@@ -16,6 +16,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 pub use self::attrs::CellAttrs;
+pub use self::color::default_bg;
+pub use self::color::default_fg;
 pub use self::cursor::CursorShape;
 pub use self::cursor::CursorStyle;
 pub use self::grid::Viewport;

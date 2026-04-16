@@ -78,6 +78,13 @@ fn blend(
     )
 }
 
+/// Lightweight snapshot of tab state for the renderer. Built by the host
+/// each frame so the renderer doesn't couple to the `App` struct.
+pub struct TabInfo<'s> {
+    pub label: &'s str,
+    pub active: bool,
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -476,37 +483,30 @@ impl Renderer {
         &mut self,
         font_system: &mut FontSystem,
         terminal: &Terminal,
+        tabs: &[TabInfo],
     ) {
         let cell_w = font_system.cell_width as f32;
         let cell_h = font_system.cell_height as f32;
         let baseline = font_system.baseline_offset();
-        // Every cell / image / cursor x-coord is offset by the gutter so
-        // col 0 starts just to the right of the reserved strip. When the
-        // gutter is disabled this is `0.0`, so the offset is harmless.
         let gutter_px = self.gutter_width_px(font_system.cell_width) as f32;
+        // When tabs are shown, shift all terminal content down by one cell
+        // height to make room for the tab bar.
+        let tab_bar_h = if tabs.is_empty() { 0.0 } else { cell_h };
 
         let mut bg_vertices: Vec<BgVertex> = Vec::new();
         let mut bg_indices: Vec<u32> = Vec::new();
         let mut fg_vertices: Vec<FgVertex> = Vec::new();
         let mut fg_indices: Vec<u32> = Vec::new();
 
-        // Resolve cursor state once. The block-shape path needs to invert
-        // the glyph at the cursor cell, so we track its position even when
-        // the bar/underline shapes are active (those don't invert but still
-        // need the position for the overlay quad).
         let cursor_state = self.cursor_state(terminal);
 
-        // While the search bar is open, skip the bottom row entirely — the
-        // bar paints its own opaque bg there and we don't want the terminal
-        // row's bg quad or glyphs leaking through between the label's
-        // letterforms.
         let skip_bottom_row = terminal.search_active();
 
         for row in 0..terminal.viewport.rows {
             if skip_bottom_row && row == terminal.viewport.rows - 1 {
                 continue;
             }
-            let y = row as f32 * cell_h;
+            let y = row as f32 * cell_h + tab_bar_h;
 
             // Background quads for the whole row.
             let grid_row = terminal.visible_row(row);
@@ -596,22 +596,23 @@ impl Renderer {
             // beside the character rather than over it.
             if let Some(overlay) = cursor_state.bar_overlay_at(row, &grid_row.fg, cell_w, cell_h) {
                 let ox = overlay.x + gutter_px;
+                let oy = overlay.y + tab_bar_h;
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
                     BgVertex {
-                        pos: [ox, overlay.y],
+                        pos: [ox, oy],
                         color: overlay.color,
                     },
                     BgVertex {
-                        pos: [ox + overlay.w, overlay.y],
+                        pos: [ox + overlay.w, oy],
                         color: overlay.color,
                     },
                     BgVertex {
-                        pos: [ox, overlay.y + overlay.h],
+                        pos: [ox, oy + overlay.h],
                         color: overlay.color,
                     },
                     BgVertex {
-                        pos: [ox + overlay.w, overlay.y + overlay.h],
+                        pos: [ox + overlay.w, oy + overlay.h],
                         color: overlay.color,
                     },
                 ]);
@@ -766,6 +767,7 @@ impl Renderer {
                 terminal,
                 gutter_px,
                 cell_h,
+                tab_bar_h,
                 &mut bg_vertices,
                 &mut bg_indices,
             );
@@ -775,9 +777,20 @@ impl Renderer {
         // Drawn last in the glyph pass so it paints over the bottom row of
         // whatever the terminal was showing. Only fires while the search
         // bar is open; when closed, this path is a cheap early return.
+        // ---- Tab bar ----
+        self.render_tab_bar(
+            font_system,
+            tabs,
+            &mut bg_vertices,
+            &mut bg_indices,
+            &mut fg_vertices,
+            &mut fg_indices,
+        );
+
         self.render_search_bar(
             font_system,
             terminal,
+            tab_bar_h,
             &mut bg_vertices,
             &mut bg_indices,
             &mut fg_vertices,
@@ -801,7 +814,7 @@ impl Renderer {
             };
 
             let base_x = vis.screen_col as f32 * cell_w + gutter_px;
-            let base_y = vis.screen_row as f32 * cell_h;
+            let base_y = vis.screen_row as f32 * cell_h + tab_bar_h;
 
             // Scale factor from source-image pixels to display pixels. For
             // sixel these are equal; kitty's `c=`/`r=` keys can request a
@@ -1008,6 +1021,193 @@ impl Renderer {
         self.bell_started = Some(Instant::now());
     }
 
+    /// Paint the tab bar at the top of the window. Each tab gets a
+    /// background quad and a label shaped through the glyph atlas. The
+    /// active tab uses `default_bg`, inactive tabs use a 50/50 blend of
+    /// `default_bg` and `default_fg`.
+    fn render_tab_bar(
+        &mut self,
+        font_system: &mut FontSystem,
+        tabs: &[TabInfo],
+        bg_vertices: &mut Vec<BgVertex>,
+        bg_indices: &mut Vec<u32>,
+        fg_vertices: &mut Vec<FgVertex>,
+        fg_indices: &mut Vec<u32>,
+    ) {
+        if tabs.is_empty() {
+            return;
+        }
+        let cell_w = font_system.cell_width as f32;
+        let cell_h = font_system.cell_height as f32;
+        let baseline = font_system.baseline_offset();
+        let surface_w = self.surface_config.width as f32;
+
+        let active_bg = crate::terminal::default_bg();
+        let inactive_bg = blend(
+            crate::terminal::default_bg(),
+            crate::terminal::default_fg(),
+            0.5,
+        );
+
+        // Full-width bar background (inactive colour as the base).
+        let bar_bg = pack_color(&inactive_bg, 255);
+        let bi = bg_vertices.len() as u32;
+        bg_vertices.extend_from_slice(&[
+            BgVertex {
+                pos: [0.0, 0.0],
+                color: bar_bg,
+            },
+            BgVertex {
+                pos: [surface_w, 0.0],
+                color: bar_bg,
+            },
+            BgVertex {
+                pos: [0.0, cell_h],
+                color: bar_bg,
+            },
+            BgVertex {
+                pos: [surface_w, cell_h],
+                color: bar_bg,
+            },
+        ]);
+        bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+
+        // Divide available width equally among tabs, capped to a
+        // reasonable maximum so a single tab doesn't span the screen.
+        let max_tab_w = cell_w * 30.0;
+        let tab_w = (surface_w / tabs.len() as f32).min(max_tab_w);
+
+        let label_fg = pack_color(&crate::terminal::default_fg(), 255);
+
+        for (i, tab) in tabs.iter().enumerate() {
+            let x0 = i as f32 * tab_w;
+
+            // Active tab background highlight.
+            if tab.active {
+                let color = pack_color(&active_bg, 255);
+                let bi = bg_vertices.len() as u32;
+                bg_vertices.extend_from_slice(&[
+                    BgVertex {
+                        pos: [x0, 0.0],
+                        color,
+                    },
+                    BgVertex {
+                        pos: [x0 + tab_w, 0.0],
+                        color,
+                    },
+                    BgVertex {
+                        pos: [x0, cell_h],
+                        color,
+                    },
+                    BgVertex {
+                        pos: [x0 + tab_w, cell_h],
+                        color,
+                    },
+                ]);
+                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+            }
+
+            // Thin separator between tabs.
+            if i > 0 {
+                let sep_w = 3.0_f32;
+                let sep_color = pack_color(&blend(active_bg, inactive_bg, 0.5), self.bg_alpha);
+                let bi = bg_vertices.len() as u32;
+                bg_vertices.extend_from_slice(&[
+                    BgVertex {
+                        pos: [x0, 0.0],
+                        color: sep_color,
+                    },
+                    BgVertex {
+                        pos: [x0 + sep_w, 0.0],
+                        color: sep_color,
+                    },
+                    BgVertex {
+                        pos: [x0, cell_h],
+                        color: sep_color,
+                    },
+                    BgVertex {
+                        pos: [x0 + sep_w, cell_h],
+                        color: sep_color,
+                    },
+                ]);
+                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+            }
+
+            // Label glyphs. Truncate to fit the tab width with a small
+            // margin on each side.
+            let margin = cell_w;
+            let max_label_chars = ((tab_w - margin * 2.0) / cell_w).max(1.0) as usize;
+            let label: String = tab.label.chars().take(max_label_chars).collect();
+
+            let cells: Vec<smol_str::SmolStr> = label
+                .chars()
+                .map(|c| {
+                    let mut buf = [0u8; 4];
+                    smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
+                })
+                .collect();
+            let attrs = vec![crate::terminal::CellAttrs::default(); cells.len()];
+            let shaped = font_system.shape_row(&cells, &attrs);
+
+            for sg in &shaped {
+                let slot = match self.glyph_atlas.ensure_cached(
+                    &self.queue,
+                    font_system,
+                    sg.font_index,
+                    sg.glyph_id,
+                    sg.cells_wide,
+                    false,
+                ) {
+                    Some(e) => e,
+                    None => continue,
+                };
+                if slot.is_empty() {
+                    continue;
+                }
+
+                let sx = slot.x();
+                let sy = slot.y();
+                let sw = slot.width();
+                let sh = slot.height();
+
+                let gx = x0 + margin + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+                let gy = baseline - slot.bearing_y as f32 - sg.y_offset;
+                let gw = sw as f32;
+                let gh = sh as f32;
+                let flags: u32 = if slot.is_color { 1 } else { 0 };
+
+                let fi = fg_vertices.len() as u32;
+                fg_vertices.extend_from_slice(&[
+                    FgVertex {
+                        pos: [gx, gy],
+                        uv: [sx as f32, sy as f32],
+                        color: label_fg,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy],
+                        uv: [(sx + sw) as f32, sy as f32],
+                        color: label_fg,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx, gy + gh],
+                        uv: [sx as f32, (sy + sh) as f32],
+                        color: label_fg,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy + gh],
+                        uv: [(sx + sw) as f32, (sy + sh) as f32],
+                        color: label_fg,
+                        flags,
+                    },
+                ]);
+                fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+            }
+        }
+    }
+
     /// Paint the bottom-of-viewport search bar. The bar is a dark quad
     /// stretching across the viewport's last row, with a prompt + typed
     /// query + match counter shaped through the normal glyph atlas. A
@@ -1017,6 +1217,7 @@ impl Renderer {
         &mut self,
         font_system: &mut FontSystem,
         terminal: &Terminal,
+        y_offset: f32,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
         fg_vertices: &mut Vec<FgVertex>,
@@ -1062,7 +1263,7 @@ impl Renderer {
         let caret_col = (prompt_len + search.query.chars().count() as u32).min(cols - 1);
 
         // Bar background: a dark opaque strip across the last row.
-        let bar_y = (rows - 1) as f32 * cell_h;
+        let bar_y = (rows - 1) as f32 * cell_h + y_offset;
         let bar_w = cols as f32 * cell_w;
         let bar_bg = pack_color(&palette::Srgb::new(24, 24, 32), 255);
         let bi = bg_vertices.len() as u32;
@@ -1323,6 +1524,7 @@ fn render_gutter_markers(
     terminal: &Terminal,
     gutter_px: f32,
     cell_h: f32,
+    y_offset: f32,
     bg_vertices: &mut Vec<BgVertex>,
     bg_indices: &mut Vec<u32>,
 ) {
@@ -1349,7 +1551,7 @@ fn render_gutter_markers(
         };
         let color = u32::from_be_bytes([rgb[0], rgb[1], rgb[2], 255]);
 
-        let y0 = row_idx as f32 * cell_h + bar_y;
+        let y0 = row_idx as f32 * cell_h + bar_y + y_offset;
         let y1 = y0 + bar_h;
         let x0 = bar_x;
         let x1 = x0 + bar_w;

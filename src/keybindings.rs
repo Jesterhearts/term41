@@ -43,6 +43,15 @@ pub enum Action {
     /// inherited from the current session — typically bound to
     /// `Ctrl+Shift+N`. The new process gets its own winit window.
     OpenNewWindow,
+    /// Open a new tab in the current window. The new session inherits the
+    /// active tab's working directory (via OSC 7) when available.
+    NewTab,
+    /// Close the active tab. If it's the last tab, exit the application.
+    CloseTab,
+    /// Switch to the next tab (wraps around).
+    NextTab,
+    /// Switch to the previous tab (wraps around).
+    PrevTab,
 }
 
 /// One key, identified either by its winit `NamedKey` (Enter, F1, …) or by
@@ -115,6 +124,26 @@ impl Keybindings {
                     key: KeySpec::Char('n'),
                     mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
                     action: Action::OpenNewWindow,
+                },
+                Keybinding {
+                    key: KeySpec::Char('t'),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::NewTab,
+                },
+                Keybinding {
+                    key: KeySpec::Char('w'),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::CloseTab,
+                },
+                Keybinding {
+                    key: KeySpec::Named(NamedKey::PageDown),
+                    mods: ModifiersState::CONTROL,
+                    action: Action::NextTab,
+                },
+                Keybinding {
+                    key: KeySpec::Named(NamedKey::PageUp),
+                    mods: ModifiersState::CONTROL,
+                    action: Action::PrevTab,
                 },
             ],
         }

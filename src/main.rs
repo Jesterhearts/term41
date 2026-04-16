@@ -72,22 +72,35 @@ static ICON: LazyLock<Icon> = LazyLock::new(|| {
     Icon::from_rgba(pixmap.take(), width, height).expect("failed to create icon")
 });
 
+/// Stable identifier for a tab. Monotonically increasing; never reused, so
+/// background threads that race with a tab close can't accidentally address
+/// the wrong session.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+pub struct TabId(pub u64);
+
 /// Custom event type for the winit event loop. Keeps cross-thread plumbing
 /// (config watcher, future async tasks) out of the main `WindowEvent` flow.
 #[derive(Debug, Clone)]
 enum AppEvent {
     /// The config file changed on disk and should be re-read + applied.
     ReloadConfig,
-    DataReady,
-    ChildExited,
+    DataReady(TabId),
+    ChildExited(TabId),
+}
+
+struct Tab {
+    id: TabId,
+    terminal: Terminal,
+    pty: Pty,
 }
 
 struct App {
     window: Option<Arc<Window>>,
     renderer: Option<Renderer>,
-    terminal: Terminal,
+    tabs: Vec<Tab>,
+    active_tab_id: TabId,
+    next_tab_id: u64,
     font_system: FontSystem,
-    pty: Pty,
     proxy: EventLoopProxy<AppEvent>,
 
     opacity: f32,
@@ -141,6 +154,10 @@ struct App {
     /// True while the left button is held in selection mode, so motion
     /// events extend the selection rather than being dropped.
     left_drag_active: bool,
+
+    /// Set to true when the last tab is closed manually. Checked on the
+    /// next event loop iteration to call `event_loop.exit()`.
+    exit_requested: bool,
 }
 
 /// Maximum time between clicks that still count as part of a sequence.
@@ -198,12 +215,18 @@ impl App {
             font_system.cell_width,
         );
         terminal.set_default_cursor_style(config.cursor_style);
+        let first_id = TabId(0);
         Self {
             window: None,
             renderer: None,
-            terminal,
+            tabs: vec![Tab {
+                id: first_id,
+                terminal,
+                pty,
+            }],
+            active_tab_id: first_id,
+            next_tab_id: 1,
             font_system,
-            pty,
             proxy,
             opacity: config.opacity,
             config_path,
@@ -223,7 +246,26 @@ impl App {
             last_click_cell: None,
             click_count: 0,
             left_drag_active: false,
+            exit_requested: false,
         }
+    }
+
+    fn active_tab(&self) -> &Tab {
+        self.tabs
+            .iter()
+            .find(|t| t.id == self.active_tab_id)
+            .expect("active tab must exist")
+    }
+
+    fn active_tab_mut(&mut self) -> &mut Tab {
+        self.tabs
+            .iter_mut()
+            .find(|t| t.id == self.active_tab_id)
+            .expect("active tab must exist")
+    }
+
+    fn tab_bar_visible(&self) -> bool {
+        self.tabs.len() >= 2
     }
 
     /// Re-read the watched config file and apply the axes that can change
@@ -237,8 +279,10 @@ impl App {
         };
         let cfg = config::load_from(path);
 
-        self.terminal.set_default_cursor_style(cfg.cursor_style);
-        self.terminal.set_scrollback_limit(cfg.scrollback_lines);
+        for tab in &mut self.tabs {
+            tab.terminal.set_default_cursor_style(cfg.cursor_style);
+            tab.terminal.set_scrollback_limit(cfg.scrollback_lines);
+        }
         self.keybindings = cfg.keybindings;
         self.bell_mode = cfg.bell;
 
@@ -253,9 +297,19 @@ impl App {
                 let size = window.inner_size();
                 let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
                 let usable_width = size.width.saturating_sub(gutter_px);
-                let (cols, rows) = self.font_system.grid_dimensions(usable_width, size.height);
-                self.terminal.resize(cols, rows);
-                self.pty.resize(cols as u16, rows as u16);
+                let tab_bar_px = if self.tab_bar_visible() {
+                    self.font_system.cell_height
+                } else {
+                    0
+                };
+                let usable_height = size.height.saturating_sub(tab_bar_px);
+                let (cols, rows) = self
+                    .font_system
+                    .grid_dimensions(usable_width, usable_height);
+                for tab in &mut self.tabs {
+                    tab.terminal.resize(cols, rows);
+                    tab.pty.resize(cols as u16, rows as u16);
+                }
             }
             self.request_redraw();
         }
@@ -291,14 +345,30 @@ impl App {
     /// title (or never set one) so the user always has a recognisable
     /// label in their window list.
     fn sync_window_title(&mut self) {
-        let want = self.terminal.current_title.as_deref();
-        if self.applied_title.as_deref() == want {
+        let tab = self.active_tab();
+        let base = tab.terminal.current_title.as_deref();
+        let want = if self.tabs.len() > 1 {
+            let idx = self
+                .tabs
+                .iter()
+                .position(|t| t.id == self.active_tab_id)
+                .unwrap_or(0);
+            Some(format!(
+                "[{}/{}] {}",
+                idx + 1,
+                self.tabs.len(),
+                base.unwrap_or("term41")
+            ))
+        } else {
+            base.map(str::to_owned)
+        };
+        if self.applied_title.as_deref() == want.as_deref() {
             return;
         }
         let Some(window) = &self.window else {
             return;
         };
-        match want {
+        match want.as_deref() {
             Some(t) => {
                 debug!("sync_window_title: set to {t:?}");
                 window.set_title(t);
@@ -308,7 +378,7 @@ impl App {
                 window.set_title("term41");
             }
         }
-        self.applied_title = want.map(str::to_owned);
+        self.applied_title = want;
     }
 
     /// Drain the bell flag and act on it according to the configured
@@ -316,7 +386,7 @@ impl App {
     /// produces one user-visible reaction per frame, not a queue of
     /// stacked flashes / urgency requests.
     fn dispatch_bell(&mut self) {
-        if !self.terminal.take_bell_pending() {
+        if !self.active_tab_mut().terminal.take_bell_pending() {
             return;
         }
         match self.bell_mode {
@@ -347,34 +417,49 @@ impl App {
     ) {
         match action {
             Action::ScrollPageUp => {
-                self.terminal
-                    .scroll_viewport_up(self.terminal.viewport.rows);
+                let tab = self.active_tab_mut();
+                tab.terminal.scroll_viewport_up(tab.terminal.viewport.rows);
             }
             Action::ScrollPageDown => {
-                self.terminal
-                    .scroll_viewport_down(self.terminal.viewport.rows);
+                let tab = self.active_tab_mut();
+                tab.terminal
+                    .scroll_viewport_down(tab.terminal.viewport.rows);
             }
             Action::Copy => {
-                if self.terminal.has_selection() {
-                    self.terminal.copy_selection(ClipboardKind::Clipboard);
+                let tab = self.active_tab_mut();
+                if tab.terminal.has_selection() {
+                    tab.terminal.copy_selection(ClipboardKind::Clipboard);
                 }
             }
             Action::Paste => {
-                self.terminal.reset_viewport();
-                self.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                let tab = self.active_tab_mut();
+                tab.terminal.reset_viewport();
+                tab.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
                 self.flush_pending();
             }
             Action::OpenSearch => {
-                self.terminal.open_search();
+                self.active_tab_mut().terminal.open_search();
             }
             Action::ScrollPrevPrompt => {
-                self.terminal.scroll_to_prev_prompt();
+                self.active_tab_mut().terminal.scroll_to_prev_prompt();
             }
             Action::ScrollNextPrompt => {
-                self.terminal.scroll_to_next_prompt();
+                self.active_tab_mut().terminal.scroll_to_next_prompt();
             }
             Action::OpenNewWindow => {
                 self.spawn_new_window();
+            }
+            Action::NewTab => {
+                self.spawn_new_tab();
+            }
+            Action::CloseTab => {
+                self.close_active_tab();
+            }
+            Action::NextTab => {
+                self.switch_tab(1);
+            }
+            Action::PrevTab => {
+                self.switch_tab(-1);
             }
         }
     }
@@ -393,7 +478,7 @@ impl App {
         };
 
         let mut cmd = std::process::Command::new(&exe);
-        match self.terminal.current_directory.as_ref() {
+        match self.active_tab().terminal.current_directory.as_ref() {
             Some(cwd) => {
                 cmd.current_dir(cwd);
             }
@@ -431,30 +516,27 @@ impl App {
         &mut self,
         event: &winit::event::KeyEvent,
     ) {
+        let shift = self.modifiers.shift_key();
+        let terminal = &mut self.active_tab_mut().terminal;
         match &event.logical_key {
             Key::Named(NamedKey::Escape) => {
-                self.terminal.close_search();
+                terminal.close_search();
             }
             Key::Named(NamedKey::Backspace) => {
-                self.terminal.search_backspace();
+                terminal.search_backspace();
             }
             Key::Named(NamedKey::Enter) => {
-                if self.modifiers.shift_key() {
-                    self.terminal.search_prev();
+                if shift {
+                    terminal.search_prev();
                 } else {
-                    self.terminal.search_next();
+                    terminal.search_next();
                 }
             }
             Key::Named(NamedKey::Space) => {
-                // Space arrives as a named key on most winit backends, not
-                // as `Key::Character(" ")`, so multi-word queries need this
-                // explicit arm or the space is silently swallowed.
-                self.terminal.search_append(" ");
+                terminal.search_append(" ");
             }
             Key::Character(s) => {
-                // Feed the text verbatim — winit has already applied
-                // Shift/AltGr to produce the character the user sees.
-                self.terminal.search_append(s);
+                terminal.search_append(s);
             }
             _ => {}
         }
@@ -465,7 +547,15 @@ impl App {
         pos: PhysicalPosition<f64>,
     ) -> (u32, u32) {
         let raw_x = pos.x.max(0.0) as u32;
-        let y = pos.y.max(0.0) as u32;
+        let raw_y = pos.y.max(0.0) as u32;
+        // When the tab bar is visible, subtract its height so terminal
+        // row 0 starts just below it.
+        let tab_bar_px = if self.tab_bar_visible() {
+            self.font_system.cell_height
+        } else {
+            0
+        };
+        let y = raw_y.saturating_sub(tab_bar_px);
         // Clicks inside the gutter map to col 0 (clamp-to-left) so users
         // don't accidentally start selections on the gutter strip.
         let gutter_px = self
@@ -474,12 +564,21 @@ impl App {
             .map(|r| r.gutter_width_px(self.font_system.cell_width))
             .unwrap_or(0);
         let x = raw_x.saturating_sub(gutter_px);
-        let cols = self.terminal.viewport.cols.saturating_sub(1);
-        let rows = self.terminal.viewport.rows.saturating_sub(1);
+        let tab = self.active_tab();
+        let cols = tab.terminal.viewport.cols.saturating_sub(1);
+        let rows = tab.terminal.viewport.rows.saturating_sub(1);
         (
             (x / self.font_system.cell_width).min(cols),
             (y / self.font_system.cell_height).min(rows),
         )
+    }
+
+    /// Returns true when the mouse position is inside the tab bar area.
+    fn is_in_tab_bar(
+        &self,
+        pos: PhysicalPosition<f64>,
+    ) -> bool {
+        self.tab_bar_visible() && (pos.y.max(0.0) as u32) < self.font_system.cell_height
     }
 
     fn mouse_modifiers(&self) -> MouseModifiers {
@@ -491,17 +590,18 @@ impl App {
     }
 
     fn flush_pending(&mut self) {
-        let bytes = self.terminal.take_pending_output();
+        let tab = self.active_tab_mut();
+        let bytes = tab.terminal.take_pending_output();
         if !bytes.is_empty() {
-            let _ = self.pty.write(&bytes);
-            self.terminal.reset_viewport();
+            let _ = tab.pty.write(&bytes);
+            tab.terminal.reset_viewport();
         }
     }
 
     /// Mouse events are forwarded to the foreground app when it has
     /// requested tracking and the shift bypass isn't active.
     fn forward_mouse_to_app(&self) -> bool {
-        self.terminal.mouse_tracking_enabled() && !self.modifiers.shift_key()
+        self.active_tab().terminal.mouse_tracking_enabled() && !self.modifiers.shift_key()
     }
 
     /// Compute the click-sequence count for a new left-button press at
@@ -522,17 +622,197 @@ impl App {
         }
     }
 
-    fn read_pty_output(&mut self) {
+    /// Map a click position in the tab bar to the clicked tab and switch
+    /// to it. Uses the same equal-width layout as `render_tab_bar`.
+    fn handle_tab_bar_click(
+        &mut self,
+        pos: PhysicalPosition<f64>,
+    ) {
+        if self.tabs.is_empty() {
+            return;
+        }
+        let cell_w = self.font_system.cell_width as f32;
+        let surface_w = self
+            .renderer
+            .as_ref()
+            .map(|_| {
+                self.window
+                    .as_ref()
+                    .map(|w| w.inner_size().width as f32)
+                    .unwrap_or(0.0)
+            })
+            .unwrap_or(0.0);
+        let max_tab_w = cell_w * 30.0;
+        let tab_w = (surface_w / self.tabs.len() as f32).min(max_tab_w);
+        let clicked_idx = (pos.x.max(0.0) as f32 / tab_w) as usize;
+        if let Some(tab) = self.tabs.get(clicked_idx) {
+            self.active_tab_id = tab.id;
+            self.request_redraw();
+        }
+    }
+
+    fn spawn_new_tab(&mut self) {
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+
+        // Inherit the active tab's working directory when available.
+        let cwd = self.active_tab().terminal.current_directory.clone();
+
+        // Derive grid dimensions accounting for a tab bar that may not
+        // have been visible before (going from 1 → 2 tabs).
+        let was_single = self.tabs.len() == 1;
+
+        let (cols, rows) = if let (Some(window), Some(renderer)) = (&self.window, &self.renderer) {
+            let size = window.inner_size();
+            let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
+            let usable_width = size.width.saturating_sub(gutter_px);
+            // The tab bar will now be visible (2+ tabs).
+            let tab_bar_px = self.font_system.cell_height;
+            let usable_height = size.height.saturating_sub(tab_bar_px);
+            self.font_system
+                .grid_dimensions(usable_width, usable_height)
+        } else {
+            (INITIAL_COLS, INITIAL_ROWS)
+        };
+
+        let scrollback = self.active_tab().terminal.active.grid.scrollback_limit;
+        let mut terminal = Terminal::new(
+            cols,
+            rows,
+            scrollback,
+            self.font_system.cell_height,
+            self.font_system.cell_width,
+        );
+        terminal.set_default_cursor_style(self.active_tab().terminal.cursor_style);
+
+        let pty = match Pty::spawn(
+            id,
+            cols as u16,
+            rows as u16,
+            self.font_system.cell_width as u16,
+            self.font_system.cell_height as u16,
+            None,
+            cwd,
+            self.proxy.clone(),
+        ) {
+            Ok(pty) => pty,
+            Err(e) => {
+                warn!("failed to spawn new tab: {e}");
+                return;
+            }
+        };
+
+        self.tabs.push(Tab { id, terminal, pty });
+        self.active_tab_id = id;
+
+        // Tab bar just appeared — all terminals need to shrink by one row.
+        if was_single {
+            self.recalculate_grid_size();
+        }
+        self.request_redraw();
+    }
+
+    fn close_active_tab(&mut self) {
+        let tab_id = self.active_tab_id;
+        let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+            return;
+        };
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            self.exit_requested = true;
+            return;
+        }
+        let new_idx = idx.min(self.tabs.len() - 1);
+        self.active_tab_id = self.tabs[new_idx].id;
+        self.recalculate_grid_size();
+        self.request_redraw();
+    }
+
+    fn switch_tab(
+        &mut self,
+        delta: i32,
+    ) {
+        if self.tabs.len() <= 1 {
+            return;
+        }
+        let idx = self
+            .tabs
+            .iter()
+            .position(|t| t.id == self.active_tab_id)
+            .unwrap_or(0);
+        let n = self.tabs.len() as i32;
+        let new_idx = ((idx as i32 + delta).rem_euclid(n)) as usize;
+        self.active_tab_id = self.tabs[new_idx].id;
+        self.request_redraw();
+    }
+
+    fn handle_child_exited(
+        &mut self,
+        tab_id: TabId,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+            return;
+        };
+        let was_active = self.active_tab_id == tab_id;
+        self.tabs.remove(idx);
+        if self.tabs.is_empty() {
+            event_loop.exit();
+            return;
+        }
+        if was_active {
+            let new_idx = idx.min(self.tabs.len() - 1);
+            self.active_tab_id = self.tabs[new_idx].id;
+        }
+        // Tab bar visibility may have changed (2 -> 1), trigger resize.
+        self.recalculate_grid_size();
+        self.request_redraw();
+    }
+
+    /// Re-derive grid dimensions from the current window size and resize all
+    /// tabs. Called when tab count crosses the 1/2 boundary (the tab bar
+    /// appears or disappears, changing usable height).
+    fn recalculate_grid_size(&mut self) {
+        let Some(window) = &self.window else { return };
+        let Some(ref mut renderer) = self.renderer else {
+            return;
+        };
+        let size = window.inner_size();
+        let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
+        let usable_width = size.width.saturating_sub(gutter_px);
+        let tab_bar_px = if self.tab_bar_visible() {
+            self.font_system.cell_height
+        } else {
+            0
+        };
+        let usable_height = size.height.saturating_sub(tab_bar_px);
+        let (cols, rows) = self
+            .font_system
+            .grid_dimensions(usable_width, usable_height);
+        for tab in &mut self.tabs {
+            tab.terminal.resize(cols, rows);
+            tab.pty.resize(cols as u16, rows as u16);
+        }
+    }
+
+    fn read_pty_output(
+        &mut self,
+        tab_id: TabId,
+    ) {
+        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
+            return;
+        };
         let time_slice = Instant::now() + Duration::from_millis(5);
         let mut buf = [0u8; 4 * 1024];
+        let proxy = self.proxy.clone();
         loop {
-            let read = self.pty.read(&mut buf);
+            let read = tab.pty.read(&mut buf);
             if read == 0 {
                 break;
             }
-            self.terminal.process(&buf[..read]);
+            tab.terminal.process(&buf[..read]);
             if Instant::now() >= time_slice {
-                let _ = self.proxy.send_event(AppEvent::DataReady);
+                let _ = proxy.send_event(AppEvent::DataReady(tab_id));
                 break;
             }
         }
@@ -555,9 +835,9 @@ impl ApplicationHandler<AppEvent> for App {
     ) {
         match event {
             AppEvent::ReloadConfig => self.reload_config(),
-            AppEvent::DataReady => self.read_pty_output(),
-            AppEvent::ChildExited => {
-                event_loop.exit();
+            AppEvent::DataReady(tab_id) => self.read_pty_output(tab_id),
+            AppEvent::ChildExited(tab_id) => {
+                self.handle_child_exited(tab_id, event_loop);
             }
         }
     }
@@ -598,6 +878,11 @@ impl ApplicationHandler<AppEvent> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
+        if self.exit_requested {
+            event_loop.exit();
+            return;
+        }
+
         match event {
             WindowEvent::CloseRequested => {
                 event_loop.exit();
@@ -606,19 +891,26 @@ impl ApplicationHandler<AppEvent> for App {
             WindowEvent::Resized(size) => {
                 if let Some(renderer) = self.renderer.as_mut() {
                     renderer.resize(size);
-                    // The gutter steals pixels from the left edge; subtract
-                    // them before dividing into cells so col 0 of the
-                    // grid is the first *text* column, not the gutter.
                     let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
                     let usable_width = size.width.saturating_sub(gutter_px);
-                    let (cols, rows) = self.font_system.grid_dimensions(usable_width, size.height);
-                    self.terminal.resize(cols, rows);
-                    self.pty.resize(cols as u16, rows as u16);
+                    let tab_bar_px = if self.tab_bar_visible() {
+                        self.font_system.cell_height
+                    } else {
+                        0
+                    };
+                    let usable_height = size.height.saturating_sub(tab_bar_px);
+                    let (cols, rows) = self
+                        .font_system
+                        .grid_dimensions(usable_width, usable_height);
+                    for tab in &mut self.tabs {
+                        tab.terminal.resize(cols, rows);
+                        tab.pty.resize(cols as u16, rows as u16);
+                    }
                 }
             }
 
             WindowEvent::Focused(focused) => {
-                self.terminal.report_focus_change(focused);
+                self.active_tab_mut().terminal.report_focus_change(focused);
                 self.flush_pending();
             }
 
@@ -635,38 +927,36 @@ impl ApplicationHandler<AppEvent> for App {
                 // events as button presses so it can page/scroll its own
                 // viewport; shift bypasses the app so the user can still
                 // navigate scrollback.
-                if self.terminal.mouse_tracking_enabled() && !self.modifiers.shift_key() {
+                if self.active_tab().terminal.mouse_tracking_enabled()
+                    && !self.modifiers.shift_key()
+                {
                     let (col, row) = self.cell_at(self.mouse_pos);
                     let mods = self.mouse_modifiers();
-                    let mut report = |button: TermMouseButton, steps: u32| {
+                    let terminal = &mut self.active_tab_mut().terminal;
+                    let report = |term: &mut Terminal, button: TermMouseButton, steps: u32| {
                         for _ in 0..steps {
-                            self.terminal.mouse_report(
-                                MouseEventKind::Press,
-                                button,
-                                col,
-                                row,
-                                mods,
-                            );
+                            term.mouse_report(MouseEventKind::Press, button, col, row, mods);
                         }
                     };
                     if y_lines < 0 {
-                        report(TermMouseButton::WheelUp, y_lines.unsigned_abs());
+                        report(terminal, TermMouseButton::WheelUp, y_lines.unsigned_abs());
                     } else if y_lines > 0 {
-                        report(TermMouseButton::WheelDown, y_lines as u32);
+                        report(terminal, TermMouseButton::WheelDown, y_lines as u32);
                     }
                     if x_lines < 0 {
-                        report(TermMouseButton::WheelLeft, x_lines.unsigned_abs());
+                        report(terminal, TermMouseButton::WheelLeft, x_lines.unsigned_abs());
                     } else if x_lines > 0 {
-                        report(TermMouseButton::WheelRight, x_lines as u32);
+                        report(terminal, TermMouseButton::WheelRight, x_lines as u32);
                     }
                     self.flush_pending();
                     return;
                 }
 
+                let terminal = &mut self.active_tab_mut().terminal;
                 if y_lines < 0 {
-                    self.terminal.scroll_viewport_up(y_lines.unsigned_abs());
+                    terminal.scroll_viewport_up(y_lines.unsigned_abs());
                 } else if y_lines > 0 {
-                    self.terminal.scroll_viewport_down(y_lines as u32);
+                    terminal.scroll_viewport_down(y_lines as u32);
                 }
             }
 
@@ -681,7 +971,7 @@ impl ApplicationHandler<AppEvent> for App {
                     self.last_motion_cell = Some(cell);
                     let button = self.mouse_buttons.primary_held();
                     let mods = self.mouse_modifiers();
-                    self.terminal.mouse_report(
+                    self.active_tab_mut().terminal.mouse_report(
                         MouseEventKind::Motion,
                         button,
                         cell.0,
@@ -694,7 +984,9 @@ impl ApplicationHandler<AppEvent> for App {
 
                 // Local selection path: extend the active drag.
                 if self.left_drag_active {
-                    self.terminal.extend_selection(cell.0, cell.1);
+                    self.active_tab_mut()
+                        .terminal
+                        .extend_selection(cell.0, cell.1);
                 }
             }
 
@@ -707,6 +999,14 @@ impl ApplicationHandler<AppEvent> for App {
                 };
                 let pressed = state == ElementState::Pressed;
                 self.mouse_buttons.set(button, pressed);
+
+                // Clicks in the tab bar switch tabs instead of reaching
+                // the terminal. Only react on press, not release.
+                if pressed && button == MouseButton::Left && self.is_in_tab_bar(self.mouse_pos) {
+                    self.handle_tab_bar_click(self.mouse_pos);
+                    return;
+                }
+
                 if pressed {
                     self.last_motion_cell = None;
                 }
@@ -719,7 +1019,8 @@ impl ApplicationHandler<AppEvent> for App {
                         MouseEventKind::Release
                     };
                     let mods = self.mouse_modifiers();
-                    self.terminal
+                    self.active_tab_mut()
+                        .terminal
                         .mouse_report(kind, term_button, col, row, mods);
                     self.flush_pending();
                     return;
@@ -728,11 +1029,8 @@ impl ApplicationHandler<AppEvent> for App {
                 let (col, row) = self.cell_at(self.mouse_pos);
                 match (button, pressed) {
                     (MouseButton::Left, true) => {
-                        // Ctrl+click on a hyperlink opens the target — checked
-                        // before selection so the click doesn't also drop a
-                        // single-cell anchor that would block the next drag.
                         if self.modifiers.control_key()
-                            && let Some(url) = self.terminal.hyperlink_at(row, col)
+                            && let Some(url) = self.active_tab().terminal.hyperlink_at(row, col)
                         {
                             if let Err(e) = open::that_detached(url) {
                                 warn!("failed to open hyperlink {url:?}: {e}");
@@ -747,28 +1045,28 @@ impl ApplicationHandler<AppEvent> for App {
                             3 => SelectionMode::Line,
                             _ => SelectionMode::Char,
                         };
-                        self.terminal.start_selection(col, row, mode);
+                        self.active_tab_mut()
+                            .terminal
+                            .start_selection(col, row, mode);
                         self.left_drag_active = true;
                     }
                     (MouseButton::Left, false) => {
                         self.left_drag_active = false;
-                        if self.terminal.has_selection() {
-                            // Drag released with real content — mirror
-                            // xterm/Linux convention and stage it on the
-                            // primary selection so middle-click elsewhere
-                            // picks it up without an explicit copy.
-                            self.terminal.copy_selection(ClipboardKind::Primary);
+                        let tab = self.active_tab_mut();
+                        if tab.terminal.has_selection() {
+                            tab.terminal.copy_selection(ClipboardKind::Primary);
                         } else {
-                            self.terminal.clear_selection();
+                            tab.terminal.clear_selection();
                         }
                     }
                     (MouseButton::Right, true) => {
-                        if self.terminal.has_selection() {
-                            self.terminal.copy_selection(ClipboardKind::Clipboard);
-                            self.terminal.clear_selection();
+                        let tab = self.active_tab_mut();
+                        if tab.terminal.has_selection() {
+                            tab.terminal.copy_selection(ClipboardKind::Clipboard);
+                            tab.terminal.clear_selection();
                         } else {
-                            self.terminal.reset_viewport();
-                            self.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                            tab.terminal.reset_viewport();
+                            tab.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
                             self.flush_pending();
                         }
                     }
@@ -790,33 +1088,26 @@ impl ApplicationHandler<AppEvent> for App {
                 // in the query buffer — including plain letters that would
                 // otherwise produce PTY input. Escape closes; Enter /
                 // Shift+Enter step through matches.
-                if self.terminal.search_active() {
+                if self.active_tab().terminal.search_active() {
                     self.handle_search_input(&event);
                     return;
                 }
 
-                // Configurable keybindings run before any of the legacy
-                // input encoders so the user's overrides win — including
-                // disabling the previous defaults by omitting them.
                 if let Some(action) = self.keybindings.lookup(&event.logical_key, self.modifiers) {
                     self.run_action(action);
                     return;
                 }
 
-                // Kitty keyboard protocol takes precedence: when the app has
-                // pushed flags onto the stack, use the disambiguating
-                // encoding so combos like Ctrl+Enter and Ctrl+I survive
-                // round-tripping. Returns None to fall through to legacy.
-                let kitty_flags = self.terminal.kitty_keyboard.current();
+                let kitty_flags = self.active_tab().terminal.kitty_keyboard.current();
                 if let Some(bytes) =
                     kitty_encode_input(&event.logical_key, self.modifiers, kitty_flags)
                 {
-                    self.terminal.reset_viewport();
-                    let _ = self.pty.write(&bytes);
+                    let tab = self.active_tab_mut();
+                    tab.terminal.reset_viewport();
+                    let _ = tab.pty.write(&bytes);
                     return;
                 }
 
-                // Ctrl+key → control character byte (0x00–0x1F).
                 if self.modifiers.control_key() {
                     let byte = match &event.logical_key {
                         Key::Character(c) => ctrl_byte(c),
@@ -825,8 +1116,9 @@ impl ApplicationHandler<AppEvent> for App {
                     };
 
                     if let Some(byte) = byte {
-                        self.terminal.reset_viewport();
-                        let _ = self.pty.write(&[byte]);
+                        let tab = self.active_tab_mut();
+                        tab.terminal.reset_viewport();
+                        let _ = tab.pty.write(&[byte]);
                         return;
                     }
                 }
@@ -838,8 +1130,9 @@ impl ApplicationHandler<AppEvent> for App {
                 };
 
                 if let Some(bytes) = bytes {
-                    self.terminal.reset_viewport();
-                    let _ = self.pty.write(&bytes);
+                    let tab = self.active_tab_mut();
+                    tab.terminal.reset_viewport();
+                    let _ = tab.pty.write(&bytes);
                 }
             }
 
@@ -850,10 +1143,33 @@ impl ApplicationHandler<AppEvent> for App {
                 // bytes but skip presenting so apps never show a half-drawn
                 // frame. The timeout inside `is_synchronized_update_active`
                 // keeps us from freezing if the app never sends ESU.
-                if !self.terminal.is_synchronized_update_active()
-                    && let Some(renderer) = self.renderer.as_mut()
-                {
-                    renderer.render(&mut self.font_system, &self.terminal);
+                let active_idx = self
+                    .tabs
+                    .iter()
+                    .position(|t| t.id == self.active_tab_id)
+                    .expect("active tab must exist");
+                let synced = self.tabs[active_idx]
+                    .terminal
+                    .is_synchronized_update_active();
+                if !synced {
+                    let tab_infos: Vec<renderer::TabInfo> = if self.tab_bar_visible() {
+                        self.tabs
+                            .iter()
+                            .map(|t| renderer::TabInfo {
+                                label: t.terminal.current_title.as_deref().unwrap_or("Shell"),
+                                active: t.id == self.active_tab_id,
+                            })
+                            .collect()
+                    } else {
+                        Vec::new()
+                    };
+                    if let Some(ref mut renderer) = self.renderer {
+                        renderer.render(
+                            &mut self.font_system,
+                            &self.tabs[active_idx].terminal,
+                            &tab_infos,
+                        );
+                    }
                 }
 
                 event_loop.set_control_flow(ControlFlow::WaitUntil(
@@ -1059,11 +1375,13 @@ fn main() {
     let font_system = FontSystem::new(config.fonts.clone(), config.font_size);
 
     let pty = Pty::spawn(
+        TabId(0),
         INITIAL_COLS as u16,
         INITIAL_ROWS as u16,
         font_system.cell_width as u16,
         font_system.cell_height as u16,
         command,
+        None,
         event_loop.create_proxy(),
     )
     .expect("failed to spawn PTY");

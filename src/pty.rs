@@ -12,6 +12,7 @@ use portable_pty::native_pty_system;
 use winit::event_loop::EventLoopProxy;
 
 use crate::AppEvent;
+use crate::TabId;
 
 pub const MAX_BUFFER: usize = 128 * 1024 * 1024;
 pub const MAX_READ_CHUNK: usize = 128 * 1024;
@@ -34,11 +35,13 @@ impl Pty {
     /// `command` is `Some`, the first element is the program and the rest are
     /// its arguments; otherwise the user's default shell is launched.
     pub fn spawn(
+        tab_id: TabId,
         cols: u16,
         rows: u16,
         cell_width: u16,
         cell_height: u16,
         command: Option<Vec<String>>,
+        cwd: Option<std::path::PathBuf>,
         event_loop: EventLoopProxy<AppEvent>,
     ) -> io::Result<Self> {
         let pty_system = native_pty_system();
@@ -72,8 +75,13 @@ impl Pty {
         // render full images.
         cmd.env("TERM_PROGRAM", "iTerm.app");
         cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
-        if let Ok(cwd) = std::env::current_dir() {
-            cmd.cwd(cwd);
+        match cwd {
+            Some(dir) => cmd.cwd(dir),
+            None => {
+                if let Ok(dir) = std::env::current_dir() {
+                    cmd.cwd(dir);
+                }
+            }
         }
 
         let mut child = pair.slave.spawn_command(cmd).map_err(io::Error::other)?;
@@ -89,7 +97,7 @@ impl Pty {
         let event_loop_ = event_loop.clone();
         thread::Builder::new()
             .name("pty-reader".into())
-            .spawn(move || pump_reader(reader, read_tx, event_loop_))
+            .spawn(move || pump_reader(tab_id, reader, read_tx, event_loop_))
             .map_err(io::Error::other)?;
 
         let child_killer = child.clone_killer();
@@ -97,7 +105,7 @@ impl Pty {
             .name("child-watcher".into())
             .spawn(move || {
                 let _ = child.wait();
-                let _ = event_loop.send_event(AppEvent::ChildExited);
+                let _ = event_loop.send_event(AppEvent::ChildExited(tab_id));
             })
             .map_err(io::Error::other)?;
 
@@ -154,6 +162,7 @@ impl Drop for Pty {
 }
 
 fn pump_reader(
+    tab_id: TabId,
     mut reader: Box<dyn Read + Send>,
     mut tx: cueue::Writer<u8>,
     event_loop: EventLoopProxy<AppEvent>,
@@ -179,7 +188,7 @@ fn pump_reader(
                         Err(_) => return,
                     }
                 }
-                let _ = event_loop.send_event(AppEvent::DataReady);
+                let _ = event_loop.send_event(AppEvent::DataReady(tab_id));
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
             Err(_) => break,
