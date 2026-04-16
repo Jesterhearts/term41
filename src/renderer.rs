@@ -1268,10 +1268,10 @@ impl RenderHost {
 
     /// Dismiss the popup (if open).
     fn close_gutter_popup(&mut self) {
-        if self.gutter_popup.take().is_some() {
-            if let Some(tab) = self.active_tab_mut() {
-                tab.terminal.clear_selection();
-            }
+        if self.gutter_popup.take().is_some()
+            && let Some(tab) = self.active_tab_mut()
+        {
+            tab.terminal.clear_selection();
         }
     }
 
@@ -1286,13 +1286,13 @@ impl RenderHost {
         let action = GUTTER_MENU_ITEMS[item_idx].action;
         match action {
             GutterMenuAction::Rerun => {
-                if let Some(tab) = self.active_tab_mut() {
-                    if let Some(cmd) = tab.terminal.command_text_at(popup.prompt_abs_row) {
-                        let cmd = cmd.trim().to_owned();
-                        tab.terminal.clear_selection();
-                        tab.terminal.reset_viewport();
-                        tab.terminal.paste(&format!("{cmd}\r"));
-                    }
+                if let Some(tab) = self.active_tab_mut()
+                    && let Some(cmd) = tab.terminal.command_text_at(popup.prompt_abs_row)
+                {
+                    let cmd = cmd.trim().to_owned();
+                    tab.terminal.clear_selection();
+                    tab.terminal.reset_viewport();
+                    tab.terminal.paste(&format!("{cmd}\r"));
                 }
                 self.flush_pending();
             }
