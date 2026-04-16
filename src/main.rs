@@ -53,6 +53,8 @@ use winit::window::Icon;
 use winit::window::Window;
 use winit::window::WindowId;
 
+use crate::pty::MAX_READ_CHUNK;
+
 #[macro_use]
 extern crate log;
 
@@ -154,10 +156,6 @@ struct App {
     /// True while the left button is held in selection mode, so motion
     /// events extend the selection rather than being dropped.
     left_drag_active: bool,
-
-    /// Set to true when the last tab is closed manually. Checked on the
-    /// next event loop iteration to call `event_loop.exit()`.
-    exit_requested: bool,
 }
 
 /// Maximum time between clicks that still count as part of a sequence.
@@ -246,7 +244,6 @@ impl App {
             last_click_cell: None,
             click_count: 0,
             left_drag_active: false,
-            exit_requested: false,
         }
     }
 
@@ -413,6 +410,7 @@ impl App {
     /// Run a configurable [`Action`] in response to a keybinding match.
     fn run_action(
         &mut self,
+        event_loop: &ActiveEventLoop,
         action: Action,
     ) {
         match action {
@@ -453,7 +451,7 @@ impl App {
                 self.spawn_new_tab();
             }
             Action::CloseTab => {
-                self.close_active_tab();
+                self.close_active_tab(event_loop);
             }
             Action::NextTab => {
                 self.switch_tab(1);
@@ -712,14 +710,17 @@ impl App {
         self.request_redraw();
     }
 
-    fn close_active_tab(&mut self) {
+    fn close_active_tab(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) {
         let tab_id = self.active_tab_id;
         let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
             return;
         };
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
-            self.exit_requested = true;
+            event_loop.exit();
             return;
         }
         let new_idx = idx.min(self.tabs.len() - 1);
@@ -808,7 +809,7 @@ impl App {
         // servicing.
         tab.pty.clear_pending();
         let time_slice = Instant::now() + Duration::from_millis(5);
-        let mut buf = [0u8; 128 * 1024];
+        let mut buf = [0u8; MAX_READ_CHUNK];
         let mut bailed = false;
         loop {
             let read = tab.pty.read(&mut buf);
@@ -892,7 +893,7 @@ impl ApplicationHandler<AppEvent> for App {
         _window_id: WindowId,
         event: WindowEvent,
     ) {
-        if self.exit_requested {
+        if self.tabs.is_empty() {
             event_loop.exit();
             return;
         }
@@ -1108,7 +1109,7 @@ impl ApplicationHandler<AppEvent> for App {
                 }
 
                 if let Some(action) = self.keybindings.lookup(&event.logical_key, self.modifiers) {
-                    self.run_action(action);
+                    self.run_action(event_loop, action);
                     return;
                 }
 

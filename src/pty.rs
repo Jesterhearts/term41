@@ -17,7 +17,7 @@ use winit::event_loop::EventLoopProxy;
 use crate::AppEvent;
 use crate::TabId;
 
-pub const MAX_BUFFER: usize = 128 * 1024 * 1024;
+pub const MAX_BUFFER: usize = 2 * 1024 * 1024;
 pub const MAX_READ_CHUNK: usize = 128 * 1024;
 
 /// A pseudo-terminal connected to a child shell process.
@@ -39,7 +39,7 @@ pub struct Pty {
     /// bails on its time slice with bytes still in the ring, the main
     /// thread re-arms and re-posts so the leftover doesn't sit stale
     /// waiting for the child to write again.
-    pending: Arc<AtomicBool>,
+    pending_read: Arc<AtomicBool>,
 }
 
 impl Pty {
@@ -106,12 +106,13 @@ impl Pty {
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
 
         let (read_tx, rx) = cueue(MAX_BUFFER)?;
-        let pending = Arc::new(AtomicBool::new(false));
-        let pending_reader = pending.clone();
+        let pending_read = Arc::new(AtomicBool::new(false));
+        let pending_read_ = pending_read.clone();
+
         let event_loop_ = event_loop.clone();
         thread::Builder::new()
             .name("pty-reader".into())
-            .spawn(move || pump_reader(tab_id, reader, read_tx, event_loop_, pending_reader))
+            .spawn(move || pump_reader(tab_id, reader, read_tx, event_loop_, pending_read_))
             .map_err(io::Error::other)?;
 
         let child_killer = child.clone_killer();
@@ -128,7 +129,7 @@ impl Pty {
             child_killer,
             writer,
             rx,
-            pending,
+            pending_read,
         })
     }
 
@@ -137,14 +138,14 @@ impl Pty {
     /// if the reader races us during the drain, we see its data in the
     /// ring this pass, and its event re-enters us cleanly next pass.
     pub fn clear_pending(&self) {
-        self.pending.store(false, Ordering::Release);
+        self.pending_read.store(false, Ordering::Release);
     }
 
     /// Mark a `DataReady` as in flight. Returns `true` when the caller
     /// is responsible for actually posting the event (flag was false),
     /// `false` when one is already pending (reader beat us to it).
     pub fn arm_pending(&self) -> bool {
-        !self.pending.swap(true, Ordering::AcqRel)
+        !self.pending_read.swap(true, Ordering::AcqRel)
     }
 
     /// Non-blocking read of bytes received from the PTY. Returns 0 when no
@@ -196,7 +197,7 @@ fn pump_reader(
     mut reader: Box<dyn Read + Send>,
     mut tx: cueue::Writer<u8>,
     event_loop: EventLoopProxy<AppEvent>,
-    pending: Arc<AtomicBool>,
+    pending_read: Arc<AtomicBool>,
 ) {
     let mut buf = [0u8; MAX_READ_CHUNK];
 
@@ -219,7 +220,7 @@ fn pump_reader(
                         Err(_) => return,
                     }
                 }
-                if !pending.swap(true, Ordering::AcqRel) {
+                if !pending_read.swap(true, Ordering::AcqRel) {
                     let _ = event_loop.send_event(AppEvent::DataReady(tab_id));
                 }
             }
