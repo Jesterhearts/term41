@@ -218,6 +218,12 @@ pub struct RenderHost {
     /// hammering it every frame would churn without value.
     ime_cursor_area: Option<(f32, f32, f32, f32)>,
 
+    /// Window-level clipboard, separate from the per-tab terminal
+    /// clipboards (which exist so OSC 52 sets are scoped per-tab). Used
+    /// by `PasteAsBackground` to read image data from the system
+    /// clipboard regardless of which tab is active.
+    clipboard: crate::clipboard::Clipboard,
+
     should_exit: bool,
 }
 
@@ -269,6 +275,7 @@ impl RenderHost {
             window: None,
             preedit: None,
             ime_cursor_area: None,
+            clipboard: crate::clipboard::Clipboard::new(),
             should_exit: false,
         }
     }
@@ -350,6 +357,19 @@ impl RenderHost {
             self.update_ime_cursor_area();
 
             if self.renderer.is_none() {
+                // Surface the precedence rule once at startup so the user
+                // isn't confused why their config edit appears to do
+                // nothing — the pasted bg overrides until cleared.
+                if let Some(pasted) = pasted_background_path()
+                    && pasted.exists()
+                    && self.config.background_image.is_some()
+                {
+                    info!(
+                        "background: pasted image at {} overrides config background_image; clear \
+                         it via Ctrl+Shift+Backspace to revert",
+                        pasted.display()
+                    );
+                }
                 self.renderer = Some(pollster::block_on(Renderer::new(
                     window.clone(),
                     display.clone(),
@@ -357,7 +377,7 @@ impl RenderHost {
                     self.config.gutter,
                     self.config.power_preference,
                     self.config.vsync,
-                    self.config.background_image.clone(),
+                    effective_bg_path(&self.config),
                     self.config.background_opacity,
                 )));
             }
@@ -939,6 +959,93 @@ impl RenderHost {
             Action::PrevTab => {
                 self.switch_tab(-1);
             }
+            Action::PasteAsBackground => {
+                self.handle_paste_as_background();
+            }
+            Action::ClearPastedBackground => {
+                self.handle_clear_pasted_background();
+            }
+        }
+    }
+
+    // -- Background-image actions ------------------------------------------
+
+    fn handle_paste_as_background(&mut self) {
+        let Some(img) = self.clipboard.get_image() else {
+            warn!("paste-as-background: clipboard does not hold image data");
+            self.fire_ui_bell();
+            return;
+        };
+        let Some(path) = pasted_background_path() else {
+            warn!("paste-as-background: no data directory available on this platform");
+            self.fire_ui_bell();
+            return;
+        };
+        if let Some(parent) = path.parent()
+            && let Err(e) = std::fs::create_dir_all(parent)
+        {
+            warn!(
+                "paste-as-background: failed to create {}: {e}",
+                parent.display()
+            );
+            self.fire_ui_bell();
+            return;
+        }
+        if let Err(e) = encode_png_rgba(&path, img.width, img.height, &img.rgba) {
+            warn!(
+                "paste-as-background: failed to write {}: {e}",
+                path.display()
+            );
+            self.fire_ui_bell();
+            return;
+        }
+        info!(
+            "background: pasted image saved to {} ({}x{})",
+            path.display(),
+            img.width,
+            img.height
+        );
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_background(Some(&path), self.config.background_opacity);
+        }
+    }
+
+    fn handle_clear_pasted_background(&mut self) {
+        let Some(path) = pasted_background_path() else {
+            return;
+        };
+        if !path.exists() {
+            return;
+        }
+        if let Err(e) = std::fs::remove_file(&path) {
+            warn!(
+                "clear-pasted-background: failed to remove {}: {e}",
+                path.display()
+            );
+            self.fire_ui_bell();
+            return;
+        }
+        info!(
+            "background: pasted image at {} cleared, reverting to config",
+            path.display()
+        );
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.set_background(
+                self.config.background_image.as_deref(),
+                self.config.background_opacity,
+            );
+        }
+    }
+
+    /// Trigger the visual bell + urgent-attention paths that the configured
+    /// bell mode would normally only fire for app-emitted BELs. UI-driven
+    /// failures (paste-as-background with no image, etc.) get this
+    /// regardless of `bell = "off"`: the user clicked something and got no
+    /// feedback otherwise. The terminal bell config governs *app* bells,
+    /// not UI errors that the user themselves initiated.
+    fn fire_ui_bell(&mut self) {
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.notify_bell();
         }
     }
 
@@ -1211,9 +1318,11 @@ impl RenderHost {
             );
         }
 
-        // Background image hot-reloads — both path swap and dim
-        // adjustment work without a restart. The renderer's `set_background`
-        // skips the file re-decode when only the opacity changed.
+        // Background hot-reload. Path: pasted-on-disk always wins
+        // (Ctrl+Shift+B sets it; Ctrl+Shift+Backspace clears) — config
+        // edits below show through only when no pasted image exists.
+        // Opacity is unconditional because it's a UI dim factor, not
+        // bound to a specific image.
         let bg_path_changed = cfg.background_image != self.config.background_image;
         let bg_opacity_changed =
             (cfg.background_opacity - self.config.background_opacity).abs() > f32::EPSILON;
@@ -1221,10 +1330,8 @@ impl RenderHost {
             self.config.background_image = cfg.background_image.clone();
             self.config.background_opacity = cfg.background_opacity;
             if let Some(renderer) = self.renderer.as_mut() {
-                renderer.set_background(
-                    self.config.background_image.as_deref(),
-                    self.config.background_opacity,
-                );
+                let path = effective_bg_path(&self.config);
+                renderer.set_background(path.as_deref(), self.config.background_opacity);
             }
         }
     }
@@ -1774,6 +1881,45 @@ fn named_key_to_bytes(key: NamedKey) -> Option<Vec<u8>> {
         NamedKey::Space => Some(b" ".to_vec()),
         _ => None,
     }
+}
+
+/// Where the `PasteAsBackground` action persists the clipboard image.
+/// Lives under the user's data dir (`~/.local/share/term41/...` on Linux,
+/// `~/Library/Application Support/term41/...` on macOS, `%APPDATA%\term41\...`
+/// on Windows). Returns `None` on platforms where `dirs` can't resolve a
+/// data dir (rare — usually broken environment).
+fn pasted_background_path() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("term41").join("pasted_background.png"))
+}
+
+/// Resolve which background image to actually load: pasted-image-on-disk
+/// always wins over the config-supplied path. The "pasted always wins
+/// until cleared" rule keeps the precedence one-line debuggable —
+/// "does the pasted file exist?" is the whole question.
+fn effective_bg_path(config: &Config) -> Option<PathBuf> {
+    pasted_background_path()
+        .filter(|p| p.exists())
+        .or_else(|| config.background_image.clone())
+}
+
+/// Encode an RGBA byte buffer to PNG at `path`. Always RGBA8 — the
+/// clipboard hands us pixels in that layout and the renderer reads them
+/// back the same way, so there's no need for a more flexible encoder.
+fn encode_png_rgba(
+    path: &std::path::Path,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> std::io::Result<()> {
+    let file = std::fs::File::create(path)?;
+    let mut encoder = png::Encoder::new(file, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
+    writer
+        .write_image_data(rgba)
+        .map_err(std::io::Error::other)?;
+    Ok(())
 }
 
 #[cfg(test)]

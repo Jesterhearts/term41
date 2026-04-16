@@ -9,7 +9,9 @@ harness = false
 name    = "vte_parse"
 
 [dependencies]
-arboard              = { version = "3.6.1", default-features = false }
+arboard              = { version = "3.6.1", default-features = false, features = [
+  "image-data"
+] }
 atoi                 = "2.0.0"
 base64               = "0.22.1"
 bitflags             = "2.11.0"

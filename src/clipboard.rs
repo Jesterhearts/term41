@@ -94,6 +94,39 @@ impl Clipboard {
             }
         }
     }
+
+    /// Read the system clipboard as raw RGBA pixel data. Returns `None`
+    /// when the clipboard doesn't hold an image (the common case — most
+    /// pastes are text), the in-memory test fallback is in use, or the
+    /// platform backend reports an error. Errors get a `debug!` log
+    /// rather than `warn!` because "no image on the clipboard" lands here
+    /// too, and that's the expected path for a regular paste.
+    pub fn get_image(&mut self) -> Option<ClipboardImage> {
+        let Backend::Real(cb) = &mut self.backend else {
+            return None;
+        };
+        match cb.get_image() {
+            Ok(img) => Some(ClipboardImage {
+                width: img.width as u32,
+                height: img.height as u32,
+                rgba: img.bytes.into_owned(),
+            }),
+            Err(e) => {
+                debug!("clipboard image not available: {e}");
+                None
+            }
+        }
+    }
+}
+
+/// Owned RGBA pixel data from the system clipboard. `width * height * 4`
+/// bytes, row-major, top-down — same layout as `DecodedImage` everywhere
+/// else in the codebase, so the bytes can be re-encoded or passed
+/// through to the renderer without conversion.
+pub struct ClipboardImage {
+    pub width: u32,
+    pub height: u32,
+    pub rgba: Vec<u8>,
 }
 
 impl std::fmt::Debug for Clipboard {

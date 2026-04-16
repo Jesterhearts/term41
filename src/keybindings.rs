@@ -52,6 +52,16 @@ pub enum Action {
     NextTab,
     /// Switch to the previous tab (wraps around).
     PrevTab,
+    /// Read an image from the system clipboard, persist it to the data
+    /// directory, and apply it as the active background. Overrides any
+    /// `background_image` from config until cleared. Bells if the
+    /// clipboard doesn't hold image data so the user knows the action ran
+    /// but had nothing to paste.
+    PasteAsBackground,
+    /// Delete the persisted pasted background and revert to the
+    /// `background_image` from config (or none, if unset). Silent no-op
+    /// when no pasted background exists.
+    ClearPastedBackground,
 }
 
 /// One key, identified either by its winit `NamedKey` (Enter, F1, …) or by
@@ -144,6 +154,21 @@ impl Keybindings {
                     key: KeySpec::Named(NamedKey::PageUp),
                     mods: ModifiersState::CONTROL,
                     action: Action::PrevTab,
+                },
+                Keybinding {
+                    key: KeySpec::Char('b'),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::PasteAsBackground,
+                },
+                // Backspace as the universal "remove" gesture — pairs with
+                // PasteAsBackground above. Avoids needing a second
+                // letter-mnemonic and won't collide with any default
+                // shell binding (Ctrl+Shift+Backspace isn't bound by
+                // bash/zsh/fish out of the box).
+                Keybinding {
+                    key: KeySpec::Named(NamedKey::Backspace),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::ClearPastedBackground,
                 },
             ],
         }
@@ -359,6 +384,25 @@ mod tests {
         assert!(b.mods.contains(ModifiersState::CONTROL));
         let b = cfg("Cmd+a", Action::Copy);
         assert!(b.mods.contains(ModifiersState::SUPER));
+    }
+
+    #[test]
+    fn paste_as_background_default_binding() {
+        let defaults = Keybindings::defaults();
+        let key = Key::Character(SmolStr::new_inline("b"));
+        let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(defaults.lookup(&key, mods), Some(Action::PasteAsBackground));
+    }
+
+    #[test]
+    fn clear_pasted_background_default_binding() {
+        let defaults = Keybindings::defaults();
+        let key = Key::Named(NamedKey::Backspace);
+        let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            defaults.lookup(&key, mods),
+            Some(Action::ClearPastedBackground)
+        );
     }
 
     #[test]
