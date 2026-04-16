@@ -175,11 +175,11 @@ fn handle_osc_133(
             let abs = mark_current_row(screen, viewport, |row| {
                 row.output_start = true;
             });
-            if let Some(prompt_abs) = *current_prompt_row {
-                if let Some(meta) = command_metas.get_mut(&prompt_abs) {
-                    meta.output_row = Some(abs);
-                    meta.started_at = Some(Instant::now());
-                }
+            if let Some(prompt_abs) = *current_prompt_row
+                && let Some(meta) = command_metas.get_mut(&prompt_abs)
+            {
+                meta.output_row = Some(abs);
+                meta.started_at = Some(Instant::now());
             }
         }
         b"D" => {
@@ -189,10 +189,10 @@ fn handle_osc_133(
             {
                 screen.grid.rows[local].exit_status = Some(exit);
             }
-            if let Some(prompt_abs) = *current_prompt_row {
-                if let Some(meta) = command_metas.get_mut(&prompt_abs) {
-                    meta.finished_at = Some(Instant::now());
-                }
+            if let Some(prompt_abs) = *current_prompt_row
+                && let Some(meta) = command_metas.get_mut(&prompt_abs)
+            {
+                meta.finished_at = Some(Instant::now());
             }
         }
         _ => {}
