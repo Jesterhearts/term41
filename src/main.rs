@@ -31,6 +31,7 @@ use terminal::MouseButton as TermMouseButton;
 use terminal::Terminal;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
+use winit::event::Ime;
 use winit::event::MouseButton;
 use winit::event::MouseScrollDelta;
 use winit::event::WindowEvent;
@@ -148,6 +149,13 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
+        // Opt into IME events. `ImePurpose::Terminal` is a hint some
+        // Wayland compositors and Android IMEs use to expose extra keys
+        // (arrows, Tab, etc.) that wouldn't normally appear on a text-input
+        // OSK; on platforms that don't understand it, it's a no-op.
+        window.set_ime_allowed(true);
+        window.set_ime_purpose(winit::window::ImePurpose::Terminal);
+
         if let Some(tx) = self.window_tx.take() {
             let _ = tx.send((window.clone(), event_loop.owned_display_handle()));
         }
@@ -209,6 +217,13 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 };
                 RenderEvent::MouseWheel { x, y, pixels }
             }
+
+            WindowEvent::Ime(ime) => match ime {
+                Ime::Enabled => RenderEvent::ImeEnabled(true),
+                Ime::Disabled => RenderEvent::ImeEnabled(false),
+                Ime::Preedit(text, cursor) => RenderEvent::ImePreedit { text, cursor },
+                Ime::Commit(text) => RenderEvent::ImeCommit(text),
+            },
 
             _ => return,
         };

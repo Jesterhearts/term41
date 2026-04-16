@@ -152,6 +152,21 @@ pub enum RenderEvent {
     ScaleFactorChanged {
         scale_factor: f64,
     },
+    /// IME composition update. `text == ""` signals the preedit is cleared
+    /// (winit emits this synthetically before a commit and on disable).
+    /// `cursor` is a byte-indexed `(start, end)` range into `text` marking
+    /// the composition caret / selected segment; `None` means "hide it".
+    ImePreedit {
+        text: String,
+        cursor: Option<(usize, usize)>,
+    },
+    /// IME commit — finalized text to insert into the terminal. Delivered
+    /// after an empty `ImePreedit` in winit's event stream.
+    ImeCommit(String),
+    /// IME was enabled or disabled by the compositor. Used to reset any
+    /// stale preedit state on disable and let the render thread start
+    /// issuing `set_ime_cursor_area` calls on enable.
+    ImeEnabled(bool),
     CloseRequested,
 }
 
@@ -188,7 +203,28 @@ pub struct RenderHost {
     /// Gutter popup menu, shown when a shell-integration marker is clicked.
     gutter_popup: Option<GutterPopup>,
 
+    /// Window handle, persisted after the first frame so IME requests
+    /// (`set_ime_cursor_area`) can be issued from event handlers.
+    window: Option<Arc<Window>>,
+
+    /// Active IME preedit (composition) state, if any. `text` is the
+    /// composing string; `cursor` is a byte-indexed `(start, end)` range
+    /// into `text` marking the caret / highlighted segment.
+    preedit: Option<PreeditState>,
+
+    /// Last pixel position/size we handed to `set_ime_cursor_area`. Used to
+    /// skip redundant calls — winit queues each one to the main thread, so
+    /// hammering it every frame would churn without value.
+    ime_cursor_area: Option<(f32, f32, f32, f32)>,
+
     should_exit: bool,
+}
+
+/// Snapshot of the IME's current composition.
+#[derive(Debug, Clone, Default)]
+pub(crate) struct PreeditState {
+    pub text: String,
+    pub cursor: Option<(usize, usize)>,
 }
 
 impl RenderHost {
@@ -229,6 +265,9 @@ impl RenderHost {
             left_drag_active: false,
             window_size: (0, 0),
             gutter_popup: None,
+            window: None,
+            preedit: None,
+            ime_cursor_area: None,
             should_exit: false,
         }
     }
@@ -247,6 +286,7 @@ impl RenderHost {
             Ok(wd) => wd,
             Err(_) => return,
         };
+        self.window = Some(window.clone());
 
         // Apply DPI scale factor: honour the config override if set,
         // otherwise use the monitor's native scale.
@@ -301,6 +341,12 @@ impl RenderHost {
 
             // Drain PTY data for every tab and render a frame.
             self.drain_all_ptys();
+
+            // Keep the IME's candidate popup anchored to the text cursor as
+            // it moves (normal typing, cursor-movement escapes, etc.). The
+            // call dedupes against the last position, so idle frames cost
+            // one comparison and nothing else.
+            self.update_ime_cursor_area();
 
             if self.renderer.is_none() {
                 self.renderer = Some(pollster::block_on(Renderer::new(
@@ -365,6 +411,17 @@ impl RenderHost {
             RenderEvent::ScaleFactorChanged { scale_factor } => {
                 self.handle_scale_factor_changed(*scale_factor);
             }
+            RenderEvent::ImePreedit { text, cursor } => {
+                self.handle_ime_preedit(text.clone(), *cursor);
+            }
+            RenderEvent::ImeCommit(text) => {
+                self.handle_ime_commit(text);
+            }
+            RenderEvent::ImeEnabled(enabled) => {
+                if !*enabled {
+                    self.preedit = None;
+                }
+            }
         }
     }
 
@@ -374,6 +431,19 @@ impl RenderHost {
         &mut self,
         key: Key,
     ) {
+        // While an IME preedit is active, drop plain text keys. Most
+        // platforms route the same keystroke through the IME path and will
+        // deliver a Commit; forwarding the Character too would double-insert.
+        // X11/XIM isn't fully consistent on this, so this guard keeps us
+        // correct on every backend. Named keys (arrows, etc.) and
+        // modifier-bearing chords still flow through — the IME doesn't
+        // absorb those.
+        if self.preedit.as_ref().is_some_and(|p| !p.text.is_empty())
+            && matches!(key, Key::Character(_))
+        {
+            return;
+        }
+
         // Dismiss gutter popup on any keypress.
         if self.gutter_popup.is_some() {
             self.close_gutter_popup();
@@ -459,6 +529,96 @@ impl RenderHost {
                 _ => {}
             }
         }
+    }
+
+    // -- IME ----------------------------------------------------------------
+
+    fn handle_ime_preedit(
+        &mut self,
+        text: String,
+        cursor: Option<(usize, usize)>,
+    ) {
+        if text.is_empty() {
+            self.preedit = None;
+        } else {
+            self.preedit = Some(PreeditState { text, cursor });
+        }
+        self.update_ime_cursor_area();
+    }
+
+    fn handle_ime_commit(
+        &mut self,
+        text: &str,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        // Kitty's REPORT_ASSOCIATED_TEXT turns the commit into a distinct
+        // event (key code 0) so editors can tell it apart from per-keystroke
+        // input. Without the flag, fall back to raw UTF-8 — that's what
+        // every non-kitty-aware app expects and how shells read typed text.
+        let Some(tab) = self.active_tab_mut() else {
+            return;
+        };
+        let flags = tab.terminal.kitty_keyboard.current();
+        let bytes = if flags.contains(KittyFlags::REPORT_ASSOCIATED_TEXT) {
+            kitty_encode_ime_commit(text)
+        } else {
+            text.as_bytes().to_vec()
+        };
+        tab.terminal.reset_viewport();
+        let _ = tab.pty.write(&bytes);
+
+        // A commit ends the composition; winit sends an empty preedit
+        // before this too, but explicitly clearing here guards against
+        // platforms that skip that synthetic event.
+        self.preedit = None;
+        self.update_ime_cursor_area();
+    }
+
+    /// Tell winit where the IME should anchor its candidate popup: the
+    /// pixel rect of the terminal's current cursor cell. Skipped when the
+    /// cursor is scrolled off-screen or hidden, and deduplicated against
+    /// the last value so we don't queue a request every frame.
+    fn update_ime_cursor_area(&mut self) {
+        let Some(window) = self.window.clone() else {
+            return;
+        };
+        let Some(tab) = self.active_tab() else {
+            return;
+        };
+        // The compositor doesn't care about IME positioning when the user
+        // has scrolled away from live output, and we don't want to signal
+        // one — clear it so the popup doesn't stick to stale coordinates.
+        if tab.terminal.active.offset != 0 || !tab.terminal.active.cursor_visible {
+            return;
+        }
+
+        let cell_w = self.font_system.cell_width as f32;
+        let cell_h = self.font_system.cell_height as f32;
+        let gutter_px = self
+            .renderer
+            .as_ref()
+            .map(|r| r.gutter_width_px(self.font_system.cell_width))
+            .unwrap_or(0) as f32;
+        let tab_bar_h = if self.tab_bar_visible() { cell_h } else { 0.0 };
+
+        let cursor = tab.terminal.active.cursor;
+        // Place the area at the row *below* the cursor so the popup doesn't
+        // cover the cell the user is about to type into.
+        let x = cursor.col as f32 * cell_w + gutter_px;
+        let y = cursor.row as f32 * cell_h + tab_bar_h;
+
+        let new_area = (x, y, cell_w, cell_h);
+        if self.ime_cursor_area == Some(new_area) {
+            return;
+        }
+        self.ime_cursor_area = Some(new_area);
+
+        window.set_ime_cursor_area(
+            winit::dpi::PhysicalPosition::new(x as f64, y as f64),
+            winit::dpi::PhysicalSize::new(cell_w as f64, cell_h as f64),
+        );
     }
 
     // -- Mouse --------------------------------------------------------------
@@ -1105,6 +1265,7 @@ impl RenderHost {
                 &self.tabs[active_idx].terminal,
                 &tab_infos,
                 self.gutter_popup.as_ref(),
+                self.preedit.as_ref(),
             );
         }
     }
@@ -1435,25 +1596,71 @@ fn kitty_encode_input(
     let mod_bits = kitty_modifier_bits(mods);
     let only_shift_or_none = (mod_bits & !1) == 0;
     let mod_param = mod_bits + 1;
+    let report_text = flags.contains(KittyFlags::REPORT_ASSOCIATED_TEXT);
+    let all_as_escape = flags.contains(KittyFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES);
 
     match key {
         Key::Character(s) => {
-            if only_shift_or_none {
+            // Pure text input (no modifiers beyond shift) is normally left as
+            // the raw byte. REPORT_ALL_KEYS_AS_ESCAPE_CODES forces it into
+            // CSI u form too so apps can tell key events apart from pastes.
+            if only_shift_or_none && !all_as_escape {
                 return None;
             }
             let lower = s.to_lowercase();
             let cp = lower.chars().next()? as u32;
-            Some(format!("\x1b[{cp};{mod_param}u").into_bytes())
+            let text = report_text.then_some(s.as_str());
+            Some(format_csi_u(cp, mod_param, text))
         }
-        Key::Named(named) => kitty_encode_named(*named, mod_bits, mod_param),
+        Key::Named(named) => kitty_encode_named(*named, mod_bits, mod_param, report_text),
         _ => None,
     }
+}
+
+/// Emit a CSI u sequence. `text`, when `Some` and non-empty, becomes the third
+/// parameter as `cp1:cp2:...` — the associated text the key produced. Apps
+/// with `REPORT_ASSOCIATED_TEXT` on use this to distinguish "user typed A"
+/// from "user typed shift+a then Caps got hit"; the raw CSI u form alone
+/// only carries the unmodified key code and the modifiers.
+fn format_csi_u(
+    cp: u32,
+    mod_param: u8,
+    text: Option<&str>,
+) -> Vec<u8> {
+    match text {
+        Some(t) if !t.is_empty() => {
+            let mut out = format!("\x1b[{cp};{mod_param};");
+            let mut first = true;
+            for ch in t.chars() {
+                if !first {
+                    out.push(':');
+                }
+                first = false;
+                use std::fmt::Write as _;
+                let _ = write!(out, "{}", ch as u32);
+            }
+            out.push('u');
+            out.into_bytes()
+        }
+        _ => format!("\x1b[{cp};{mod_param}u").into_bytes(),
+    }
+}
+
+/// Encode an IME commit as a synthetic key event under the kitty protocol.
+/// Key code 0 is the spec's sentinel for "this wasn't a physical key" —
+/// editors read that plus the text param and can treat the string as a
+/// single input block instead of N individual keystrokes. Callers should
+/// only route through here when `REPORT_ASSOCIATED_TEXT` is set; without it,
+/// the bytes go straight to the PTY unchanged.
+pub(crate) fn kitty_encode_ime_commit(text: &str) -> Vec<u8> {
+    format_csi_u(0, 0, Some(text))
 }
 
 fn kitty_encode_named(
     named: NamedKey,
     mod_bits: u8,
     mod_param: u8,
+    report_text: bool,
 ) -> Option<Vec<u8>> {
     let direct_code = match named {
         NamedKey::Enter => Some(13u32),
@@ -1467,7 +1674,19 @@ fn kitty_encode_named(
         if (mod_bits & !1) == 0 && mod_bits == 0 {
             return None;
         }
-        return Some(format!("\x1b[{cp};{mod_param}u").into_bytes());
+        // Enter/Tab/Space genuinely produce text ("\r", "\t", " "); Backspace
+        // and Escape don't — they're control actions, no text param for them.
+        let text: Option<&str> = if report_text {
+            match named {
+                NamedKey::Enter => Some("\r"),
+                NamedKey::Tab => Some("\t"),
+                NamedKey::Space => Some(" "),
+                _ => None,
+            }
+        } else {
+            None
+        };
+        return Some(format_csi_u(cp, mod_param, text));
     }
 
     if mod_bits == 0 {
@@ -1518,5 +1737,113 @@ fn named_key_to_bytes(key: NamedKey) -> Option<Vec<u8>> {
         NamedKey::PageDown => Some(b"\x1b[6~".to_vec()),
         NamedKey::Space => Some(b" ".to_vec()),
         _ => None,
+    }
+}
+
+#[cfg(test)]
+mod kitty_encode_tests {
+    use winit::keyboard::Key;
+    use winit::keyboard::ModifiersState;
+    use winit::keyboard::NamedKey;
+    use winit::keyboard::SmolStr;
+
+    use super::*;
+
+    fn char_key(s: &str) -> Key {
+        Key::Character(SmolStr::new(s))
+    }
+
+    #[test]
+    fn ctrl_letter_without_text_flag() {
+        let bytes = kitty_encode_input(
+            &char_key("a"),
+            ModifiersState::CONTROL,
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES,
+        )
+        .expect("encoded");
+        assert_eq!(bytes, b"\x1b[97;5u");
+    }
+
+    #[test]
+    fn ctrl_letter_with_text_flag_appends_text_param() {
+        let bytes = kitty_encode_input(
+            &char_key("a"),
+            ModifiersState::CONTROL,
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_ASSOCIATED_TEXT,
+        )
+        .expect("encoded");
+        // text param is the codepoint of the produced char ("a" = 97)
+        assert_eq!(bytes, b"\x1b[97;5;97u");
+    }
+
+    #[test]
+    fn shift_a_with_all_as_escape_and_text() {
+        // Plain "A" (shift+a) normally emits no CSI u. With REPORT_ALL_KEYS
+        // the key code is the unmodified base ("a" = 97), modifier param is
+        // 2 (shift = bit 0 + 1), text param carries the actual produced
+        // character so apps can distinguish a true "A" from a synth one.
+        let bytes = kitty_encode_input(
+            &char_key("A"),
+            ModifiersState::SHIFT,
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES
+                | KittyFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+                | KittyFlags::REPORT_ASSOCIATED_TEXT,
+        )
+        .expect("encoded");
+        assert_eq!(bytes, b"\x1b[97;2;65u");
+    }
+
+    #[test]
+    fn plain_text_without_all_as_escape_is_not_encoded() {
+        // Just REPORT_ASSOCIATED_TEXT shouldn't force plain text into CSI u;
+        // the raw byte path still handles it.
+        assert!(
+            kitty_encode_input(
+                &char_key("a"),
+                ModifiersState::empty(),
+                KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_ASSOCIATED_TEXT,
+            )
+            .is_none()
+        );
+    }
+
+    #[test]
+    fn enter_with_text_flag_reports_cr_as_text() {
+        let bytes = kitty_encode_input(
+            &Key::Named(NamedKey::Enter),
+            ModifiersState::CONTROL,
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_ASSOCIATED_TEXT,
+        )
+        .expect("encoded");
+        // Enter's associated text is "\r" (13).
+        assert_eq!(bytes, b"\x1b[13;5;13u");
+    }
+
+    #[test]
+    fn escape_with_text_flag_has_no_text_param() {
+        // Escape is a control action, not a text-producing key.
+        let bytes = kitty_encode_input(
+            &Key::Named(NamedKey::Escape),
+            ModifiersState::CONTROL,
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_ASSOCIATED_TEXT,
+        )
+        .expect("encoded");
+        assert_eq!(bytes, b"\x1b[27;5u");
+    }
+
+    #[test]
+    fn ime_commit_uses_zero_key_and_zero_mods() {
+        // Spec sentinel: key code 0 + modifier param 0 means "not a physical
+        // key". Codepoints join with ':'. 啊 = U+554A (0x554A = 21834),
+        // 不 = U+4E0D (0x4E0D = 19981).
+        let bytes = kitty_encode_ime_commit("啊不");
+        assert_eq!(bytes, b"\x1b[0;0;21834:19981u");
+    }
+
+    #[test]
+    fn ime_commit_single_codepoint() {
+        let bytes = kitty_encode_ime_commit("é");
+        // é = U+00E9 = 233
+        assert_eq!(bytes, b"\x1b[0;0;233u");
     }
 }

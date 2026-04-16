@@ -507,6 +507,7 @@ impl Renderer {
         terminal: &Terminal,
         tabs: &[TabInfo],
         gutter_popup: Option<&GutterPopup>,
+        preedit: Option<&crate::renderer::PreeditState>,
     ) {
         let cell_w = font_system.cell_width as f32;
         let cell_h = font_system.cell_height as f32;
@@ -852,6 +853,30 @@ impl Renderer {
                 gutter_px,
                 cell_w,
                 cell_h,
+                tab_bar_h,
+                &mut bg_vertices,
+                &mut bg_indices,
+                &mut fg_vertices,
+                &mut fg_indices,
+            );
+        }
+
+        // ---- IME preedit overlay ----
+        // Suppressed while the search bar is open — the search bar is its
+        // own text-input UI that captures IME input into the query, not the
+        // terminal grid. Letting the preedit overlay draw at the cursor
+        // too would duplicate the feedback and confuse the user.
+        if let Some(preedit) = preedit
+            && !terminal.search_active()
+        {
+            self.render_preedit(
+                font_system,
+                terminal,
+                preedit,
+                gutter_px,
+                cell_w,
+                cell_h,
+                baseline,
                 tab_bar_h,
                 &mut bg_vertices,
                 &mut bg_indices,
@@ -1681,6 +1706,225 @@ impl Renderer {
         }
     }
 
+    /// Paint the IME preedit: a darkened strip at the cursor cell, an
+    /// underline that marks the whole composition as uncommitted, a
+    /// thicker underline over the caret/highlighted segment the IME
+    /// reported (when it did), and the composed glyphs themselves.
+    ///
+    /// Composition length is clipped to the remaining columns on the
+    /// cursor's row; long compositions trail off past the right edge
+    /// rather than wrapping. The IME's candidate popup sits below this
+    /// overlay via `set_ime_cursor_area`, so the user can still see their
+    /// options.
+    fn render_preedit(
+        &mut self,
+        font_system: &mut FontSystem,
+        terminal: &Terminal,
+        preedit: &crate::renderer::PreeditState,
+        gutter_px: f32,
+        cell_w: f32,
+        cell_h: f32,
+        baseline: f32,
+        tab_bar_h: f32,
+        bg_vertices: &mut Vec<BgVertex>,
+        bg_indices: &mut Vec<u32>,
+        fg_vertices: &mut Vec<FgVertex>,
+        fg_indices: &mut Vec<u32>,
+    ) {
+        // Cursor scrolled off-screen or DECTCEM-hidden → nowhere sensible
+        // to anchor the preedit. The IME's candidate popup still works off
+        // `set_ime_cursor_area`; suppressing the inline overlay matches
+        // how the regular cursor is handled.
+        if terminal.active.offset != 0 || !terminal.active.cursor_visible {
+            return;
+        }
+        if preedit.text.is_empty() {
+            return;
+        }
+
+        let cursor = terminal.active.cursor;
+        let origin_x = cursor.col as f32 * cell_w + gutter_px;
+        let origin_y = cursor.row as f32 * cell_h + tab_bar_h;
+
+        let max_chars = terminal.viewport.cols.saturating_sub(cursor.col) as usize;
+        if max_chars == 0 {
+            return;
+        }
+
+        // Per-char iteration keeps the math simple — the overlay treats
+        // every codepoint as one cell wide. That's wrong for CJK
+        // full-width chars in general, but the preedit is a transient
+        // overlay on top of the grid, and the candidate popup does the
+        // real work of showing full-width layout options.
+        let visible_chars: Vec<char> = preedit.text.chars().take(max_chars).collect();
+        let visible_len = visible_chars.len();
+        if visible_len == 0 {
+            return;
+        }
+
+        // Solid dark panel so the glyph being composed doesn't bleed
+        // through the cells it's sitting on. Alpha is 255 because we
+        // want full occlusion; the whole surface is already composited
+        // with the window opacity.
+        let panel_bg = pack_color(&palette::Srgb::new(40, 40, 55), 255);
+        let panel_w = visible_len as f32 * cell_w;
+        let bi = bg_vertices.len() as u32;
+        bg_vertices.extend_from_slice(&[
+            BgVertex {
+                pos: [origin_x, origin_y],
+                color: panel_bg,
+            },
+            BgVertex {
+                pos: [origin_x + panel_w, origin_y],
+                color: panel_bg,
+            },
+            BgVertex {
+                pos: [origin_x, origin_y + cell_h],
+                color: panel_bg,
+            },
+            BgVertex {
+                pos: [origin_x + panel_w, origin_y + cell_h],
+                color: panel_bg,
+            },
+        ]);
+        bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+
+        // Thin underline across the whole composition — the universal
+        // "this text isn't committed yet" hint.
+        let underline_color = pack_color(&palette::Srgb::new(180, 180, 220), 255);
+        let underline_h = (cell_h * 0.08).max(1.5);
+        let underline_y = origin_y + cell_h - underline_h;
+        let bi = bg_vertices.len() as u32;
+        bg_vertices.extend_from_slice(&[
+            BgVertex {
+                pos: [origin_x, underline_y],
+                color: underline_color,
+            },
+            BgVertex {
+                pos: [origin_x + panel_w, underline_y],
+                color: underline_color,
+            },
+            BgVertex {
+                pos: [origin_x, underline_y + underline_h],
+                color: underline_color,
+            },
+            BgVertex {
+                pos: [origin_x + panel_w, underline_y + underline_h],
+                color: underline_color,
+            },
+        ]);
+        bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+
+        // The IME may mark a selected segment (the part the user is
+        // currently editing inside a longer composition) via a byte range.
+        // Paint a thicker bar over that segment so the user can see where
+        // their next keystroke lands. Empty / full-span ranges just mean
+        // "caret at position"; we skip them to avoid double-drawing the
+        // whole underline.
+        if let Some((start_byte, end_byte)) = preedit.cursor
+            && start_byte != end_byte
+        {
+            let (seg_start_char, seg_end_char) =
+                byte_range_to_char_range(&preedit.text, start_byte, end_byte, visible_len);
+            if seg_end_char > seg_start_char {
+                let seg_x = origin_x + seg_start_char as f32 * cell_w;
+                let seg_w = (seg_end_char - seg_start_char) as f32 * cell_w;
+                let seg_h = (cell_h * 0.14).max(2.5);
+                let seg_y = origin_y + cell_h - seg_h;
+                let bi = bg_vertices.len() as u32;
+                bg_vertices.extend_from_slice(&[
+                    BgVertex {
+                        pos: [seg_x, seg_y],
+                        color: underline_color,
+                    },
+                    BgVertex {
+                        pos: [seg_x + seg_w, seg_y],
+                        color: underline_color,
+                    },
+                    BgVertex {
+                        pos: [seg_x, seg_y + seg_h],
+                        color: underline_color,
+                    },
+                    BgVertex {
+                        pos: [seg_x + seg_w, seg_y + seg_h],
+                        color: underline_color,
+                    },
+                ]);
+                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+            }
+        }
+
+        // Shape the composing text through the same pipeline normal cells
+        // use so fonts, ligatures, and fallback chains behave identically.
+        let cells: Vec<smol_str::SmolStr> = visible_chars
+            .iter()
+            .map(|c| {
+                let mut buf = [0u8; 4];
+                smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
+            })
+            .collect();
+        let attrs = vec![crate::terminal::CellAttrs::default(); cells.len()];
+        let shaped = font_system.shape_row(&cells, &attrs);
+
+        let glyph_fg = pack_color(&palette::Srgb::new(235, 235, 245), 255);
+        for sg in &shaped {
+            let slot = match self.glyph_atlas.ensure_cached(
+                &self.queue,
+                font_system,
+                sg.font_index,
+                sg.glyph_id,
+                sg.cells_wide,
+                false,
+            ) {
+                Some(e) => e,
+                None => continue,
+            };
+            if slot.is_empty() {
+                continue;
+            }
+
+            let sx = slot.x();
+            let sy = slot.y();
+            let sw = slot.width();
+            let sh = slot.height();
+
+            let gx = origin_x + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+            let gy = origin_y + baseline - slot.bearing_y as f32 - sg.y_offset;
+            let gw = sw as f32;
+            let gh = sh as f32;
+            let flags: u32 = if slot.is_color { 1 } else { 0 };
+
+            let fi = fg_vertices.len() as u32;
+            fg_vertices.extend_from_slice(&[
+                FgVertex {
+                    pos: [gx, gy],
+                    uv: [sx as f32, sy as f32],
+                    color: glyph_fg,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw, gy],
+                    uv: [(sx + sw) as f32, sy as f32],
+                    color: glyph_fg,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx, gy + gh],
+                    uv: [sx as f32, (sy + sh) as f32],
+                    color: glyph_fg,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw, gy + gh],
+                    uv: [(sx + sw) as f32, (sy + sh) as f32],
+                    color: glyph_fg,
+                    flags,
+                },
+            ]);
+            fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+        }
+    }
+
     /// Resolve "is the cursor visible right now and what does it look like"
     /// once per frame. Hidden cases — scrolled away from live or in the
     /// blink-off phase — collapse to [`CursorRenderState::Hidden`] so the
@@ -1886,5 +2130,68 @@ fn render_gutter_markers(
             },
         ]);
         bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+    }
+}
+
+/// Convert a byte-indexed `(start, end)` range on `text` to a character-index
+/// `(start, end)` range, clamped to `visible_len`. winit reports the IME
+/// cursor/selection as byte offsets into the preedit string, but the renderer
+/// paints one cell per char — so every per-cell overlay needs the char-index
+/// form. Byte offsets that fall inside a multi-byte codepoint collapse onto
+/// the next char boundary, which is the behaviour every sane IME is after.
+fn byte_range_to_char_range(
+    text: &str,
+    start_byte: usize,
+    end_byte: usize,
+    visible_len: usize,
+) -> (usize, usize) {
+    let mut seg_start = visible_len;
+    let mut seg_end = visible_len;
+    let mut byte_offset = 0usize;
+    for (char_idx, ch) in text.chars().enumerate() {
+        if byte_offset >= start_byte && seg_start == visible_len {
+            seg_start = char_idx;
+        }
+        if byte_offset >= end_byte {
+            seg_end = char_idx;
+            break;
+        }
+        byte_offset += ch.len_utf8();
+        if char_idx + 1 >= visible_len {
+            seg_end = visible_len;
+            break;
+        }
+    }
+    let seg_start = seg_start.min(visible_len);
+    let seg_end = seg_end.min(visible_len).max(seg_start);
+    (seg_start, seg_end)
+}
+
+#[cfg(test)]
+mod preedit_tests {
+    use super::byte_range_to_char_range;
+
+    #[test]
+    fn ascii_range_maps_straight_through() {
+        assert_eq!(byte_range_to_char_range("hello", 1, 4, 5), (1, 4));
+    }
+
+    #[test]
+    fn full_range_caps_at_visible_len() {
+        assert_eq!(byte_range_to_char_range("hi", 0, 2, 2), (0, 2));
+    }
+
+    #[test]
+    fn range_past_visible_len_clamps() {
+        // visible_len of 3 even though the string has 5 chars simulates
+        // clipping at the right edge of the terminal.
+        assert_eq!(byte_range_to_char_range("abcde", 0, 5, 3), (0, 3));
+    }
+
+    #[test]
+    fn multibyte_range_counts_chars_not_bytes() {
+        // 啊 and 不 are 3 bytes each in UTF-8. Byte range 3..6 = char 1..2.
+        let text = "啊不";
+        assert_eq!(byte_range_to_char_range(text, 3, 6, 2), (1, 2));
     }
 }
