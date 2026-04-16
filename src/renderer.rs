@@ -146,6 +146,12 @@ pub enum RenderEvent {
         y: f64,
         pixels: bool,
     },
+    /// The window's DPI scale factor changed (e.g. moved to a different
+    /// monitor). The render thread rescales font metrics and re-rasterizes
+    /// glyphs.
+    ScaleFactorChanged {
+        scale_factor: f64,
+    },
     CloseRequested,
 }
 
@@ -241,6 +247,18 @@ impl RenderHost {
             Ok(wd) => wd,
             Err(_) => return,
         };
+
+        // Apply DPI scale factor: honour the config override if set,
+        // otherwise use the monitor's native scale.
+        let scale = self
+            .config
+            .dpi_scale
+            .map(|s| s as f64)
+            .unwrap_or_else(|| window.scale_factor());
+        if scale != 1.0 {
+            self.font_system.set_scale_factor(scale as f32);
+        }
+
         let initial_size = window.inner_size();
         self.window_size = (initial_size.width, initial_size.height);
         self.handle_resize(initial_size.width, initial_size.height);
@@ -343,6 +361,9 @@ impl RenderHost {
             }
             RenderEvent::MouseWheel { x, y, pixels } => {
                 self.handle_mouse_wheel(*x, *y, *pixels);
+            }
+            RenderEvent::ScaleFactorChanged { scale_factor } => {
+                self.handle_scale_factor_changed(*scale_factor);
             }
         }
     }
@@ -742,6 +763,25 @@ impl RenderHost {
         }
     }
 
+    // -- DPI scaling ---------------------------------------------------------
+
+    fn handle_scale_factor_changed(
+        &mut self,
+        scale_factor: f64,
+    ) {
+        // When the user has a fixed dpi_scale, ignore system scale changes.
+        if self.config.dpi_scale.is_some() {
+            return;
+        }
+        self.font_system.set_scale_factor(scale_factor as f32);
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.reset_glyph_atlas();
+        }
+        // The compositor will follow up with a Resized event carrying the
+        // new physical dimensions, which triggers handle_resize and
+        // recalculates the grid with the updated cell metrics.
+    }
+
     // -- Resize -------------------------------------------------------------
 
     fn handle_resize(
@@ -958,6 +998,13 @@ impl RenderHost {
                 renderer.set_gutter_enabled(cfg.gutter);
                 self.recalculate_grid_size();
             }
+        }
+
+        if cfg.dpi_scale != self.config.dpi_scale {
+            warn!(
+                "config: dpi_scale changed ({:?} → {:?}); restart to apply",
+                self.config.dpi_scale, cfg.dpi_scale
+            );
         }
 
         if cfg.fonts != self.config.fonts {

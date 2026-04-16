@@ -1076,6 +1076,12 @@ impl Renderer {
         frame.present();
     }
 
+    /// Clear all cached glyphs so they are re-rasterized at the current
+    /// font size. Called when the DPI scale factor changes.
+    pub fn reset_glyph_atlas(&mut self) {
+        self.glyph_atlas.clear();
+    }
+
     /// Trigger a visual bell flash. Idempotent within the flash window:
     /// re-arming mid-flash restarts the fade-out from full alpha, which
     /// is the desired behaviour for back-to-back bells (the user sees

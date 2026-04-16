@@ -137,10 +137,14 @@ impl ApplicationHandler<AppEvent> for WindowHost {
         let pixel_width = INITIAL_COLS * self.cell_width;
         let pixel_height = INITIAL_ROWS * self.cell_height;
         let transparent = self.opacity < 1.0;
+        // LogicalSize so the window occupies the same visual area regardless
+        // of the monitor's DPI scale factor. Cell metrics are computed at 1x
+        // here; the render thread rescales them once it knows the actual
+        // scale factor.
         let attrs = Window::default_attributes()
             .with_title("term41")
             .with_transparent(transparent)
-            .with_inner_size(winit::dpi::PhysicalSize::new(pixel_width, pixel_height));
+            .with_inner_size(winit::dpi::LogicalSize::new(pixel_width, pixel_height));
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
@@ -180,6 +184,10 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     }
                     _ => return,
                 }
+            }
+
+            WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                RenderEvent::ScaleFactorChanged { scale_factor }
             }
 
             WindowEvent::ModifiersChanged(mods) => RenderEvent::ModifiersChanged(mods.state()),

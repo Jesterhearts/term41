@@ -119,6 +119,8 @@ pub struct FontSystem {
     pub cell_height: u32,
     pub font_size: f32,
     ascent: f32,
+    /// The user-configured font size before DPI scaling.
+    base_font_size: f32,
 }
 
 impl FontSystem {
@@ -238,6 +240,7 @@ impl FontSystem {
             cell_height,
             font_size,
             ascent,
+            base_font_size: font_size,
         }
     }
 
@@ -295,6 +298,37 @@ impl FontSystem {
 
     pub fn baseline_offset(&self) -> f32 {
         self.ascent
+    }
+
+    /// Apply a new DPI scale factor, recalculating cell metrics and effective
+    /// font size. The glyph atlas must be cleared separately after calling
+    /// this — cached rasters are at the old resolution.
+    pub fn set_scale_factor(
+        &mut self,
+        scale: f32,
+    ) {
+        let effective = self.base_font_size * scale;
+        if (effective - self.font_size).abs() < f32::EPSILON {
+            return;
+        }
+
+        let rf = read_fonts::FontRef::new(&self.final_font.data).expect("parse font");
+        let hhea = rf.hhea().expect("hhea table");
+        let hmtx = rf.hmtx().expect("hmtx table");
+
+        let s = effective / self.final_font.units_per_em;
+        let ascent = hhea.ascender().to_i16() as f32 * s;
+        let descent = hhea.descender().to_i16() as f32 * s;
+        let line_gap = hhea.line_gap().to_i16() as f32 * s;
+
+        self.cell_height = (ascent - descent + line_gap).ceil() as u32;
+        let m_advance = hmtx
+            .advance(GlyphId::new(charmap_lookup(&rf, 'M')))
+            .unwrap_or(0) as f32
+            * s;
+        self.cell_width = m_advance.ceil() as u32;
+        self.font_size = effective;
+        self.ascent = ascent;
     }
 
     /// Shape an entire terminal row with font fallback and plan caching.

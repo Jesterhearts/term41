@@ -102,6 +102,12 @@ struct ConfigFile {
     #[serde(deserialize_with = "vsync_opt")]
     #[serde(default)]
     vsync: Option<VSync>,
+    /// Override the monitor's DPI scale factor. When absent, the system
+    /// scale factor is used automatically. Set to `1.0` to disable DPI
+    /// scaling entirely.
+    #[serde(deserialize_with = "float_opt")]
+    #[serde(default)]
+    dpi_scale: Option<f32>,
 }
 
 pub struct Config {
@@ -115,6 +121,9 @@ pub struct Config {
     pub gutter: bool,
     pub power_preference: PowerPreference,
     pub vsync: VSync,
+    /// Override the monitor's DPI scale factor. `None` = automatic (use the
+    /// system scale factor). `Some(x)` = use `x` regardless of monitor.
+    pub dpi_scale: Option<f32>,
 }
 
 impl Default for Config {
@@ -130,6 +139,7 @@ impl Default for Config {
             gutter: true,
             power_preference: PowerPreference::default(),
             vsync: VSync::Auto,
+            dpi_scale: None,
         }
     }
 }
@@ -174,6 +184,7 @@ fn parse_config(
         gutter: file.gutter.unwrap_or(true),
         power_preference: file.power_preference.unwrap_or_default(),
         vsync: file.vsync.unwrap_or(VSync::Auto),
+        dpi_scale: file.dpi_scale.map(|v| v.max(0.25)),
     }
 }
 

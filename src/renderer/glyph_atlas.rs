@@ -165,6 +165,13 @@ impl GlyphAtlas {
         }
     }
 
+    /// Discard all cached glyphs. Called when the DPI scale factor changes
+    /// so every glyph is re-rasterized at the new resolution.
+    pub fn clear(&mut self) {
+        self.cache = Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap());
+        self.packer = ShelfPacker::new(ATLAS_SIZE, 1);
+    }
+
     pub fn bind_group(&self) -> &wgpu::BindGroup {
         &self.bind_group
     }
