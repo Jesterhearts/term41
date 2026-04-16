@@ -40,6 +40,7 @@ use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoop;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
+use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::Window;
 use winit::window::WindowId;
 
@@ -146,6 +147,13 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             .with_title("term41")
             .with_transparent(transparent)
             .with_inner_size(winit::dpi::LogicalSize::new(pixel_width, pixel_height));
+
+        // On Wayland, also set the app ID and class to help with
+        // compositor-specific configuration. The app ID is supposed to be
+        // the executable name, but winit doesn't have a way to get that
+        // directly, so we just hardcode it.
+        #[cfg(target_os = "linux")]
+        let attrs = attrs.with_name("com.jesterhearts.term41", "com.jesterhearts.term41");
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
