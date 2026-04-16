@@ -86,7 +86,7 @@ fn process_data(
         byte @ 0x3F..=0x7E => {
             if rows.is_empty() {
                 rows.push(SixelRow::new(if transparent {
-                    Srgba::default()
+                    Srgba::new(0, 0, 0, 0)
                 } else {
                     palette[0]
                 }));
@@ -100,7 +100,7 @@ fn process_data(
         b'!' => {
             if rows.is_empty() {
                 rows.push(SixelRow::new(if transparent {
-                    Srgba::default()
+                    Srgba::new(0, 0, 0, 0)
                 } else {
                     palette[0]
                 }));
@@ -117,7 +117,7 @@ fn process_data(
         }
         b'-' => {
             rows.push(SixelRow::new(if transparent {
-                Srgba::default()
+                Srgba::new(0, 0, 0, 0)
             } else {
                 palette[0]
             }));
