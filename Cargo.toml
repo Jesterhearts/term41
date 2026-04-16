@@ -49,7 +49,11 @@ smol_str             = "0.3.6"
 toml                 = "1.1.2"
 unicode-segmentation = "1.12.0"
 unicode-width        = "0.2.2"
-wgpu                 = { version = "29.0.1", features = ["serde"] }
+wgpu                 = { version = "29.0.1", default-features = false, features = [
+  "serde",
+  "vulkan",
+  "wgsl"
+] }
 winit                = "0.30.13"
 
 [dev-dependencies]

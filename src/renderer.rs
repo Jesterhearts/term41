@@ -3,6 +3,7 @@ pub mod image_atlas;
 mod shelf;
 
 use std::num::NonZeroU64;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
@@ -11,6 +12,7 @@ use palette::Srgb;
 use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
+use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::font::FontSystem;
@@ -119,11 +121,38 @@ pub struct Renderer {
     /// the current cell metrics); when `false` the gutter is fully
     /// collapsed and every caller gets `0`.
     gutter_enabled: bool,
+
+    /// Cached compiled pipelines. Persisted to disk on drop so subsequent
+    /// launches skip shader recompilation. Only effective on backends that
+    /// support it (Vulkan); a no-op on GL.
+    pipeline_cache: wgpu::PipelineCache,
 }
 
 /// Half-period of the cursor blink. xterm uses 530ms by default; 500 lands
 /// just shy of that and is the common choice for newer terminals.
 const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
+
+fn pipeline_cache_path() -> Option<PathBuf> {
+    dirs::cache_dir().map(|d| d.join("term41").join("pipeline_cache.bin"))
+}
+
+/// Load a pipeline cache from disk, falling back to an empty cache when the
+/// file is missing or the data is rejected by the driver. The cache only has
+/// an effect on backends that support it (Vulkan); on GL the driver ignores
+/// the data and `get_data()` returns `None`.
+fn load_pipeline_cache(device: &wgpu::Device) -> wgpu::PipelineCache {
+    let data = pipeline_cache_path().and_then(|p| std::fs::read(p).ok());
+    // SAFETY: `data` was written by a previous `PipelineCache::get_data` call
+    // from this program (or is `None`). `fallback: true` ensures a corrupt
+    // or stale file just produces an empty cache instead of an error.
+    unsafe {
+        device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
+            label: Some("pipeline_cache"),
+            data: data.as_deref(),
+            fallback: true,
+        })
+    }
+}
 
 /// How long the visual bell stays on screen, fading out linearly.
 const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);
@@ -135,14 +164,16 @@ const BELL_FLASH_PEAK_ALPHA: f32 = 80.0;
 impl Renderer {
     pub async fn new(
         window: Arc<Window>,
-        font_system: &mut FontSystem,
+        display: OwnedDisplayHandle,
         opacity: f32,
         gutter_enabled: bool,
         power_preference: PowerPreference,
     ) -> Self {
         let size = window.inner_size();
 
-        let instance = wgpu::Instance::new(wgpu::InstanceDescriptor::new_without_display_handle());
+        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
+        desc.backends = wgpu::Backends::VULKAN;
+        let instance = wgpu::Instance::new(desc);
         let surface = instance.create_surface(window).expect("create surface");
         let adapter = instance
             .request_adapter(&wgpu::RequestAdapterOptions {
@@ -154,9 +185,14 @@ impl Renderer {
             .expect("request adapter");
 
         let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor::default())
+            .request_device(&wgpu::DeviceDescriptor {
+                required_features: wgpu::Features::PIPELINE_CACHE,
+                ..Default::default()
+            })
             .await
             .expect("request device");
+
+        let pipeline_cache = load_pipeline_cache(&device);
 
         let surface_caps = surface.get_capabilities(&adapter);
         let preferred_formats = [
@@ -283,7 +319,7 @@ impl Renderer {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
-            cache: None,
+            cache: Some(&pipeline_cache),
         });
 
         // ---- Foreground pipeline ----
@@ -331,7 +367,7 @@ impl Renderer {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
-            cache: None,
+            cache: Some(&pipeline_cache),
         });
 
         // ---- Image pipeline ----
@@ -378,10 +414,10 @@ impl Renderer {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
-            cache: None,
+            cache: Some(&pipeline_cache),
         });
 
-        let mut renderer = Self {
+        let renderer = Self {
             device,
             queue,
             surface,
@@ -397,30 +433,10 @@ impl Renderer {
             started: Instant::now(),
             bell_started: None,
             gutter_enabled,
+            pipeline_cache,
         };
 
         renderer.update_screen_size(size);
-
-        // Pre-cache printable ASCII glyphs so the first few frames don't
-        // rasterize them on demand.
-        let ascii_cells: Vec<smol_str::SmolStr> = (' '..='~')
-            .map(|c| {
-                let mut buf = [0u8; 4];
-                smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
-            })
-            .collect();
-        let ascii_attrs = vec![crate::terminal::CellAttrs::default(); ascii_cells.len()];
-        let shaped = font_system.shape_row(&ascii_cells, &ascii_attrs);
-        for sg in &shaped {
-            renderer.glyph_atlas.ensure_cached(
-                &renderer.queue,
-                font_system,
-                sg.font_index,
-                sg.glyph_id,
-                sg.cells_wide,
-                false,
-            );
-        }
 
         renderer
     }
@@ -1411,6 +1427,21 @@ impl Renderer {
             row: terminal.active.cursor.row,
             col: terminal.active.cursor.col,
             shape: style.shape,
+        }
+    }
+}
+
+impl Drop for Renderer {
+    fn drop(&mut self) {
+        if let Some(data) = self.pipeline_cache.get_data()
+            && let Some(path) = pipeline_cache_path()
+        {
+            if let Some(parent) = path.parent() {
+                let _ = std::fs::create_dir_all(parent);
+            }
+            if let Err(e) = std::fs::write(&path, data) {
+                warn!("failed to save pipeline cache: {e}");
+            }
         }
     }
 }

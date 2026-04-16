@@ -15,7 +15,6 @@ mod vte;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::LazyLock;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -26,9 +25,6 @@ use font::FontSystem;
 use keybindings::Action;
 use pty::Pty;
 use renderer::Renderer;
-use resvg::tiny_skia::Pixmap;
-use resvg::usvg;
-use resvg::usvg::Transform;
 use selection::SelectionMode;
 use terminal::KittyFlags;
 use terminal::KittyKeys;
@@ -49,7 +45,6 @@ use winit::event_loop::EventLoopProxy;
 use winit::keyboard::Key;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
-use winit::window::Icon;
 use winit::window::Window;
 use winit::window::WindowId;
 
@@ -60,19 +55,6 @@ extern crate log;
 
 const INITIAL_COLS: u32 = 80;
 const INITIAL_ROWS: u32 = 24;
-
-const ICON_BYTES: &str = include_str!(concat!(env!("CARGO_MANIFEST_DIR"), "/resources/icon.svg"));
-static ICON: LazyLock<Icon> = LazyLock::new(|| {
-    let opts = usvg::Options::default();
-    let tree = usvg::Tree::from_str(ICON_BYTES, &opts).expect("failed to parse icon SVG");
-    let mut pixmap = Pixmap::new(256, 256).expect("failed to create pixmap for icon");
-    resvg::render(&tree, Transform::identity(), &mut pixmap.as_mut());
-
-    let width = pixmap.width();
-    let height = pixmap.height();
-
-    Icon::from_rgba(pixmap.take(), width, height).expect("failed to create icon")
-});
 
 /// Stable identifier for a tab. Monotonically increasing; never reused, so
 /// background threads that race with a tab close can't accidentally address
@@ -870,16 +852,14 @@ impl ApplicationHandler<AppEvent> for App {
         let attrs = Window::default_attributes()
             .with_title("term41")
             .with_transparent(transparent)
-            .with_window_icon(Some(ICON.clone()))
             .with_inner_size(winit::dpi::PhysicalSize::new(pixel_width, pixel_height));
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
-
         let window_ = window.clone();
 
         self.renderer = Some(pollster::block_on(Renderer::new(
             window_,
-            &mut self.font_system,
+            event_loop.owned_display_handle(),
             self.opacity,
             self.gutter_enabled,
             self.power_preference,
