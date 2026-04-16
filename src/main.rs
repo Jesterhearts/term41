@@ -802,9 +802,14 @@ impl App {
         let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
             return;
         };
+        // Clear the coalesce flag before draining so any write the
+        // reader does while we're here posts a fresh DataReady, rather
+        // than being silently absorbed into the event we're already
+        // servicing.
+        tab.pty.clear_pending();
         let time_slice = Instant::now() + Duration::from_millis(5);
-        let mut buf = [0u8; 4 * 1024];
-        let proxy = self.proxy.clone();
+        let mut buf = [0u8; 128 * 1024];
+        let mut bailed = false;
         loop {
             let read = tab.pty.read(&mut buf);
             if read == 0 {
@@ -812,9 +817,18 @@ impl App {
             }
             tab.terminal.process(&buf[..read]);
             if Instant::now() >= time_slice {
-                let _ = proxy.send_event(AppEvent::DataReady(tab_id));
+                bailed = true;
                 break;
             }
+        }
+
+        // If we stopped on the time slice (not an empty ring) there may
+        // still be bytes waiting. The reader's coalesce will swallow its
+        // own wakeup whenever `pending` is already set, so we re-arm +
+        // re-post ourselves; otherwise a final partial drain would sit
+        // stale until the child writes again.
+        if bailed && tab.pty.arm_pending() {
+            let _ = self.proxy.send_event(AppEvent::DataReady(tab_id));
         }
 
         self.request_redraw();
