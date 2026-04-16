@@ -45,6 +45,7 @@ read-fonts           = "0.39.1"
 # rasterize just the paint tree via tiny-skia.
 resvg                = { version = "0.47.0", default-features = false }
 serde                = { version = "1.0.228", features = ["derive"] }
+shellexpand = "3.1.2"
 smol_str             = "0.3.6"
 toml                 = "1.1.2"
 unicode-segmentation = "1.12.0"

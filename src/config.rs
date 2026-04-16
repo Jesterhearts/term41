@@ -108,8 +108,23 @@ struct ConfigFile {
     #[serde(deserialize_with = "float_opt")]
     #[serde(default)]
     dpi_scale: Option<f32>,
+    /// Path to an image file to draw behind the terminal cells. PNG is
+    /// always supported; GIF (including animated) requires the `ffmpeg`
+    /// cargo feature. Cells with the default background colour become
+    /// transparent over the image so it shows through; cells with an
+    /// explicit SGR background still paint over the image.
+    #[serde(default)]
+    background_image: Option<PathBuf>,
+    /// Multiplier applied to the background image's RGB. `1.0` paints the
+    /// image at full brightness; `0.0` makes it invisible. Useful for
+    /// dimming a busy wallpaper enough that text remains readable. The
+    /// image's own alpha channel is preserved either way.
+    #[serde(deserialize_with = "float_opt_clamp_0_1")]
+    #[serde(default)]
+    background_opacity: Option<f32>,
 }
 
+#[derive(Debug)]
 pub struct Config {
     pub opacity: f32,
     pub fonts: Option<String>,
@@ -124,6 +139,10 @@ pub struct Config {
     /// Override the monitor's DPI scale factor. `None` = automatic (use the
     /// system scale factor). `Some(x)` = use `x` regardless of monitor.
     pub dpi_scale: Option<f32>,
+    /// Optional wallpaper image painted behind terminal cells.
+    pub background_image: Option<PathBuf>,
+    /// RGB multiplier applied to the background image. Always in `[0.0, 1.0]`.
+    pub background_opacity: f32,
 }
 
 impl Default for Config {
@@ -140,6 +159,8 @@ impl Default for Config {
             power_preference: PowerPreference::default(),
             vsync: VSync::Auto,
             dpi_scale: None,
+            background_image: None,
+            background_opacity: 1.0,
         }
     }
 }
@@ -174,7 +195,7 @@ fn parse_config(
     let keybindings = build_keybindings(file.keybindings, source);
 
     Config {
-        opacity: file.opacity.unwrap_or(1.0).clamp(0.0, 1.0),
+        opacity: file.opacity.unwrap_or(1.0),
         fonts: file.fonts,
         font_size: file.font_size.unwrap_or(24.0).max(1.0),
         scrollback_lines: file.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
@@ -185,6 +206,29 @@ fn parse_config(
         power_preference: file.power_preference.unwrap_or_default(),
         vsync: file.vsync.unwrap_or(VSync::Auto),
         dpi_scale: file.dpi_scale.map(|v| v.max(0.25)),
+        background_image: file.background_image.map(expand_path),
+        background_opacity: file.background_opacity.unwrap_or(1.0),
+    }
+}
+
+/// Resolve `~` and `$VAR` / `${VAR}` references in a config-supplied
+/// path. Without this, `background_image = "~/foo.png"` is opened
+/// literally and fails with ENOENT, since Rust's `PathBuf` (unlike a
+/// shell) doesn't expand `~`. `shellexpand::full` also accepts
+/// `${XDG_CONFIG_HOME}/term41/wall.png` and similar — handy because
+/// terminals are exactly where users expect shell-style paths to work.
+///
+/// On a lookup failure (referenced env var unset), we log the error and
+/// fall back to the literal path so the downstream loader reports a
+/// clean "no such file" diagnostic against what the user actually wrote.
+fn expand_path(path: PathBuf) -> PathBuf {
+    let raw = path.to_string_lossy();
+    match shellexpand::full(&raw) {
+        Ok(expanded) => PathBuf::from(expanded.as_ref()),
+        Err(e) => {
+            warn!("path: failed to expand {raw:?}: {e}");
+            path
+        }
     }
 }
 
@@ -403,5 +447,70 @@ mod tests {
         // resets to defaults, and the default gutter state is on.
         let cfg = parse("gutter = \"yes-please\"");
         assert!(cfg.gutter);
+    }
+
+    #[test]
+    fn background_image_defaults_to_none() {
+        let cfg = parse("");
+        assert!(cfg.background_image.is_none());
+        // 1.0 is the no-op multiplier — image painted at full brightness
+        // when set, but doesn't affect anything when unset.
+        assert_eq!(cfg.background_opacity, 1.0);
+    }
+
+    #[test]
+    fn background_image_and_opacity_round_trip() {
+        let cfg = parse("background_image = \"/tmp/wallpaper.png\"\nbackground_opacity = 0.6\n");
+        assert_eq!(
+            cfg.background_image.as_deref(),
+            Some(std::path::Path::new("/tmp/wallpaper.png"))
+        );
+        assert_eq!(cfg.background_opacity, 0.6);
+    }
+
+    #[test]
+    fn background_opacity_clamps_to_unit_range() {
+        let cfg = parse("background_opacity = 1.7");
+        assert_eq!(cfg.background_opacity, 1.0);
+        let cfg = parse("background_opacity = -0.3");
+        assert_eq!(cfg.background_opacity, 0.0);
+    }
+
+    #[test]
+    fn background_image_path_expands_tilde() {
+        let cfg = parse("background_image = \"~/wallpapers/forest.png\"");
+        let bg = cfg.background_image.expect("path parsed");
+        // dirs::home_dir() can return None in some sandboxed test envs;
+        // when it does, shellexpand leaves `~` literal and we just check
+        // the path round-tripped untouched.
+        if let Some(home) = dirs::home_dir() {
+            assert_eq!(bg, home.join("wallpapers/forest.png"));
+        } else {
+            assert_eq!(bg, std::path::Path::new("~/wallpapers/forest.png"));
+        }
+    }
+
+    #[test]
+    fn background_image_path_expands_env_var() {
+        // SAFETY: setting an env var in a single-threaded test context.
+        // The risk would be other threads reading mid-mutation; this
+        // test only sets it.
+        unsafe {
+            std::env::set_var("TERM41_TEST_WALLPAPER_DIR", "/srv/walls");
+        }
+        let cfg = parse("background_image = \"$TERM41_TEST_WALLPAPER_DIR/foo.png\"");
+        assert_eq!(
+            cfg.background_image.as_deref(),
+            Some(std::path::Path::new("/srv/walls/foo.png"))
+        );
+    }
+
+    #[test]
+    fn background_image_absolute_path_passes_through() {
+        let cfg = parse("background_image = \"/srv/share/wall.png\"");
+        assert_eq!(
+            cfg.background_image.as_deref(),
+            Some(std::path::Path::new("/srv/share/wall.png"))
+        );
     }
 }

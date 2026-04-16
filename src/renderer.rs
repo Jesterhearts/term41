@@ -1,3 +1,4 @@
+pub mod background;
 pub mod glyph_atlas;
 pub mod image_atlas;
 mod r#impl;
@@ -356,9 +357,27 @@ impl RenderHost {
                     self.config.gutter,
                     self.config.power_preference,
                     self.config.vsync,
+                    self.config.background_image.clone(),
+                    self.config.background_opacity,
                 )));
             }
+            // Tick the background's animation clock and re-upload its
+            // texture if a new frame is due. The render loop normally
+            // parks waiting for input; an animated background needs the
+            // loop to keep ticking, so the renderer reports back whether
+            // it's animated and we self-unpark if so.
+            let bg_animated = self
+                .renderer
+                .as_mut()
+                .is_some_and(|r| r.advance_background_frame(Instant::now()));
             self.render_frame();
+
+            if bg_animated {
+                self.render_thread_handle
+                    .get()
+                    .expect("render thread handle set")
+                    .unpark();
+            }
 
             frames += 1;
             if frames.is_multiple_of(100) {
@@ -1190,6 +1209,23 @@ impl RenderHost {
                 "config: power_preference changed ({:?} → {:?}); restart to apply",
                 self.config.power_preference, cfg.power_preference
             );
+        }
+
+        // Background image hot-reloads — both path swap and dim
+        // adjustment work without a restart. The renderer's `set_background`
+        // skips the file re-decode when only the opacity changed.
+        let bg_path_changed = cfg.background_image != self.config.background_image;
+        let bg_opacity_changed =
+            (cfg.background_opacity - self.config.background_opacity).abs() > f32::EPSILON;
+        if bg_path_changed || bg_opacity_changed {
+            self.config.background_image = cfg.background_image.clone();
+            self.config.background_opacity = cfg.background_opacity;
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.set_background(
+                    self.config.background_image.as_deref(),
+                    self.config.background_opacity,
+                );
+            }
         }
     }
 

@@ -16,6 +16,9 @@ use crate::font::FontSystem;
 use crate::renderer::GUTTER_MENU_ITEMS;
 use crate::renderer::GutterPopup;
 use crate::renderer::POPUP_WIDTH_CELLS;
+use crate::renderer::background;
+use crate::renderer::background::Background;
+use crate::renderer::background::BgImageVertex;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
@@ -94,6 +97,7 @@ pub struct Renderer {
     surface_config: wgpu::SurfaceConfiguration,
 
     bg_pipeline: wgpu::RenderPipeline,
+    bg_image_pipeline: wgpu::RenderPipeline,
     fg_pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
 
@@ -102,6 +106,15 @@ pub struct Renderer {
 
     glyph_atlas: GlyphAtlas,
     image_atlas: ImageAtlas,
+
+    /// Bind group layout for the background image's texture + sampler. The
+    /// pipeline references it; cached here so reloading a different image
+    /// (config hot-reload) can build a fresh `Background` without
+    /// re-deriving the layout.
+    bg_image_layout: wgpu::BindGroupLayout,
+    /// Currently loaded background image, if any. `None` when the user
+    /// hasn't set `background_image` (or the load failed).
+    background: Option<Background>,
 
     bg_alpha: u8,
 
@@ -169,6 +182,8 @@ impl Renderer {
         gutter_enabled: bool,
         power_preference: PowerPreference,
         vsync: VSync,
+        background_image: Option<PathBuf>,
+        background_opacity: f32,
     ) -> Self {
         let size = window.inner_size();
 
@@ -286,6 +301,10 @@ impl Renderer {
         let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("image_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/image.wgsl").into()),
+        });
+        let bg_image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+            label: Some("bg_image_shader"),
+            source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bg_image.wgsl").into()),
         });
 
         // ---- Background pipeline ----
@@ -423,19 +442,86 @@ impl Renderer {
             cache: Some(&pipeline_cache),
         });
 
+        // ---- Background image pipeline ----
+        // Drawn as the very first thing in the bg pass, before cell quads,
+        // so that cells skipping their bg quad (default-bg cells) reveal
+        // the image while explicitly-coloured SGR cells overpaint it.
+        let bg_image_layout = background::bind_group_layout(&device);
+        let bg_image_pipeline_layout =
+            device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+                label: Some("bg_image_pipeline_layout"),
+                bind_group_layouts: &[Some(&screen_size_layout), Some(&bg_image_layout)],
+                immediate_size: 0,
+            });
+        let bg_image_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+            label: Some("bg_image_pipeline"),
+            layout: Some(&bg_image_pipeline_layout),
+            vertex: wgpu::VertexState {
+                module: &bg_image_shader,
+                entry_point: Some("vs_main"),
+                buffers: &[wgpu::VertexBufferLayout {
+                    array_stride: std::mem::size_of::<BgImageVertex>() as u64,
+                    step_mode: wgpu::VertexStepMode::Vertex,
+                    attributes: &wgpu::vertex_attr_array![
+                        0 => Float32x2,
+                        1 => Float32x2,
+                        2 => Float32,
+                    ],
+                }],
+                compilation_options: Default::default(),
+            },
+            fragment: Some(wgpu::FragmentState {
+                module: &bg_image_shader,
+                entry_point: Some("fs_main"),
+                targets: &[Some(wgpu::ColorTargetState {
+                    format: surface_format,
+                    // `blend: None` so the image's own alpha lands on the
+                    // framebuffer directly. The bg pass clears at
+                    // `bg_alpha` and the image quad covers the whole
+                    // window; cell quads draw on top with `blend: None`
+                    // too, overwriting the image where they paint.
+                    blend: None,
+                    write_mask: wgpu::ColorWrites::ALL,
+                })],
+                compilation_options: Default::default(),
+            }),
+            primitive: wgpu::PrimitiveState {
+                topology: wgpu::PrimitiveTopology::TriangleList,
+                ..Default::default()
+            },
+            depth_stencil: None,
+            multisample: wgpu::MultisampleState::default(),
+            multiview_mask: None,
+            cache: Some(&pipeline_cache),
+        });
+
+        let background = background_image.and_then(|p| {
+            Background::load(
+                &device,
+                &queue,
+                &bg_image_layout,
+                p,
+                background_opacity.clamp(0.0, 1.0),
+                (size.width.max(1), size.height.max(1)),
+            )
+        });
+
         let renderer = Self {
             device,
             queue,
             surface,
             surface_config,
             bg_pipeline,
+            bg_image_pipeline,
             fg_pipeline,
             image_pipeline,
             screen_size_buffer,
             screen_size_bind_group,
             glyph_atlas,
             image_atlas,
-            bg_alpha: (opacity.clamp(0.0, 1.0) * 255.0) as u8,
+            bg_image_layout,
+            background,
+            bg_alpha: (opacity * 255.0) as u8,
             started: Instant::now(),
             bell_started: None,
             gutter_enabled,
@@ -458,6 +544,9 @@ impl Renderer {
         self.surface_config.height = size.height;
         self.surface.configure(&self.device, &self.surface_config);
         self.update_screen_size(size);
+        if let Some(background) = self.background.as_mut() {
+            background.resize(&self.queue, (size.width, size.height));
+        }
     }
 
     /// Configure whether the shell-integration gutter is drawn. Returns
@@ -473,6 +562,55 @@ impl Renderer {
         }
         self.gutter_enabled = enabled;
         true
+    }
+
+    /// Reload the background image to match the supplied `path` and
+    /// `opacity`. Cheap when only opacity changed (rewrites four floats);
+    /// re-decodes from disk only when the path is actually different.
+    /// Logs and proceeds without a background on load failure.
+    pub fn set_background(
+        &mut self,
+        path: Option<&std::path::Path>,
+        opacity: f32,
+    ) {
+        let opacity = opacity.clamp(0.0, 1.0);
+        let window = (
+            self.surface_config.width.max(1),
+            self.surface_config.height.max(1),
+        );
+        match (path, self.background.as_mut()) {
+            (None, _) => {
+                self.background = None;
+            }
+            (Some(p), Some(bg)) if bg.path() == p => {
+                bg.set_dim(&self.queue, opacity);
+            }
+            (Some(p), _) => {
+                self.background = Background::load(
+                    &self.device,
+                    &self.queue,
+                    &self.bg_image_layout,
+                    p.to_path_buf(),
+                    opacity,
+                    window,
+                );
+            }
+        }
+    }
+
+    /// Advance the background's animation clock. No-op for static images
+    /// or when no background is loaded. Returns `true` when the background
+    /// is animated (caller should keep the render loop ticking instead of
+    /// blocking on input idleness).
+    pub fn advance_background_frame(
+        &mut self,
+        now: Instant,
+    ) -> bool {
+        let Some(bg) = self.background.as_mut() else {
+            return false;
+        };
+        bg.frame_advance(&self.queue, now);
+        bg.is_animated()
     }
 
     /// Width reserved for the gutter at the given cell width, in pixels.
@@ -571,27 +709,42 @@ impl Renderer {
                 } else {
                     cell_bg
                 };
-                let bg_color = pack_color(&bg_effective, self.bg_alpha);
-                let bi = bg_vertices.len() as u32;
-                bg_vertices.extend_from_slice(&[
-                    BgVertex {
-                        pos: [x, y],
-                        color: bg_color,
-                    },
-                    BgVertex {
-                        pos: [x + cell_w, y],
-                        color: bg_color,
-                    },
-                    BgVertex {
-                        pos: [x, y + cell_h],
-                        color: bg_color,
-                    },
-                    BgVertex {
-                        pos: [x + cell_w, y + cell_h],
-                        color: bg_color,
-                    },
-                ]);
-                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+                // When a background image is loaded, default-bg cells with
+                // no interaction overlay skip their bg quad so the image
+                // shows through. Cells with an explicit SGR bg (anything
+                // other than `default_bg()`) and any interaction overlay
+                // (selection / search match / block cursor) still paint.
+                // False positives — apps that explicitly set SGR bg to the
+                // exact default colour — are rare and degrade gracefully:
+                // the cell goes transparent, which is what a wallpaper
+                // user wanted anyway.
+                let interaction_overlay = selected || matched || active_match || block_cursor_here;
+                let skip_default_bg = self.background.is_some()
+                    && !interaction_overlay
+                    && cell_bg == crate::terminal::default_bg();
+                if !skip_default_bg {
+                    let bg_color = pack_color(&bg_effective, self.bg_alpha);
+                    let bi = bg_vertices.len() as u32;
+                    bg_vertices.extend_from_slice(&[
+                        BgVertex {
+                            pos: [x, y],
+                            color: bg_color,
+                        },
+                        BgVertex {
+                            pos: [x + cell_w, y],
+                            color: bg_color,
+                        },
+                        BgVertex {
+                            pos: [x, y + cell_h],
+                            color: bg_color,
+                        },
+                        BgVertex {
+                            pos: [x + cell_w, y + cell_h],
+                            color: bg_color,
+                        },
+                    ]);
+                    bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+                }
 
                 // Underline quad. Drawn for either of two sources:
                 //   * OSC 8 hyperlinks — so the user can see what's clickable.
@@ -1012,11 +1165,26 @@ impl Renderer {
                 ..Default::default()
             });
 
-            pass.set_pipeline(&self.bg_pipeline);
-            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_vertex_buffer(0, bg_vbuf.slice(..));
-            pass.set_index_buffer(bg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+            // Background image first, so cell quads — drawn next with
+            // `blend: None` — overwrite it where they paint, leaving the
+            // image visible only through cells that opted out (default-bg
+            // cells with no interaction overlay).
+            if let Some(background) = &self.background {
+                pass.set_pipeline(&self.bg_image_pipeline);
+                pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+                pass.set_bind_group(1, background.bind_group(), &[]);
+                pass.set_vertex_buffer(0, background.vbuf().slice(..));
+                pass.set_index_buffer(background.ibuf().slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..6, 0, 0..1);
+            }
+
+            if bg_ibuf.size() > 0 {
+                pass.set_pipeline(&self.bg_pipeline);
+                pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+                pass.set_vertex_buffer(0, bg_vbuf.slice(..));
+                pass.set_index_buffer(bg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+            }
         }
 
         // ---- FG pass ----
