@@ -13,8 +13,8 @@
 use std::num::NonZeroUsize;
 
 use evictor::Lru;
+use image41::DecodedImage;
 
-use crate::image::DecodedImage;
 use crate::renderer::shelf::Allocation;
 use crate::renderer::shelf::ShelfPacker;
 

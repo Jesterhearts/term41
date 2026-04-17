@@ -19,6 +19,14 @@ use clip41::Clipboard;
 use clip41::ClipboardKind;
 use font41::FontSystem;
 use pty_pipe41::Pty;
+use terminal41::KittyFlags;
+use terminal41::KittyKeys;
+use terminal41::MouseButton as TermMouseButton;
+use terminal41::MouseEventKind;
+use terminal41::MouseModifiers;
+use terminal41::Terminal;
+use terminal41::TerminalThread;
+use terminal41::selection::SelectionMode;
 use winit::event::MouseButton;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
@@ -41,14 +49,6 @@ use crate::keybindings::Action;
 use crate::renderer::r#impl::Renderer;
 use crate::renderer::r#impl::TabInfo;
 pub use crate::renderer::r#impl::compute_gutter_width;
-use crate::selection::SelectionMode;
-use crate::terminal::KittyFlags;
-use crate::terminal::KittyKeys;
-use crate::terminal::MouseButton as TermMouseButton;
-use crate::terminal::MouseEventKind;
-use crate::terminal::MouseModifiers;
-use crate::terminal::Terminal;
-use crate::terminal::TerminalThread;
 
 // ---------------------------------------------------------------------------
 // Gutter popup — shown on click of a shell-integration gutter marker

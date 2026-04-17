@@ -2,8 +2,9 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 use std::time::Instant;
 
-use crate::image::DecodedImage;
-use crate::terminal::row::Row;
+use image41::DecodedImage;
+
+use crate::row::Row;
 
 #[derive(Debug, Clone)]
 pub struct PlacedImage {

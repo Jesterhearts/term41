@@ -5,7 +5,7 @@ use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
-use crate::terminal::hyperlink::HyperlinkId;
+use crate::hyperlink::HyperlinkId;
 
 /// Inline SmolStr for the default blank cell. Cheap to clone.
 pub(super) const fn blank_cell() -> SmolStr {
@@ -242,8 +242,8 @@ fn range_bounds<R: RangeBounds<usize>>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::color::default_bg;
-    use crate::terminal::color::default_fg;
+    use crate::color::default_bg;
+    use crate::color::default_fg;
 
     fn row_text(row: &Row) -> String {
         let mut s = String::new();

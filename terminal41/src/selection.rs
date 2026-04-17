@@ -6,7 +6,7 @@
 
 use unicode_segmentation::UnicodeSegmentation;
 
-use crate::terminal::Row;
+use crate::Row;
 
 /// A point in the grid addressable across scrollback lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -149,10 +149,10 @@ pub fn expand_to_line(row: &Row) -> (u32, u32) {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::Row;
+    use crate::Row;
 
     fn row_from(text: &str) -> Row {
-        use crate::terminal::ColorPalette;
+        use crate::ColorPalette;
         let pal = ColorPalette::default();
         let mut r = Row::new(text.chars().count() as u32, pal.fg, pal.bg);
         let mut buf = [0u8; 4];

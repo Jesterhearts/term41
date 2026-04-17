@@ -6,17 +6,17 @@ use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
-use crate::terminal::color::default_bg;
-use crate::terminal::color::default_fg;
-use crate::terminal::grid::Cursor;
-use crate::terminal::grid::Grid;
-use crate::terminal::grid::Viewport;
-use crate::terminal::hyperlink::HyperlinkId;
-use crate::terminal::image::PlacedImage;
-use crate::terminal::image::anchor_images;
-use crate::terminal::image::clear_in_range;
-use crate::terminal::image::restore_images;
-use crate::terminal::row::Row;
+use crate::color::default_bg;
+use crate::color::default_fg;
+use crate::grid::Cursor;
+use crate::grid::Grid;
+use crate::grid::Viewport;
+use crate::hyperlink::HyperlinkId;
+use crate::image::PlacedImage;
+use crate::image::anchor_images;
+use crate::image::clear_in_range;
+use crate::image::restore_images;
+use crate::row::Row;
 
 /// Snapshot of cursor position and active colors, used by DECSC/DECRC
 /// (ESC 7 / ESC 8) and the `?1048`/`?1049` private modes.

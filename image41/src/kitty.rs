@@ -8,8 +8,8 @@ use std::collections::HashMap;
 use std::io::Read;
 use std::path::Path;
 
-use crate::image::DecodedImage;
-use crate::image::decode_png;
+use crate::DecodedImage;
+use crate::decode_png;
 
 // ---------------------------------------------------------------------------
 // Parsed command

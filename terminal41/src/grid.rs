@@ -3,10 +3,10 @@ use std::collections::VecDeque;
 
 use palette::Srgb;
 
-use crate::terminal::image::PlacedImage;
-use crate::terminal::image::clear_in_range;
-use crate::terminal::image::shift_in_region;
-use crate::terminal::row::Row;
+use crate::image::PlacedImage;
+use crate::image::clear_in_range;
+use crate::image::shift_in_region;
+use crate::row::Row;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
@@ -419,8 +419,8 @@ mod tests {
     use palette::Srgb;
 
     use super::*;
-    use crate::terminal::color::default_bg;
-    use crate::terminal::color::default_fg;
+    use crate::color::default_bg;
+    use crate::color::default_fg;
 
     /// Build a grid from `(text, wrapped)` pairs. Each row is padded to `width`
     /// with spaces.

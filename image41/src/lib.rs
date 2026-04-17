@@ -5,9 +5,12 @@ pub mod kitty;
 pub mod sixel;
 
 #[cfg(feature = "ffmpeg")]
-pub(crate) mod ffmpeg_decoder;
+pub mod ffmpeg_decoder;
 
 use std::time::Duration;
+
+#[macro_use]
+extern crate log;
 
 /// A single frame of a decoded image. Static images carry exactly one
 /// frame with `delay = Duration::ZERO`; animated images (GIFs today) carry

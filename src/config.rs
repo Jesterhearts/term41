@@ -3,14 +3,14 @@ use std::str::FromStr;
 
 use palette::Srgb;
 use serde::Deserialize;
+use terminal41::ColorPalette;
+use terminal41::CursorShape;
+use terminal41::CursorStyle;
 use wgpu::PowerPreference;
 
 use crate::keybindings::Keybinding;
 use crate::keybindings::KeybindingConfig;
 use crate::keybindings::Keybindings;
-use crate::terminal::ColorPalette;
-use crate::terminal::CursorShape;
-use crate::terminal::CursorStyle;
 
 pub const DEFAULT_SCROLLBACK: u32 = 10_000;
 

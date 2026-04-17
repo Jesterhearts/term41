@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 mod color;
 mod cursor;
 mod grid;
@@ -9,6 +11,8 @@ mod osc;
 mod parser;
 mod row;
 mod screen;
+mod search;
+pub mod selection;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -102,7 +106,7 @@ impl CommandMeta {
 /// the `Terminal` struct focused and lets handler functions accept a single
 /// `&mut TerminalModes` instead of five separate parameters.
 #[derive(Debug)]
-pub(super) struct TerminalModes {
+pub struct TerminalModes {
     /// Currently-active mouse tracking mode requested by the app via DECSET.
     pub mouse_tracking: MouseTracking,
     /// Wire encoding used for mouse events.
@@ -175,7 +179,7 @@ pub struct Terminal {
 
     /// Terminal-level modes toggled by escape sequences (DECSET/DECRST,
     /// mode 2004, mode 2026, etc.) and reset together by RIS.
-    pub(super) modes: TerminalModes,
+    pub modes: TerminalModes,
 
     /// Active text selection, if any. Positions use absolute row indices so
     /// the selection stays locked to content across scrollback trimming.
@@ -248,14 +252,14 @@ pub struct Terminal {
 
     /// Kitty graphics protocol image store. Images transmitted via `a=t`
     /// live here until placed or deleted.
-    kitty_images: crate::image::kitty::KittyImageStore,
+    kitty_images: image41::kitty::KittyImageStore,
 
     /// Accumulates chunks for multi-part kitty graphics transmissions.
-    kitty_chunked: crate::image::kitty::ChunkedTransmission,
+    kitty_chunked: image41::kitty::ChunkedTransmission,
 
     /// Accumulates chunks for multi-part iTerm2 graphics transmissions
     /// (`MultipartFile` → `FilePart*` → `FileEnd`).
-    iterm_chunked: crate::image::iterm::ChunkedTransmission,
+    iterm_chunked: image41::iterm::ChunkedTransmission,
 
     /// Runtime color palette. Stored here so SGR resets, OSC color queries,
     /// and the renderer can all resolve themed colors.
@@ -302,9 +306,9 @@ impl Terminal {
             bell_pending: false,
             current_prompt_row: None,
             command_metas: HashMap::new(),
-            kitty_images: crate::image::kitty::KittyImageStore::new(),
-            kitty_chunked: crate::image::kitty::ChunkedTransmission::new(),
-            iterm_chunked: crate::image::iterm::ChunkedTransmission::new(),
+            kitty_images: image41::kitty::KittyImageStore::new(),
+            kitty_chunked: image41::kitty::ChunkedTransmission::new(),
+            iterm_chunked: image41::iterm::ChunkedTransmission::new(),
             cell_width,
             palette,
         }
@@ -1516,7 +1520,7 @@ impl Terminal {
     /// the lock, so the CPU-intensive decode doesn't block rendering.
     pub fn place_sixel_image(
         &mut self,
-        image: crate::image::DecodedImage,
+        image: image41::DecodedImage,
     ) {
         let popped_before: usize = self.active.grid.total_popped;
 
@@ -1527,7 +1531,7 @@ impl Terminal {
             .grid
             .active_row_index(&self.active.cursor, &self.viewport);
         let image_rows = image.height.div_ceil(self.cell_height);
-        crate::terminal::image::remove_overlapping(
+        crate::image::remove_overlapping(
             &mut self.active.images,
             row,
             image_rows.max(1) as usize,
@@ -1584,9 +1588,15 @@ impl Terminal {
 }
 
 /// Handle to a running terminal thread. Signals the thread to stop on drop.
-pub(crate) struct TerminalThread {
+pub struct TerminalThread {
     stop: Arc<AtomicBool>,
     pub thread_handle: Arc<OnceLock<Thread>>,
+}
+
+impl Default for TerminalThread {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl TerminalThread {
@@ -1768,7 +1778,7 @@ pub fn run_terminal_thread(
                         } else if act == 'q' && intermediates.as_slice().is_empty() {
                             // Sixel parsing is CPU-heavy — done outside the
                             // lock so rendering isn't blocked.
-                            let image = crate::image::sixel::parse_sixel(_params, bytes);
+                            let image = image41::sixel::parse_sixel(_params, bytes);
                             terminal.lock().unwrap().place_sixel_image(image);
                         }
                     }
@@ -1800,8 +1810,8 @@ pub fn run_terminal_thread(
 
 fn handle_kitty_graphics(
     data: &[u8],
-    store: &mut crate::image::kitty::KittyImageStore,
-    chunked: &mut crate::image::kitty::ChunkedTransmission,
+    store: &mut image41::kitty::KittyImageStore,
+    chunked: &mut image41::kitty::ChunkedTransmission,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -1814,7 +1824,7 @@ fn handle_kitty_graphics(
         return;
     }
 
-    let cmd = crate::image::kitty::parse_command(&data[1..]);
+    let cmd = image41::kitty::parse_command(&data[1..]);
 
     // Feed into chunked accumulator. If more chunks expected, return early.
     let cmd = match chunked.feed(cmd) {
@@ -1852,20 +1862,18 @@ fn handle_kitty_graphics(
 
 /// Decode image data from a command's payload, handling direct, file, and
 /// temp-file transmission mediums.
-fn decode_kitty_image(
-    cmd: &crate::image::kitty::KittyCommand
-) -> Option<crate::image::DecodedImage> {
+fn decode_kitty_image(cmd: &image41::kitty::KittyCommand) -> Option<image41::DecodedImage> {
     match cmd.transmission {
-        b'f' => crate::image::kitty::decode_file_payload(cmd, &cmd.payload, false),
-        b't' => crate::image::kitty::decode_file_payload(cmd, &cmd.payload, true),
-        _ => crate::image::kitty::decode_payload(cmd, &cmd.payload),
+        b'f' => image41::kitty::decode_file_payload(cmd, &cmd.payload, false),
+        b't' => image41::kitty::decode_file_payload(cmd, &cmd.payload, true),
+        _ => image41::kitty::decode_payload(cmd, &cmd.payload),
     }
 }
 
 /// Place an image on the grid at the cursor position.
 fn place_kitty_image(
-    image: crate::image::DecodedImage,
-    cmd: &crate::image::kitty::KittyCommand,
+    image: image41::DecodedImage,
+    cmd: &image41::kitty::KittyCommand,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -1873,7 +1881,7 @@ fn place_kitty_image(
     cell_width: u32,
 ) {
     // Apply source rectangle cropping.
-    let image = crate::image::kitty::crop_source_rect(image, cmd);
+    let image = image41::kitty::crop_source_rect(image, cmd);
 
     let id = *next_image_id;
     *next_image_id += 1;
@@ -1912,7 +1920,7 @@ fn place_kitty_image(
 
     let image_rows = display_height.div_ceil(cell_height);
 
-    crate::terminal::image::remove_overlapping(
+    crate::image::remove_overlapping(
         &mut screen.images,
         row,
         image_rows.max(1) as usize,
@@ -1948,7 +1956,7 @@ fn place_kitty_image(
 }
 
 fn send_kitty_response(
-    cmd: &crate::image::kitty::KittyCommand,
+    cmd: &image41::kitty::KittyCommand,
     image_id: u32,
     ok: bool,
     message: &str,
@@ -1961,12 +1969,12 @@ fn send_kitty_response(
     if cmd.quiet >= 1 && ok {
         return;
     }
-    pending_output.extend_from_slice(&crate::image::kitty::format_response(image_id, ok, message));
+    pending_output.extend_from_slice(&image41::kitty::format_response(image_id, ok, message));
 }
 
 fn handle_kitty_query(
-    cmd: &crate::image::kitty::KittyCommand,
-    store: &mut crate::image::kitty::KittyImageStore,
+    cmd: &image41::kitty::KittyCommand,
+    store: &mut image41::kitty::KittyImageStore,
     pending_output: &mut Vec<u8>,
 ) {
     let id = store.resolve_id(cmd);
@@ -1976,8 +1984,8 @@ fn handle_kitty_query(
 }
 
 fn handle_kitty_transmit(
-    cmd: &crate::image::kitty::KittyCommand,
-    store: &mut crate::image::kitty::KittyImageStore,
+    cmd: &image41::kitty::KittyCommand,
+    store: &mut image41::kitty::KittyImageStore,
     pending_output: &mut Vec<u8>,
 ) {
     let id = store.resolve_id(cmd);
@@ -1993,8 +2001,8 @@ fn handle_kitty_transmit(
 }
 
 fn handle_kitty_transmit_display(
-    cmd: &crate::image::kitty::KittyCommand,
-    store: &mut crate::image::kitty::KittyImageStore,
+    cmd: &image41::kitty::KittyCommand,
+    store: &mut image41::kitty::KittyImageStore,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -2025,8 +2033,8 @@ fn handle_kitty_transmit_display(
 }
 
 fn handle_kitty_place(
-    cmd: &crate::image::kitty::KittyCommand,
-    store: &mut crate::image::kitty::KittyImageStore,
+    cmd: &image41::kitty::KittyCommand,
+    store: &mut image41::kitty::KittyImageStore,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -2056,9 +2064,9 @@ fn handle_kitty_place(
 }
 
 fn handle_kitty_delete(
-    cmd: &crate::image::kitty::KittyCommand,
+    cmd: &image41::kitty::KittyCommand,
     screen: &mut Screen,
-    store: &mut crate::image::kitty::KittyImageStore,
+    store: &mut image41::kitty::KittyImageStore,
     cell_height: u32,
 ) {
     let uppercase = cmd.delete.is_ascii_uppercase();
@@ -2152,15 +2160,15 @@ fn is_iterm_image_cmd(rest: &[u8]) -> bool {
 /// payload with the leading `1337;` already consumed.
 fn handle_iterm_graphics(
     rest: &[u8],
-    chunked: &mut crate::image::iterm::ChunkedTransmission,
+    chunked: &mut image41::iterm::ChunkedTransmission,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
     cell_height: u32,
     cell_width: u32,
 ) {
-    if let Some(cmd) = crate::image::iterm::parse_file(rest) {
-        if let Some(image) = crate::image::iterm::decode_payload(&cmd.payload) {
+    if let Some(cmd) = image41::iterm::parse_file(rest) {
+        if let Some(image) = image41::iterm::decode_payload(&cmd.payload) {
             place_iterm_image(
                 cmd,
                 image,
@@ -2173,17 +2181,17 @@ fn handle_iterm_graphics(
         }
         return;
     }
-    if let Some(header) = crate::image::iterm::parse_multipart_start(rest) {
+    if let Some(header) = image41::iterm::parse_multipart_start(rest) {
         chunked.begin(header);
         return;
     }
-    if let Some(chunk) = crate::image::iterm::parse_file_part(rest) {
+    if let Some(chunk) = image41::iterm::parse_file_part(rest) {
         chunked.push(chunk);
         return;
     }
-    if crate::image::iterm::is_file_end(rest)
+    if image41::iterm::is_file_end(rest)
         && let Some(cmd) = chunked.finish()
-        && let Some(image) = crate::image::iterm::decode_payload(&cmd.payload)
+        && let Some(image) = image41::iterm::decode_payload(&cmd.payload)
     {
         place_iterm_image(
             cmd,
@@ -2202,8 +2210,8 @@ fn handle_iterm_graphics(
 /// pixels and advancing the cursor past the image unless `doNotMoveCursor`
 /// is set.
 fn place_iterm_image(
-    cmd: crate::image::iterm::ItermCommand,
-    image: crate::image::DecodedImage,
+    cmd: image41::iterm::ItermCommand,
+    image: image41::DecodedImage,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -2220,8 +2228,8 @@ fn place_iterm_image(
     let viewport_px_w = viewport.cols * cell_width;
     let viewport_px_h = viewport.rows * cell_height;
 
-    let w_given = !matches!(cmd.width, crate::image::iterm::Dimension::Auto);
-    let h_given = !matches!(cmd.height, crate::image::iterm::Dimension::Auto);
+    let w_given = !matches!(cmd.width, image41::iterm::Dimension::Auto);
+    let h_given = !matches!(cmd.height, image41::iterm::Dimension::Auto);
 
     let mut display_width = cmd.width.to_pixels(cell_width, viewport_px_w, image.width);
     let mut display_height = cmd
@@ -2251,7 +2259,7 @@ fn place_iterm_image(
     let row = screen.grid.active_row_index(&screen.cursor, viewport);
     let image_rows = display_height.div_ceil(cell_height);
 
-    crate::terminal::image::remove_overlapping(
+    crate::image::remove_overlapping(
         &mut screen.images,
         row,
         image_rows.max(1) as usize,
@@ -2564,7 +2572,7 @@ mod tests {
         term.active.images.insert(
             id,
             PlacedImage {
-                image: crate::image::DecodedImage::single_frame(1, height_px, vec![]),
+                image: image41::DecodedImage::single_frame(1, height_px, vec![]),
                 id,
                 row,
                 col,

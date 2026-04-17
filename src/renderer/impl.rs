@@ -9,6 +9,9 @@ use font41::FontSystem;
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
 use palette::Srgb;
+use terminal41::ColorPalette;
+use terminal41::CursorShape;
+use terminal41::Terminal;
 use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
@@ -25,9 +28,6 @@ use crate::renderer::background::BgImageVertex;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
-use crate::terminal::ColorPalette;
-use crate::terminal::CursorShape;
-use crate::terminal::Terminal;
 
 /// Packed vertex for background quads: position + color.
 #[repr(C)]

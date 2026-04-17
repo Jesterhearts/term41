@@ -2,12 +2,8 @@
 #![allow(clippy::type_complexity)]
 
 mod config;
-mod image;
 mod keybindings;
 mod renderer;
-mod search;
-mod selection;
-mod terminal;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -24,8 +20,9 @@ use config::Config;
 use font41::FontSystem;
 use pty_pipe41::Pty;
 use renderer::RenderHost;
-use terminal::MouseButton as TermMouseButton;
-use terminal::Terminal;
+use terminal41::MouseButton as TermMouseButton;
+use terminal41::Terminal;
+use terminal41::TerminalThread;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::Ime;
@@ -43,7 +40,6 @@ use winit::window::WindowId;
 
 use crate::renderer::RenderEvent;
 use crate::renderer::compute_gutter_width;
-use crate::terminal::TerminalThread;
 
 #[macro_use]
 extern crate log;

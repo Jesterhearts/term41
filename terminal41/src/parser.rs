@@ -9,19 +9,19 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use vtepp::Params;
 
-use crate::terminal::TerminalModes;
-use crate::terminal::color;
-use crate::terminal::color::apply_sgr;
-use crate::terminal::cursor::CursorStyle;
-use crate::terminal::grid;
-use crate::terminal::grid::Viewport;
-use crate::terminal::keyboard::KittyKeyboardState;
-use crate::terminal::keyboard::handle_kitty_keyboard;
-use crate::terminal::mouse::MouseTracking;
-use crate::terminal::mouse::apply_mouse_mode;
-use crate::terminal::row::Row;
-use crate::terminal::screen;
-use crate::terminal::screen::Screen;
+use crate::TerminalModes;
+use crate::color;
+use crate::color::apply_sgr;
+use crate::cursor::CursorStyle;
+use crate::grid;
+use crate::grid::Viewport;
+use crate::keyboard::KittyKeyboardState;
+use crate::keyboard::handle_kitty_keyboard;
+use crate::mouse::MouseTracking;
+use crate::mouse::apply_mouse_mode;
+use crate::row::Row;
+use crate::screen;
+use crate::screen::Screen;
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that CSI handlers
 /// need beyond the active screen. Keeps the call signature stable as new CSI
@@ -1375,9 +1375,9 @@ mod tests {
     use vtepp::Parser;
 
     use super::*;
-    use crate::terminal::cursor::CursorStyle;
-    use crate::terminal::keyboard::KittyKeyboardState;
-    use crate::terminal::screen::Screen;
+    use crate::cursor::CursorStyle;
+    use crate::keyboard::KittyKeyboardState;
+    use crate::screen::Screen;
 
     const TEST_COLS: u32 = 10;
     const TEST_ROWS: u32 = 4;

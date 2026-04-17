@@ -8,12 +8,12 @@ use clip41::Clipboard;
 use clip41::ClipboardKind;
 use percent_encoding::percent_decode;
 
-use crate::terminal::CommandMeta;
-use crate::terminal::color;
-use crate::terminal::grid::Viewport;
-use crate::terminal::hyperlink::HyperlinkId;
-use crate::terminal::hyperlink::HyperlinkRegistry;
-use crate::terminal::screen::Screen;
+use crate::CommandMeta;
+use crate::color;
+use crate::grid::Viewport;
+use crate::hyperlink::HyperlinkId;
+use crate::hyperlink::HyperlinkRegistry;
+use crate::screen::Screen;
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that OSC handlers
 /// are allowed to read or mutate. Passing a single context keeps the call
@@ -225,7 +225,7 @@ fn handle_osc_133(
 fn mark_current_row(
     screen: &mut Screen,
     viewport: &Viewport,
-    apply: impl FnOnce(&mut crate::terminal::row::Row),
+    apply: impl FnOnce(&mut crate::row::Row),
 ) -> u64 {
     let local = screen.grid.active_row_index(&screen.cursor, viewport);
     apply(&mut screen.grid.rows[local]);
@@ -488,7 +488,7 @@ fn handle_osc_8(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::terminal::hyperlink::HyperlinkRegistry;
+    use crate::hyperlink::HyperlinkRegistry;
 
     struct Bag {
         clipboard: Clipboard,
@@ -926,7 +926,7 @@ mod tests {
         fn row_at(
             &self,
             screen_row: u32,
-        ) -> &crate::terminal::row::Row {
+        ) -> &crate::row::Row {
             let first_visible = self.screen.grid.rows.len() - self.viewport.rows as usize;
             &self.screen.grid.rows[first_visible + screen_row as usize]
         }

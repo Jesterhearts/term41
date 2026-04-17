@@ -41,8 +41,8 @@ use ff::software::scaling::Flags as SwsFlags;
 use ff::util::frame::video::Video as VideoFrame;
 use ffmpeg_next as ff;
 
-use crate::image::DecodedImage;
-use crate::image::Frame;
+use crate::DecodedImage;
+use crate::Frame;
 
 /// One-time ffmpeg runtime init. Subsequent calls are no-ops; wrap in a
 /// `OnceLock` so we don't race on first use.

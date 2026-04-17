@@ -22,8 +22,8 @@
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 
-use crate::image::DecodedImage;
-use crate::image::decode_image;
+use crate::DecodedImage;
+use crate::decode_image;
 
 /// A `width=` / `height=` value. iTerm2 distinguishes the unit by suffix:
 /// bare digits = cells, `px` suffix = pixels, `%` suffix = viewport fraction,

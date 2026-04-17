@@ -26,11 +26,10 @@ use std::time::Instant;
 
 use bytemuck::Pod;
 use bytemuck::Zeroable;
-use wgpu::util::DeviceExt;
-
-use crate::image::decode_image;
+use image41::decode_image;
 #[cfg(feature = "ffmpeg")]
-use crate::image::ffmpeg_decoder::FrameReader;
+use image41::ffmpeg_decoder::FrameReader;
+use wgpu::util::DeviceExt;
 
 /// How many decoded frames the decoder thread is allowed to get ahead of
 /// the render thread. Pre-buffering absorbs render-thread hiccups

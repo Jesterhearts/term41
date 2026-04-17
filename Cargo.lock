@@ -1214,6 +1214,22 @@ dependencies = [
 ]
 
 [[package]]
+name = "image41"
+version = "0.1.0"
+dependencies = [
+ "atoi",
+ "base64",
+ "ffmpeg-next",
+ "flate2",
+ "infer",
+ "libc",
+ "log",
+ "palette",
+ "png",
+ "vtepp",
+]
+
+[[package]]
 name = "imagesize"
 version = "0.14.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3082,9 +3098,7 @@ dependencies = [
 name = "term41"
 version = "0.1.0"
 dependencies = [
- "atoi",
  "atomic-write-file",
- "base64",
  "bitflags 2.11.1",
  "bytemuck",
  "clip41",
@@ -3092,32 +3106,49 @@ dependencies = [
  "cueue",
  "dirs",
  "evictor",
- "ffmpeg-next",
  "flate2",
  "font41",
  "fontdb",
  "harfrust",
+ "image41",
  "infer",
- "libc",
  "log",
  "notify",
  "open",
  "palette",
- "percent-encoding",
  "png",
  "pollster",
  "pty-pipe41",
  "serde",
  "shellexpand",
  "smol_str 0.3.6",
+ "terminal41",
  "toml",
  "tracing",
  "tracing-subscriber",
- "unicode-segmentation",
  "unicode-width",
  "vtepp",
  "wgpu",
  "winit",
+]
+
+[[package]]
+name = "terminal41"
+version = "0.1.0"
+dependencies = [
+ "base64",
+ "bitflags 2.11.1",
+ "clip41",
+ "font41",
+ "image41",
+ "palette",
+ "percent-encoding",
+ "pty-pipe41",
+ "serde",
+ "smol_str 0.3.6",
+ "unicode-segmentation",
+ "unicode-width",
+ "vtepp",
 ]
 
 [[package]]

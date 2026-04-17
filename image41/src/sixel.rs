@@ -4,7 +4,7 @@ use palette::IntoColor;
 use palette::Srgba;
 use vtepp::Params;
 
-use crate::image::DecodedImage;
+use crate::DecodedImage;
 
 struct SixelRow {
     default_color: Srgba<u8>,
