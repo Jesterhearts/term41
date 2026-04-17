@@ -19,6 +19,9 @@ use crate::renderer::shelf::ShelfPacker;
 
 pub const ATLAS_SIZE: u32 = 1024;
 const CACHE_CAPACITY: usize = 2048;
+const PADDING: u32 = 2;
+const X_OFFSET: u32 = PADDING / 2;
+const Y_OFFSET: u32 = PADDING / 2;
 
 /// `(font_index, glyph_id, cells_wide, synthetic_bold)`. Cluster span is
 /// part of the key because colour rasterisers size their output to the
@@ -48,19 +51,19 @@ impl GlyphSlot {
     }
 
     pub fn x(&self) -> u32 {
-        self.alloc.map_or(0, |a| a.x)
+        self.alloc.map_or(0, |a| a.x + X_OFFSET)
     }
 
     pub fn y(&self) -> u32 {
-        self.alloc.map_or(0, |a| a.y)
+        self.alloc.map_or(0, |a| a.y + Y_OFFSET)
     }
 
     pub fn width(&self) -> u32 {
-        self.alloc.map_or(0, |a| a.width)
+        self.alloc.map_or(0, |a| a.width - PADDING)
     }
 
     pub fn height(&self) -> u32 {
-        self.alloc.map_or(0, |a| a.height)
+        self.alloc.map_or(0, |a| a.height - PADDING)
     }
 }
 
@@ -221,7 +224,10 @@ impl GlyphAtlas {
         }
 
         let alloc = loop {
-            if let Some(a) = self.packer.allocate(glyph.width, glyph.height) {
+            if let Some(a) = self
+                .packer
+                .allocate(glyph.width + PADDING, glyph.height + PADDING)
+            {
                 break a;
             }
             // Atlas is full; free the LRU entry and retry. Give up if the
@@ -315,8 +321,8 @@ fn upload_glyph(
             texture,
             mip_level: 0,
             origin: wgpu::Origin3d {
-                x: alloc.x,
-                y: alloc.y,
+                x: alloc.x + X_OFFSET,
+                y: alloc.y + Y_OFFSET,
                 z: 0,
             },
             aspect: wgpu::TextureAspect::All,
