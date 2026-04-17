@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::io;
 use std::io::Read;
 use std::io::Write;
@@ -15,8 +17,6 @@ use portable_pty::CommandBuilder;
 use portable_pty::MasterPty;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
-
-use crate::TabId;
 
 pub const MAX_READ_CHUNK: usize = 128 * 1024;
 pub const MAX_BUFFER: usize = MAX_READ_CHUNK * 8 * 32; // 32 MB
@@ -79,7 +79,7 @@ impl Pty {
     ///
     /// `render_thread` is used by the child-watcher thread to unpark the
     /// render loop when the child process exits.
-    pub fn spawn(
+    pub fn spawn<TabId>(
         tab_id: TabId,
         cols: u16,
         rows: u16,
@@ -90,7 +90,10 @@ impl Pty {
         data_thread: Arc<OnceLock<Thread>>,
         render_thread: Arc<OnceLock<Thread>>,
         child_exit_tx: mpsc::Sender<TabId>,
-    ) -> io::Result<(Self, PtyReader)> {
+    ) -> io::Result<(Self, PtyReader)>
+    where
+        TabId: Send + 'static + Into<u64>,
+    {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {

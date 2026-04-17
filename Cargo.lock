@@ -2426,6 +2426,14 @@ source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "3eb8486b569e12e2c32ad3e204dbaba5e4b5b216e9367044f25f1dba42341773"
 
 [[package]]
+name = "pty-pipe41"
+version = "0.1.0"
+dependencies = [
+ "cueue",
+ "portable-pty",
+]
+
+[[package]]
 name = "pulp"
 version = "0.22.2"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3098,7 +3106,7 @@ dependencies = [
  "percent-encoding",
  "png",
  "pollster",
- "portable-pty",
+ "pty-pipe41",
  "serde",
  "shellexpand",
  "smol_str 0.3.6",

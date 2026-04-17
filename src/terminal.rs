@@ -24,6 +24,8 @@ use std::time::Instant;
 
 use clip41::Clipboard;
 use clip41::ClipboardKind;
+use pty_pipe41::MAX_READ_CHUNK;
+use pty_pipe41::PtyReader;
 use vtepp::Action;
 
 pub use self::color::ColorPalette;
@@ -55,8 +57,6 @@ use self::parser::put_char;
 pub use self::row::Row;
 pub use self::screen::Screen;
 use self::screen::resize_screen;
-use crate::pty::MAX_READ_CHUNK;
-use crate::pty::PtyReader;
 use crate::search::MatchSpan;
 use crate::search::SearchState;
 use crate::selection::Selection;

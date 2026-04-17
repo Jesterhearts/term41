@@ -4,7 +4,6 @@
 mod config;
 mod image;
 mod keybindings;
-mod pty;
 mod renderer;
 mod search;
 mod selection;
@@ -23,7 +22,7 @@ use std::time::Duration;
 
 use config::Config;
 use font41::FontSystem;
-use pty::Pty;
+use pty_pipe41::Pty;
 use renderer::RenderHost;
 use terminal::MouseButton as TermMouseButton;
 use terminal::Terminal;
@@ -60,6 +59,12 @@ const EVENT_QUEUE_SIZE: usize = 4096;
 /// the wrong session.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct TabId(pub u64);
+
+impl From<TabId> for u64 {
+    fn from(val: TabId) -> Self {
+        val.0
+    }
+}
 
 /// Commands sent from the render thread back to the window thread.
 #[derive(Debug, Clone)]

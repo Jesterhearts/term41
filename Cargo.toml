@@ -9,11 +9,13 @@ license      = "Unlicense"
 members = [
   "clip41",
   "font41",
+  "pty-pipe41",
   "vtepp",
 ]
 
 [workspace.dependencies]
 bitflags = "2.11.1"
+cueue    = "0.6.0"
 flate2   = "1.1.9"
 log      = "0.4.29"
 png      = "0.18.1"
@@ -33,7 +35,7 @@ bytemuck             = { version = "1.25.0", features = [
   "extern_crate_alloc"
 ] }
 clip41               = { path = "clip41" }
-cueue                = "0.6.0"
+cueue                = { workspace = true }
 dirs                 = "6.0.0"
 evictor              = "0.7.2"
 ffmpeg-next          = { version = "8.1.0", optional = true }
@@ -54,7 +56,7 @@ palette              = { version = "0.7.6", default-features = false, features =
 percent-encoding     = "2.3.2"
 png                  = { workspace = true }
 pollster             = "0.4.0"
-portable-pty         = "0.9.0"
+pty-pipe41           = { path = "pty-pipe41" }
 serde                = { version = "1.0.228", features = ["derive"] }
 shellexpand          = "3.1.2"
 smol_str             = { workspace = true }
