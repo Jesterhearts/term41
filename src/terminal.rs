@@ -316,6 +316,15 @@ impl Terminal {
     /// the user shrinks the limit, the unwanted history goes away on the
     /// next render. The alt screen always has zero scrollback so its
     /// budget never moves.
+    pub fn set_cell_dimensions(
+        &mut self,
+        cell_width: u32,
+        cell_height: u32,
+    ) {
+        self.cell_width = cell_width;
+        self.cell_height = cell_height;
+    }
+
     pub fn set_scrollback_limit(
         &mut self,
         limit: u32,

@@ -1343,17 +1343,24 @@ impl RenderHost {
             );
         }
 
-        if cfg.fonts != self.config.fonts {
-            warn!(
-                "config: fonts changed (was {:?}, now {:?}); restart to apply",
-                self.config.fonts, cfg.fonts
-            );
-        }
-        if (cfg.font_size - self.config.font_size).abs() > f32::EPSILON {
-            warn!(
-                "config: font_size changed ({} → {}); restart to apply",
-                self.config.font_size, cfg.font_size
-            );
+        let fonts_changed = cfg.fonts != self.config.fonts;
+        let size_changed = (cfg.font_size - self.config.font_size).abs() > f32::EPSILON;
+        let ss_changed = cfg.font_supersampling != self.config.font_supersampling;
+        if fonts_changed || size_changed || ss_changed {
+            self.font_system
+                .reload(cfg.fonts.clone(), cfg.font_size, cfg.font_supersampling);
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.reset_glyph_atlas();
+            }
+            for tab in &self.tabs {
+                let mut terminal = tab.terminal.lock().unwrap();
+                terminal
+                    .set_cell_dimensions(self.font_system.cell_width, self.font_system.cell_height);
+            }
+            self.recalculate_grid_size();
+            self.config.fonts = cfg.fonts.clone();
+            self.config.font_size = cfg.font_size;
+            self.config.font_supersampling = cfg.font_supersampling;
         }
         if (cfg.opacity - self.config.opacity).abs() > f32::EPSILON {
             warn!(

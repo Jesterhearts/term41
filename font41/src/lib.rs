@@ -8,7 +8,7 @@ mod svg;
 
 use std::collections::HashMap;
 use std::sync::Arc;
-use std::sync::OnceLock;
+use std::sync::RwLock;
 use std::thread;
 
 use harfrust::Direction;
@@ -109,8 +109,89 @@ struct PlanKey {
     script: Script,
 }
 
-static FONTS: OnceLock<Vec<LoadedFont>> = OnceLock::new();
-static FAMILIES: OnceLock<Vec<FamilyVariants>> = OnceLock::new();
+static FONTS: RwLock<Vec<LoadedFont>> = RwLock::new(Vec::new());
+static FAMILIES: RwLock<Vec<FamilyVariants>> = RwLock::new(Vec::new());
+
+/// Scan system fonts for the families listed in `fonts_config` (comma-
+/// separated) and install them into the global FONTS/FAMILIES tables.
+/// Called from a background thread at startup and synchronously on reload.
+fn load_and_install_fonts(fonts_config: Option<String>) {
+    let mut fonts: Vec<LoadedFont> = Vec::new();
+    let mut families: Vec<FamilyVariants> = Vec::new();
+
+    if let Some(families_str) = fonts_config {
+        let mut db = fontdb::Database::new();
+        db.load_system_fonts();
+
+        for family_name in families_str.split(',').map(|s| s.trim()) {
+            if family_name.is_empty() {
+                continue;
+            }
+
+            let family = match family_name.to_lowercase().as_str() {
+                "monospace" => fontdb::Family::Monospace,
+                "serif" => fontdb::Family::Serif,
+                "sans-serif" | "sans serif" => fontdb::Family::SansSerif,
+                _ => fontdb::Family::Name(family_name),
+            };
+
+            let Some(regular) = load_family_variant(
+                &db,
+                &mut fonts,
+                &family,
+                fontdb::Weight::NORMAL,
+                fontdb::Style::Normal,
+                false,
+                false,
+            ) else {
+                warn!("font not found: {family_name}");
+                continue;
+            };
+            let bold = load_family_variant(
+                &db,
+                &mut fonts,
+                &family,
+                fontdb::Weight::BOLD,
+                fontdb::Style::Normal,
+                true,
+                false,
+            );
+            let italic = load_family_variant(
+                &db,
+                &mut fonts,
+                &family,
+                fontdb::Weight::NORMAL,
+                fontdb::Style::Italic,
+                false,
+                true,
+            );
+            let bold_italic = load_family_variant(
+                &db,
+                &mut fonts,
+                &family,
+                fontdb::Weight::BOLD,
+                fontdb::Style::Italic,
+                true,
+                true,
+            );
+            info!(
+                "loaded font family: {family_name} (bold={} italic={} bold_italic={})",
+                bold.is_some(),
+                italic.is_some(),
+                bold_italic.is_some()
+            );
+            families.push(FamilyVariants {
+                regular,
+                bold,
+                italic,
+                bold_italic,
+            });
+        }
+    }
+
+    *FONTS.write().unwrap() = fonts;
+    *FAMILIES.write().unwrap() = families;
+}
 
 /// Font system: manages an ordered list of fonts with fallback and plan
 /// caching. Families are kept in user-declared order — the first entry is
@@ -137,87 +218,12 @@ impl FontSystem {
         font_size: f32,
         supersample: i32,
     ) -> Self {
-        let _ = thread::Builder::new().name("font-loader".into()).spawn(|| {
-            let mut fonts: Vec<LoadedFont> = Vec::new();
-            let mut families: Vec<FamilyVariants> = Vec::new();
-
-            if let Some(families_str) = fonts_config {
-                let mut db = fontdb::Database::new();
-                db.load_system_fonts();
-
-                for family_name in families_str.split(',').map(|s| s.trim()) {
-                    if family_name.is_empty() {
-                        continue;
-                    }
-
-                    let family = match family_name.to_lowercase().as_str() {
-                        "monospace" => fontdb::Family::Monospace,
-                        "serif" => fontdb::Family::Serif,
-                        "sans-serif" | "sans serif" => fontdb::Family::SansSerif,
-                        _ => fontdb::Family::Name(family_name),
-                    };
-
-                    let Some(regular) = load_family_variant(
-                        &db,
-                        &mut fonts,
-                        &family,
-                        fontdb::Weight::NORMAL,
-                        fontdb::Style::Normal,
-                        false,
-                        false,
-                    ) else {
-                        warn!("font not found: {family_name}");
-                        continue;
-                    };
-                    // Each optional variant is loaded only when fontdb can match
-                    // the exact weight/style — fontdb's fuzzy query will happily
-                    // return a regular face for a bold query, which would load
-                    // the same file twice and do nothing useful.
-                    let bold = load_family_variant(
-                        &db,
-                        &mut fonts,
-                        &family,
-                        fontdb::Weight::BOLD,
-                        fontdb::Style::Normal,
-                        true,
-                        false,
-                    );
-                    let italic = load_family_variant(
-                        &db,
-                        &mut fonts,
-                        &family,
-                        fontdb::Weight::NORMAL,
-                        fontdb::Style::Italic,
-                        false,
-                        true,
-                    );
-                    let bold_italic = load_family_variant(
-                        &db,
-                        &mut fonts,
-                        &family,
-                        fontdb::Weight::BOLD,
-                        fontdb::Style::Italic,
-                        true,
-                        true,
-                    );
-                    info!(
-                        "loaded font family: {family_name} (bold={} italic={} bold_italic={})",
-                        bold.is_some(),
-                        italic.is_some(),
-                        bold_italic.is_some()
-                    );
-                    families.push(FamilyVariants {
-                        regular,
-                        bold,
-                        italic,
-                        bold_italic,
-                    });
-                }
-            }
-
-            let _ = FONTS.set(fonts);
-            let _ = FAMILIES.set(families);
-        });
+        // Kick off font loading in the background so the window appears
+        // immediately. FONTS/FAMILIES start empty; shape_row falls through
+        // to the embedded fallback until they're populated.
+        let _ = thread::Builder::new()
+            .name("font-loader".into())
+            .spawn(|| load_and_install_fonts(fonts_config));
 
         // Always append embedded Fairfax HD as ultimate fallback. It ships
         // only a regular face; cells that want bold/italic from the fallback
@@ -225,33 +231,57 @@ impl FontSystem {
         // still apply on top.
         let final_font = load_font(FAIRFAX_HD, false, false).expect("Failed to load embedded font");
 
-        // Compute cell metrics from the first family's regular face.
-        let rf = read_fonts::FontRef::new(&final_font.data).expect("parse font");
+        let mut fs = Self {
+            final_font,
+            plan_cache: HashMap::new(),
+            cell_width: 0,
+            cell_height: 0,
+            font_size,
+            ascent: 0.0,
+            base_font_size: font_size,
+            supersample,
+        };
+        fs.recompute_metrics();
+        fs
+    }
+
+    /// Reload fonts, font size, and supersampling factor. Scans system fonts
+    /// synchronously (appropriate for config-file hot-reload), then
+    /// recomputes cell metrics. The caller must clear the glyph atlas and
+    /// recalculate the grid size after calling this.
+    pub fn reload(
+        &mut self,
+        fonts_config: Option<String>,
+        font_size: f32,
+        supersample: i32,
+    ) {
+        load_and_install_fonts(fonts_config);
+        self.base_font_size = font_size;
+        self.supersample = supersample;
+        self.plan_cache.clear();
+        self.recompute_metrics();
+    }
+
+    /// Recompute cell_width, cell_height, ascent, and font_size from the
+    /// fallback font's metrics and the current base_font_size. Shared by
+    /// `new()`, `reload()`, and `set_scale_factor()`.
+    fn recompute_metrics(&mut self) {
+        let rf = read_fonts::FontRef::new(&self.final_font.data).expect("parse font");
         let hhea = rf.hhea().expect("hhea table");
         let hmtx = rf.hmtx().expect("hmtx table");
 
-        let scale = font_size / final_font.units_per_em;
-        let ascent = hhea.ascender().to_i16() as f32 * scale;
-        let descent = hhea.descender().to_i16() as f32 * scale;
-        let line_gap = hhea.line_gap().to_i16() as f32 * scale;
-        let cell_height = (ascent - descent + line_gap).ceil() as u32;
+        let s = self.font_size / self.final_font.units_per_em;
+        let ascent = hhea.ascender().to_i16() as f32 * s;
+        let descent = hhea.descender().to_i16() as f32 * s;
+        let line_gap = hhea.line_gap().to_i16() as f32 * s;
 
+        self.cell_height = (ascent - descent + line_gap).ceil() as u32;
         let m_advance = hmtx
             .advance(GlyphId::new(charmap_lookup(&rf, 'M')))
             .unwrap_or(0) as f32
-            * scale;
-        let cell_width = m_advance.ceil() as u32;
-
-        Self {
-            final_font,
-            plan_cache: HashMap::new(),
-            cell_width,
-            cell_height,
-            font_size,
-            ascent,
-            base_font_size: font_size,
-            supersample,
-        }
+            * s;
+        self.cell_width = m_advance.ceil() as u32;
+        self.ascent = ascent;
     }
 
     /// Whether `font_index`'s face was loaded as a bold weight. The renderer
@@ -265,7 +295,8 @@ impl FontSystem {
             return false;
         }
         FONTS
-            .wait()
+            .read()
+            .unwrap()
             .get(font_index)
             .unwrap_or(&self.final_font)
             .is_bold
@@ -282,7 +313,8 @@ impl FontSystem {
             return false;
         }
         FONTS
-            .wait()
+            .read()
+            .unwrap()
             .get(font_index)
             .unwrap_or(&self.final_font)
             .is_italic
@@ -299,7 +331,8 @@ impl FontSystem {
             return false;
         }
         FONTS
-            .wait()
+            .read()
+            .unwrap()
             .get(font_index)
             .unwrap_or(&self.final_font)
             .is_color
@@ -326,28 +359,13 @@ impl FontSystem {
         &mut self,
         scale: f32,
     ) {
+        dbg!(scale);
         let effective = self.base_font_size * scale;
         if (effective - self.font_size).abs() < f32::EPSILON {
             return;
         }
-
-        let rf = read_fonts::FontRef::new(&self.final_font.data).expect("parse font");
-        let hhea = rf.hhea().expect("hhea table");
-        let hmtx = rf.hmtx().expect("hmtx table");
-
-        let s = effective / self.final_font.units_per_em;
-        let ascent = hhea.ascender().to_i16() as f32 * s;
-        let descent = hhea.descender().to_i16() as f32 * s;
-        let line_gap = hhea.line_gap().to_i16() as f32 * s;
-
-        self.cell_height = (ascent - descent + line_gap).ceil() as u32;
-        let m_advance = hmtx
-            .advance(GlyphId::new(charmap_lookup(&rf, 'M')))
-            .unwrap_or(0) as f32
-            * s;
-        self.cell_width = m_advance.ceil() as u32;
         self.font_size = effective;
-        self.ascent = ascent;
+        self.recompute_metrics();
     }
 
     /// Shape an entire terminal row with font fallback and plan caching.
@@ -403,9 +421,9 @@ impl FontSystem {
                     None
                 } else {
                     let a = attrs[col];
-                    let families = FAMILIES.wait();
+                    let families = FAMILIES.read().unwrap();
                     let (idx, _, _) = pick_variant(
-                        families,
+                        &families,
                         families.len(),
                         a.contains(CellAttrs::BOLD),
                         a.contains(CellAttrs::ITALIC),
@@ -453,9 +471,9 @@ impl FontSystem {
         // Two passes: first only accept a glyph from the cell's preferred
         // face (variant-matched, or colour-matched for emoji). Second pass
         // lets any remaining uncovered cell take whichever font has a glyph.
+        let loaded_fonts = FONTS.read().unwrap();
         for pass in 0..2 {
-            for (font_idx, loaded) in FONTS
-                .wait()
+            for (font_idx, loaded) in loaded_fonts
                 .iter()
                 .chain(std::iter::once(&self.final_font))
                 .enumerate()
@@ -592,7 +610,8 @@ impl FontSystem {
             return legacy::rasterize(glyph_index, self.cell_width, self.cell_height, self.ascent);
         }
 
-        let loaded = FONTS.wait().get(font_index).unwrap_or(&self.final_font);
+        let fonts = FONTS.read().unwrap();
+        let loaded = fonts.get(font_index).unwrap_or(&self.final_font);
         let scale = self.font_size / loaded.units_per_em;
 
         let Ok(font) = read_fonts::FontRef::new(&loaded.data) else {
