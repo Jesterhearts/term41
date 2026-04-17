@@ -14,6 +14,7 @@ mod terminal;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -44,6 +45,7 @@ use winit::window::Window;
 use winit::window::WindowId;
 
 use crate::renderer::RenderEvent;
+use crate::terminal::TerminalThread;
 
 #[macro_use]
 extern crate log;
@@ -71,8 +73,10 @@ enum AppEvent {
 
 struct Tab {
     id: TabId,
-    terminal: Terminal,
+    terminal: Arc<Mutex<Terminal>>,
     pty: Pty,
+    /// Kept alive for its Drop impl which signals the thread to stop.
+    _terminal_thread: TerminalThread,
 }
 
 struct WindowHost {
@@ -305,8 +309,12 @@ fn main() {
 
     let proxy = event_loop.create_proxy();
 
+    // Create the terminal thread handle before spawning the PTY so the PTY
+    // reader can unpark the terminal thread once it starts.
+    let terminal_thread = TerminalThread::new();
+
     // Spawn the initial PTY early so the shell starts running immediately.
-    let pty = Pty::spawn(
+    let (pty, pty_reader) = Pty::spawn(
         TabId(0),
         INITIAL_COLS as u16,
         INITIAL_ROWS as u16,
@@ -314,6 +322,7 @@ fn main() {
         cell_height as u16,
         command,
         None,
+        terminal_thread.thread_handle.clone(),
         render_thread_handle.clone(),
         child_exit_tx.clone(),
     )
@@ -327,10 +336,20 @@ fn main() {
         cell_width,
     );
     terminal.set_default_cursor_style(config.cursor_style);
+    let terminal = Arc::new(Mutex::new(terminal));
+
+    terminal_thread.spawn(
+        "terminal-0".into(),
+        terminal.clone(),
+        pty_reader,
+        render_thread_handle.clone(),
+    );
+
     let tab = Tab {
         id: TabId(0),
         terminal,
         pty,
+        _terminal_thread: terminal_thread,
     };
 
     // Clone config_path before moving it into the render thread closure —

@@ -6,6 +6,7 @@ mod shelf;
 
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -35,7 +36,6 @@ use crate::config::Config;
 use crate::config::DEFAULT_SCROLLBACK;
 use crate::font::FontSystem;
 use crate::keybindings::Action;
-use crate::pty::MAX_READ_CHUNK;
 use crate::pty::Pty;
 use crate::renderer::r#impl::Renderer;
 use crate::renderer::r#impl::TabInfo;
@@ -46,6 +46,7 @@ use crate::terminal::MouseButton as TermMouseButton;
 use crate::terminal::MouseEventKind;
 use crate::terminal::MouseModifiers;
 use crate::terminal::Terminal;
+use crate::terminal::TerminalThread;
 
 // ---------------------------------------------------------------------------
 // Gutter popup — shown on click of a shell-integration gutter marker
@@ -234,6 +235,12 @@ pub(crate) struct PreeditState {
     pub cursor: Option<(usize, usize)>,
 }
 
+// ---------------------------------------------------------------------------
+// Terminal thread — processes PTY data on its own thread so rendering and
+// terminal updates are decoupled. The parser runs outside the terminal lock;
+// only per-action state mutations hold the lock.
+// ---------------------------------------------------------------------------
+
 impl RenderHost {
     pub fn new(
         event_rx: cueue::Reader<RenderEvent>,
@@ -347,9 +354,6 @@ impl RenderHost {
                 break;
             }
 
-            // Drain PTY data for every tab and render a frame.
-            self.drain_all_ptys();
-
             // Keep the IME's candidate popup anchored to the text cursor as
             // it moves (normal typing, cursor-movement escapes, etc.). The
             // call dedupes against the last position, so idle frames cost
@@ -427,8 +431,8 @@ impl RenderHost {
                 self.handle_resize(*width, *height);
             }
             RenderEvent::Focused(focused) => {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.report_focus_change(*focused);
+                if let Some(tab) = self.active_tab() {
+                    tab.terminal.lock().unwrap().report_focus_change(*focused);
                 }
                 self.flush_pending();
             }
@@ -495,7 +499,7 @@ impl RenderHost {
 
         // Search-bar routing runs ahead of keybindings and PTY encoding.
         if let Some(tab) = self.active_tab()
-            && tab.terminal.search_active()
+            && tab.terminal.lock().unwrap().search_active()
         {
             self.handle_search_key(&key);
             return;
@@ -507,10 +511,10 @@ impl RenderHost {
         }
 
         if let Some(tab) = self.active_tab() {
-            let kitty_flags = tab.terminal.kitty_keyboard.current();
+            let kitty_flags = tab.terminal.lock().unwrap().kitty_keyboard.current();
             if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags) {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.reset_viewport();
+                    tab.terminal.lock().unwrap().reset_viewport();
                     let _ = tab.pty.write(&bytes);
                 }
                 return;
@@ -526,7 +530,7 @@ impl RenderHost {
 
             if let Some(byte) = byte {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.reset_viewport();
+                    tab.terminal.lock().unwrap().reset_viewport();
                     let _ = tab.pty.write(&[byte]);
                 }
                 return;
@@ -542,7 +546,7 @@ impl RenderHost {
         if let Some(bytes) = bytes
             && let Some(tab) = self.active_tab_mut()
         {
-            tab.terminal.reset_viewport();
+            tab.terminal.lock().unwrap().reset_viewport();
             let _ = tab.pty.write(&bytes);
         }
     }
@@ -552,7 +556,8 @@ impl RenderHost {
         key: &Key,
     ) {
         let shift = self.modifiers.shift_key();
-        if let Some(terminal) = self.active_tab_mut().map(|tab| &mut tab.terminal) {
+        if let Some(tab) = self.active_tab() {
+            let mut terminal = tab.terminal.lock().unwrap();
             match key {
                 Key::Named(NamedKey::Escape) => terminal.close_search(),
                 Key::Named(NamedKey::Backspace) => terminal.search_backspace(),
@@ -599,13 +604,13 @@ impl RenderHost {
         let Some(tab) = self.active_tab_mut() else {
             return;
         };
-        let flags = tab.terminal.kitty_keyboard.current();
+        let flags = tab.terminal.lock().unwrap().kitty_keyboard.current();
         let bytes = if flags.contains(KittyFlags::REPORT_ASSOCIATED_TEXT) {
             kitty_encode_ime_commit(text)
         } else {
             text.as_bytes().to_vec()
         };
-        tab.terminal.reset_viewport();
+        tab.terminal.lock().unwrap().reset_viewport();
         let _ = tab.pty.write(&bytes);
 
         // A commit ends the composition; winit sends an empty preedit
@@ -626,10 +631,11 @@ impl RenderHost {
         let Some(tab) = self.active_tab() else {
             return;
         };
+        let terminal = tab.terminal.lock().unwrap();
         // The compositor doesn't care about IME positioning when the user
         // has scrolled away from live output, and we don't want to signal
         // one — clear it so the popup doesn't stick to stale coordinates.
-        if tab.terminal.active.offset != 0 || !tab.terminal.active.cursor_visible {
+        if terminal.active.offset != 0 || !terminal.active.cursor_visible {
             return;
         }
 
@@ -642,7 +648,8 @@ impl RenderHost {
             .unwrap_or(0) as f32;
         let tab_bar_h = if self.tab_bar_visible() { cell_h } else { 0.0 };
 
-        let cursor = tab.terminal.active.cursor;
+        let cursor = terminal.active.cursor;
+        drop(terminal);
         // Place the area at the row *below* the cursor so the popup doesn't
         // cover the cell the user is about to type into.
         let x = cursor.col as f32 * cell_w + gutter_px;
@@ -687,8 +694,13 @@ impl RenderHost {
             let button = self.mouse_buttons.primary_held();
             let mods = self.mouse_modifiers();
             if let Some(tab) = self.active_tab_mut() {
-                tab.terminal
-                    .mouse_report(MouseEventKind::Motion, button, cell.0, cell.1, mods);
+                tab.terminal.lock().unwrap().mouse_report(
+                    MouseEventKind::Motion,
+                    button,
+                    cell.0,
+                    cell.1,
+                    mods,
+                );
             }
             self.flush_pending();
             return;
@@ -697,7 +709,10 @@ impl RenderHost {
         if self.left_drag_active
             && let Some(tab) = self.active_tab_mut()
         {
-            tab.terminal.extend_selection(cell.0, cell.1);
+            tab.terminal
+                .lock()
+                .unwrap()
+                .extend_selection(cell.0, cell.1);
         }
     }
 
@@ -757,7 +772,10 @@ impl RenderHost {
             };
             let mods = self.mouse_modifiers();
             if let Some(tab) = self.active_tab_mut() {
-                tab.terminal.mouse_report(kind, term_button, col, row, mods);
+                tab.terminal
+                    .lock()
+                    .unwrap()
+                    .mouse_report(kind, term_button, col, row, mods);
             }
             self.flush_pending();
             return;
@@ -768,12 +786,19 @@ impl RenderHost {
             (MouseButton::Left, true) => {
                 if self.modifiers.control_key()
                     && let Some(tab) = self.active_tab()
-                    && let Some(url) = tab.terminal.hyperlink_at(row, col)
                 {
-                    if let Err(e) = open::that_detached(url) {
-                        warn!("failed to open hyperlink {url:?}: {e}");
+                    let url = tab
+                        .terminal
+                        .lock()
+                        .unwrap()
+                        .hyperlink_at(row, col)
+                        .map(str::to_owned);
+                    if let Some(url) = url {
+                        if let Err(e) = open::that_detached(&url) {
+                            warn!("failed to open hyperlink {url:?}: {e}");
+                        }
+                        return;
                     }
-                    return;
                 }
                 self.click_count = self.next_click_count((col, row));
                 self.last_click_cell = Some((col, row));
@@ -784,29 +809,32 @@ impl RenderHost {
                     _ => SelectionMode::Char,
                 };
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.start_selection(col, row, mode);
+                    tab.terminal.lock().unwrap().start_selection(col, row, mode);
                 }
                 self.left_drag_active = true;
             }
             (MouseButton::Left, false) => {
                 self.left_drag_active = false;
                 if let Some(tab) = self.active_tab_mut() {
-                    if tab.terminal.has_selection() {
-                        tab.terminal.copy_selection(ClipboardKind::Primary);
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    if terminal.has_selection() {
+                        terminal.copy_selection(ClipboardKind::Primary);
                     } else {
-                        tab.terminal.clear_selection();
+                        terminal.clear_selection();
                     }
                 }
             }
             (MouseButton::Right, true) => {
                 if let Some(tab) = self.active_tab_mut() {
-                    if tab.terminal.has_selection() {
-                        tab.terminal.copy_selection(ClipboardKind::Clipboard);
-                        tab.terminal.clear_selection();
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    if terminal.has_selection() {
+                        terminal.copy_selection(ClipboardKind::Clipboard);
+                        terminal.clear_selection();
                     } else {
-                        tab.terminal.reset_viewport();
-                        tab.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                        terminal.reset_viewport();
+                        terminal.paste_from_clipboard(ClipboardKind::Clipboard);
                     }
+                    drop(terminal);
                     self.flush_pending();
                 }
             }
@@ -829,14 +857,14 @@ impl RenderHost {
             (raw_x as i32, -(raw_y as i32))
         };
 
-        if let Some(tab) = self.active_tab()
-            && tab.terminal.mouse_tracking_enabled()
-            && !self.modifiers.shift_key()
-        {
+        let mouse_tracking = self
+            .active_tab()
+            .is_some_and(|tab| tab.terminal.lock().unwrap().mouse_tracking_enabled());
+        if mouse_tracking && !self.modifiers.shift_key() {
             let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
             let mods = self.mouse_modifiers();
             if let Some(tab) = self.active_tab_mut() {
-                let terminal = &mut tab.terminal;
+                let mut terminal = tab.terminal.lock().unwrap();
                 if y_lines < 0 {
                     for _ in 0..y_lines.unsigned_abs() {
                         terminal.mouse_report(
@@ -885,7 +913,7 @@ impl RenderHost {
         }
 
         if let Some(tab) = self.active_tab_mut() {
-            let terminal = &mut tab.terminal;
+            let mut terminal = tab.terminal.lock().unwrap();
             if y_lines < 0 {
                 terminal.scroll_viewport_up(y_lines.unsigned_abs());
             } else if y_lines > 0 {
@@ -903,47 +931,52 @@ impl RenderHost {
         match action {
             Action::ScrollPageUp => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.scroll_viewport_up(tab.terminal.viewport.rows);
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    let rows = terminal.viewport.rows;
+                    terminal.scroll_viewport_up(rows);
                 }
             }
             Action::ScrollPageDown => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal
-                        .scroll_viewport_down(tab.terminal.viewport.rows);
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    let rows = terminal.viewport.rows;
+                    terminal.scroll_viewport_down(rows);
                 }
             }
             Action::Copy => {
-                if let Some(tab) = self.active_tab_mut()
-                    && tab.terminal.has_selection()
-                {
-                    tab.terminal.copy_selection(ClipboardKind::Clipboard);
+                if let Some(tab) = self.active_tab_mut() {
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    if terminal.has_selection() {
+                        terminal.copy_selection(ClipboardKind::Clipboard);
+                    }
                 }
             }
             Action::Paste => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.reset_viewport();
-                    tab.terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    terminal.reset_viewport();
+                    terminal.paste_from_clipboard(ClipboardKind::Clipboard);
                 }
                 self.flush_pending();
             }
             Action::OpenSearch => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.open_search();
+                    tab.terminal.lock().unwrap().open_search();
                 }
             }
             Action::ScrollPrevPrompt => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.scroll_to_prev_prompt();
+                    tab.terminal.lock().unwrap().scroll_to_prev_prompt();
                 }
             }
             Action::ScrollNextPrompt => {
                 if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.scroll_to_next_prompt();
+                    tab.terminal.lock().unwrap().scroll_to_next_prompt();
                 }
             }
             Action::OpenNewWindow => {
                 if let Some(tab) = self.active_tab() {
-                    let cwd = tab.terminal.current_directory.clone();
+                    let cwd = tab.terminal.lock().unwrap().current_directory.clone();
                     let _ = self.proxy.send_event(AppEvent::SpawnNewWindow { cwd });
                 }
             }
@@ -1089,7 +1122,7 @@ impl RenderHost {
                 .font_system
                 .grid_dimensions(usable_width, usable_height);
             for tab in &mut self.tabs {
-                tab.terminal.resize(cols, rows);
+                tab.terminal.lock().unwrap().resize(cols, rows);
                 tab.pty.resize(cols as u16, rows as u16);
             }
         }
@@ -1112,7 +1145,7 @@ impl RenderHost {
             .font_system
             .grid_dimensions(usable_width, usable_height);
         for tab in &mut self.tabs {
-            tab.terminal.resize(cols, rows);
+            tab.terminal.lock().unwrap().resize(cols, rows);
             tab.pty.resize(cols as u16, rows as u16);
         }
     }
@@ -1136,7 +1169,7 @@ impl RenderHost {
         self.next_tab_id += 1;
 
         let cwd = if let Some(tab) = self.active_tab() {
-            tab.terminal.current_directory.clone()
+            tab.terminal.lock().unwrap().current_directory.clone()
         } else {
             Default::default()
         };
@@ -1156,7 +1189,7 @@ impl RenderHost {
         };
 
         let scrollback = if let Some(tab) = self.active_tab() {
-            tab.terminal.active.grid.scrollback_limit
+            tab.terminal.lock().unwrap().active.grid.scrollback_limit
         } else {
             DEFAULT_SCROLLBACK
         };
@@ -1168,10 +1201,12 @@ impl RenderHost {
             self.font_system.cell_width,
         );
         if let Some(tab) = self.active_tab() {
-            terminal.set_default_cursor_style(tab.terminal.cursor_style);
+            terminal.set_default_cursor_style(tab.terminal.lock().unwrap().cursor_style);
         }
 
-        let pty = match Pty::spawn(
+        let terminal_thread = TerminalThread::new();
+
+        let (pty, pty_reader) = match Pty::spawn(
             id,
             cols as u16,
             rows as u16,
@@ -1179,17 +1214,31 @@ impl RenderHost {
             self.font_system.cell_height as u16,
             None,
             cwd,
+            terminal_thread.thread_handle.clone(),
             self.render_thread_handle.clone(),
             self.child_exit_tx.clone(),
         ) {
-            Ok(pty) => pty,
+            Ok(pair) => pair,
             Err(e) => {
                 warn!("failed to spawn new tab: {e}");
                 return;
             }
         };
 
-        self.tabs.push(Tab { id, terminal, pty });
+        let terminal = Arc::new(Mutex::new(terminal));
+        terminal_thread.spawn(
+            format!("terminal-{}", id.0),
+            terminal.clone(),
+            pty_reader,
+            self.render_thread_handle.clone(),
+        );
+
+        self.tabs.push(Tab {
+            id,
+            terminal,
+            pty,
+            _terminal_thread: terminal_thread,
+        });
         self.active_tab_id = id;
 
         if was_single {
@@ -1272,8 +1321,9 @@ impl RenderHost {
         let cfg = crate::config::load_from(path);
 
         for tab in &mut self.tabs {
-            tab.terminal.set_default_cursor_style(cfg.cursor_style);
-            tab.terminal.set_scrollback_limit(cfg.scrollback_lines);
+            let mut terminal = tab.terminal.lock().unwrap();
+            terminal.set_default_cursor_style(cfg.cursor_style);
+            terminal.set_scrollback_limit(cfg.scrollback_lines);
         }
         self.config.keybindings = cfg.keybindings;
         self.config.bell = cfg.bell;
@@ -1336,38 +1386,6 @@ impl RenderHost {
         }
     }
 
-    // -- PTY draining -------------------------------------------------------
-
-    fn drain_all_ptys(&mut self) {
-        let time_slice = Instant::now() + Duration::from_millis(5);
-        let tab_ids: Vec<TabId> = self.tabs.iter().map(|t| t.id).collect();
-        for tab_id in tab_ids {
-            self.read_pty_output(tab_id, time_slice);
-        }
-    }
-
-    fn read_pty_output(
-        &mut self,
-        tab_id: TabId,
-        time_slice: Instant,
-    ) {
-        let Some(tab) = self.tabs.iter_mut().find(|t| t.id == tab_id) else {
-            return;
-        };
-        tab.pty.clear_pending();
-        let mut buf = [0u8; MAX_READ_CHUNK];
-        loop {
-            let read = tab.pty.read(&mut buf);
-            if read == 0 {
-                break;
-            }
-            tab.terminal.process(&buf[..read]);
-            if Instant::now() >= time_slice {
-                break;
-            }
-        }
-    }
-
     // -- Per-frame rendering ------------------------------------------------
 
     fn render_frame(&mut self) {
@@ -1386,38 +1404,71 @@ impl RenderHost {
 
         let synced = self.tabs[active_idx]
             .terminal
+            .lock()
+            .unwrap()
             .is_synchronized_update_active();
         if synced {
             return;
         }
 
-        let tab_infos: Vec<TabInfo> = if self.tab_bar_visible() {
+        // Collect owned tab titles under brief per-tab locks before
+        // borrowing the renderer. Two-pass so the MutexGuards are dropped
+        // before we enter the render call.
+        let tab_titles: Vec<(String, bool)> = if self.tab_bar_visible() {
             self.tabs
                 .iter()
-                .map(|t| TabInfo {
-                    label: t.terminal.current_title.as_deref().unwrap_or("Shell"),
-                    active: t.id == self.active_tab_id,
+                .map(|t| {
+                    let title = t
+                        .terminal
+                        .lock()
+                        .unwrap()
+                        .current_title
+                        .clone()
+                        .unwrap_or_else(|| "Shell".to_owned());
+                    (title, t.id == self.active_tab_id)
                 })
                 .collect()
         } else {
             Vec::new()
         };
-        if let Some(ref mut renderer) = self.renderer {
-            renderer.render(
-                &mut self.font_system,
-                &self.tabs[active_idx].terminal,
-                &tab_infos,
-                self.gutter_popup.as_ref(),
-                self.preedit.as_ref(),
-            );
-        }
+        let tab_infos: Vec<TabInfo> = tab_titles
+            .iter()
+            .map(|(title, active)| TabInfo {
+                label: title,
+                active: *active,
+            })
+            .collect();
+
+        let Some(ref mut renderer) = self.renderer else {
+            return;
+        };
+
+        // Acquire the swapchain image BEFORE locking the terminal. This is
+        // where vsync blocks — keeping the terminal unlocked here lets the
+        // terminal thread continue processing PTY data during the wait.
+        let Some(acquired) = renderer.acquire_frame() else {
+            return;
+        };
+
+        // Lock the active terminal for the duration of vertex building +
+        // Lock the active terminal for vertex building only — the renderer
+        // drops the guard internally before GPU buffer creation / submit.
+        let term = self.tabs[active_idx].terminal.lock().unwrap();
+        renderer.render(
+            acquired,
+            &mut self.font_system,
+            term,
+            &tab_infos,
+            self.gutter_popup.as_ref(),
+            self.preedit.as_ref(),
+        );
     }
 
     fn sync_window_title(&mut self) {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let base = tab.terminal.current_title.as_deref();
+        let base = tab.terminal.lock().unwrap().current_title.clone();
         let want = if self.tabs.len() > 1 {
             let idx = self
                 .tabs
@@ -1428,10 +1479,10 @@ impl RenderHost {
                 "[{}/{}] {}",
                 idx + 1,
                 self.tabs.len(),
-                base.unwrap_or("term41")
+                base.as_deref().unwrap_or("term41")
             ))
         } else {
-            base.map(str::to_owned)
+            base
         };
         if self.applied_title.as_deref() == want.as_deref() {
             return;
@@ -1443,7 +1494,7 @@ impl RenderHost {
 
     fn dispatch_bell(&mut self) {
         if let Some(tab) = self.active_tab_mut()
-            && !tab.terminal.take_bell_pending()
+            && !tab.terminal.lock().unwrap().take_bell_pending()
         {
             return;
         }
@@ -1484,8 +1535,9 @@ impl RenderHost {
         let Some(tab) = self.active_tab() else {
             return (0, 0);
         };
-        let cols = tab.terminal.viewport.cols.saturating_sub(1);
-        let rows = tab.terminal.viewport.rows.saturating_sub(1);
+        let terminal = tab.terminal.lock().unwrap();
+        let cols = terminal.viewport.cols.saturating_sub(1);
+        let rows = terminal.viewport.rows.saturating_sub(1);
         (
             (x / self.font_system.cell_width).min(cols),
             (y / self.font_system.cell_height).min(rows),
@@ -1509,16 +1561,16 @@ impl RenderHost {
             return;
         };
 
-        let bytes = tab.terminal.take_pending_output();
+        let bytes = tab.terminal.lock().unwrap().take_pending_output();
         if !bytes.is_empty() {
             let _ = tab.pty.write(&bytes);
-            tab.terminal.reset_viewport();
+            tab.terminal.lock().unwrap().reset_viewport();
         }
     }
 
     fn forward_mouse_to_app(&self) -> bool {
         if let Some(tab) = self.active_tab() {
-            tab.terminal.mouse_tracking_enabled() && !self.modifiers.shift_key()
+            tab.terminal.lock().unwrap().mouse_tracking_enabled() && !self.modifiers.shift_key()
         } else {
             false
         }
@@ -1601,14 +1653,15 @@ impl RenderHost {
         let Some(tab) = self.active_tab_mut() else {
             return;
         };
-        let Some(prompt_abs) = tab.terminal.find_prompt_for_screen_row(screen_row) else {
+        let mut terminal = tab.terminal.lock().unwrap();
+        let Some(prompt_abs) = terminal.find_prompt_for_screen_row(screen_row) else {
             return;
         };
-        tab.terminal.select_command_at(prompt_abs);
-        let duration_text = tab
-            .terminal
+        terminal.select_command_at(prompt_abs);
+        let duration_text = terminal
             .command_duration_at(prompt_abs)
             .map(format_duration);
+        drop(terminal);
         self.gutter_popup = Some(GutterPopup {
             prompt_abs_row: prompt_abs,
             screen_row,
@@ -1622,7 +1675,7 @@ impl RenderHost {
         if self.gutter_popup.take().is_some()
             && let Some(tab) = self.active_tab_mut()
         {
-            tab.terminal.clear_selection();
+            tab.terminal.lock().unwrap().clear_selection();
         }
     }
 
@@ -1637,41 +1690,42 @@ impl RenderHost {
         let action = GUTTER_MENU_ITEMS[item_idx].action;
         match action {
             GutterMenuAction::Rerun => {
-                if let Some(tab) = self.active_tab_mut()
-                    && let Some(cmd) = tab.terminal.command_text_at(popup.prompt_abs_row)
-                {
-                    let cmd = cmd.trim().to_owned();
-                    tab.terminal.clear_selection();
-                    tab.terminal.reset_viewport();
-                    tab.terminal.paste(&format!("{cmd}\r"));
+                if let Some(tab) = self.active_tab_mut() {
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    if let Some(cmd) = terminal.command_text_at(popup.prompt_abs_row) {
+                        let cmd = cmd.trim().to_owned();
+                        terminal.clear_selection();
+                        terminal.reset_viewport();
+                        terminal.paste(&format!("{cmd}\r"));
+                    }
                 }
                 self.flush_pending();
             }
             GutterMenuAction::CopyCommand => {
                 if let Some(tab) = self.active_tab_mut() {
-                    if let Some(text) = tab.terminal.command_text_at(popup.prompt_abs_row) {
-                        tab.terminal.copy_to_clipboard(text.trim());
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    if let Some(text) = terminal.command_text_at(popup.prompt_abs_row) {
+                        terminal.copy_to_clipboard(text.trim());
                     }
-                    tab.terminal.clear_selection();
+                    terminal.clear_selection();
                 }
             }
             GutterMenuAction::CopyCommandAndOutput => {
                 if let Some(tab) = self.active_tab_mut() {
-                    if let Some(text) = tab
-                        .terminal
-                        .command_and_output_text_at(popup.prompt_abs_row)
-                    {
-                        tab.terminal.copy_to_clipboard(&text);
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    if let Some(text) = terminal.command_and_output_text_at(popup.prompt_abs_row) {
+                        terminal.copy_to_clipboard(&text);
                     }
-                    tab.terminal.clear_selection();
+                    terminal.clear_selection();
                 }
             }
             GutterMenuAction::CopyOutput => {
                 if let Some(tab) = self.active_tab_mut() {
-                    if let Some(text) = tab.terminal.output_text_at(popup.prompt_abs_row) {
-                        tab.terminal.copy_to_clipboard(&text);
+                    let mut terminal = tab.terminal.lock().unwrap();
+                    if let Some(text) = terminal.output_text_at(popup.prompt_abs_row) {
+                        terminal.copy_to_clipboard(&text);
                     }
-                    tab.terminal.clear_selection();
+                    terminal.clear_selection();
                 }
             }
         }

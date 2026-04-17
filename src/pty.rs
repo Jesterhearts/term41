@@ -18,35 +18,67 @@ use portable_pty::native_pty_system;
 
 use crate::TabId;
 
-pub const MAX_BUFFER: usize = 2 * 1024 * 1024;
 pub const MAX_READ_CHUNK: usize = 128 * 1024;
+pub const MAX_BUFFER: usize = MAX_READ_CHUNK * 8;
 
-/// A pseudo-terminal connected to a child shell process.
-///
-/// Wraps `portable-pty` so the same code path handles forkpty on Unix and
-/// ConPTY on Windows. portable-pty exposes a blocking reader, so a worker
-/// thread pumps bytes into a channel and `read` drains it without ever
-/// blocking the render loop.
+/// Read half of a PTY connection. Owns the cueue ring-buffer consumer and the
+/// coalesce flag shared with the pump thread. Lives on the terminal thread so
+/// PTY data can be drained and parsed without touching the render thread.
+pub struct PtyReader {
+    rx: cueue::Reader<u8>,
+    /// Coalesce flag shared with the pty-reader thread. The reader
+    /// only unparks the consumer thread on the false→true transition, so
+    /// a burst of reads produces a single wakeup instead of one per read.
+    /// The consumer clears it at the top of its drain.
+    pending_read: Arc<AtomicBool>,
+}
+
+impl PtyReader {
+    /// Release the coalesce flag so the reader thread is free to unpark us
+    /// again. Call at the top of a drain — if the reader races us during the
+    /// drain, we see its data in the ring this pass, and its wakeup
+    /// re-enters us cleanly next pass.
+    pub fn clear_pending(&self) {
+        self.pending_read.store(false, Ordering::Release);
+    }
+
+    /// Non-blocking read of bytes received from the PTY. Returns 0 when no
+    /// data is currently available.
+    pub fn read(
+        &mut self,
+        buf: &mut [u8],
+    ) -> usize {
+        let data = self
+            .rx
+            .limited_read_chunk(buf.len().min(MAX_READ_CHUNK) as u64);
+        let read_len = data.len();
+        buf[..read_len].copy_from_slice(data);
+        self.rx.commit();
+        read_len
+    }
+}
+
+/// Write half of a PTY connection. Keeps the master fd (for resize), the
+/// child killer (for cleanup), and the writer (for keyboard/paste input).
+/// Lives on the render thread.
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
     child_killer: Box<dyn ChildKiller>,
     writer: Box<dyn Write + Send>,
-    rx: cueue::Reader<u8>,
-    /// Coalesce flag shared with the pty-reader thread. The reader
-    /// only unparks the render thread on the false→true transition, so
-    /// a burst of reads produces a single wakeup instead of one per read.
-    /// The render thread clears it at the top of its drain.
-    pending_read: Arc<AtomicBool>,
 }
 
 impl Pty {
-    /// Spawns a child process in a new PTY with the given grid size. When
-    /// `command` is `Some`, the first element is the program and the rest are
-    /// its arguments; otherwise the user's default shell is launched.
+    /// Spawns a child process in a new PTY with the given grid size. Returns
+    /// the write half (`Pty`) and the read half (`PtyReader`).
     ///
-    /// `render_thread` is set once the render thread starts; the PTY reader
-    /// and child-watcher threads use it to unpark the render thread when
-    /// data arrives or the child exits.
+    /// When `command` is `Some`, the first element is the program and the rest
+    /// are its arguments; otherwise the user's default shell is launched.
+    ///
+    /// `data_thread` is the thread that consumes PTY output (the terminal
+    /// thread). The PTY pump thread unparks it when new data arrives.
+    ///
+    /// `render_thread` is used by the child-watcher thread to unpark the
+    /// render loop when the child process exits.
     pub fn spawn(
         tab_id: TabId,
         cols: u16,
@@ -55,9 +87,10 @@ impl Pty {
         cell_height: u16,
         command: Option<Vec<String>>,
         cwd: Option<std::path::PathBuf>,
+        data_thread: Arc<OnceLock<Thread>>,
         render_thread: Arc<OnceLock<Thread>>,
         child_exit_tx: mpsc::Sender<TabId>,
-    ) -> io::Result<Self> {
+    ) -> io::Result<(Self, PtyReader)> {
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -111,12 +144,15 @@ impl Pty {
         let pending_read = Arc::new(AtomicBool::new(false));
         let pending_read_ = pending_read.clone();
 
-        let render_thread_ = render_thread.clone();
+        // The pump thread unparks the data consumer (terminal thread) when
+        // new bytes arrive.
         thread::Builder::new()
             .name("pty-reader".into())
-            .spawn(move || pump_reader(reader, read_tx, render_thread_, pending_read_))
+            .spawn(move || pump_reader(reader, read_tx, data_thread, pending_read_))
             .map_err(io::Error::other)?;
 
+        // The child watcher unparks the render thread so it can handle the
+        // tab close.
         let child_killer = child.clone_killer();
         thread::Builder::new()
             .name("child-watcher".into())
@@ -129,36 +165,14 @@ impl Pty {
             })
             .map_err(io::Error::other)?;
 
-        Ok(Self {
-            master: pair.master,
-            child_killer,
-            writer,
-            rx,
-            pending_read,
-        })
-    }
-
-    /// Release the coalesce flag so the reader is free to unpark the render
-    /// thread again. Call at the top of a drain — if the reader races us
-    /// during the drain, we see its data in the ring this pass, and its
-    /// wakeup re-enters us cleanly next pass.
-    pub fn clear_pending(&self) {
-        self.pending_read.store(false, Ordering::Release);
-    }
-
-    /// Non-blocking read of bytes received from the PTY. Returns 0 when no
-    /// data is currently available so callers can poll in the render loop.
-    pub fn read(
-        &mut self,
-        buf: &mut [u8],
-    ) -> usize {
-        let data = self
-            .rx
-            .limited_read_chunk(buf.len().min(MAX_READ_CHUNK) as u64);
-        let read_len = data.len();
-        buf[..read_len].copy_from_slice(data);
-        self.rx.commit();
-        read_len
+        Ok((
+            Self {
+                master: pair.master,
+                child_killer,
+                writer,
+            },
+            PtyReader { rx, pending_read },
+        ))
     }
 
     /// Write bytes to the PTY (sends input to the shell).
@@ -193,7 +207,7 @@ impl Drop for Pty {
 fn pump_reader(
     mut reader: Box<dyn Read + Send>,
     mut tx: cueue::Writer<u8>,
-    render_thread: Arc<OnceLock<Thread>>,
+    consumer_thread: Arc<OnceLock<Thread>>,
     pending_read: Arc<AtomicBool>,
 ) {
     let mut buf = [0u8; MAX_READ_CHUNK];
@@ -211,6 +225,11 @@ fn pump_reader(
                             if written >= n {
                                 break;
                             }
+                            if !pending_read.swap(true, Ordering::AcqRel)
+                                && let Some(t) = consumer_thread.get()
+                            {
+                                t.unpark();
+                            }
                             thread::yield_now();
                         }
                         Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
@@ -218,7 +237,7 @@ fn pump_reader(
                     }
                 }
                 if !pending_read.swap(true, Ordering::AcqRel)
-                    && let Some(t) = render_thread.get()
+                    && let Some(t) = consumer_thread.get()
                 {
                     t.unpark();
                 }

@@ -1,6 +1,7 @@
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::sync::MutexGuard;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -636,10 +637,33 @@ impl Renderer {
         );
     }
 
+    /// Acquire the next swapchain image. This is where vsync blocks — call
+    /// it BEFORE locking the terminal so the lock isn't held during the wait.
+    /// Returns `None` on surface errors (reconfigures automatically).
+    pub fn acquire_frame(&mut self) -> Option<(wgpu::SurfaceTexture, wgpu::TextureView)> {
+        let frame = match self.surface.get_current_texture() {
+            wgpu::CurrentSurfaceTexture::Success(frame)
+            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
+            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
+                self.surface.configure(&self.device, &self.surface_config);
+                return None;
+            }
+            other => {
+                error!("surface error: {other:?}");
+                return None;
+            }
+        };
+        let view = frame
+            .texture
+            .create_view(&wgpu::TextureViewDescriptor::default());
+        Some((frame, view))
+    }
+
     pub fn render(
         &mut self,
+        acquired: (wgpu::SurfaceTexture, wgpu::TextureView),
         font_system: &mut FontSystem,
-        terminal: &Terminal,
+        terminal: MutexGuard<'_, Terminal>,
         tabs: &[TabInfo],
         gutter_popup: Option<&GutterPopup>,
         preedit: Option<&crate::renderer::PreeditState>,
@@ -657,7 +681,7 @@ impl Renderer {
         let mut fg_vertices: Vec<FgVertex> = Vec::new();
         let mut fg_indices: Vec<u32> = Vec::new();
 
-        let cursor_state = self.cursor_state(terminal);
+        let cursor_state = self.cursor_state(&terminal);
 
         // Pre-compute the popup's pixel bounds so we can clip terminal
         // text that would otherwise bleed through the opaque panel.
@@ -962,7 +986,7 @@ impl Renderer {
         // care about cell columns underneath it).
         if gutter_px > 0.0 {
             render_gutter_markers(
-                terminal,
+                &terminal,
                 gutter_px,
                 cell_h,
                 tab_bar_h,
@@ -987,7 +1011,7 @@ impl Renderer {
 
         self.render_search_bar(
             font_system,
-            terminal,
+            &terminal,
             tab_bar_h,
             &mut bg_vertices,
             &mut bg_indices,
@@ -1021,7 +1045,7 @@ impl Renderer {
         {
             self.render_preedit(
                 font_system,
-                terminal,
+                &terminal,
                 preedit,
                 gutter_px,
                 cell_w,
@@ -1105,22 +1129,12 @@ impl Renderer {
             }
         }
 
-        // ---- Acquire surface texture ----
-        let frame = match self.surface.get_current_texture() {
-            wgpu::CurrentSurfaceTexture::Success(frame)
-            | wgpu::CurrentSurfaceTexture::Suboptimal(frame) => frame,
-            wgpu::CurrentSurfaceTexture::Outdated | wgpu::CurrentSurfaceTexture::Lost => {
-                self.surface.configure(&self.device, &self.surface_config);
-                return;
-            }
-            other => {
-                error!("surface error: {other:?}");
-                return;
-            }
-        };
-        let view = frame
-            .texture
-            .create_view(&wgpu::TextureViewDescriptor::default());
+        // All terminal data has been read into vertex/index buffers above.
+        // Release the lock so the terminal thread can continue processing
+        // PTY data while we do GPU work.
+        drop(terminal);
+
+        let (frame, view) = acquired;
 
         let mut encoder = self
             .device
