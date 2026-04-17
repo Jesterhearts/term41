@@ -1,10 +1,13 @@
+use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::MutexGuard;
+use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use atomic_write_file::AtomicWriteFile;
 use palette::Srgb;
 use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
@@ -135,11 +138,6 @@ pub struct Renderer {
     /// the current cell metrics); when `false` the gutter is fully
     /// collapsed and every caller gets `0`.
     gutter_enabled: bool,
-
-    /// Cached compiled pipelines. Persisted to disk on drop so subsequent
-    /// launches skip shader recompilation. Only effective on backends that
-    /// support it (Vulkan); a no-op on GL.
-    pipeline_cache: wgpu::PipelineCache,
 }
 
 /// Half-period of the cursor blink. xterm uses 530ms by default; 500 lands
@@ -496,6 +494,30 @@ impl Renderer {
             cache: Some(&pipeline_cache),
         });
 
+        thread::spawn(move || {
+            if let Some(data) = pipeline_cache.get_data()
+                && let Some(path) = pipeline_cache_path()
+            {
+                if let Some(parent) = path.parent() {
+                    let _ = std::fs::create_dir_all(parent);
+                }
+
+                let Ok(mut cache) = AtomicWriteFile::options().open(path) else {
+                    warn!("failed to open pipeline cache for writing");
+                    return;
+                };
+
+                if let Err(e) = cache.write_all(&data) {
+                    warn!("failed to write pipeline cache: {e}");
+                }
+                if let Err(e) = cache.commit() {
+                    warn!("failed to commit pipeline cache: {e}");
+                }
+
+                info!("pipeline cache saved ({} bytes)", data.len());
+            }
+        });
+
         let background = background_image.and_then(|p| {
             Background::load(
                 &device,
@@ -526,7 +548,6 @@ impl Renderer {
             started: Instant::now(),
             bell_started: None,
             gutter_enabled,
-            pipeline_cache,
         };
 
         renderer.update_screen_size(size);
@@ -2130,21 +2151,6 @@ impl Renderer {
             row: terminal.active.cursor.row,
             col: terminal.active.cursor.col,
             shape: style.shape,
-        }
-    }
-}
-
-impl Drop for Renderer {
-    fn drop(&mut self) {
-        if let Some(data) = self.pipeline_cache.get_data()
-            && let Some(path) = pipeline_cache_path()
-        {
-            if let Some(parent) = path.parent() {
-                let _ = std::fs::create_dir_all(parent);
-            }
-            if let Err(e) = std::fs::write(&path, data) {
-                warn!("failed to save pipeline cache: {e}");
-            }
         }
     }
 }
