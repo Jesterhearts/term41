@@ -256,7 +256,9 @@ impl FontSystem {
         supersample: i32,
     ) {
         load_and_install_fonts(fonts_config);
+        let scale = self.font_size / self.base_font_size;
         self.base_font_size = font_size;
+        self.font_size = font_size * scale;
         self.supersample = supersample;
         self.plan_cache.clear();
         self.recompute_metrics();

@@ -19,7 +19,7 @@ use crate::renderer::shelf::ShelfPacker;
 
 pub const ATLAS_SIZE: u32 = 1024;
 const CACHE_CAPACITY: usize = 2048;
-const PADDING: u32 = 2;
+const PADDING: u32 = 4;
 const X_OFFSET: u32 = PADDING / 2;
 const Y_OFFSET: u32 = PADDING / 2;
 
