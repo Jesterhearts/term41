@@ -6,8 +6,6 @@ use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
-use crate::color::default_bg;
-use crate::color::default_fg;
 use crate::grid::Cursor;
 use crate::grid::Grid;
 use crate::grid::Viewport;
@@ -139,8 +137,8 @@ impl Screen {
                 default_bg: bg,
             },
             cursor: Cursor::default(),
-            fg: default_fg(),
-            bg: default_bg(),
+            fg,
+            bg,
             attrs: CellAttrs::default(),
             underline: UnderlineStyle::None,
             underline_color: None,
