@@ -39,6 +39,7 @@ use crate::keybindings::Action;
 use crate::pty::Pty;
 use crate::renderer::r#impl::Renderer;
 use crate::renderer::r#impl::TabInfo;
+pub use crate::renderer::r#impl::compute_gutter_width;
 use crate::selection::SelectionMode;
 use crate::terminal::KittyFlags;
 use crate::terminal::KittyKeys;
@@ -518,7 +519,9 @@ impl RenderHost {
             }
         }
 
-        if self.modifiers.control_key() {
+        let mods = self.modifiers;
+
+        if mods.control_key() {
             let byte = match &key {
                 Key::Character(c) => ctrl_byte(c),
                 Key::Named(NamedKey::Space) => Some(0x00),
@@ -528,15 +531,29 @@ impl RenderHost {
             if let Some(byte) = byte {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.terminal.lock().unwrap().reset_viewport();
-                    let _ = tab.pty.write(&[byte]);
+                    // Alt+Ctrl+key: prefix the control byte with ESC.
+                    if mods.alt_key() {
+                        let _ = tab.pty.write(&[0x1b, byte]);
+                    } else {
+                        let _ = tab.pty.write(&[byte]);
+                    }
                 }
                 return;
             }
         }
 
         let bytes = match &key {
-            Key::Character(c) => Some(c.as_bytes().to_vec()),
-            Key::Named(named) => named_key_to_bytes(*named),
+            Key::Character(c) => {
+                if mods.alt_key() {
+                    // Alt+key sends ESC prefix + character bytes.
+                    let mut v = vec![0x1b];
+                    v.extend_from_slice(c.as_bytes());
+                    Some(v)
+                } else {
+                    Some(c.as_bytes().to_vec())
+                }
+            }
+            Key::Named(named) => legacy_encode_named(*named, mods),
             _ => None,
         };
 
@@ -1949,24 +1966,125 @@ fn kitty_encode_named(
     None
 }
 
-fn named_key_to_bytes(key: NamedKey) -> Option<Vec<u8>> {
-    match key {
-        NamedKey::Enter => Some(b"\r".to_vec()),
-        NamedKey::Backspace => Some(b"\x7f".to_vec()),
-        NamedKey::Tab => Some(b"\t".to_vec()),
-        NamedKey::Escape => Some(b"\x1b".to_vec()),
-        NamedKey::ArrowUp => Some(b"\x1b[A".to_vec()),
-        NamedKey::ArrowDown => Some(b"\x1b[B".to_vec()),
-        NamedKey::ArrowRight => Some(b"\x1b[C".to_vec()),
-        NamedKey::ArrowLeft => Some(b"\x1b[D".to_vec()),
-        NamedKey::Home => Some(b"\x1b[H".to_vec()),
-        NamedKey::End => Some(b"\x1b[F".to_vec()),
-        NamedKey::Delete => Some(b"\x1b[3~".to_vec()),
-        NamedKey::PageUp => Some(b"\x1b[5~".to_vec()),
-        NamedKey::PageDown => Some(b"\x1b[6~".to_vec()),
-        NamedKey::Space => Some(b" ".to_vec()),
-        _ => None,
+/// Encode a named key for legacy (non-Kitty) mode, using xterm-style
+/// modifier encoding. Plain keys use standard VT/xterm sequences;
+/// modified keys use the `CSI 1;mod X` (arrows/Home/End) or
+/// `CSI code;mod ~` (F-keys/Ins/Del/PgUp/PgDn) format where
+/// mod = 1 + Shift(1) + Alt(2) + Ctrl(4).
+fn legacy_encode_named(
+    key: NamedKey,
+    mods: ModifiersState,
+) -> Option<Vec<u8>> {
+    let mod_param = legacy_modifier_param(mods);
+
+    // Simple keys that don't take modifier parameters.
+    if mod_param == 0 {
+        let plain = match key {
+            NamedKey::Enter => Some(&b"\r"[..]),
+            NamedKey::Backspace => Some(&b"\x7f"[..]),
+            NamedKey::Tab => Some(&b"\t"[..]),
+            NamedKey::Escape => Some(&b"\x1b"[..]),
+            NamedKey::Space => Some(&b" "[..]),
+            _ => None,
+        };
+        if let Some(bytes) = plain {
+            return Some(bytes.to_vec());
+        }
     }
+
+    // Shift+Tab → CSI Z (backtab).
+    if key == NamedKey::Tab && mods.shift_key() {
+        return Some(b"\x1b[Z".to_vec());
+    }
+
+    // Arrow-style keys: CSI [1;mod] X
+    let arrow_final = match key {
+        NamedKey::ArrowUp => Some('A'),
+        NamedKey::ArrowDown => Some('B'),
+        NamedKey::ArrowRight => Some('C'),
+        NamedKey::ArrowLeft => Some('D'),
+        NamedKey::Home => Some('H'),
+        NamedKey::End => Some('F'),
+        _ => None,
+    };
+    if let Some(ch) = arrow_final {
+        return if mod_param > 0 {
+            Some(format!("\x1b[1;{mod_param}{ch}").into_bytes())
+        } else {
+            Some(format!("\x1b[{ch}").into_bytes())
+        };
+    }
+
+    // Tilde-style keys: CSI code [;mod] ~
+    let tilde_code = match key {
+        NamedKey::Insert => Some(2),
+        NamedKey::Delete => Some(3),
+        NamedKey::PageUp => Some(5),
+        NamedKey::PageDown => Some(6),
+        _ => None,
+    };
+    if let Some(code) = tilde_code {
+        return if mod_param > 0 {
+            Some(format!("\x1b[{code};{mod_param}~").into_bytes())
+        } else {
+            Some(format!("\x1b[{code}~").into_bytes())
+        };
+    }
+
+    // F1-F4 use SS3 unmodified, CSI 1;mod P/Q/R/S with modifiers.
+    let f1_4_final = match key {
+        NamedKey::F1 => Some('P'),
+        NamedKey::F2 => Some('Q'),
+        NamedKey::F3 => Some('R'),
+        NamedKey::F4 => Some('S'),
+        _ => None,
+    };
+    if let Some(ch) = f1_4_final {
+        return if mod_param > 0 {
+            Some(format!("\x1b[1;{mod_param}{ch}").into_bytes())
+        } else {
+            Some(format!("\x1bO{ch}").into_bytes())
+        };
+    }
+
+    // F5-F12 use tilde-style: CSI code [;mod] ~
+    let fkey_code = match key {
+        NamedKey::F5 => Some(15),
+        NamedKey::F6 => Some(17),
+        NamedKey::F7 => Some(18),
+        NamedKey::F8 => Some(19),
+        NamedKey::F9 => Some(20),
+        NamedKey::F10 => Some(21),
+        NamedKey::F11 => Some(23),
+        NamedKey::F12 => Some(24),
+        _ => None,
+    };
+    if let Some(code) = fkey_code {
+        return if mod_param > 0 {
+            Some(format!("\x1b[{code};{mod_param}~").into_bytes())
+        } else {
+            Some(format!("\x1b[{code}~").into_bytes())
+        };
+    }
+
+    None
+}
+
+/// Compute the xterm modifier parameter: 1 + (shift | alt | ctrl).
+/// Returns 0 when no modifiers are held, meaning the plain (unmodified)
+/// sequence should be used.
+fn legacy_modifier_param(mods: ModifiersState) -> u8 {
+    let mut bits: u8 = 0;
+    if mods.shift_key() {
+        bits |= 1;
+    }
+    if mods.alt_key() {
+        bits |= 2;
+    }
+    if mods.control_key() {
+        bits |= 4;
+    }
+    if bits == 0 { 0 } else { bits + 1 }
 }
 
 /// Directory where `PasteAsBackground` persists images.
