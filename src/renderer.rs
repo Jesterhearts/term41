@@ -1019,30 +1019,30 @@ impl RenderHost {
 
         // Try raw clipboard bytes first — preserves GIF animation that
         // arboard's decoded-RGBA path would flatten to a single frame.
-        if let Some(bytes) = crate::clipboard::get_raw_image_bytes() {
-            if let Some(kind) = infer::get(&bytes) {
-                let ext = kind.extension();
-                let path = dir.join(format!("pasted_background.{ext}"));
-                clear_pasted_backgrounds();
-                if let Err(e) = std::fs::write(&path, &bytes) {
-                    warn!(
-                        "paste-as-background: failed to write {}: {e}",
-                        path.display()
-                    );
-                    self.fire_ui_bell();
-                    return;
-                }
-                info!(
-                    "background: pasted {} saved to {} ({} bytes)",
-                    kind.mime_type(),
-                    path.display(),
-                    bytes.len()
+        if let Some(bytes) = crate::clipboard::get_raw_image_bytes()
+            && let Some(kind) = infer::get(&bytes)
+        {
+            let ext = kind.extension();
+            let path = dir.join(format!("pasted_background.{ext}"));
+            clear_pasted_backgrounds();
+            if let Err(e) = std::fs::write(&path, &bytes) {
+                warn!(
+                    "paste-as-background: failed to write {}: {e}",
+                    path.display()
                 );
-                if let Some(renderer) = self.renderer.as_mut() {
-                    renderer.set_background(Some(&path), self.config.background_opacity);
-                }
+                self.fire_ui_bell();
                 return;
             }
+            info!(
+                "background: pasted {} saved to {} ({} bytes)",
+                kind.mime_type(),
+                path.display(),
+                bytes.len()
+            );
+            if let Some(renderer) = self.renderer.as_mut() {
+                renderer.set_background(Some(&path), self.config.background_opacity);
+            }
+            return;
         }
 
         // Fallback: arboard decoded RGBA → PNG. Handles cases where the
