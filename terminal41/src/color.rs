@@ -171,7 +171,8 @@ pub(super) fn apply_sgr(
                 *underline = UnderlineStyle::from_sgr(sub);
             }
             // SGR 5/6 = blink on (slow/rapid treated alike), SGR 25 = blink off.
-            5 | 6 => attrs.insert(CellAttrs::BLINK),
+            5 => attrs.insert(CellAttrs::BLINK),
+            6 => attrs.insert(CellAttrs::RAPID_BLINK),
             7 => attrs.insert(CellAttrs::REVERSE),
             8 => attrs.insert(CellAttrs::HIDDEN),
             9 => attrs.insert(CellAttrs::STRIKETHROUGH),
@@ -180,7 +181,7 @@ pub(super) fn apply_sgr(
             22 => attrs.remove(CellAttrs::BOLD | CellAttrs::DIM),
             23 => attrs.remove(CellAttrs::ITALIC),
             24 => *underline = UnderlineStyle::None,
-            25 => attrs.remove(CellAttrs::BLINK),
+            25 => attrs.remove(CellAttrs::BLINK | CellAttrs::RAPID_BLINK),
             27 => attrs.remove(CellAttrs::REVERSE),
             28 => attrs.remove(CellAttrs::HIDDEN),
             29 => attrs.remove(CellAttrs::STRIKETHROUGH),

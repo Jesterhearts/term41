@@ -1092,6 +1092,7 @@ impl Renderer {
             // are still visible. The bg_animated path keeps the render thread
             // running at 125 fps, so no extra wake-up is needed.
             let blink_off = (self.started.elapsed().as_millis() / 500) & 1 == 1;
+            let rapid_blink_off = (self.started.elapsed().as_millis() / 250) & 1 == 1;
 
             for sg in &shaped {
                 // Double-wide rows only use the left half of the columns.
@@ -1137,6 +1138,10 @@ impl Renderer {
                 // Blink off-phase: suppress the glyph quad but keep the bg
                 // quad already emitted so selection/cursor overlays remain.
                 if cell_attrs.contains(CellAttrs::BLINK) && blink_off {
+                    continue;
+                }
+
+                if cell_attrs.contains(CellAttrs::RAPID_BLINK) && rapid_blink_off {
                     continue;
                 }
 

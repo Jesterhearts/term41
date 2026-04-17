@@ -314,11 +314,12 @@ impl Row {
                     }
                     1 => self.attrs[c] |= CellAttrs::BOLD,
                     4 => self.underline[c] = UnderlineStyle::Single,
-                    5 | 6 => self.attrs[c] |= CellAttrs::BLINK,
+                    5 => self.attrs[c] |= CellAttrs::BLINK,
+                    6 => self.attrs[c] |= CellAttrs::RAPID_BLINK,
                     7 => self.attrs[c] |= CellAttrs::REVERSE,
                     22 => self.attrs[c] &= !CellAttrs::BOLD,
                     24 => self.underline[c] = UnderlineStyle::None,
-                    25 => self.attrs[c] &= !CellAttrs::BLINK,
+                    25 => self.attrs[c] &= !(CellAttrs::BLINK | CellAttrs::RAPID_BLINK),
                     27 => self.attrs[c] &= !CellAttrs::REVERSE,
                     _ => {}
                 }
@@ -342,14 +343,16 @@ impl Row {
         let mut flags = CellAttrs::empty();
         let mut toggle_ul = false;
         if sgr_params.is_empty() || sgr_params.contains(&0) {
-            flags |= CellAttrs::BOLD | CellAttrs::REVERSE | CellAttrs::BLINK;
+            flags |=
+                CellAttrs::BOLD | CellAttrs::REVERSE | CellAttrs::BLINK | CellAttrs::RAPID_BLINK;
             toggle_ul = true;
         }
         for &p in sgr_params {
             match p {
                 1 => flags |= CellAttrs::BOLD,
                 4 => toggle_ul = true,
-                5 | 6 => flags |= CellAttrs::BLINK,
+                5 => flags |= CellAttrs::BLINK,
+                6 => flags |= CellAttrs::RAPID_BLINK,
                 7 => flags |= CellAttrs::REVERSE,
                 _ => {}
             }

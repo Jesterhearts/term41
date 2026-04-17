@@ -4,15 +4,16 @@ bitflags::bitflags! {
     /// inflating memory or breaking the memset-style fills in
     /// `put_ascii_run`.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
-    pub struct CellAttrs: u8 {
-        const BOLD          = 0b0000_0001;
-        const ITALIC        = 0b0000_0010;
-        const REVERSE       = 0b0000_0100;
-        const DIM           = 0b0000_1000;
-        const STRIKETHROUGH = 0b0001_0000;
-        const OVERLINE      = 0b0010_0000;
-        const HIDDEN        = 0b0100_0000;
-        const BLINK         = 0b1000_0000;
+    pub struct CellAttrs: u16 {
+        const BOLD          = 0b0000_0000_0001;
+        const ITALIC        = 0b0000_0000_0010;
+        const REVERSE       = 0b0000_0000_0100;
+        const DIM           = 0b0000_0000_1000;
+        const STRIKETHROUGH = 0b0000_0001_0000;
+        const OVERLINE      = 0b0000_0010_0000;
+        const HIDDEN        = 0b0000_0100_0000;
+        const BLINK         = 0b0000_1000_0000;
+        const RAPID_BLINK   = 0b0001_0000_0000;
     }
 }
 
