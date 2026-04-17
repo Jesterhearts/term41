@@ -8,6 +8,8 @@ use std::time::Duration;
 use std::time::Instant;
 
 use atomic_write_file::AtomicWriteFile;
+use font41::FontSystem;
+use font41::attrs::CellAttrs;
 use palette::Srgb;
 use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
@@ -16,7 +18,6 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::config::VSync;
-use crate::font::FontSystem;
 use crate::renderer::GUTTER_MENU_ITEMS;
 use crate::renderer::GutterPopup;
 use crate::renderer::POPUP_WIDTH_CELLS;
@@ -797,7 +798,7 @@ impl Renderer {
                 // glyph paints over any pixels the line would otherwise eat.
                 let has_link = grid_row.links[col as usize].is_some();
                 let has_attr_underline =
-                    grid_row.attrs[col as usize].contains(crate::terminal::CellAttrs::UNDERLINE);
+                    grid_row.attrs[col as usize].contains(CellAttrs::UNDERLINE);
                 if has_link || has_attr_underline {
                     let underline_color = pack_color(&grid_row.fg[col as usize], 255);
                     let thickness = (cell_h * 0.06).max(1.0);
@@ -869,8 +870,8 @@ impl Renderer {
                 }
 
                 let cell_attrs = grid_row.attrs[sg.col as usize];
-                let wants_bold = cell_attrs.contains(crate::terminal::CellAttrs::BOLD);
-                let wants_italic = cell_attrs.contains(crate::terminal::CellAttrs::ITALIC);
+                let wants_bold = cell_attrs.contains(CellAttrs::BOLD);
+                let wants_italic = cell_attrs.contains(CellAttrs::ITALIC);
                 // Synth flags: true when the cell asks for a style the face
                 // the shaper actually used doesn't natively cover. The atlas
                 // only acts on `synth_bold` for colour fonts; italic
@@ -1440,7 +1441,7 @@ impl Renderer {
                     smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
                 })
                 .collect();
-            let attrs = vec![crate::terminal::CellAttrs::default(); cells.len()];
+            let attrs = vec![CellAttrs::default(); cells.len()];
             let shaped = font_system.shape_row(&cells, &attrs);
 
             for sg in &shaped {
@@ -1617,7 +1618,7 @@ impl Renderer {
                 smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
             })
             .collect();
-        let attrs = vec![crate::terminal::CellAttrs::default(); cells.len()];
+        let attrs = vec![CellAttrs::default(); cells.len()];
         let shaped = font_system.shape_row(&cells, &attrs);
 
         let label_fg = pack_color(&palette::Srgb::new(220, 220, 220), 255);
@@ -1845,7 +1846,7 @@ impl Renderer {
                 smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
             })
             .collect();
-        let attrs = vec![crate::terminal::CellAttrs::default(); cells.len()];
+        let attrs = vec![CellAttrs::default(); cells.len()];
         let shaped = font_system.shape_row(&cells, &attrs);
 
         for sg in &shaped {
@@ -2063,7 +2064,7 @@ impl Renderer {
                 smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
             })
             .collect();
-        let attrs = vec![crate::terminal::CellAttrs::default(); cells.len()];
+        let attrs = vec![CellAttrs::default(); cells.len()];
         let shaped = font_system.shape_row(&cells, &attrs);
 
         let glyph_fg = pack_color(&palette::Srgb::new(235, 235, 245), 255);

@@ -1,4 +1,3 @@
-mod attrs;
 mod color;
 mod cursor;
 mod grid;
@@ -25,7 +24,6 @@ use std::time::Instant;
 
 use vtepp::Action;
 
-pub use self::attrs::CellAttrs;
 pub use self::color::default_bg;
 pub use self::color::default_fg;
 pub use self::cursor::CursorShape;

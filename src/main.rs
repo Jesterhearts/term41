@@ -3,7 +3,6 @@
 
 mod clipboard;
 mod config;
-mod font;
 mod image;
 mod keybindings;
 mod pty;
@@ -24,7 +23,7 @@ use std::thread::Thread;
 use std::time::Duration;
 
 use config::Config;
-use font::FontSystem;
+use font41::FontSystem;
 use pty::Pty;
 use renderer::RenderHost;
 use terminal::MouseButton as TermMouseButton;

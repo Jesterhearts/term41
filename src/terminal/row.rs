@@ -1,9 +1,9 @@
 use std::ops::RangeBounds;
 
+use font41::attrs::CellAttrs;
 use palette::Srgb;
 use smol_str::SmolStr;
 
-use crate::terminal::attrs::CellAttrs;
 use crate::terminal::color::default_bg;
 use crate::terminal::color::default_fg;
 use crate::terminal::hyperlink::HyperlinkId;

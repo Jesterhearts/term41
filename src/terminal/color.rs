@@ -1,7 +1,6 @@
+use font41::attrs::CellAttrs;
 use palette::Srgb;
 use vtepp::Params;
-
-use crate::terminal::attrs::CellAttrs;
 
 /// First palette index of the 6×6×6 RGB color cube in the 256-color palette.
 const CUBE_PALETTE_START: u8 = 16;

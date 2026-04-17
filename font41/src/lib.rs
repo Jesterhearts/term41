@@ -1,3 +1,6 @@
+#![allow(clippy::too_many_arguments)]
+
+pub mod attrs;
 mod bitmap;
 mod colr;
 mod legacy;
@@ -29,7 +32,10 @@ use read_fonts::tables::loca::Loca;
 use read_fonts::types::GlyphId;
 use smol_str::SmolStr;
 
-use crate::terminal::CellAttrs;
+use crate::attrs::CellAttrs;
+
+#[macro_use]
+extern crate log;
 
 /// The embedded Fairfax HD font (ultimate fallback).
 static FAIRFAX_HD: &[u8] = include_bytes!("../resources/fonts/FairfaxHD.ttf");

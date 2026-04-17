@@ -15,6 +15,7 @@ use std::thread::Thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use font41::FontSystem;
 use winit::event::MouseButton;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
@@ -34,7 +35,6 @@ use crate::clipboard::ClipboardKind;
 use crate::config::BellMode;
 use crate::config::Config;
 use crate::config::DEFAULT_SCROLLBACK;
-use crate::font::FontSystem;
 use crate::keybindings::Action;
 use crate::pty::Pty;
 use crate::renderer::r#impl::Renderer;

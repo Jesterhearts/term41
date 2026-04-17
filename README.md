@@ -35,17 +35,17 @@ write my own, with the features I prefer.
 - [Kitty keyboard protocol](https://sw.kovidgoyal.net/kitty/keyboard-protocol/)
   with the `disambiguate-escape-codes` flag, so TUIs can distinguish
   combos like `Ctrl+Enter` and `Ctrl+I` from their legacy aliases
-- DECSCUSR cursor styles (block / underline / beam, blinking or steady)
-  with config defaults
-- Focus reporting (DECSET 1004) so apps can react when the window
-  gains/loses focus
+- DECSCUSR cursor styles (block / underline / beam, blinking or steady) with
+  config defaults
+- Focus reporting (DECSET 1004) so apps can react when the window gains/loses
+  focus
 - OSC 0 / OSC 2 window title forwarded to the OS
-- Configurable bell handling (`off`, `visual` flash, or `urgent`
-  attention hint to the compositor)
+- Configurable bell handling (`off`, `visual` flash, or `urgent` attention hint
+  to the compositor)
 - Configurable keybindings via `config.toml`
-- Live config reload — the watcher picks up edits in place; cursor,
-  scrollback, and keybinding changes apply instantly (font / opacity
-  changes still need a restart and log a notice)
+- Live config reload — the watcher picks up edits in place; cursor, scrollback,
+  and keybinding changes apply instantly (font / opacity changes still need a
+  restart and log a notice)
 - Sixel image rendering
 - Configurable window opacity, fonts, font size, and scrollback size
 
@@ -138,9 +138,9 @@ keybindings = [
 ]
 ```
 
-The config file is watched for changes; cursor style, scrollback size,
-and keybindings re-apply on save without restarting. Font and opacity
-changes are noted in the log but require a restart to take effect.
+The config file is watched for changes; cursor style, scrollback size, and
+keybindings re-apply on save without restarting. Font and opacity changes are
+noted in the log but require a restart to take effect.
 
 ### Key bindings
 
@@ -163,7 +163,7 @@ changes are noted in the log but require a restart to take effect.
 term41 is released into the public domain under [The Unlicense](LICENSE).
 
 The embedded Fairfax HD font is distributed under the SIL Open Font License; see
-[`resources/fonts/FairfaxHD-OFL.txt`](resources/fonts/FairfaxHD-OFL.txt).
+[`resources/fonts/FairfaxHD-OFL.txt`](font41/resources/fonts/FairfaxHD-OFL.txt).
 
 [`wgpu`]: https://github.com/gfx-rs/wgpu
 [`harfrust`]: https://crates.io/crates/harfrust

@@ -11,9 +11,9 @@ use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
 
 use evictor::Lru;
+use font41::FontSystem;
+use font41::RasterizedGlyph;
 
-use crate::font::FontSystem;
-use crate::font::RasterizedGlyph;
 use crate::renderer::shelf::Allocation;
 use crate::renderer::shelf::ShelfPacker;
 

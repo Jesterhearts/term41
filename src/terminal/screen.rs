@@ -1,9 +1,9 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
+use font41::attrs::CellAttrs;
 use palette::Srgb;
 
-use crate::terminal::attrs::CellAttrs;
 use crate::terminal::color::default_bg;
 use crate::terminal::color::default_fg;
 use crate::terminal::grid::Cursor;

@@ -6,8 +6,16 @@ license = "Unlicense"
 
 [workspace]
 members = [
+  "font41",
   "vtepp",
 ]
+
+[workspace.dependencies]
+bitflags = "2.11.1"
+flate2   = "1.1.9"
+log      = "0.4.29"
+png      = "0.18.1"
+smol_str = "0.3.6"
 
 [[bench]]
 harness = false
@@ -20,7 +28,7 @@ arboard              = { version = "3.6.1", default-features = false, features =
 atoi                 = "2.0.0"
 atomic-write-file    = "0.3.0"
 base64               = "0.22.1"
-bitflags             = "2.11.0"
+bitflags             = { workspace = true }
 bytemuck             = { version = "1.25.0", features = [
   "derive",
   "extern_crate_alloc"
@@ -30,30 +38,25 @@ dirs                 = "6.0.0"
 env_logger           = "0.11.10"
 evictor              = "0.7.2"
 ffmpeg-next          = { version = "8.1.0", optional = true }
-flate2               = "1.1.9"
+flate2               = { workspace = true }
+font41               = { path = "font41" }
 fontdb               = "0.23.0"
 harfrust             = "0.6.0"
 infer                = { version = "0.19.0", default-features = false }
 libc                 = "0.2.184"
-log                  = "0.4.29"
+log                  = { workspace = true }
 notify               = "8.2.0"
 open                 = "5.3.3"
 palette              = { version = "0.7.6", default-features = false, features = [
   "std"
 ] }
 percent-encoding     = "2.3.2"
-png                  = "0.18.1"
+png                  = { workspace = true }
 pollster             = "0.4.0"
 portable-pty         = "0.9.0"
-raqote               = { version = "0.8.5", default-features = false }
-read-fonts           = "0.39.1"
-# OpenType SVG emoji are essentially static vector artwork — no <text> runs, no
-# <image> tags, no filesystem font lookup. Disable resvg's default features and
-# rasterize just the paint tree via tiny-skia.
-resvg                = { version = "0.47.0", default-features = false }
 serde                = { version = "1.0.228", features = ["derive"] }
 shellexpand          = "3.1.2"
-smol_str             = "0.3.6"
+smol_str             = { workspace = true }
 toml                 = "1.1.2"
 unicode-segmentation = "1.13.2"
 unicode-width        = "0.2.2"

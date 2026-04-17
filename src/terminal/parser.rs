@@ -2,13 +2,13 @@ use std::io::Write;
 use std::sync::LazyLock;
 use std::time::Instant;
 
+use font41::attrs::CellAttrs;
 use smol_str::SmolStr;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use vtepp::Params;
 
 use crate::terminal::TerminalModes;
-use crate::terminal::attrs::CellAttrs;
 use crate::terminal::color;
 use crate::terminal::color::apply_sgr;
 use crate::terminal::cursor::CursorStyle;
