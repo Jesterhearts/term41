@@ -376,6 +376,113 @@ pub(super) fn put_char(
     screen.cursor.col += width as u32;
 }
 
+/// Process a [`vtepp::Action::PrintText`] run: a validated UTF-8 `&str`
+/// that may contain a mix of printable ASCII (0x20..=0x7E) and multi-byte
+/// UTF-8 codepoints.
+///
+/// The fast path splits the str into ASCII sub-runs (delegated to
+/// [`put_ascii_run`]) and individual UTF-8 codepoints (delegated to
+/// [`put_char`]).  The slow paths for single-shift and DEC Special Graphics
+/// mirror the equivalent handling in [`put_ascii_run`].
+pub(super) fn put_text_run(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    run: &str,
+    insert_mode: bool,
+) {
+    if run.is_empty() {
+        return;
+    }
+
+    // Single-shift (SS2/SS3): the first character uses G2 or G3 for one
+    // character only.  PrintText always starts with a multi-byte UTF-8 lead,
+    // which is outside the DEC drawing range (0x60..=0x7E), so no drawing
+    // translation applies; just grab the first char and forward it.
+    let mut chars = run.chars();
+    let run = if screen.single_shift.take().is_some() {
+        let ch = chars.next().unwrap();
+        put_char(
+            screen,
+            viewport,
+            SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4])),
+            insert_mode,
+        );
+        chars.as_str()
+    } else {
+        run
+    };
+    if run.is_empty() {
+        return;
+    }
+
+    let bytes = run.as_bytes();
+
+    // DEC Special Graphics: bytes 0x60..=0x7E need per-byte translation.
+    // Fall back to per-codepoint dispatch for the whole run.
+    if screen.is_drawing_active() {
+        for ch in run.chars() {
+            let cp = ch as u32;
+            if (0x20..=0x7E).contains(&cp) {
+                let b = cp as u8;
+                let s = if (0x60..=0x7E).contains(&b) {
+                    SmolStr::new_inline(translate_drawing_char(b))
+                } else {
+                    ASCII_CELLS[(b - 0x20) as usize].clone()
+                };
+                put_char(screen, viewport, s, insert_mode);
+            } else {
+                put_char(
+                    screen,
+                    viewport,
+                    SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4])),
+                    insert_mode,
+                );
+            }
+        }
+        return;
+    }
+
+    // Fast path: dispatch ASCII sub-runs to put_ascii_run and UTF-8
+    // codepoints to put_char.  The input is validated UTF-8 so we can
+    // derive byte lengths directly from lead bytes.
+    let mut i = 0;
+    while i < bytes.len() {
+        // ASCII sub-run.
+        let start = i;
+        while i < bytes.len() && bytes[i] >= 0x20 && bytes[i] <= 0x7E {
+            i += 1;
+        }
+        if i > start {
+            put_ascii_run(screen, viewport, &bytes[start..i], insert_mode);
+        }
+        if i >= bytes.len() {
+            break;
+        }
+        // UTF-8 codepoint — input is validated, so just compute the length
+        // from the lead byte and slice directly.
+        let len = utf8_char_len(bytes[i]);
+        put_char(
+            screen,
+            viewport,
+            SmolStr::new_inline(&run[i..i + len]),
+            insert_mode,
+        );
+        i += len;
+    }
+}
+
+/// Byte length of a UTF-8 codepoint from its lead byte.
+/// Only called on validated UTF-8, so the lead byte is always valid.
+#[inline]
+fn utf8_char_len(lead: u8) -> usize {
+    match lead {
+        0x00..=0x7F => 1,
+        0xC0..=0xDF => 2,
+        0xE0..=0xEF => 3,
+        _ => 4,
+    }
+}
+
 /// True if the cell at `col` is the anchor of a wide glyph — it holds
 /// non-blank text and its right neighbour is the empty continuation
 /// sentinel we placed when laying out the wide glyph. Consulting the grid
@@ -1886,6 +1993,7 @@ mod tests {
             }
             match action {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
+                Action::PrintText(run) => put_text_run(screen, viewport, run, modes.insert_mode),
                 Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
                 Action::Execute(b) => {
                     execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)
@@ -2761,6 +2869,7 @@ mod tests {
             }
             match action {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
+                Action::PrintText(run) => put_text_run(screen, viewport, run, modes.insert_mode),
                 Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
                 Action::Execute(b) => {
                     execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)

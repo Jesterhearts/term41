@@ -58,6 +58,7 @@ use self::parser::esc_dispatch;
 use self::parser::execute;
 use self::parser::put_ascii_run;
 use self::parser::put_char;
+use self::parser::put_text_run;
 pub use self::row::LineAttr;
 pub use self::row::Row;
 pub use self::screen::Screen;
@@ -1503,6 +1504,12 @@ impl Terminal {
 
         match action {
             Action::PrintAscii(run) => put_ascii_run(
+                &mut self.active,
+                &self.viewport,
+                run,
+                self.modes.insert_mode,
+            ),
+            Action::PrintText(run) => put_text_run(
                 &mut self.active,
                 &self.viewport,
                 run,

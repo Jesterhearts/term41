@@ -103,6 +103,18 @@ pub enum Action<'d> {
     /// the common case of a text run; callers can fast-path this without
     /// grapheme or width reasoning since every byte is width-1.
     PrintAscii(&'d [u8]),
+    /// A contiguous run of validated UTF-8 text that includes at least one
+    /// multi-byte codepoint. The payload may contain printable ASCII
+    /// (0x20..=0x7E) intermixed with UTF-8 multi-byte sequences; it never
+    /// contains C0 controls, DEL, or standalone C1 controls (0x80..=0x9F).
+    ///
+    /// Emitted by the SIMD text scanner when the current byte in
+    /// [`State::Ground`] is a valid UTF-8 lead (0xC2..=0xFF). The scanner
+    /// finds the extent of the text region using SIMD (stopping at C0/DEL),
+    /// then validates UTF-8 structure via `std::str::from_utf8` (which is
+    /// itself SIMD-optimized). The validated `&str` is zero-copy from the
+    /// input buffer.
+    PrintText(&'d str),
     /// A single non-ASCII UTF-8 codepoint. The payload is the raw UTF-8 for
     /// the codepoint reassembled from `utf8_buf`; grapheme-cluster
     /// accumulation happens downstream where the previous cell's contents are
@@ -232,6 +244,56 @@ impl pulp::WithSimd for ScanPrintable<'_> {
         while i < data.len() {
             let b = data[i];
             if !(0x20..=0x7E).contains(&b) {
+                return i;
+            }
+            i += 1;
+        }
+        data.len()
+    }
+}
+
+/// Returns the length of the leading run of bytes that are NOT C0 controls
+/// (0x00..=0x1F) and NOT DEL (0x7F).
+///
+/// Everything else — printable ASCII, UTF-8 lead and continuation bytes
+/// (including C1-range continuations 0x80..=0x9F), and high bytes — is
+/// treated as "candidate text." The caller validates UTF-8 structure on
+/// the returned region via [`std::str::from_utf8`], which disambiguates
+/// standalone C1 bytes (invalid UTF-8) from valid continuations.
+struct ScanText<'a>(&'a [u8]);
+
+impl pulp::WithSimd for ScanText<'_> {
+    type Output = usize;
+
+    #[inline(always)]
+    fn with_simd<S: Simd>(
+        self,
+        simd: S,
+    ) -> usize {
+        let data = self.0;
+        let lanes = S::U8_LANES;
+        let splat_0x20 = simd.splat_u8s(0x20);
+        let splat_del = simd.splat_u8s(0x7F);
+
+        let mut i = 0;
+        while i + lanes <= data.len() {
+            // SAFETY: bounds checked above; `S::u8s: Pod` accepts any byte
+            // pattern so the unaligned read is sound.
+            let chunk: S::u8s =
+                unsafe { core::ptr::read_unaligned(data.as_ptr().add(i) as *const S::u8s) };
+            let is_c0 = simd.less_than_u8s(chunk, splat_0x20);
+            let is_del = simd.equal_u8s(chunk, splat_del);
+            let stop = simd.or_m8s(is_c0, is_del);
+            let first = simd.first_true_m8s(stop);
+            if first < lanes {
+                return i + first;
+            }
+            i += lanes;
+        }
+
+        while i < data.len() {
+            let b = data[i];
+            if b < 0x20 || b == 0x7F {
                 return i;
             }
             i += 1;
@@ -1046,6 +1108,37 @@ impl<'a> Iterator for ParseIter<'a> {
                 }
             }
 
+            // SIMD text fast path: when the current byte in Ground state is a
+            // valid UTF-8 lead (0xC2..=0xFF), use ScanText to find the
+            // extent of the candidate region (everything up to the first
+            // C0 control or DEL), then validate UTF-8 structure with
+            // std::str::from_utf8 (itself SIMD-optimized).  This
+            // disambiguates standalone C1 bytes (0x80..=0x9F, rejected as
+            // invalid UTF-8) from valid continuation bytes for free.
+            if self.parser.state == State::Ground
+                && self.pos < self.data.len()
+                && matches!(self.data[self.pos], 0xC2..=0xFF)
+            {
+                let candidate_len = self.parser.arch.dispatch(ScanText(&self.data[self.pos..]));
+                if candidate_len > 0 {
+                    let candidate = &self.data[self.pos..self.pos + candidate_len];
+                    let valid_len = match std::str::from_utf8(candidate) {
+                        Ok(s) => s.len(),
+                        Err(e) => e.valid_up_to(),
+                    };
+                    if valid_len > 0 {
+                        // SAFETY: from_utf8 validated [pos..pos+valid_len].
+                        let s = unsafe {
+                            std::str::from_utf8_unchecked(
+                                &self.data[self.pos..self.pos + valid_len],
+                            )
+                        };
+                        self.pos += valid_len;
+                        return Some(Action::PrintText(s));
+                    }
+                }
+            }
+
             // APC fast path: kitty graphics payloads are base64 (all
             // printable ASCII). Batch the run and buffer it directly,
             // avoiding per-byte dispatch through the state machine.
@@ -1155,6 +1248,7 @@ mod tests {
     #[derive(Debug, PartialEq, Eq)]
     enum Owned {
         PrintAscii(Vec<u8>),
+        PrintText(String),
         Print(String),
         Execute(u8),
         Csi(Vec<u8>, char),
@@ -1172,6 +1266,7 @@ mod tests {
             .parse(input)
             .map(|a| match a {
                 Action::PrintAscii(b) => Owned::PrintAscii(b.to_vec()),
+                Action::PrintText(s) => Owned::PrintText(s.to_owned()),
                 Action::Print(s) => Owned::Print(s.to_string()),
                 Action::Execute(b) => Owned::Execute(b),
                 Action::CsiDispatch {
@@ -1288,15 +1383,80 @@ mod tests {
 
     #[test]
     fn print_ascii_run_ends_at_utf8_lead() {
-        // "hi" then "é" (0xc3 0xa9)
+        // "hi" then "é" (0xc3 0xa9): the ASCII scanner stops at the 0xc3
+        // lead byte, then the text scanner batches the two UTF-8 bytes into
+        // a single PrintText action.
         let out = collect(b"hi\xc3\xa9");
         assert_eq!(
             out,
             vec![
                 Owned::PrintAscii(b"hi".to_vec()),
-                Owned::Print("é".to_string()),
+                Owned::PrintText("é".to_owned()),
             ]
         );
+    }
+
+    #[test]
+    fn print_text_batches_cjk_run() {
+        // 3-byte CJK characters: the ScanText fast path should batch all of
+        // them into a single PrintText action instead of one Print per char.
+        let input = "你好世界";
+        let out = collect(input.as_bytes());
+        assert_eq!(out.len(), 1, "expected one PrintText, got: {out:?}");
+        assert_eq!(out[0], Owned::PrintText(input.to_owned()));
+    }
+
+    #[test]
+    fn print_text_mixed_ascii_and_utf8() {
+        // A run that starts with a UTF-8 sequence but also contains ASCII:
+        // the whole thing arrives as one PrintText because ScanText continues
+        // through printable ASCII bytes too.
+        let input = "é world"; // \xc3\xa9 + b" world"
+        let out = collect(input.as_bytes());
+        assert_eq!(out.len(), 1, "expected one PrintText, got: {out:?}");
+        assert_eq!(out[0], Owned::PrintText(input.to_owned()));
+    }
+
+    #[test]
+    fn print_text_terminates_at_c0_control() {
+        // A C0 control in the middle of a UTF-8 run stops the text scan.
+        let input = b"\xe4\xbd\xa0\x0a\xe5\xa5\xbd"; // 你 LF 好
+        let out = collect(input);
+        // PrintText("你"), Execute(LF), PrintText("好")
+        assert_eq!(out.len(), 3, "got: {out:?}");
+        assert_eq!(out[0], Owned::PrintText("你".to_owned()));
+        assert_eq!(out[1], Owned::Execute(0x0A));
+        assert_eq!(out[2], Owned::PrintText("好".to_owned()));
+    }
+
+    #[test]
+    fn print_text_terminates_at_c1_control() {
+        // A C1 control (0x9B = 8-bit CSI) interrupts the text scan so
+        // the C1 anywhere-transition fires correctly.
+        let out = collect(b"\xe4\xbd\xa0\x9b0J");
+        // PrintText("你"), then the 8-bit CSI is processed as a state
+        // transition → CsiDispatch 'J' with param 0.
+        assert!(
+            out.iter().any(|a| matches!(a, Owned::PrintText(_))),
+            "expected PrintText: {out:?}"
+        );
+        assert!(
+            out.iter().any(|a| matches!(a, Owned::Csi(_, 'J'))),
+            "expected CSI J: {out:?}"
+        );
+    }
+
+    #[test]
+    fn print_text_large_cjk_buffer() {
+        // Exercises the SIMD main loop across many AVX2 chunks.
+        let reps = 64 * 1024 / 3 + 1;
+        let text: String = "你".repeat(reps);
+        let out = collect(text.as_bytes());
+        assert_eq!(out.len(), 1, "expected single PrintText, got {}", out.len());
+        match &out[0] {
+            Owned::PrintText(s) => assert_eq!(s.len(), text.len()),
+            other => panic!("expected PrintText, got {other:?}"),
+        }
     }
 
     #[test]
