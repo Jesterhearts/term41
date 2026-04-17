@@ -542,6 +542,11 @@ impl RenderHost {
             }
         }
 
+        let app_cursor_keys = self
+            .active_tab()
+            .map(|tab| tab.terminal.lock().unwrap().active.app_cursor_keys)
+            .unwrap_or(false);
+
         let bytes = match &key {
             Key::Character(c) => {
                 if mods.alt_key() {
@@ -553,7 +558,7 @@ impl RenderHost {
                     Some(c.as_bytes().to_vec())
                 }
             }
-            Key::Named(named) => legacy_encode_named(*named, mods),
+            Key::Named(named) => legacy_encode_named(*named, mods, app_cursor_keys),
             _ => None,
         };
 
@@ -1974,6 +1979,7 @@ fn kitty_encode_named(
 fn legacy_encode_named(
     key: NamedKey,
     mods: ModifiersState,
+    app_cursor_keys: bool,
 ) -> Option<Vec<u8>> {
     let mod_param = legacy_modifier_param(mods);
 
@@ -1998,6 +2004,8 @@ fn legacy_encode_named(
     }
 
     // Arrow-style keys: CSI [1;mod] X
+    // In DECCKM (app cursor keys) mode, unmodified arrows/Home/End send
+    // SS3 form (ESC O X) instead of CSI form (ESC [ X).
     let arrow_final = match key {
         NamedKey::ArrowUp => Some('A'),
         NamedKey::ArrowDown => Some('B'),
@@ -2010,6 +2018,8 @@ fn legacy_encode_named(
     if let Some(ch) = arrow_final {
         return if mod_param > 0 {
             Some(format!("\x1b[1;{mod_param}{ch}").into_bytes())
+        } else if app_cursor_keys {
+            Some(format!("\x1bO{ch}").into_bytes())
         } else {
             Some(format!("\x1b[{ch}").into_bytes())
         };

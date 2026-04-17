@@ -91,6 +91,11 @@ pub struct Screen {
     /// wraps to the next line. When false, the cursor stays at the right
     /// margin and overwrites the last column.
     pub autowrap: bool,
+    /// DECCKM (`?1`) — when true, unmodified arrow keys send SS3 form
+    /// (ESC O A/B/C/D) instead of CSI form (ESC [ A/B/C/D). Modified
+    /// arrows still use the CSI modifier form. Default is false (normal
+    /// cursor keys).
+    pub app_cursor_keys: bool,
 }
 
 impl Screen {
@@ -142,6 +147,7 @@ impl Screen {
             charset_g1_is_drawing: false,
             charset_gl_is_g0: true,
             autowrap: true,
+            app_cursor_keys: false,
         }
     }
 }
@@ -254,6 +260,8 @@ pub(super) fn set_private_mode(
     on_alt: &mut bool,
 ) {
     match mode {
+        // DECCKM — application cursor keys.
+        1 => active.app_cursor_keys = enable,
         // DECCOLM (mode 3) is handled in csi_dispatch where mutable
         // viewport access is available for the resize.
         6 => {

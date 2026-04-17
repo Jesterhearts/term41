@@ -38,6 +38,9 @@ pub(super) struct CsiContext<'a> {
     pub cell_width: u32,
     pub cell_height: u32,
     pub palette: &'a color::ColorPalette,
+    pub title_stack: &'a mut Vec<Option<String>>,
+    pub current_title: &'a mut Option<String>,
+    pub saved_modes: &'a mut std::collections::HashMap<u16, bool>,
 }
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that ESC handlers
@@ -51,6 +54,8 @@ pub(super) struct EscContext<'a> {
     pub kitty_keyboard: &'a mut KittyKeyboardState,
     pub cursor_style: &'a mut CursorStyle,
     pub current_title: &'a mut Option<String>,
+    pub title_stack: &'a mut Vec<Option<String>>,
+    pub saved_modes: &'a mut std::collections::HashMap<u16, bool>,
     pub current_prompt_row: &'a mut Option<u64>,
     pub bell_pending: &'a mut bool,
     pub palette: &'a color::ColorPalette,
@@ -403,6 +408,41 @@ fn soft_wrap(
     }
 }
 
+/// Apply a private mode set/reset from the XTRESTORE path. Mirrors the
+/// logic in the `CSI ? h`/`l` handler: terminal-level modes are handled
+/// inline, screen/alt-screen modes delegate to `set_private_mode` and
+/// `apply_mouse_mode`.
+fn apply_private_mode(
+    mode: u16,
+    enable: bool,
+    ctx: &mut CsiContext<'_>,
+) {
+    if mode == 2004 {
+        ctx.modes.bracketed_paste = enable;
+    } else if mode == 1004 {
+        ctx.modes.focus_reporting = enable;
+    } else if mode == 2026 {
+        ctx.modes.synchronized_update_since = enable.then(Instant::now);
+    } else if mode == 3 {
+        // DECCOLM restore is tricky (resizes the grid). Skip for save/restore —
+        // xterm itself ignores mode 3 in XTSAVE/XTRESTORE.
+    } else if !apply_mouse_mode(
+        mode,
+        enable,
+        &mut ctx.modes.mouse_tracking,
+        &mut ctx.modes.mouse_encoding,
+    ) {
+        screen::set_private_mode(
+            mode,
+            enable,
+            ctx.screen,
+            ctx.stash,
+            ctx.viewport,
+            ctx.on_alt_screen,
+        );
+    }
+}
+
 /// Map a private-mode number to its DECRQM response value:
 /// 1 = set, 2 = reset, 0 = not recognized. Queries every private mode
 /// we track so apps can probe capabilities without side effects.
@@ -411,6 +451,14 @@ fn query_private_mode(
     ctx: &CsiContext<'_>,
 ) -> u8 {
     match ps {
+        // DECCKM — application cursor keys.
+        1 => {
+            if ctx.screen.app_cursor_keys {
+                1
+            } else {
+                2
+            }
+        }
         // DECOM — origin mode.
         6 => {
             if ctx.screen.origin_mode {
@@ -676,6 +724,27 @@ pub(super) fn csi_dispatch(
         return;
     }
 
+    // XTSAVE — save individual private mode values (CSI ? Ps s).
+    if intermediates == b"?" && action == 's' {
+        for p in params.iter() {
+            let mode = p[0];
+            let state = query_private_mode(mode, ctx);
+            ctx.saved_modes.insert(mode, state == 1);
+        }
+        return;
+    }
+
+    // XTRESTORE — restore individual private mode values (CSI ? Ps r).
+    if intermediates == b"?" && action == 'r' {
+        for p in params.iter() {
+            let mode = p[0];
+            if let Some(&saved) = ctx.saved_modes.get(&mode) {
+                apply_private_mode(mode, saved, ctx);
+            }
+        }
+        return;
+    }
+
     if action == 'u' && matches!(intermediates, b">" | b"<" | b"=" | b"?") {
         handle_kitty_keyboard(
             intermediates[0],
@@ -769,6 +838,7 @@ pub(super) fn csi_dispatch(
         screen.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
         screen.origin_mode = false;
         screen.autowrap = true;
+        screen.app_cursor_keys = false;
         screen.charset_g0_is_drawing = false;
         screen.charset_g1_is_drawing = false;
         screen.charset_gl_is_g0 = true;
@@ -828,6 +898,21 @@ pub(super) fn csi_dispatch(
             .and_then(|g| g.first().copied())
             .unwrap_or(0);
         match ps {
+            // Title stack push. Second param (0 or 2) selects icon vs
+            // window title; we only track one title so both are equivalent.
+            22 => {
+                if ctx.title_stack.len() < 16 {
+                    ctx.title_stack.push(ctx.current_title.clone());
+                }
+                return;
+            }
+            // Title stack pop.
+            23 => {
+                if let Some(title) = ctx.title_stack.pop() {
+                    *ctx.current_title = title;
+                }
+                return;
+            }
             14 => {
                 // Report window size in pixels: CSI 4 ; height ; width t.
                 let h = ctx.viewport.rows * ctx.cell_height;
@@ -1251,6 +1336,7 @@ pub(super) fn esc_dispatch(
                 s.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
                 s.origin_mode = false;
                 s.autowrap = true;
+                s.app_cursor_keys = false;
                 s.charset_g0_is_drawing = false;
                 s.charset_g1_is_drawing = false;
                 s.charset_gl_is_g0 = true;
@@ -1259,6 +1345,8 @@ pub(super) fn esc_dispatch(
             *ctx.kitty_keyboard = KittyKeyboardState::new();
             *ctx.cursor_style = CursorStyle::default();
             *ctx.current_title = None;
+            ctx.title_stack.clear();
+            ctx.saved_modes.clear();
             *ctx.current_prompt_row = None;
             *ctx.bell_pending = false;
         }
@@ -1333,6 +1421,8 @@ mod tests {
         let mut cursor_style = CursorStyle::default();
         let mut bell_pending = false;
         let mut current_title = None;
+        let mut title_stack = Vec::new();
+        let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
 
         for action in parser.parse(input) {
@@ -1359,6 +1449,9 @@ mod tests {
                         cell_width: 8,
                         cell_height: 16,
                         palette: &pal,
+                        title_stack: &mut title_stack,
+                        current_title: &mut current_title,
+                        saved_modes: &mut saved_modes,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -1375,6 +1468,8 @@ mod tests {
                         kitty_keyboard: &mut kitty_keyboard,
                         cursor_style: &mut cursor_style,
                         current_title: &mut current_title,
+                        title_stack: &mut title_stack,
+                        saved_modes: &mut saved_modes,
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
                         palette: &pal,
@@ -2151,6 +2246,8 @@ mod tests {
         let mut cursor_style = CursorStyle::default();
         let mut bell_pending = false;
         let mut current_title = None;
+        let mut title_stack = Vec::new();
+        let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
 
         for action in parser.parse(input) {
@@ -2177,6 +2274,9 @@ mod tests {
                         cell_width: 8,
                         cell_height: 16,
                         palette: &pal,
+                        title_stack: &mut title_stack,
+                        current_title: &mut current_title,
+                        saved_modes: &mut saved_modes,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -2193,6 +2293,8 @@ mod tests {
                         kitty_keyboard: &mut kitty_keyboard,
                         cursor_style: &mut cursor_style,
                         current_title: &mut current_title,
+                        title_stack: &mut title_stack,
+                        saved_modes: &mut saved_modes,
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
                         palette: &pal,

@@ -213,6 +213,13 @@ pub struct Terminal {
     /// it); the host applies its default ("term41") in that case.
     pub current_title: Option<String>,
 
+    /// xterm title stack. CSI 22;0 t pushes, CSI 23;0 t pops. Capped at
+    /// 16 entries to bound memory from a misbehaving app.
+    title_stack: Vec<Option<String>>,
+
+    /// Saved private mode states for XTSAVE/XTRESTORE (CSI ? Ps s / r).
+    saved_private_modes: HashMap<u16, bool>,
+
     /// Latched true whenever the parser sees a BEL byte (0x07). The host
     /// drains this each frame via [`Self::take_bell_pending`] so it can
     /// flash the screen, ping the compositor, etc. Latched (not
@@ -290,6 +297,8 @@ impl Terminal {
             kitty_keyboard: KittyKeyboardState::new(),
             cursor_style: CursorStyle::default(),
             current_title: None,
+            title_stack: Vec::new(),
+            saved_private_modes: HashMap::new(),
             bell_pending: false,
             current_prompt_row: None,
             command_metas: HashMap::new(),
@@ -1421,6 +1430,9 @@ impl Terminal {
                     cell_width: self.cell_width,
                     cell_height: self.cell_height,
                     palette: &self.palette,
+                    title_stack: &mut self.title_stack,
+                    current_title: &mut self.current_title,
+                    saved_modes: &mut self.saved_private_modes,
                 };
                 csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
             }
@@ -1437,6 +1449,8 @@ impl Terminal {
                     kitty_keyboard: &mut self.kitty_keyboard,
                     cursor_style: &mut self.cursor_style,
                     current_title: &mut self.current_title,
+                    title_stack: &mut self.title_stack,
+                    saved_modes: &mut self.saved_private_modes,
                     current_prompt_row: &mut self.current_prompt_row,
                     bell_pending: &mut self.bell_pending,
                     palette: &self.palette,
