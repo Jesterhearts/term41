@@ -19,7 +19,7 @@ use portable_pty::native_pty_system;
 use crate::TabId;
 
 pub const MAX_READ_CHUNK: usize = 128 * 1024;
-pub const MAX_BUFFER: usize = MAX_READ_CHUNK * 8;
+pub const MAX_BUFFER: usize = MAX_READ_CHUNK * 8 * 32; // 32 MB
 
 /// Read half of a PTY connection. Owns the cueue ring-buffer consumer and the
 /// coalesce flag shared with the pump thread. Lives on the terminal thread so

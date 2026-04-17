@@ -67,7 +67,6 @@ enum AppEvent {
     SetTitle(String),
     RequestUserAttention,
     SpawnNewWindow { cwd: Option<PathBuf> },
-    Exit,
 }
 
 struct Tab {
@@ -107,7 +106,7 @@ const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
 impl ApplicationHandler<AppEvent> for WindowHost {
     fn user_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         event: AppEvent,
     ) {
         match event {
@@ -123,9 +122,6 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
             AppEvent::SpawnNewWindow { cwd } => {
                 spawn_new_window(cwd);
-            }
-            AppEvent::Exit => {
-                event_loop.exit();
             }
         }
     }
@@ -178,14 +174,13 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
     fn window_event(
         &mut self,
-        event_loop: &ActiveEventLoop,
+        _event_loop: &ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
         let ev = match event {
             WindowEvent::CloseRequested => {
-                event_loop.exit();
-                RenderEvent::CloseRequested
+                std::process::exit(0);
             }
 
             WindowEvent::Resized(size) => RenderEvent::Resized {
@@ -279,25 +274,35 @@ impl MouseButtonState {
 }
 
 fn main() {
-    env_logger::init();
+    use tracing_subscriber::fmt::format::FmtSpan;
+
+    tracing_subscriber::fmt()
+        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
+        .with_span_events(FmtSpan::CLOSE)
+        .init();
 
     let command = parse_command_args();
 
     let config_path = config::config_file_path();
-    let config = match config_path.as_deref() {
+    let config = tracing::debug_span!("load_config").in_scope(|| match config_path.as_deref() {
         Some(p) => config::load_from(p),
         None => Config::default(),
-    };
+    });
 
-    let event_loop: EventLoop<AppEvent> = EventLoop::with_user_event()
-        .build()
-        .expect("create event loop");
+    let event_loop: EventLoop<AppEvent> =
+        tracing::debug_span!("create_event_loop").in_scope(|| {
+            EventLoop::with_user_event()
+                .build()
+                .expect("create event loop")
+        });
 
-    let font_system = FontSystem::new(
-        config.fonts.clone(),
-        config.font_size,
-        config.font_supersampling,
-    );
+    let font_system = tracing::debug_span!("init_font_system").in_scope(|| {
+        FontSystem::new(
+            config.fonts.clone(),
+            config.font_size,
+            config.font_supersampling,
+        )
+    });
     let cell_width = font_system.cell_width;
     let cell_height = font_system.cell_height;
     let opacity = config.opacity;
@@ -317,19 +322,21 @@ fn main() {
     let terminal_thread = TerminalThread::new();
 
     // Spawn the initial PTY early so the shell starts running immediately.
-    let (pty, pty_reader) = Pty::spawn(
-        TabId(0),
-        INITIAL_COLS as u16,
-        INITIAL_ROWS as u16,
-        cell_width as u16,
-        cell_height as u16,
-        command,
-        None,
-        terminal_thread.thread_handle.clone(),
-        render_thread_handle.clone(),
-        child_exit_tx.clone(),
-    )
-    .expect("failed to spawn PTY");
+    let (pty, pty_reader) = tracing::debug_span!("spawn_pty").in_scope(|| {
+        Pty::spawn(
+            TabId(0),
+            INITIAL_COLS as u16,
+            INITIAL_ROWS as u16,
+            cell_width as u16,
+            cell_height as u16,
+            command,
+            None,
+            terminal_thread.thread_handle.clone(),
+            render_thread_handle.clone(),
+            child_exit_tx.clone(),
+        )
+        .expect("failed to spawn PTY")
+    });
 
     let mut terminal = Terminal::new(
         INITIAL_COLS,

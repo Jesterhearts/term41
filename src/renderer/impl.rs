@@ -1,13 +1,10 @@
-use std::io::Write;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::MutexGuard;
-use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
-use atomic_write_file::AtomicWriteFile;
 use font41::FontSystem;
 use font41::attrs::CellAttrs;
 use palette::Srgb;
@@ -145,6 +142,7 @@ pub struct Renderer {
 /// just shy of that and is the common choice for newer terminals.
 const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
 
+#[cfg(feature = "vulkan")]
 fn pipeline_cache_path() -> Option<PathBuf> {
     dirs::cache_dir().map(|d| d.join("term41").join("pipeline_cache.bin"))
 }
@@ -153,8 +151,13 @@ fn pipeline_cache_path() -> Option<PathBuf> {
 /// file is missing or the data is rejected by the driver. The cache only has
 /// an effect on backends that support it (Vulkan); on GL the driver ignores
 /// the data and `get_data()` returns `None`.
+#[cfg(feature = "vulkan")]
 fn load_pipeline_cache(device: &wgpu::Device) -> wgpu::PipelineCache {
     let data = pipeline_cache_path().and_then(|p| std::fs::read(p).ok());
+    if data.is_none() {
+        info!("no pipeline cache found");
+    }
+
     // SAFETY: `data` was written by a previous `PipelineCache::get_data` call
     // from this program (or is `None`). `fallback: true` ensures a corrupt
     // or stale file just produces an empty cache instead of an error.
@@ -187,28 +190,59 @@ impl Renderer {
     ) -> Self {
         let size = window.inner_size();
 
-        let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
-        desc.backends = wgpu::Backends::VULKAN;
-        let instance = wgpu::Instance::new(desc);
-        let surface = instance.create_surface(window).expect("create surface");
-        let adapter = instance
-            .request_adapter(&wgpu::RequestAdapterOptions {
-                compatible_surface: Some(&surface),
-                power_preference,
-                ..Default::default()
-            })
-            .await
-            .expect("request adapter");
+        let instance = tracing::debug_span!("create_instance").in_scope(|| {
+            let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
+            #[cfg(not(feature = "vulkan"))]
+            {
+                desc.backends = wgpu::Backends::GL;
+            }
+            #[cfg(feature = "vulkan")]
+            {
+                desc.backends = wgpu::Backends::VULKAN;
+            }
 
-        let (device, queue) = adapter
-            .request_device(&wgpu::DeviceDescriptor {
-                required_features: wgpu::Features::PIPELINE_CACHE,
-                ..Default::default()
-            })
-            .await
-            .expect("request device");
+            wgpu::Instance::new(desc)
+        });
 
-        let pipeline_cache = load_pipeline_cache(&device);
+        let surface = tracing::debug_span!("create_surface")
+            .in_scope(|| instance.create_surface(window).expect("create surface"));
+        let adapter = {
+            let _s = tracing::debug_span!("request_adapter").entered();
+            instance
+                .request_adapter(&wgpu::RequestAdapterOptions {
+                    compatible_surface: Some(&surface),
+                    power_preference,
+                    ..Default::default()
+                })
+                .await
+                .expect("request adapter")
+        };
+
+        let (device, queue) = {
+            let _s = tracing::debug_span!("request_device").entered();
+
+            let descriptor = cfg_select! {
+                feature = "vulkan" => {
+                    wgpu::DeviceDescriptor {
+                    required_features: wgpu::Features::PIPELINE_CACHE,
+                        ..Default::default()
+                    }
+                },
+                _ => wgpu::DeviceDescriptor::default()
+            };
+
+            adapter
+                .request_device(&descriptor)
+                .await
+                .expect("request device")
+        };
+
+        let pipeline_cache = cfg_select! {
+            feature = "vulkan" => {
+                tracing::debug_span!("load_pipeline_cache").in_scope(||Some(load_pipeline_cache(&device)))
+            }
+            _ => None,
+        };
 
         let surface_caps = surface.get_capabilities(&adapter);
         let preferred_formats = [
@@ -290,6 +324,7 @@ impl Renderer {
         let image_atlas = ImageAtlas::new(&device);
 
         // ---- Shaders ----
+        let create_pipelines = tracing::debug_span!("create_pipelines").entered();
         let bg_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
             label: Some("bg_shader"),
             source: wgpu::ShaderSource::Wgsl(include_str!("shaders/bg.wgsl").into()),
@@ -344,7 +379,7 @@ impl Renderer {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
-            cache: Some(&pipeline_cache),
+            cache: pipeline_cache.as_ref(),
         });
 
         // ---- Foreground pipeline ----
@@ -392,7 +427,7 @@ impl Renderer {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
-            cache: Some(&pipeline_cache),
+            cache: pipeline_cache.as_ref(),
         });
 
         // ---- Image pipeline ----
@@ -439,7 +474,7 @@ impl Renderer {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
-            cache: Some(&pipeline_cache),
+            cache: pipeline_cache.as_ref(),
         });
 
         // ---- Background image pipeline ----
@@ -492,22 +527,27 @@ impl Renderer {
             depth_stencil: None,
             multisample: wgpu::MultisampleState::default(),
             multiview_mask: None,
-            cache: Some(&pipeline_cache),
+            cache: pipeline_cache.as_ref(),
         });
 
-        thread::spawn(move || {
-            if let Some(data) = pipeline_cache.get_data()
+        drop(create_pipelines);
+
+        #[cfg(feature = "vulkan")]
+        std::thread::spawn(move || {
+            if let Some(cache) = pipeline_cache
+                && let Some(data) = cache.get_data()
                 && let Some(path) = pipeline_cache_path()
             {
                 if let Some(parent) = path.parent() {
                     let _ = std::fs::create_dir_all(parent);
                 }
 
-                let Ok(mut cache) = AtomicWriteFile::options().open(path) else {
+                let Ok(mut cache) = atomic_write_file::AtomicWriteFile::options().open(path) else {
                     warn!("failed to open pipeline cache for writing");
                     return;
                 };
 
+                use std::io::Write;
                 if let Err(e) = cache.write_all(&data) {
                     warn!("failed to write pipeline cache: {e}");
                 }
@@ -519,15 +559,17 @@ impl Renderer {
             }
         });
 
-        let background = background_image.and_then(|p| {
-            Background::load(
-                &device,
-                &queue,
-                &bg_image_layout,
-                p,
-                background_opacity.clamp(0.0, 1.0),
-                (size.width.max(1), size.height.max(1)),
-            )
+        let background = tracing::debug_span!("load_background").in_scope(|| {
+            background_image.and_then(|p| {
+                Background::load(
+                    &device,
+                    &queue,
+                    &bg_image_layout,
+                    p,
+                    background_opacity.clamp(0.0, 1.0),
+                    (size.width.max(1), size.height.max(1)),
+                )
+            })
         });
 
         let renderer = Self {

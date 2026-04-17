@@ -169,7 +169,6 @@ pub enum RenderEvent {
     /// stale preedit state on disable and let the render thread start
     /// issuing `set_ime_cursor_area` calls on enable.
     ImeEnabled(bool),
-    CloseRequested,
 }
 
 pub struct RenderHost {
@@ -373,16 +372,18 @@ impl RenderHost {
                         pasted.display()
                     );
                 }
-                self.renderer = Some(pollster::block_on(Renderer::new(
-                    window.clone(),
-                    display.clone(),
-                    self.config.opacity,
-                    self.config.gutter,
-                    self.config.power_preference,
-                    self.config.vsync,
-                    effective_bg_path(&self.config),
-                    self.config.background_opacity,
-                )));
+                self.renderer = Some(tracing::debug_span!("create_renderer").in_scope(|| {
+                    pollster::block_on(Renderer::new(
+                        window.clone(),
+                        display.clone(),
+                        self.config.opacity,
+                        self.config.gutter,
+                        self.config.power_preference,
+                        self.config.vsync,
+                        effective_bg_path(&self.config),
+                        self.config.background_opacity,
+                    ))
+                }));
             }
             // Tick the background's animation clock and re-upload its
             // texture if a new frame is due. The render loop normally
@@ -411,7 +412,7 @@ impl RenderHost {
             }
         }
 
-        let _ = self.proxy.send_event(AppEvent::Exit);
+        std::process::exit(0);
     }
 
     // -- Event dispatch -----------------------------------------------------
@@ -422,9 +423,6 @@ impl RenderHost {
     ) {
         match event {
             RenderEvent::None => {}
-            RenderEvent::CloseRequested => {
-                self.should_exit = true;
-            }
             RenderEvent::Resized { width, height } => {
                 self.window_size = (*width, *height);
                 self.handle_resize(*width, *height);

@@ -1,8 +1,9 @@
 [package]
-name    = "term41"
-version = "0.1.0"
-edition = "2024"
-license = "Unlicense"
+name         = "term41"
+version      = "0.1.0"
+edition      = "2024"
+rust-version = "1.95.0"
+license      = "Unlicense"
 
 [workspace]
 members = [
@@ -26,7 +27,7 @@ arboard              = { version = "3.6.1", default-features = false, features =
   "image-data"
 ] }
 atoi                 = "2.0.0"
-atomic-write-file    = "0.3.0"
+atomic-write-file    = { version = "0.3.0", optional = true }
 base64               = "0.22.1"
 bitflags             = { workspace = true }
 bytemuck             = { version = "1.25.0", features = [
@@ -35,7 +36,6 @@ bytemuck             = { version = "1.25.0", features = [
 ] }
 cueue                = "0.6.0"
 dirs                 = "6.0.0"
-env_logger           = "0.11.10"
 evictor              = "0.7.2"
 ffmpeg-next          = { version = "8.1.0", optional = true }
 flate2               = { workspace = true }
@@ -58,12 +58,14 @@ serde                = { version = "1.0.228", features = ["derive"] }
 shellexpand          = "3.1.2"
 smol_str             = { workspace = true }
 toml                 = "1.1.2"
+tracing              = "0.1.44"
+tracing-subscriber   = { version = "0.3.23", features = ["env-filter"] }
 unicode-segmentation = "1.13.2"
 unicode-width        = "0.2.2"
 vtepp                = { path = "vtepp" }
 wgpu                 = { version = "29.0.1", default-features = false, features = [
+  "gles",
   "serde",
-  "vulkan",
   "wgsl"
 ] }
 winit                = "0.30.13"
@@ -79,6 +81,11 @@ default              = ["ffmpeg", "wayland-data-control"]
 # built-in PNG path (animated GIF is the motivating case). Requires the
 # libav* dev packages on the host; leave off for lightweight builds.
 ffmpeg               = ["dep:ffmpeg-next"]
+# Pulls in atomic-write-file and the wgpu vulkan feature, enabling pipeline
+# caching on Vulkan. The cache can improve startup times by avoiding shader
+# compilation, but vulkan sometimes just takes O(seconds) to startup even with
+# caching, which makes us look bad so it's off by default.
+vulkan               = ["dep:atomic-write-file", "wgpu/vulkan"]
 # Enables arboard's zwlr_data_control_manager_v1 backend on Wayland, giving
 # access to compositors that implement the protocol (sway, wayfire, Hyprland,
 # etc.) without requiring a focused-window hack. Disable only for
