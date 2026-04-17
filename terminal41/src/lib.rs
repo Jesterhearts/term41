@@ -1490,6 +1490,8 @@ impl Terminal {
                         current_prompt_row: &mut self.current_prompt_row,
                         command_metas: &mut self.command_metas,
                         palette: &self.palette,
+                        cell_width: self.cell_width,
+                        cell_height: self.cell_height,
                     };
                     handle_osc(&data, &mut ctx);
                 }

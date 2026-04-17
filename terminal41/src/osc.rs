@@ -41,6 +41,8 @@ pub(super) struct OscContext<'a> {
     /// and timestamps for duration calculation.
     pub command_metas: &'a mut HashMap<u64, CommandMeta>,
     pub palette: &'a color::ColorPalette,
+    pub cell_width: u32,
+    pub cell_height: u32,
 }
 
 /// Split an OSC payload into its numeric command prefix and the remainder.
@@ -131,9 +133,18 @@ pub(super) fn handle_osc(
             ctx.command_metas,
         ),
         // iTerm2 proprietary commands. Image commands (File=, MultipartFile=,
-        // etc.) are routed separately in terminal.rs. Non-image commands
-        // (SetMark, SetBadgeFormat, SetUserVar, ClearScrollback, etc.) are
-        // silently accepted as no-ops.
+        // etc.) are routed separately in terminal.rs. ReportCellSize gets a
+        // reply; other non-image commands are silently accepted as no-ops.
+        b"1337" if rest.starts_with(b"ReportCellSize") => {
+            use std::io::Write;
+            // Reply format: OSC 1337 ; ReportCellSize=<height>;<width> ST
+            write!(
+                ctx.pending_output,
+                "\x1b]1337;ReportCellSize={};{}\x1b\\",
+                ctx.cell_height, ctx.cell_width
+            )
+            .expect("write to Vec is infallible");
+        }
         b"1337" => {}
         _ => {}
     }
@@ -545,6 +556,8 @@ mod tests {
                 current_prompt_row: &mut self.prompt_row,
                 command_metas: &mut self.command_metas,
                 palette: &self.palette,
+                cell_width: 8,
+                cell_height: 16,
             };
             handle_osc(payload, &mut ctx);
         }

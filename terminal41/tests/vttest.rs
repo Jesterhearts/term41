@@ -481,6 +481,24 @@ fn decrqm_reports_known_modes() {
 }
 
 // ---------------------------------------------------------------------------
+// 10b. iTerm2 OSC 1337 ReportCellSize
+// ---------------------------------------------------------------------------
+
+#[test]
+fn osc_1337_report_cell_size() {
+    let mut t = VtTerm::new_80x24();
+    t.process(b"\x1b]1337;ReportCellSize\x1b\\");
+    let out = t.pending_output();
+    // Response: OSC 1337 ; ReportCellSize=<h>;<w> ST
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        s.starts_with("\x1b]1337;ReportCellSize="),
+        "unexpected response: {s:?}"
+    );
+    assert!(s.ends_with("\x1b\\"));
+}
+
+// ---------------------------------------------------------------------------
 // 11. DECCKM (Application Cursor Keys)
 // ---------------------------------------------------------------------------
 
