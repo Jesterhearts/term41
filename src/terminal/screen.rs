@@ -254,6 +254,8 @@ pub(super) fn set_private_mode(
     on_alt: &mut bool,
 ) {
     match mode {
+        // DECCOLM (mode 3) is handled in csi_dispatch where mutable
+        // viewport access is available for the resize.
         6 => {
             active.origin_mode = enable;
             // Entering/leaving origin mode homes the cursor per DEC spec.

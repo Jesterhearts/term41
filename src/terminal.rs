@@ -125,6 +125,9 @@ pub(super) struct TerminalModes {
     /// LNM (ANSI mode 20) — Line Feed/New Line mode. When `true`, LF, VT,
     /// and FF perform an implicit CR before the line feed. Default is off.
     pub newline_mode: bool,
+    /// Saved column count from before DECCOLM switched to 132 columns.
+    /// `None` when in normal (80-column) mode.
+    pub deccolm_saved_cols: Option<u32>,
 }
 
 impl TerminalModes {
@@ -137,6 +140,7 @@ impl TerminalModes {
             synchronized_update_since: None,
             insert_mode: false,
             newline_mode: false,
+            deccolm_saved_cols: None,
         }
     }
 }
@@ -1408,7 +1412,7 @@ impl Terminal {
                 let mut ctx = CsiContext {
                     screen: &mut self.active,
                     stash: &mut self.stash,
-                    viewport: &self.viewport,
+                    viewport: &mut self.viewport,
                     on_alt_screen: &mut self.on_alt_screen,
                     modes: &mut self.modes,
                     kitty_keyboard: &mut self.kitty_keyboard,
@@ -3379,5 +3383,31 @@ mod tests {
         term.process(b"\x1bc");
         // Rows count stays the same — visible area cleared in place, history kept.
         assert_eq!(term.active.grid.rows.len(), rows_before);
+    }
+
+    #[test]
+    fn deccolm_set_resizes_to_132_and_clears() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"hello");
+        assert_eq!(term.viewport.cols, 80);
+        // DECCOLM set: resize to 132, clear screen, reset margins, home.
+        term.process(b"\x1b[?3h");
+        assert_eq!(term.viewport.cols, 132);
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
+        assert_eq!(term.active.scroll_top, 0);
+        // First visible row should be blank (cleared).
+        let first_vis = term.active.grid.rows.len() - 24;
+        assert_eq!(term.active.grid.rows[first_vis].cells[0].as_str(), " ");
+    }
+
+    #[test]
+    fn deccolm_reset_restores_original_width() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?3h"); // 132 cols
+        assert_eq!(term.viewport.cols, 132);
+        term.process(b"\x1b[?3l"); // back to 80
+        assert_eq!(term.viewport.cols, 80);
+        assert_eq!(term.active.cursor.row, 0);
     }
 }

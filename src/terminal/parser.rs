@@ -29,7 +29,7 @@ use crate::terminal::screen::Screen;
 pub(super) struct CsiContext<'a> {
     pub screen: &'a mut Screen,
     pub stash: &'a mut Screen,
-    pub viewport: &'a Viewport,
+    pub viewport: &'a mut Viewport,
     pub on_alt_screen: &'a mut bool,
     pub modes: &'a mut TerminalModes,
     pub kitty_keyboard: &'a mut KittyKeyboardState,
@@ -634,6 +634,29 @@ pub(super) fn csi_dispatch(
                 // nested BSU matches the contour spec's "keep the window open"
                 // rule for apps that chain updates.
                 ctx.modes.synchronized_update_since = enable.then(Instant::now);
+            } else if p[0] == 3 {
+                // DECCOLM — 80/132 column mode. Resize the grid, clear
+                // the screen, reset margins, and home the cursor per DEC
+                // spec. This lets vttest's 132-column pass work.
+                let new_cols = if enable {
+                    ctx.modes.deccolm_saved_cols = Some(ctx.viewport.cols);
+                    132
+                } else {
+                    ctx.modes
+                        .deccolm_saved_cols
+                        .take()
+                        .unwrap_or(ctx.viewport.cols)
+                };
+                let old_cols = ctx.viewport.cols;
+                let rows = ctx.viewport.rows;
+                for s in [&mut *ctx.screen, &mut *ctx.stash] {
+                    screen::resize_screen(s, old_cols, rows, new_cols, rows);
+                }
+                ctx.viewport.cols = new_cols;
+                screen::clear_visible(ctx.screen, ctx.viewport);
+                ctx.screen.scroll_top = 0;
+                ctx.screen.scroll_bottom = rows.saturating_sub(1);
+                ctx.screen.cursor = grid::Cursor::default();
             } else if !apply_mouse_mode(
                 p[0],
                 enable,
@@ -854,7 +877,7 @@ pub(super) fn csi_dispatch(
     }
 
     let screen = &mut *ctx.screen;
-    let viewport = ctx.viewport;
+    let viewport = &*ctx.viewport;
     let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
     let cursor = &mut screen.cursor;
 
@@ -1276,7 +1299,7 @@ mod tests {
     fn feed(
         input: &[u8],
         screen: &mut Screen,
-        viewport: &Viewport,
+        viewport: &mut Viewport,
     ) {
         let pal = color::ColorPalette::default();
         let mut parser = Parser::new();
@@ -1365,7 +1388,7 @@ mod tests {
 
     #[test]
     fn put_char_writes_with_current_colors_and_advances() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.fg = Srgb::new(1, 2, 3);
         screen.bg = Srgb::new(4, 5, 6);
 
@@ -1381,12 +1404,12 @@ mod tests {
 
     #[test]
     fn put_char_soft_wraps_at_right_edge() {
-        let (mut screen, viewport) = setup();
-        feed(b"abcdefghij", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"abcdefghij", &mut screen, &mut viewport);
 
         // Cursor sits past the right edge; the next char should wrap.
         assert_eq!(screen.cursor.col, TEST_COLS);
-        feed(b"k", &mut screen, &viewport);
+        feed(b"k", &mut screen, &mut viewport);
 
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 1);
@@ -1398,10 +1421,10 @@ mod tests {
 
     #[test]
     fn put_char_folds_combining_mark_into_previous_cell() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // U+0301 COMBINING ACUTE ACCENT — feeding "e" then the combining mark
         // should store the full grapheme "é" in one cell without advancing.
-        feed("e\u{0301}".as_bytes(), &mut screen, &viewport);
+        feed("e\u{0301}".as_bytes(), &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "e\u{0301}");
@@ -1410,7 +1433,7 @@ mod tests {
 
     #[test]
     fn put_char_vs16_emoji_stays_in_single_cell() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // `UnicodeWidthStr::width("❤\u{FE0F}") == 2`, but glibc `wcswidth`
         // reports 1 because it treats VS16 as a zero-width variation
         // selector without upgrading the base to emoji presentation. The
@@ -1419,7 +1442,7 @@ mod tests {
         // continuation cell and the user can't delete the emoji. Keep the
         // cluster in one cell; the shaper still sees the full cluster
         // text and renders it scaled to that cell.
-        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &viewport);
+        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{2764}\u{FE0F}");
@@ -1440,8 +1463,8 @@ mod tests {
         // emoji as a misaligned wide anchor and blanked it. The grid-state
         // check in `is_wide_anchor_at` looks at the right neighbour
         // instead, matching the physical layout.
-        let (mut screen, viewport) = setup();
-        feed("\u{2764}\u{FE0F}X".as_bytes(), &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed("\u{2764}\u{FE0F}X".as_bytes(), &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(
@@ -1461,8 +1484,8 @@ mod tests {
         // clear the cell cleanly; widening the cell into 2 columns would
         // leave the cursor sitting on the continuation after one BS and
         // desync the shell's tracking.
-        let (mut screen, viewport) = setup();
-        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, 1);
 
         execute(&mut screen, &viewport, BS, &mut false, false);
@@ -1470,8 +1493,8 @@ mod tests {
 
         // A full rub-out of `\b \b` from bash lands us back at col 0 with
         // the cell erased.
-        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &viewport);
-        feed(b"\x08 \x08", &mut screen, &viewport);
+        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &mut viewport);
+        feed(b"\x08 \x08", &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), " ");
@@ -1480,12 +1503,12 @@ mod tests {
 
     #[test]
     fn put_char_regional_indicators_get_separate_cells() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // `unicode-width` reports width 1 for each regional indicator, so
         // "🇺🇸" advances the cursor by 2 across two 1-col cells. We do not
         // collapse the flag pair into one cell — that would disagree with
         // the host's wcswidth and desync the cursor.
-        feed("🇺🇸".as_bytes(), &mut screen, &viewport);
+        feed("🇺🇸".as_bytes(), &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "🇺");
@@ -1497,8 +1520,8 @@ mod tests {
 
     #[test]
     fn put_char_wide_glyph_occupies_two_cells_and_advances_cursor() {
-        let (mut screen, viewport) = setup();
-        feed("好".as_bytes(), &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed("好".as_bytes(), &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "好");
@@ -1508,12 +1531,12 @@ mod tests {
 
     #[test]
     fn put_char_wide_glyph_soft_wraps_when_it_would_overhang() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Fill 9 of 10 columns with narrow chars so only 1 column is free.
-        feed(b"abcdefghi", &mut screen, &viewport);
+        feed(b"abcdefghi", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, 9);
 
-        feed("好".as_bytes(), &mut screen, &viewport);
+        feed("好".as_bytes(), &mut screen, &mut viewport);
 
         // The wide glyph didn't fit at col 9, so we soft-wrap and place it
         // on the next row.
@@ -1527,11 +1550,11 @@ mod tests {
 
     #[test]
     fn put_char_narrow_overwriting_wide_anchor_blanks_continuation() {
-        let (mut screen, viewport) = setup();
-        feed("好b".as_bytes(), &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed("好b".as_bytes(), &mut screen, &mut viewport);
         // Move cursor back to col 0 and stomp on the anchor with a narrow char.
-        feed(b"\x1b[1;1H", &mut screen, &viewport);
-        feed(b"x", &mut screen, &viewport);
+        feed(b"\x1b[1;1H", &mut screen, &mut viewport);
+        feed(b"x", &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "x");
@@ -1542,11 +1565,11 @@ mod tests {
 
     #[test]
     fn put_char_narrow_overwriting_wide_continuation_blanks_anchor() {
-        let (mut screen, viewport) = setup();
-        feed("好b".as_bytes(), &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed("好b".as_bytes(), &mut screen, &mut viewport);
         // Park cursor on the continuation (col 1) and write a narrow char.
-        feed(b"\x1b[1;2H", &mut screen, &viewport);
-        feed(b"x", &mut screen, &viewport);
+        feed(b"\x1b[1;2H", &mut screen, &mut viewport);
+        feed(b"x", &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         // The anchor at col 0 is now orphaned — must be blanked.
@@ -1557,13 +1580,13 @@ mod tests {
 
     #[test]
     fn put_char_wide_overwriting_wide_blanks_both_neighbours() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // [好, "", 世, "", a]
-        feed("好世a".as_bytes(), &mut screen, &viewport);
+        feed("好世a".as_bytes(), &mut screen, &mut viewport);
         // Park on col 1 (好's continuation) and write a new wide glyph that
         // straddles the old layout.
-        feed(b"\x1b[1;2H", &mut screen, &viewport);
-        feed("界".as_bytes(), &mut screen, &viewport);
+        feed(b"\x1b[1;2H", &mut screen, &mut viewport);
+        feed("界".as_bytes(), &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         // 好's anchor (col 0) is orphaned — blanked.
@@ -1578,13 +1601,13 @@ mod tests {
 
     #[test]
     fn put_char_zwj_emoji_keeps_components_in_separate_wide_cells() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // 👨‍💻 = 👨 ZWJ 💻. wcswidth = 2+0+2 = 4, so the shell expects the
         // cursor to advance by 4. The ZWJ folds into `👨` (width 0 → fold),
         // but the second emoji starts a new wide cell of its own. The font
         // shaper still sees the full ZWJ sequence in `row_text` and renders
         // the ligature if the font has one.
-        feed("👨\u{200D}💻".as_bytes(), &mut screen, &viewport);
+        feed("👨\u{200D}💻".as_bytes(), &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👨\u{200D}");
@@ -1598,14 +1621,14 @@ mod tests {
 
     #[test]
     fn execute_lf_moves_cursor_down() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         execute(&mut screen, &viewport, b'\n', &mut false, false);
         assert_eq!(screen.cursor.row, 1);
     }
 
     #[test]
     fn execute_lf_at_scroll_bottom_scrolls_up() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = screen.scroll_bottom;
         let rows_before = screen.grid.rows.len();
 
@@ -1617,7 +1640,7 @@ mod tests {
 
     #[test]
     fn execute_cr_resets_col_to_zero() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 5;
         execute(&mut screen, &viewport, b'\r', &mut false, false);
         assert_eq!(screen.cursor.col, 0);
@@ -1625,7 +1648,7 @@ mod tests {
 
     #[test]
     fn execute_bs_saturates_at_zero() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 2;
         execute(&mut screen, &viewport, BS, &mut false, false);
         assert_eq!(screen.cursor.col, 1);
@@ -1637,7 +1660,7 @@ mod tests {
 
     #[test]
     fn execute_tab_advances_to_next_tab_stop() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
 
@@ -1648,7 +1671,7 @@ mod tests {
 
     #[test]
     fn execute_tab_clamps_at_rightmost_column() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = TEST_COLS - 1;
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
@@ -1656,7 +1679,7 @@ mod tests {
 
     #[test]
     fn execute_bel_sets_bell_pending() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         let mut bell = false;
         screen.cursor.col = 3;
         screen.cursor.row = 2;
@@ -1668,7 +1691,7 @@ mod tests {
 
     #[test]
     fn execute_nul_is_noop() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 3;
         screen.cursor.row = 2;
         execute(&mut screen, &viewport, NUL, &mut false, false);
@@ -1680,55 +1703,55 @@ mod tests {
 
     #[test]
     fn csi_a_moves_cursor_up_by_count() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 3;
-        feed(b"\x1b[2A", &mut screen, &viewport);
+        feed(b"\x1b[2A", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
     }
 
     #[test]
     fn csi_a_defaults_to_one() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
-        feed(b"\x1b[A", &mut screen, &viewport);
+        feed(b"\x1b[A", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
     }
 
     #[test]
     fn csi_a_zero_parameter_treated_as_one() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
-        feed(b"\x1b[0A", &mut screen, &viewport);
+        feed(b"\x1b[0A", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
     }
 
     #[test]
     fn csi_a_saturates_at_top() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 1;
-        feed(b"\x1b[99A", &mut screen, &viewport);
+        feed(b"\x1b[99A", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
     }
 
     #[test]
     fn csi_b_moves_cursor_down_clamped() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[99B", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[99B", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, TEST_ROWS - 1);
     }
 
     #[test]
     fn csi_c_moves_cursor_right_clamped() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[99C", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[99C", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
 
     #[test]
     fn csi_d_moves_cursor_left_saturating() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 2;
-        feed(b"\x1b[5D", &mut screen, &viewport);
+        feed(b"\x1b[5D", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, 0);
     }
 
@@ -1736,86 +1759,86 @@ mod tests {
 
     #[test]
     fn csi_e_moves_down_and_homes_column() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 0;
         screen.cursor.col = 5;
-        feed(b"\x1b[2E", &mut screen, &viewport);
+        feed(b"\x1b[2E", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
     fn csi_e_clamps_at_bottom() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 3;
-        feed(b"\x1b[99E", &mut screen, &viewport);
+        feed(b"\x1b[99E", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, TEST_ROWS - 1);
         assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
     fn csi_f_moves_up_and_homes_column() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 3;
         screen.cursor.col = 7;
-        feed(b"\x1b[2F", &mut screen, &viewport);
+        feed(b"\x1b[2F", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
     fn csi_f_saturates_at_top() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 1;
         screen.cursor.col = 5;
-        feed(b"\x1b[99F", &mut screen, &viewport);
+        feed(b"\x1b[99F", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
         assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
     fn csi_h_positions_cursor_one_based() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[3;5H", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[3;5H", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 4);
     }
 
     #[test]
     fn csi_h_defaults_to_origin() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
         screen.cursor.col = 5;
-        feed(b"\x1b[H", &mut screen, &viewport);
+        feed(b"\x1b[H", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
         assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
     fn csi_h_clamps_to_viewport() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[99;99H", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[99;99H", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, TEST_ROWS - 1);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
 
     #[test]
     fn csi_f_is_alias_of_h() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[2;3f", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[2;3f", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 2);
     }
 
     #[test]
     fn csi_s_saves_and_csi_u_restores_cursor() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[2;3H\x1b[s", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[2;3H\x1b[s", &mut screen, &mut viewport);
         // Move elsewhere after saving.
-        feed(b"\x1b[4;5H", &mut screen, &viewport);
+        feed(b"\x1b[4;5H", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 3);
         assert_eq!(screen.cursor.col, 4);
-        feed(b"\x1b[u", &mut screen, &viewport);
+        feed(b"\x1b[u", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 2);
     }
@@ -1826,9 +1849,9 @@ mod tests {
         // Live-updating scripts that call `CSI u` on the first paint
         // before any `CSI s` get predictable behaviour instead of a
         // surprise no-op that leaves the cursor mid-screen.
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[2;3H", &mut screen, &viewport);
-        feed(b"\x1b[u", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[2;3H", &mut screen, &mut viewport);
+        feed(b"\x1b[u", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
         assert_eq!(screen.cursor.col, 0);
     }
@@ -1837,10 +1860,10 @@ mod tests {
     fn csi_s_shares_slot_with_esc_7() {
         // SCOSC and DECSC write the same slot, so an `ESC 8` after a
         // `CSI s` restores the CSI-written position.
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[2;3H\x1b[s", &mut screen, &viewport);
-        feed(b"\x1b[4;5H", &mut screen, &viewport);
-        feed(b"\x1b8", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[2;3H\x1b[s", &mut screen, &mut viewport);
+        feed(b"\x1b[4;5H", &mut screen, &mut viewport);
+        feed(b"\x1b8", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 2);
     }
@@ -1851,26 +1874,30 @@ mod tests {
         // `?`). A plain `CSI u` must fall through to SCORC — this test
         // guards against anyone re-ordering the kitty check in front of
         // the SCORC arm.
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[2;3H\x1b[s\x1b[4;5H\x1b[u", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(
+            b"\x1b[2;3H\x1b[s\x1b[4;5H\x1b[u",
+            &mut screen,
+            &mut viewport,
+        );
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 2);
     }
 
     #[test]
     fn csi_g_sets_column_only() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
-        feed(b"\x1b[5G", &mut screen, &viewport);
+        feed(b"\x1b[5G", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 4);
     }
 
     #[test]
     fn csi_d_lowercase_sets_row_only() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 5;
-        feed(b"\x1b[3d", &mut screen, &viewport);
+        feed(b"\x1b[3d", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 5);
     }
@@ -1879,36 +1906,36 @@ mod tests {
 
     #[test]
     fn csi_j_2_erases_entire_display() {
-        let (mut screen, viewport) = setup();
-        feed(b"hello\nworld", &mut screen, &viewport);
-        feed(b"\x1b[2J", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"hello\nworld", &mut screen, &mut viewport);
+        feed(b"\x1b[2J", &mut screen, &mut viewport);
         assert_eq!(row_text(&screen, &viewport, 0).trim(), "");
         assert_eq!(row_text(&screen, &viewport, 1).trim(), "");
     }
 
     #[test]
     fn csi_k_erases_to_end_of_line() {
-        let (mut screen, viewport) = setup();
-        feed(b"hello", &mut screen, &viewport);
-        feed(b"\x1b[3G", &mut screen, &viewport); // col=2
-        feed(b"\x1b[K", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"hello", &mut screen, &mut viewport);
+        feed(b"\x1b[3G", &mut screen, &mut viewport); // col=2
+        feed(b"\x1b[K", &mut screen, &mut viewport);
         assert_eq!(row_text(&screen, &viewport, 0).trim_end(), "he");
     }
 
     #[test]
     fn csi_m_applies_sgr_colors() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[31m", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[31m", &mut screen, &mut viewport);
         // SGR 31 = ANSI red fg, which is (205, 0, 0) in the standard palette.
         assert_eq!(screen.fg, Srgb::new(205, 0, 0));
     }
 
     #[test]
     fn csi_r_sets_scroll_region_and_homes_cursor() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 3;
         screen.cursor.col = 5;
-        feed(b"\x1b[2;3r", &mut screen, &viewport);
+        feed(b"\x1b[2;3r", &mut screen, &mut viewport);
         assert_eq!(screen.scroll_top, 1);
         assert_eq!(screen.scroll_bottom, 2);
         assert_eq!(screen.cursor.row, 0);
@@ -1917,31 +1944,31 @@ mod tests {
 
     #[test]
     fn csi_r_clamps_bounds_to_viewport() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[1;99r", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[1;99r", &mut screen, &mut viewport);
         assert_eq!(screen.scroll_top, 0);
         assert_eq!(screen.scroll_bottom, TEST_ROWS - 1);
     }
 
     #[test]
     fn csi_with_intermediate_is_ignored() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
         screen.cursor.col = 3;
         // Intermediate ` ` before action `q` is a valid CSI shape but not one
         // we handle — we must leave state untouched.
-        feed(b"\x1b[1 q", &mut screen, &viewport);
+        feed(b"\x1b[1 q", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 3);
     }
 
     #[test]
     fn csi_unknown_action_is_ignored() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 1;
         screen.cursor.col = 1;
         // Use a genuinely unrecognized CSI action (not Z, which is now CBT).
-        feed(b"\x1b[1~", &mut screen, &viewport);
+        feed(b"\x1b[1~", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 1);
     }
@@ -1950,11 +1977,11 @@ mod tests {
 
     #[test]
     fn esc_m_at_scroll_top_scrolls_down() {
-        let (mut screen, viewport) = setup();
-        feed(b"top\nmid\nbot", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"top\nmid\nbot", &mut screen, &mut viewport);
         // Cursor is at scroll_top (row 0) after moving back there.
-        feed(b"\x1b[H", &mut screen, &viewport);
-        feed(b"\x1bM", &mut screen, &viewport);
+        feed(b"\x1b[H", &mut screen, &mut viewport);
+        feed(b"\x1bM", &mut screen, &mut viewport);
         // After scroll-down, the old top row shifts down one and row 0 blanks.
         assert_eq!(row_text(&screen, &viewport, 0).trim(), "");
         assert_eq!(row_text(&screen, &viewport, 1).trim_end(), "top");
@@ -1962,9 +1989,9 @@ mod tests {
 
     #[test]
     fn esc_m_above_scroll_top_moves_cursor_up() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
-        feed(b"\x1bM", &mut screen, &viewport);
+        feed(b"\x1bM", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
     }
 
@@ -1973,33 +2000,33 @@ mod tests {
         // scroll_top defaults to 0, so row 0 triggers scroll_down_in_region
         // above. Force a non-zero scroll_top to exercise the cursor.row > 0
         // branch at exactly row 0 of the viewport.
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[2;4r", &mut screen, &viewport); // scroll_top = 1
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[2;4r", &mut screen, &mut viewport); // scroll_top = 1
         screen.cursor.row = 0;
-        feed(b"\x1bM", &mut screen, &viewport);
+        feed(b"\x1bM", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
     }
 
     #[test]
     fn esc_scs_designator_is_ignored() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
         screen.cursor.col = 3;
         // ESC ( B designates US-ASCII as G0. Parser should no-op without
         // dropping state or panicking on the `B` byte (which would otherwise
         // land in the unknown-byte arm).
-        feed(b"\x1b(B", &mut screen, &viewport);
+        feed(b"\x1b(B", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 3);
     }
 
     #[test]
     fn esc_keypad_modes_are_noop() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
         screen.cursor.col = 3;
-        feed(b"\x1b=", &mut screen, &viewport);
-        feed(b"\x1b>", &mut screen, &viewport);
+        feed(b"\x1b=", &mut screen, &mut viewport);
+        feed(b"\x1b>", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 3);
     }
@@ -2008,9 +2035,9 @@ mod tests {
 
     #[test]
     fn rep_repeats_last_printed_char() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Print 'A' then repeat it 3 times.
-        feed(b"A\x1b[3b", &mut screen, &viewport);
+        feed(b"A\x1b[3b", &mut screen, &mut viewport);
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "A");
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "A");
@@ -2021,15 +2048,15 @@ mod tests {
 
     #[test]
     fn rep_without_prior_char_is_noop() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[3b", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[3b", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
     fn rep_defaults_to_one_repetition() {
-        let (mut screen, viewport) = setup();
-        feed(b"X\x1b[b", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"X\x1b[b", &mut screen, &mut viewport);
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "X");
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "X");
@@ -2040,14 +2067,14 @@ mod tests {
 
     #[test]
     fn decstr_resets_attrs_and_colors() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Set bold + reverse + custom colors.
-        feed(b"\x1b[1;7;31;42m", &mut screen, &viewport);
+        feed(b"\x1b[1;7;31;42m", &mut screen, &mut viewport);
         assert!(screen.attrs.contains(CellAttrs::BOLD));
         assert!(screen.attrs.contains(CellAttrs::REVERSE));
         assert_ne!(screen.fg, color::default_fg());
         // Soft reset.
-        feed(b"\x1b[!p", &mut screen, &viewport);
+        feed(b"\x1b[!p", &mut screen, &mut viewport);
         assert_eq!(screen.attrs, CellAttrs::default());
         assert_eq!(screen.fg, color::default_fg());
         assert_eq!(screen.bg, color::default_bg());
@@ -2055,27 +2082,27 @@ mod tests {
 
     #[test]
     fn decstr_resets_scroll_region() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Set a restrictive scroll region.
-        feed(b"\x1b[2;3r", &mut screen, &viewport);
+        feed(b"\x1b[2;3r", &mut screen, &mut viewport);
         assert_eq!(screen.scroll_top, 1);
         assert_eq!(screen.scroll_bottom, 2);
         // Soft reset should restore full region.
-        feed(b"\x1b[!p", &mut screen, &viewport);
+        feed(b"\x1b[!p", &mut screen, &mut viewport);
         assert_eq!(screen.scroll_top, 0);
         assert_eq!(screen.scroll_bottom, viewport.rows - 1);
     }
 
     #[test]
     fn decstr_preserves_screen_contents() {
-        let (mut screen, viewport) = setup();
-        feed(b"Hello", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"Hello", &mut screen, &mut viewport);
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         let before: Vec<_> = screen.grid.rows[r].cells[..5]
             .iter()
             .map(|s| s.as_str().to_owned())
             .collect();
-        feed(b"\x1b[!p", &mut screen, &viewport);
+        feed(b"\x1b[!p", &mut screen, &mut viewport);
         let after: Vec<_> = screen.grid.rows[r].cells[..5]
             .iter()
             .map(|s| s.as_str().to_owned())
@@ -2090,7 +2117,7 @@ mod tests {
     fn feed_with_output(
         input: &[u8],
         screen: &mut Screen,
-        viewport: &Viewport,
+        viewport: &mut Viewport,
     ) -> Vec<u8> {
         let pal = color::ColorPalette::default();
         let mut parser = Parser::new();
@@ -2164,40 +2191,40 @@ mod tests {
 
     #[test]
     fn decrqm_reports_cursor_visible_set() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Cursor is visible by default.
-        let out = feed_with_output(b"\x1b[?25$p", &mut screen, &viewport);
+        let out = feed_with_output(b"\x1b[?25$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[?25;1$y");
     }
 
     #[test]
     fn decrqm_reports_cursor_visible_reset() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor_visible = false;
-        let out = feed_with_output(b"\x1b[?25$p", &mut screen, &viewport);
+        let out = feed_with_output(b"\x1b[?25$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[?25;2$y");
     }
 
     #[test]
     fn decrqm_reports_bracketed_paste() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Enable bracketed paste first, then query.
-        let out = feed_with_output(b"\x1b[?2004h\x1b[?2004$p", &mut screen, &viewport);
+        let out = feed_with_output(b"\x1b[?2004h\x1b[?2004$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[?2004;1$y");
     }
 
     #[test]
     fn decrqm_unknown_mode_reports_zero() {
-        let (mut screen, viewport) = setup();
-        let out = feed_with_output(b"\x1b[?9999$p", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        let out = feed_with_output(b"\x1b[?9999$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[?9999;0$y");
     }
 
     #[test]
     fn decrqm_ansi_mode_reports_zero_for_unknown() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Query an unknown ANSI (non-private) mode.
-        let out = feed_with_output(b"\x1b[99$p", &mut screen, &viewport);
+        let out = feed_with_output(b"\x1b[99$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[99;0$y");
     }
 
@@ -2206,7 +2233,7 @@ mod tests {
     #[test]
     fn default_tab_stops_every_8_columns() {
         // 10-col screen: only column 8 is a stop.
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         assert_eq!(screen.cursor.col, 0);
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
@@ -2214,7 +2241,7 @@ mod tests {
 
     #[test]
     fn tab_from_mid_column_goes_to_next_stop() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 3;
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
@@ -2222,7 +2249,7 @@ mod tests {
 
     #[test]
     fn tab_at_last_column_stays() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = TEST_COLS - 1;
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
@@ -2230,9 +2257,9 @@ mod tests {
 
     #[test]
     fn hts_sets_custom_tab_stop() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Move to col 3, set a tab stop with ESC H, then tab from col 0.
-        feed(b"\x1b[1;4H\x1bH", &mut screen, &viewport);
+        feed(b"\x1b[1;4H\x1bH", &mut screen, &mut viewport);
         assert!(screen.tab_stops[3]);
         screen.cursor.col = 0;
         execute(&mut screen, &viewport, b'\t', &mut false, false);
@@ -2250,12 +2277,12 @@ mod tests {
             color::default_fg(),
             color::default_bg(),
         );
-        let viewport = Viewport {
+        let mut viewport = Viewport {
             rows: TEST_ROWS,
             cols: screen_cols,
         };
         // Default stops at 8, 16. CSI 2 I from col 0 should jump to 16.
-        feed(b"\x1b[2I", &mut screen, &viewport);
+        feed(b"\x1b[2I", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, 16);
     }
 
@@ -2269,22 +2296,22 @@ mod tests {
             color::default_fg(),
             color::default_bg(),
         );
-        let viewport = Viewport {
+        let mut viewport = Viewport {
             rows: TEST_ROWS,
             cols: screen_cols,
         };
         // Park at col 20, then CSI 2 Z (back 2 stops) should land at 8.
         screen.cursor.col = 20;
-        feed(b"\x1b[2Z", &mut screen, &viewport);
+        feed(b"\x1b[2Z", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, 8);
     }
 
     #[test]
     fn tbc_0_clears_at_cursor() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Default stop at col 8. Move there and clear it.
         screen.cursor.col = 8;
-        feed(b"\x1b[0g", &mut screen, &viewport);
+        feed(b"\x1b[0g", &mut screen, &mut viewport);
         assert!(!screen.tab_stops[8]);
         // Tab from col 0 should now go to the last column.
         screen.cursor.col = 0;
@@ -2294,8 +2321,8 @@ mod tests {
 
     #[test]
     fn tbc_3_clears_all_tab_stops() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[3g", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[3g", &mut screen, &mut viewport);
         assert!(screen.tab_stops.iter().all(|&s| !s));
         // Tab from col 0 should go to last column.
         screen.cursor.col = 0;
@@ -2307,11 +2334,11 @@ mod tests {
 
     #[test]
     fn default_mode_is_replace() {
-        let (mut screen, viewport) = setup();
-        feed(b"abc", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"abc", &mut screen, &mut viewport);
         // Overwrite at col 0.
-        feed(b"\x1b[1;1H", &mut screen, &viewport);
-        feed(b"X", &mut screen, &viewport);
+        feed(b"\x1b[1;1H", &mut screen, &mut viewport);
+        feed(b"X", &mut screen, &mut viewport);
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "X");
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "b");
@@ -2320,10 +2347,10 @@ mod tests {
 
     #[test]
     fn insert_mode_shifts_text_right() {
-        let (mut screen, viewport) = setup();
-        feed(b"abc", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"abc", &mut screen, &mut viewport);
         // Enable insert mode (CSI 4 h), move to col 0, type 'X'.
-        feed(b"\x1b[4h\x1b[1;1HX", &mut screen, &viewport);
+        feed(b"\x1b[4h\x1b[1;1HX", &mut screen, &mut viewport);
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "X");
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "a");
@@ -2333,10 +2360,10 @@ mod tests {
 
     #[test]
     fn insert_mode_disable_returns_to_replace() {
-        let (mut screen, viewport) = setup();
-        feed(b"abc", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"abc", &mut screen, &mut viewport);
         // Enable insert, then disable it.
-        feed(b"\x1b[4h\x1b[4l\x1b[1;1HX", &mut screen, &viewport);
+        feed(b"\x1b[4h\x1b[4l\x1b[1;1HX", &mut screen, &mut viewport);
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         // Replace mode: 'X' overwrites 'a'.
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "X");
@@ -2348,72 +2375,72 @@ mod tests {
 
     #[test]
     fn origin_mode_cup_relative_to_scroll_region() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Set scroll region to rows 2..3 (1-based).
-        feed(b"\x1b[2;3r", &mut screen, &viewport);
+        feed(b"\x1b[2;3r", &mut screen, &mut viewport);
         // Enable origin mode.
-        feed(b"\x1b[?6h", &mut screen, &viewport);
+        feed(b"\x1b[?6h", &mut screen, &mut viewport);
         // CUP(1,1) should land at top of scroll region (row 1 in 0-based).
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 0);
         // CUP(2,1) should land at row 2 (scroll_bottom).
-        feed(b"\x1b[2;1H", &mut screen, &viewport);
+        feed(b"\x1b[2;1H", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
     }
 
     #[test]
     fn origin_mode_cup_clamps_to_scroll_region() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[2;3r", &mut screen, &viewport);
-        feed(b"\x1b[?6h", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[2;3r", &mut screen, &mut viewport);
+        feed(b"\x1b[?6h", &mut screen, &mut viewport);
         // CUP(99,1) should clamp to scroll_bottom.
-        feed(b"\x1b[99;1H", &mut screen, &viewport);
+        feed(b"\x1b[99;1H", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
     }
 
     #[test]
     fn origin_mode_disable_returns_to_absolute() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[2;3r", &mut screen, &viewport);
-        feed(b"\x1b[?6h", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[2;3r", &mut screen, &mut viewport);
+        feed(b"\x1b[?6h", &mut screen, &mut viewport);
         // Disable origin mode — cursor homes to absolute (0,0).
-        feed(b"\x1b[?6l", &mut screen, &viewport);
+        feed(b"\x1b[?6l", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
         assert_eq!(screen.cursor.col, 0);
         // CUP(1,1) is now absolute row 0.
-        feed(b"\x1b[1;1H", &mut screen, &viewport);
+        feed(b"\x1b[1;1H", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
     }
 
     #[test]
     fn origin_mode_vpa_relative_to_scroll_region() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[2;3r", &mut screen, &viewport);
-        feed(b"\x1b[?6h", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[2;3r", &mut screen, &mut viewport);
+        feed(b"\x1b[?6h", &mut screen, &mut viewport);
         // VPA(2) should land at scroll_top + 1 = row 2.
-        feed(b"\x1b[2d", &mut screen, &viewport);
+        feed(b"\x1b[2d", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
     }
 
     #[test]
     fn decrqm_reports_origin_mode() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Default is off.
-        let out = feed_with_output(b"\x1b[?6$p", &mut screen, &viewport);
+        let out = feed_with_output(b"\x1b[?6$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[?6;2$y");
         // Enable and re-query.
-        let out = feed_with_output(b"\x1b[?6h\x1b[?6$p", &mut screen, &viewport);
+        let out = feed_with_output(b"\x1b[?6h\x1b[?6$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[?6;1$y");
     }
 
     #[test]
     fn decrqm_irm_reports_insert_mode() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Default is replace (off) → Pm=2.
-        let out = feed_with_output(b"\x1b[4$p", &mut screen, &viewport);
+        let out = feed_with_output(b"\x1b[4$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[4;2$y");
         // Enable and re-query → Pm=1.
-        let out = feed_with_output(b"\x1b[4h\x1b[4$p", &mut screen, &viewport);
+        let out = feed_with_output(b"\x1b[4h\x1b[4$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[4;1$y");
     }
 
@@ -2421,10 +2448,10 @@ mod tests {
 
     #[test]
     fn scs_g0_drawing_translates_box_chars() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // ESC ( 0 designates DEC drawing into G0, then print box-drawing bytes.
         // 0x6C = ┌, 0x71 = ─, 0x6B = ┐
-        feed(b"\x1b(0\x6c\x71\x6b", &mut screen, &viewport);
+        feed(b"\x1b(0\x6c\x71\x6b", &mut screen, &mut viewport);
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{250C}"); // ┌
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "\u{2500}"); // ─
@@ -2433,9 +2460,9 @@ mod tests {
 
     #[test]
     fn scs_g0_ascii_restores_normal() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Enable drawing, write a box char, then switch back to ASCII.
-        feed(b"\x1b(0\x6c\x1b(B\x6c", &mut screen, &viewport);
+        feed(b"\x1b(0\x6c\x1b(B\x6c", &mut screen, &mut viewport);
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{250C}"); // ┌
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "l"); // plain ASCII
@@ -2443,9 +2470,9 @@ mod tests {
 
     #[test]
     fn scs_drawing_does_not_translate_below_0x60() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // In drawing mode, bytes below 0x60 should pass through as ASCII.
-        feed(b"\x1b(0ABC", &mut screen, &viewport);
+        feed(b"\x1b(0ABC", &mut screen, &mut viewport);
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "A");
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "B");
@@ -2454,14 +2481,14 @@ mod tests {
 
     #[test]
     fn scs_so_si_switch_between_g0_g1() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // G0 = ASCII (default), G1 = drawing.
         // SO (0x0E) invokes G1, SI (0x0F) invokes G0.
-        feed(b"\x1b)0", &mut screen, &viewport); // G1 = drawing
-        feed(b"\x0E", &mut screen, &viewport); // SO → GL = G1
-        feed(b"\x6c", &mut screen, &viewport); // should translate
-        feed(b"\x0F", &mut screen, &viewport); // SI → GL = G0
-        feed(b"\x6c", &mut screen, &viewport); // should be plain ASCII
+        feed(b"\x1b)0", &mut screen, &mut viewport); // G1 = drawing
+        feed(b"\x0E", &mut screen, &mut viewport); // SO → GL = G1
+        feed(b"\x6c", &mut screen, &mut viewport); // should translate
+        feed(b"\x0F", &mut screen, &mut viewport); // SI → GL = G0
+        feed(b"\x6c", &mut screen, &mut viewport); // should be plain ASCII
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{250C}"); // ┌
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "l"); // plain
@@ -2469,11 +2496,11 @@ mod tests {
 
     #[test]
     fn scs_decstr_resets_charset_state() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b(0", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b(0", &mut screen, &mut viewport);
         assert!(screen.charset_g0_is_drawing);
         // DECSTR should reset charset state.
-        feed(b"\x1b[!p", &mut screen, &viewport);
+        feed(b"\x1b[!p", &mut screen, &mut viewport);
         assert!(!screen.charset_g0_is_drawing);
         assert!(!screen.charset_g1_is_drawing);
         assert!(screen.charset_gl_is_g0);
@@ -2481,13 +2508,13 @@ mod tests {
 
     #[test]
     fn scs_ris_resets_charset_state() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b(0\x1b)0\x0E", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b(0\x1b)0\x0E", &mut screen, &mut viewport);
         assert!(screen.charset_g0_is_drawing);
         assert!(screen.charset_g1_is_drawing);
         assert!(!screen.charset_gl_is_g0);
         // RIS should reset everything.
-        feed(b"\x1bc", &mut screen, &viewport);
+        feed(b"\x1bc", &mut screen, &mut viewport);
         assert!(!screen.charset_g0_is_drawing);
         assert!(!screen.charset_g1_is_drawing);
         assert!(screen.charset_gl_is_g0);
@@ -2495,25 +2522,25 @@ mod tests {
 
     #[test]
     fn scs_save_restore_cursor_preserves_charset() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Enable drawing in G0, save cursor.
-        feed(b"\x1b(0\x1b7", &mut screen, &viewport);
+        feed(b"\x1b(0\x1b7", &mut screen, &mut viewport);
         // Switch back to ASCII.
-        feed(b"\x1b(B", &mut screen, &viewport);
+        feed(b"\x1b(B", &mut screen, &mut viewport);
         assert!(!screen.charset_g0_is_drawing);
         // Restore cursor — should bring back DEC drawing.
-        feed(b"\x1b8", &mut screen, &viewport);
+        feed(b"\x1b8", &mut screen, &mut viewport);
         assert!(screen.charset_g0_is_drawing);
     }
 
     #[test]
     fn scs_full_box_top_bottom() {
         // Simulate a typical box-drawing sequence: ┌──┐ on top, └──┘ on bottom.
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b(0", &mut screen, &viewport);
-        feed(b"\x6c\x71\x71\x6b", &mut screen, &viewport); // ┌──┐
-        feed(b"\r\n", &mut screen, &viewport);
-        feed(b"\x6d\x71\x71\x6a", &mut screen, &viewport); // └──┘
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b(0", &mut screen, &mut viewport);
+        feed(b"\x6c\x71\x71\x6b", &mut screen, &mut viewport); // ┌──┐
+        feed(b"\r\n", &mut screen, &mut viewport);
+        feed(b"\x6d\x71\x71\x6a", &mut screen, &mut viewport); // └──┘
         let top = row_text(&screen, &viewport, 0);
         assert!(top.starts_with("\u{250C}\u{2500}\u{2500}\u{2510}"));
         let bot = row_text(&screen, &viewport, 1);
@@ -2524,9 +2551,9 @@ mod tests {
 
     #[test]
     fn decaln_fills_screen_with_e() {
-        let (mut screen, viewport) = setup();
-        feed(b"hello", &mut screen, &viewport);
-        feed(b"\x1b#8", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"hello", &mut screen, &mut viewport);
+        feed(b"\x1b#8", &mut screen, &mut viewport);
         let text = row_text(&screen, &viewport, 0);
         assert!(text.chars().all(|c| c == 'E'));
         let text2 = row_text(&screen, &viewport, TEST_ROWS - 1);
@@ -2537,28 +2564,28 @@ mod tests {
 
     #[test]
     fn ind_moves_cursor_down() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 5;
-        feed(b"\x1bD", &mut screen, &viewport);
+        feed(b"\x1bD", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 5); // col preserved
     }
 
     #[test]
     fn ind_at_scroll_bottom_scrolls_up() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = screen.scroll_bottom;
         let rows_before = screen.grid.rows.len();
-        feed(b"\x1bD", &mut screen, &viewport);
+        feed(b"\x1bD", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, screen.scroll_bottom);
         assert!(screen.grid.rows.len() > rows_before);
     }
 
     #[test]
     fn nel_moves_to_col_0_of_next_line() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 5;
-        feed(b"\x1bE", &mut screen, &viewport);
+        feed(b"\x1bE", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 0);
     }
@@ -2567,11 +2594,11 @@ mod tests {
 
     #[test]
     fn decawm_off_prevents_wrap() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Disable auto-wrap.
-        feed(b"\x1b[?7l", &mut screen, &viewport);
+        feed(b"\x1b[?7l", &mut screen, &mut viewport);
         // Write more chars than columns — should stay on last column.
-        feed(b"abcdefghijXX", &mut screen, &viewport);
+        feed(b"abcdefghijXX", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
         // Last column should have the last char written.
         let text = row_text(&screen, &viewport, 0);
@@ -2580,10 +2607,10 @@ mod tests {
 
     #[test]
     fn decawm_on_wraps_normally() {
-        let (mut screen, viewport) = setup();
-        feed(b"\x1b[?7l", &mut screen, &viewport);
-        feed(b"\x1b[?7h", &mut screen, &viewport);
-        feed(b"abcdefghijkl", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[?7l", &mut screen, &mut viewport);
+        feed(b"\x1b[?7h", &mut screen, &mut viewport);
+        feed(b"abcdefghijkl", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
     }
 
@@ -2591,11 +2618,11 @@ mod tests {
 
     #[test]
     fn lnm_enabled_lf_implies_cr() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.col = 5;
         // Enable LNM and issue LF in one feed call so the modes object
         // persists across both sequences.
-        feed(b"\x1b[20h\n", &mut screen, &viewport);
+        feed(b"\x1b[20h\n", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 0); // CR implied
     }
@@ -2604,35 +2631,35 @@ mod tests {
 
     #[test]
     fn cub_from_pending_wrap_lands_on_second_to_last() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         // Fill the row to put cursor into pending wrap (col == viewport.cols).
-        feed(b"abcdefghij", &mut screen, &viewport);
+        feed(b"abcdefghij", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, TEST_COLS);
         // CUB 1 should cancel pending wrap (→ last col) then move back 1.
-        feed(b"\x1b[D", &mut screen, &viewport);
+        feed(b"\x1b[D", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, TEST_COLS - 2);
     }
 
     #[test]
     fn cuu_from_pending_wrap_cancels_wrap() {
-        let (mut screen, viewport) = setup();
+        let (mut screen, mut viewport) = setup();
         screen.cursor.row = 1;
-        feed(b"abcdefghij", &mut screen, &viewport);
+        feed(b"abcdefghij", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, TEST_COLS);
         // CUU 1 should move up without wrapping and cancel the pending
         // wrap column to the last column.
-        feed(b"\x1b[A", &mut screen, &viewport);
+        feed(b"\x1b[A", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
 
     #[test]
     fn ed_from_pending_wrap_erases_last_column() {
-        let (mut screen, viewport) = setup();
-        feed(b"abcdefghij", &mut screen, &viewport);
+        let (mut screen, mut viewport) = setup();
+        feed(b"abcdefghij", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, TEST_COLS);
         // ED 0 (erase to end) should erase the last column, not be a no-op.
-        feed(b"\x1b[J", &mut screen, &viewport);
+        feed(b"\x1b[J", &mut screen, &mut viewport);
         let text = row_text(&screen, &viewport, 0);
         assert_eq!(&text[..TEST_COLS as usize], "abcdefghi ");
     }
