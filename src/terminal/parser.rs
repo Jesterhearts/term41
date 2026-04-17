@@ -1099,7 +1099,16 @@ pub(super) fn esc_dispatch(
                     row.fg.fill(fg);
                     row.bg.fill(bg);
                     row.attrs.fill(CellAttrs::default());
+                    row.underline.fill(UnderlineStyle::None);
+                    row.underline_color.fill(None);
                 }
+                // DECALN resets margins, origin mode, and homes the cursor
+                // per DEC spec. Without this, vttest's border drawing after
+                // DECALN misaligns if a previous test left a restricted
+                // scroll region or origin mode enabled.
+                ctx.screen.scroll_top = 0;
+                ctx.screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+                ctx.screen.origin_mode = false;
                 ctx.screen.cursor.row = 0;
                 ctx.screen.cursor.col = 0;
             }

@@ -1360,4 +1360,57 @@ mod tests {
         assert_eq!(out[0], Owned::Osc(b"0;title".to_vec()));
         assert_eq!(out[1], Owned::Execute(0x1A));
     }
+
+    #[test]
+    fn c0_control_inside_csi_is_executed_and_sequence_continues() {
+        // BS (0x08) embedded in a CSI H sequence should be executed mid-
+        // parse, then the CSI H dispatch should still fire with the
+        // correct parameters.
+        let out = collect(b"\x1b[1\x08;1H");
+        // Expect: Execute(BS), then CsiDispatch for 'H' with params [1,1].
+        assert!(out.contains(&Owned::Execute(0x08)));
+        assert!(out.contains(&Owned::Csi(vec![], 'H')));
+    }
+
+    #[test]
+    fn c0_controls_inside_escape_sequence_are_executed() {
+        // A LF (0x0A) between ESC and [ should be executed, then the CSI
+        // sequence should still parse.
+        let out = collect(b"\x1b\x0a[H");
+        assert!(out.contains(&Owned::Execute(0x0A)));
+        assert!(out.contains(&Owned::Csi(vec![], 'H')));
+    }
+
+    #[test]
+    fn ht_inside_csi_params_executes_and_dispatches() {
+        // HT (0x09) embedded mid-parameter: ESC [ 3 HT ; 1 H
+        // Should execute the HT and dispatch CHA (H) with params.
+        let out = collect(b"\x1b[3\x09;1H");
+        assert!(
+            out.contains(&Owned::Execute(0x09)),
+            "HT not executed: {out:?}"
+        );
+        assert!(
+            out.contains(&Owned::Csi(vec![], 'H')),
+            "CSI H not dispatched: {out:?}"
+        );
+    }
+
+    #[test]
+    fn cr_lf_inside_csi_params_execute_and_dispatches() {
+        // CR + LF embedded in CSI params: ESC [ 2 CR LF ; 1 G
+        let out = collect(b"\x1b[2\x0d\x0a;1G");
+        assert!(
+            out.contains(&Owned::Execute(0x0D)),
+            "CR not executed: {out:?}"
+        );
+        assert!(
+            out.contains(&Owned::Execute(0x0A)),
+            "LF not executed: {out:?}"
+        );
+        assert!(
+            out.contains(&Owned::Csi(vec![], 'G')),
+            "CSI G not dispatched: {out:?}"
+        );
+    }
 }
