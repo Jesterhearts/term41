@@ -549,6 +549,13 @@ pub(super) fn execute(
     bell_pending: &mut bool,
     newline_mode: bool,
 ) {
+    // Cancel pending wrap for control characters that affect cursor
+    // position. Without this, a BS/TAB/CR/LF after writing the last
+    // column would see cursor.col == viewport.cols (one past the edge).
+    if screen.cursor.col >= viewport.cols {
+        screen.cursor.col = viewport.cols - 1;
+    }
+
     match byte {
         b'\n' => {
             // LNM (mode 20): when enabled, LF implies CR.
@@ -838,6 +845,15 @@ pub(super) fn csi_dispatch(
     let screen = &mut *ctx.screen;
     let viewport = ctx.viewport;
     let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
+
+    // Cancel the pending-wrap state before any cursor movement or erase.
+    // After writing the last column, cursor.col sits at viewport.cols
+    // (one past the right edge). Movement sequences and erases should
+    // treat the cursor as being on the last column, not past it.
+    if screen.cursor.col >= viewport.cols {
+        screen.cursor.col = viewport.cols - 1;
+    }
+
     let cursor = &mut screen.cursor;
 
     match action {
@@ -1097,6 +1113,11 @@ pub(super) fn esc_dispatch(
 
     if !intermediates.is_empty() {
         return;
+    }
+
+    // Cancel pending wrap before ESC sequences that move the cursor.
+    if ctx.screen.cursor.col >= ctx.viewport.cols {
+        ctx.screen.cursor.col = ctx.viewport.cols - 1;
     }
 
     match byte {
@@ -2566,5 +2587,42 @@ mod tests {
         feed(b"\x1b[20h\n", &mut screen, &viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 0); // CR implied
+    }
+
+    // -- pending wrap cancellation -------------------------------------------
+
+    #[test]
+    fn cub_from_pending_wrap_lands_on_second_to_last() {
+        let (mut screen, viewport) = setup();
+        // Fill the row to put cursor into pending wrap (col == viewport.cols).
+        feed(b"abcdefghij", &mut screen, &viewport);
+        assert_eq!(screen.cursor.col, TEST_COLS);
+        // CUB 1 should cancel pending wrap (→ last col) then move back 1.
+        feed(b"\x1b[D", &mut screen, &viewport);
+        assert_eq!(screen.cursor.col, TEST_COLS - 2);
+    }
+
+    #[test]
+    fn cuu_from_pending_wrap_cancels_wrap() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.row = 1;
+        feed(b"abcdefghij", &mut screen, &viewport);
+        assert_eq!(screen.cursor.col, TEST_COLS);
+        // CUU 1 should move up without wrapping and cancel the pending
+        // wrap column to the last column.
+        feed(b"\x1b[A", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 0);
+        assert_eq!(screen.cursor.col, TEST_COLS - 1);
+    }
+
+    #[test]
+    fn ed_from_pending_wrap_erases_last_column() {
+        let (mut screen, viewport) = setup();
+        feed(b"abcdefghij", &mut screen, &viewport);
+        assert_eq!(screen.cursor.col, TEST_COLS);
+        // ED 0 (erase to end) should erase the last column, not be a no-op.
+        feed(b"\x1b[J", &mut screen, &viewport);
+        let text = row_text(&screen, &viewport, 0);
+        assert_eq!(&text[..TEST_COLS as usize], "abcdefghi ");
     }
 }
