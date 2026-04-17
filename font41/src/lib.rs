@@ -359,7 +359,6 @@ impl FontSystem {
         &mut self,
         scale: f32,
     ) {
-        dbg!(scale);
         let effective = self.base_font_size * scale;
         if (effective - self.font_size).abs() < f32::EPSILON {
             return;
