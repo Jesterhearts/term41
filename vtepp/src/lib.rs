@@ -134,8 +134,13 @@ pub enum Action<'d> {
     /// Used by the kitty graphics protocol (`ESC _ G ...`). Payload contains
     /// the raw bytes between the APC introducer and its terminator (ST).
     ApcDispatch(Vec<u8>),
-    /// Start of a DCS (Device Control String) — parameters are available.
-    Hook { params: Params, action: char },
+    /// Start of a DCS (Device Control String) — parameters and intermediates
+    /// are available, mirroring CSI dispatch.
+    Hook {
+        params: Params,
+        intermediates: Intermediates,
+        action: char,
+    },
     /// A contiguous run of DCS passthrough data, borrowed from the input
     /// buffer. Produced both by the SIMD scanner for printable runs and by
     /// the scalar path for individual kept-control bytes.
@@ -169,6 +174,7 @@ enum RawAction {
     ApcDispatch(Vec<u8>),
     Hook {
         params: Params,
+        intermediates: Intermediates,
         action: char,
     },
     /// Scalar dispatch of a single DCS passthrough byte (rare — C0 bytes kept
@@ -863,6 +869,7 @@ impl Parser {
                 self.state = State::DcsPassthrough;
                 Some(RawAction::Hook {
                     params: self.snapshot_params(),
+                    intermediates: self.snapshot_intermediates(),
                     action: byte as char,
                 })
             }
@@ -902,6 +909,7 @@ impl Parser {
                 self.state = State::DcsPassthrough;
                 Some(RawAction::Hook {
                     params: self.snapshot_params(),
+                    intermediates: self.snapshot_intermediates(),
                     action: byte as char,
                 })
             }
@@ -928,6 +936,7 @@ impl Parser {
                 self.state = State::DcsPassthrough;
                 Some(RawAction::Hook {
                     params: self.snapshot_params(),
+                    intermediates: self.snapshot_intermediates(),
                     action: byte as char,
                 })
             }
@@ -1110,7 +1119,15 @@ impl<'a> ParseIter<'a> {
             },
             RawAction::OscDispatch(data) => Action::OscDispatch(data),
             RawAction::ApcDispatch(data) => Action::ApcDispatch(data),
-            RawAction::Hook { params, action } => Action::Hook { params, action },
+            RawAction::Hook {
+                params,
+                intermediates,
+                action,
+            } => Action::Hook {
+                params,
+                intermediates,
+                action,
+            },
             // The byte that produced this was at self.pos - 1.
             RawAction::PutByte => Action::Put(&self.data[self.pos - 1..self.pos]),
             RawAction::Unhook => Action::Unhook,

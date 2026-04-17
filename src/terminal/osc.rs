@@ -115,7 +115,14 @@ pub(super) fn handle_osc(
         b"10" => handle_osc_color_query(rest, 10, ctx.palette.fg, ctx.pending_output),
         // OSC 11 ? — query background color.
         b"11" => handle_osc_color_query(rest, 11, ctx.palette.bg, ctx.pending_output),
+        // OSC 12 ? — query cursor color.
+        b"12" => handle_osc_cursor_color_query(rest, ctx),
         b"52" => handle_osc_52(rest, ctx.clipboard, ctx.pending_output),
+        // OSC 104 — reset palette color(s). OSC 110/111/112 — reset default
+        // fg/bg/cursor color. Accepted but currently no-op — the palette is
+        // immutable at this level. A full implementation would require mutable
+        // palette access through OscContext.
+        b"104" | b"110" | b"111" | b"112" => {}
         b"133" => handle_osc_133(
             rest,
             ctx.active_screen,
@@ -123,6 +130,11 @@ pub(super) fn handle_osc(
             ctx.current_prompt_row,
             ctx.command_metas,
         ),
+        // iTerm2 proprietary commands. Image commands (File=, MultipartFile=,
+        // etc.) are routed separately in terminal.rs. Non-image commands
+        // (SetMark, SetBadgeFormat, SetUserVar, ClearScrollback, etc.) are
+        // silently accepted as no-ops.
+        b"1337" => {}
         _ => {}
     }
 }
@@ -302,6 +314,23 @@ fn handle_osc_color_query(
     pending_output.push(b';');
     pending_output.extend_from_slice(reply.as_bytes());
     pending_output.extend_from_slice(b"\x1b\\");
+}
+
+/// OSC 12 — cursor color query. If the payload is `?` the terminal replies
+/// with the cursor color in X11 `rgb:RRRR/GGGG/BBBB` format. When no explicit
+/// cursor color is set, the default foreground is reported (matching xterm).
+fn handle_osc_cursor_color_query(
+    rest: &[u8],
+    ctx: &mut OscContext<'_>,
+) {
+    if rest != b"?" {
+        return;
+    }
+    let c = ctx.palette.cursor.unwrap_or(ctx.palette.fg);
+    let reply = rgb_reply(c.red, c.green, c.blue);
+    ctx.pending_output.extend_from_slice(b"\x1b]12;");
+    ctx.pending_output.extend_from_slice(reply.as_bytes());
+    ctx.pending_output.extend_from_slice(b"\x1b\\");
 }
 
 /// OSC 4;N;? — query the Nth entry of the 256-color palette. The response
@@ -787,6 +816,84 @@ mod tests {
     fn osc_4_invalid_index_is_ignored() {
         let mut bag = Bag::new();
         bag.dispatch(b"4;999;?");
+        assert!(bag.pending.is_empty());
+    }
+
+    // ---- OSC 12 — cursor color query ----
+
+    #[test]
+    fn osc_12_query_returns_fg_when_no_cursor_color() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"12;?");
+        // No cursor color set → falls back to fg (204,204,204).
+        assert_eq!(bag.pending, b"\x1b]12;rgb:cccc/cccc/cccc\x1b\\");
+    }
+
+    #[test]
+    fn osc_12_query_returns_explicit_cursor_color() {
+        let mut bag = Bag::new();
+        bag.palette.cursor = Some(palette::Srgb::new(255, 128, 0));
+        bag.dispatch(b"12;?");
+        assert_eq!(bag.pending, b"\x1b]12;rgb:ffff/8080/0000\x1b\\");
+    }
+
+    #[test]
+    fn osc_12_non_query_is_ignored() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"12;rgb:ffff/0000/0000");
+        assert!(bag.pending.is_empty());
+    }
+
+    // ---- OSC 104/110/111/112 — color reset no-ops ----
+
+    #[test]
+    fn osc_104_accepted_silently() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"104");
+        assert!(bag.pending.is_empty());
+    }
+
+    #[test]
+    fn osc_104_with_index_accepted_silently() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"104;1");
+        assert!(bag.pending.is_empty());
+    }
+
+    #[test]
+    fn osc_110_accepted_silently() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"110");
+        assert!(bag.pending.is_empty());
+    }
+
+    #[test]
+    fn osc_111_accepted_silently() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"111");
+        assert!(bag.pending.is_empty());
+    }
+
+    #[test]
+    fn osc_112_accepted_silently() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"112");
+        assert!(bag.pending.is_empty());
+    }
+
+    // ---- OSC 1337 — iTerm2 non-image commands ----
+
+    #[test]
+    fn osc_1337_non_image_accepted_silently() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"1337;SetMark");
+        assert!(bag.pending.is_empty());
+    }
+
+    #[test]
+    fn osc_1337_set_user_var_accepted_silently() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"1337;SetUserVar=foo=bar");
         assert!(bag.pending.is_empty());
     }
 

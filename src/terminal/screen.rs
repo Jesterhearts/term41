@@ -28,6 +28,10 @@ pub struct SavedCursor {
     pub attrs: CellAttrs,
     pub underline: UnderlineStyle,
     pub underline_color: Option<Srgb<u8>>,
+    pub origin_mode: bool,
+    pub charset_g0_is_drawing: bool,
+    pub charset_g1_is_drawing: bool,
+    pub charset_gl_is_g0: bool,
 }
 
 /// State for a single screen buffer (primary or alt). The terminal holds
@@ -69,9 +73,32 @@ pub struct Screen {
     /// Last character placed by `put_char` or `put_ascii_run`, used by REP
     /// (`CSI Ps b`) to repeat the preceding graphic character.
     pub last_char: Option<SmolStr>,
+    /// Per-column tab stops. `tab_stops[c]` is `true` when column `c` is a
+    /// tab stop. Defaults to every 8 columns (8, 16, 24, ...).
+    pub tab_stops: Vec<bool>,
+    /// DECOM — when set, cursor addressing (CUP, VPA) is relative to the
+    /// scroll region rather than the full screen. Homes the cursor on toggle.
+    pub origin_mode: bool,
+    /// Character set designated to G0. `true` = DEC Special Graphics, `false` =
+    /// ASCII.
+    pub charset_g0_is_drawing: bool,
+    /// Character set designated to G1.
+    pub charset_g1_is_drawing: bool,
+    /// `true` when G0 is active (GL = G0, default). `false` when G1 is active
+    /// (GL = G1, after SO).
+    pub charset_gl_is_g0: bool,
 }
 
 impl Screen {
+    /// Whether the active GL character set is DEC Special Graphics.
+    pub fn is_drawing_active(&self) -> bool {
+        if self.charset_gl_is_g0 {
+            self.charset_g0_is_drawing
+        } else {
+            self.charset_g1_is_drawing
+        }
+    }
+
     pub(super) fn new(
         cols: u32,
         rows: u32,
@@ -105,8 +132,25 @@ impl Screen {
             current_hyperlink: None,
             cursor_visible: true,
             last_char: None,
+            tab_stops: init_tab_stops(cols),
+            origin_mode: false,
+            charset_g0_is_drawing: false,
+            charset_g1_is_drawing: false,
+            charset_gl_is_g0: true,
         }
     }
+}
+
+/// Create the default tab-stop pattern: a stop every 8 columns
+/// (i.e. columns 8, 16, 24, ...). Column 0 is never a stop.
+pub(super) fn init_tab_stops(cols: u32) -> Vec<bool> {
+    let mut stops = vec![false; cols as usize];
+    let mut c = 8;
+    while c < cols as usize {
+        stops[c] = true;
+        c += 8;
+    }
+    stops
 }
 
 /// Save the active screen's cursor and colors into its DECSC slot
@@ -119,6 +163,10 @@ pub(super) fn save_cursor_slot(screen: &mut Screen) {
         attrs: screen.attrs,
         underline: screen.underline,
         underline_color: screen.underline_color,
+        origin_mode: screen.origin_mode,
+        charset_g0_is_drawing: screen.charset_g0_is_drawing,
+        charset_g1_is_drawing: screen.charset_g1_is_drawing,
+        charset_gl_is_g0: screen.charset_gl_is_g0,
     });
 }
 
@@ -138,6 +186,10 @@ pub(super) fn restore_cursor_slot(
             screen.attrs = saved.attrs;
             screen.underline = saved.underline;
             screen.underline_color = saved.underline_color;
+            screen.origin_mode = saved.origin_mode;
+            screen.charset_g0_is_drawing = saved.charset_g0_is_drawing;
+            screen.charset_g1_is_drawing = saved.charset_g1_is_drawing;
+            screen.charset_gl_is_g0 = saved.charset_gl_is_g0;
         }
         None => {
             screen.cursor.row = 0;
@@ -197,6 +249,12 @@ pub(super) fn set_private_mode(
     on_alt: &mut bool,
 ) {
     match mode {
+        6 => {
+            active.origin_mode = enable;
+            // Entering/leaving origin mode homes the cursor per DEC spec.
+            active.cursor.row = if enable { active.scroll_top } else { 0 };
+            active.cursor.col = 0;
+        }
         25 => active.cursor_visible = enable,
         47 => switch_screen(enable, active, stash, on_alt),
         1047 => {
@@ -326,6 +384,7 @@ pub(super) fn resize_screen(
 
     screen.scroll_top = 0;
     screen.scroll_bottom = new_rows.saturating_sub(1);
+    screen.tab_stops = init_tab_stops(new_cols);
     let scrollback = screen.grid.scrollback_len(&Viewport {
         rows: new_rows,
         cols: new_cols,

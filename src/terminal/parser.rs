@@ -84,13 +84,83 @@ const NUL: u8 = 0x00;
 const BEL: u8 = 0x07;
 const BS: u8 = 0x08;
 
-/// Hardware tab stop width in columns.
-const TAB_WIDTH: u32 = 8;
+/// Forward-scan tab stops from `start_col + 1`. Returns the column of the
+/// next set tab stop, or `cols - 1` if none is found.
+fn next_tab_stop(
+    tab_stops: &[bool],
+    start_col: u32,
+    cols: u32,
+) -> u32 {
+    let start = start_col as usize + 1;
+    let end = cols as usize;
+    if let Some(offset) = tab_stops
+        .get(start..end)
+        .and_then(|s| s.iter().position(|&v| v))
+    {
+        (start + offset) as u32
+    } else {
+        cols - 1
+    }
+}
+
+/// Backward-scan tab stops from `start_col - 1`. Returns the column of the
+/// previous set tab stop, or 0 if none is found.
+fn prev_tab_stop(
+    tab_stops: &[bool],
+    start_col: u32,
+) -> u32 {
+    if start_col == 0 {
+        return 0;
+    }
+    for c in (0..start_col as usize).rev() {
+        if tab_stops[c] {
+            return c as u32;
+        }
+    }
+    0
+}
 
 /// SCS (Select Character Set) intermediate bytes that designate G0..G3.
-/// We accept and silently ignore these rather than treating the sequence as
-/// unknown.
 const SCS_INTERMEDIATES: &[u8] = b"()*+";
+
+/// Translate a byte in 0x60..=0x7E to a DEC Special Graphics Unicode character.
+/// The mapping follows the VT100/VT220 standard box-drawing character set.
+fn translate_drawing_char(byte: u8) -> &'static str {
+    const TABLE: [&str; 31] = [
+        "\u{25C6}", // 0x60 → ◆
+        "\u{2592}", // 0x61 → ▒
+        "\u{2409}", // 0x62 → ␉ (HT symbol)
+        "\u{240C}", // 0x63 → ␌ (FF symbol)
+        "\u{240D}", // 0x64 → ␍ (CR symbol)
+        "\u{240A}", // 0x65 → ␊ (LF symbol)
+        "\u{00B0}", // 0x66 → °
+        "\u{00B1}", // 0x67 → ±
+        "\u{2424}", // 0x68 → ␤ (NL symbol)
+        "\u{240B}", // 0x69 → ␋ (VT symbol)
+        "\u{2518}", // 0x6A → ┘
+        "\u{2510}", // 0x6B → ┐
+        "\u{250C}", // 0x6C → ┌
+        "\u{2514}", // 0x6D → └
+        "\u{253C}", // 0x6E → ┼
+        "\u{23BA}", // 0x6F → ⎺ (scan line 1)
+        "\u{23BB}", // 0x70 → ⎻ (scan line 3)
+        "\u{2500}", // 0x71 → ─ (horizontal line)
+        "\u{23BC}", // 0x72 → ⎼ (scan line 7)
+        "\u{23BD}", // 0x73 → ⎽ (scan line 9)
+        "\u{251C}", // 0x74 → ├
+        "\u{2524}", // 0x75 → ┤
+        "\u{2534}", // 0x76 → ┴
+        "\u{252C}", // 0x77 → ┬
+        "\u{2502}", // 0x78 → │ (vertical line)
+        "\u{2264}", // 0x79 → ≤
+        "\u{2265}", // 0x7A → ≥
+        "\u{03C0}", // 0x7B → π
+        "\u{2260}", // 0x7C → ≠
+        "\u{00A3}", // 0x7D → £
+        "\u{00B7}", // 0x7E → ·
+    ];
+    TABLE[(byte - 0x60) as usize]
+}
 
 /// Fast path for a batched run of printable ASCII bytes (0x20..=0x7E).
 ///
@@ -102,8 +172,24 @@ pub(super) fn put_ascii_run(
     screen: &mut Screen,
     viewport: &Viewport,
     run: &[u8],
+    insert_mode: bool,
 ) {
     if run.is_empty() {
+        return;
+    }
+
+    // When DEC Special Graphics is active, bytes 0x60-0x7E need to be
+    // translated to Unicode box-drawing characters. Fall back to a
+    // per-character path that handles the translation.
+    if screen.is_drawing_active() {
+        for &b in run {
+            let ch = if (0x60..=0x7E).contains(&b) {
+                SmolStr::new_inline(translate_drawing_char(b))
+            } else {
+                ASCII_CELLS[(b - 0x20) as usize].clone()
+            };
+            put_char(screen, viewport, ch, insert_mode);
+        }
         return;
     }
 
@@ -130,6 +216,13 @@ pub(super) fn put_ascii_run(
         let col = screen.cursor.col as usize;
         let remaining_cols = (viewport.cols - screen.cursor.col) as usize;
         let chunk_len = (run.len() - i).min(remaining_cols);
+
+        // IRM: shift existing content right before overwriting.
+        if insert_mode {
+            screen
+                .grid
+                .insert_chars(&screen.cursor, viewport, chunk_len as u16);
+        }
 
         // Break a wide anchor severed by the left edge of the chunk. The
         // right-edge case is covered by passing chunk_len to
@@ -164,6 +257,7 @@ pub(super) fn put_char(
     screen: &mut Screen,
     viewport: &Viewport,
     s: SmolStr,
+    insert_mode: bool,
 ) {
     let raw_width = UnicodeWidthStr::width(s.as_str());
 
@@ -189,6 +283,13 @@ pub(super) fn put_char(
     // left behind by the previous character.
     if screen.cursor.col + width as u32 > viewport.cols {
         soft_wrap(screen, viewport);
+    }
+
+    // IRM: shift existing content right before overwriting.
+    if insert_mode {
+        screen
+            .grid
+            .insert_chars(&screen.cursor, viewport, width as u16);
     }
 
     let fg = screen.fg;
@@ -302,6 +403,14 @@ fn query_private_mode(
     ctx: &CsiContext<'_>,
 ) -> u8 {
     match ps {
+        // DECOM — origin mode.
+        6 => {
+            if ctx.screen.origin_mode {
+                1
+            } else {
+                2
+            }
+        }
         // DECTCEM — cursor visible.
         25 => {
             if ctx.screen.cursor_visible {
@@ -448,8 +557,15 @@ pub(super) fn execute(
             screen.cursor.col = screen.cursor.col.saturating_sub(1);
         }
         b'\t' => {
-            let next = (screen.cursor.col / TAB_WIDTH + 1) * TAB_WIDTH;
-            screen.cursor.col = next.min(viewport.cols - 1);
+            screen.cursor.col = next_tab_stop(&screen.tab_stops, screen.cursor.col, viewport.cols);
+        }
+        0x0E => {
+            // SO — Shift Out: invoke G1 into GL.
+            screen.charset_gl_is_g0 = false;
+        }
+        0x0F => {
+            // SI — Shift In: invoke G0 into GL (default).
+            screen.charset_gl_is_g0 = true;
         }
         BEL => {
             *bell_pending = true;
@@ -546,8 +662,16 @@ pub(super) fn csi_dispatch(
         let pm = if private {
             query_private_mode(ps, ctx)
         } else {
-            // We don't implement any ANSI (non-private) modes.
-            0
+            match ps {
+                4 => {
+                    if ctx.modes.insert_mode {
+                        1
+                    } else {
+                        2
+                    }
+                }
+                _ => 0,
+            }
         };
         if private {
             write!(ctx.pending_output, "\x1b[?{ps};{pm}$y").expect("write to Vec is infallible");
@@ -580,6 +704,11 @@ pub(super) fn csi_dispatch(
         screen.current_hyperlink = None;
         screen.cursor_visible = true;
         screen.last_char = None;
+        screen.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
+        screen.origin_mode = false;
+        screen.charset_g0_is_drawing = false;
+        screen.charset_g1_is_drawing = false;
+        screen.charset_gl_is_g0 = true;
         *ctx.modes = TerminalModes::new();
         *ctx.kitty_keyboard = KittyKeyboardState::new();
         *ctx.cursor_style = CursorStyle::default();
@@ -675,8 +804,9 @@ pub(super) fn csi_dispatch(
             .unwrap_or(1)
             .max(1);
         if let Some(ch) = ctx.screen.last_char.clone() {
+            let insert = ctx.modes.insert_mode;
             for _ in 0..n {
-                put_char(ctx.screen, ctx.viewport, ch.clone());
+                put_char(ctx.screen, ctx.viewport, ch.clone(), insert);
             }
         }
         return;
@@ -719,8 +849,13 @@ pub(super) fn csi_dispatch(
         'H' | 'f' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             let col = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
-            cursor.row = row.min(viewport.rows - 1);
-            cursor.col = col.min(viewport.cols - 1);
+            if screen.origin_mode {
+                cursor.row = (screen.scroll_top + row).min(screen.scroll_bottom);
+                cursor.col = col.min(viewport.cols - 1);
+            } else {
+                cursor.row = row.min(viewport.rows - 1);
+                cursor.col = col.min(viewport.cols - 1);
+            }
         }
         'J' => {
             let mode = p.first().copied().unwrap_or(0);
@@ -743,7 +878,11 @@ pub(super) fn csi_dispatch(
         ),
         'd' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
-            cursor.row = row.min(viewport.rows - 1);
+            if screen.origin_mode {
+                cursor.row = (screen.scroll_top + row).min(screen.scroll_bottom);
+            } else {
+                cursor.row = row.min(viewport.rows - 1);
+            }
         }
         'G' => {
             let col = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
@@ -837,6 +976,44 @@ pub(super) fn csi_dispatch(
             // unambiguously the restore form.
             screen::restore_cursor_slot(screen, viewport);
         }
+        // CHT — Cursor Forward Tabulation. Advance Ps tab stops.
+        'I' => {
+            let n = p.first().copied().unwrap_or(1).max(1);
+            for _ in 0..n {
+                cursor.col = next_tab_stop(&screen.tab_stops, cursor.col, viewport.cols);
+            }
+        }
+        // CBT — Cursor Backward Tabulation. Move back Ps tab stops.
+        'Z' => {
+            let n = p.first().copied().unwrap_or(1).max(1);
+            for _ in 0..n {
+                cursor.col = prev_tab_stop(&screen.tab_stops, cursor.col);
+            }
+        }
+        // TBC — Tab Clear. Ps=0: clear at cursor. Ps=3: clear all.
+        'g' => {
+            let ps = p.first().copied().unwrap_or(0);
+            match ps {
+                0 => {
+                    let col = cursor.col as usize;
+                    if col < screen.tab_stops.len() {
+                        screen.tab_stops[col] = false;
+                    }
+                }
+                3 => screen.tab_stops.fill(false),
+                _ => {}
+            }
+        }
+        'h' | 'l' => {
+            // ANSI (non-private) mode set/reset. Private modes (with `?`
+            // intermediate) are handled above.
+            let enable = action == 'h';
+            for &mode in &p {
+                if mode == 4 {
+                    ctx.modes.insert_mode = enable;
+                }
+            }
+        }
         _ => {}
     }
 }
@@ -846,10 +1023,15 @@ pub(super) fn esc_dispatch(
     intermediates: &[u8],
     byte: u8,
 ) {
-    if intermediates
-        .first()
-        .is_some_and(|&b| SCS_INTERMEDIATES.contains(&b))
+    if let Some(&inter) = intermediates.first()
+        && SCS_INTERMEDIATES.contains(&inter)
     {
+        let is_drawing = byte == b'0';
+        match inter {
+            b'(' => ctx.screen.charset_g0_is_drawing = is_drawing,
+            b')' => ctx.screen.charset_g1_is_drawing = is_drawing,
+            _ => {} // G2/G3 (*/+) silently ignored
+        }
         return;
     }
     if !intermediates.is_empty() {
@@ -859,6 +1041,13 @@ pub(super) fn esc_dispatch(
     match byte {
         b'7' => screen::save_cursor_slot(ctx.screen),
         b'8' => screen::restore_cursor_slot(ctx.screen, ctx.viewport),
+        b'H' => {
+            // HTS — set a tab stop at the current cursor column.
+            let col = ctx.screen.cursor.col as usize;
+            if col < ctx.screen.tab_stops.len() {
+                ctx.screen.tab_stops[col] = true;
+            }
+        }
         b'c' => {
             // RIS (Reset to Initial State). Drop the app's terminal state
             // back to power-on defaults — every mode the app might have
@@ -888,6 +1077,11 @@ pub(super) fn esc_dispatch(
                 s.current_hyperlink = None;
                 s.cursor_visible = true;
                 s.last_char = None;
+                s.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
+                s.origin_mode = false;
+                s.charset_g0_is_drawing = false;
+                s.charset_g1_is_drawing = false;
+                s.charset_gl_is_g0 = true;
             }
             *ctx.modes = TerminalModes::new();
             *ctx.kitty_keyboard = KittyKeyboardState::new();
@@ -971,8 +1165,8 @@ mod tests {
 
         for action in parser.parse(input) {
             match action {
-                Action::PrintAscii(run) => put_ascii_run(screen, viewport, run),
-                Action::Print(s) => put_char(screen, viewport, s),
+                Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
+                Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
                 Action::Execute(b) => execute(screen, viewport, b, &mut bell_pending),
                 Action::CsiDispatch {
                     params,
@@ -1040,7 +1234,7 @@ mod tests {
         screen.fg = Srgb::new(1, 2, 3);
         screen.bg = Srgb::new(4, 5, 6);
 
-        put_char(&mut screen, &viewport, SmolStr::new_inline("A"));
+        put_char(&mut screen, &viewport, SmolStr::new_inline("A"), false);
 
         assert_eq!(row_text(&screen, &viewport, 0).chars().next(), Some('A'));
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
@@ -1310,11 +1504,11 @@ mod tests {
     fn execute_tab_advances_to_next_tab_stop() {
         let (mut screen, viewport) = setup();
         execute(&mut screen, &viewport, b'\t', &mut false);
-        assert_eq!(screen.cursor.col, TAB_WIDTH);
+        assert_eq!(screen.cursor.col, 8);
 
         screen.cursor.col = 3;
         execute(&mut screen, &viewport, b'\t', &mut false);
-        assert_eq!(screen.cursor.col, TAB_WIDTH);
+        assert_eq!(screen.cursor.col, 8);
     }
 
     #[test]
@@ -1611,7 +1805,8 @@ mod tests {
         let (mut screen, viewport) = setup();
         screen.cursor.row = 1;
         screen.cursor.col = 1;
-        feed(b"\x1b[1Z", &mut screen, &viewport);
+        // Use a genuinely unrecognized CSI action (not Z, which is now CBT).
+        feed(b"\x1b[1~", &mut screen, &viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 1);
     }
@@ -1782,8 +1977,8 @@ mod tests {
 
         for action in parser.parse(input) {
             match action {
-                Action::PrintAscii(run) => put_ascii_run(screen, viewport, run),
-                Action::Print(s) => put_char(screen, viewport, s),
+                Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
+                Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
                 Action::Execute(b) => execute(screen, viewport, b, &mut bell_pending),
                 Action::CsiDispatch {
                     params,
@@ -1864,8 +2059,327 @@ mod tests {
     #[test]
     fn decrqm_ansi_mode_reports_zero_for_unknown() {
         let (mut screen, viewport) = setup();
-        // ANSI (non-private) mode query.
+        // Query an unknown ANSI (non-private) mode.
+        let out = feed_with_output(b"\x1b[99$p", &mut screen, &viewport);
+        assert_eq!(out, b"\x1b[99;0$y");
+    }
+
+    // -- Tab stops -----------------------------------------------------------
+
+    #[test]
+    fn default_tab_stops_every_8_columns() {
+        // 10-col screen: only column 8 is a stop.
+        let (mut screen, viewport) = setup();
+        assert_eq!(screen.cursor.col, 0);
+        execute(&mut screen, &viewport, b'\t', &mut false);
+        assert_eq!(screen.cursor.col, 8);
+    }
+
+    #[test]
+    fn tab_from_mid_column_goes_to_next_stop() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.col = 3;
+        execute(&mut screen, &viewport, b'\t', &mut false);
+        assert_eq!(screen.cursor.col, 8);
+    }
+
+    #[test]
+    fn tab_at_last_column_stays() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.col = TEST_COLS - 1;
+        execute(&mut screen, &viewport, b'\t', &mut false);
+        assert_eq!(screen.cursor.col, TEST_COLS - 1);
+    }
+
+    #[test]
+    fn hts_sets_custom_tab_stop() {
+        let (mut screen, viewport) = setup();
+        // Move to col 3, set a tab stop with ESC H, then tab from col 0.
+        feed(b"\x1b[1;4H\x1bH", &mut screen, &viewport);
+        assert!(screen.tab_stops[3]);
+        screen.cursor.col = 0;
+        execute(&mut screen, &viewport, b'\t', &mut false);
+        assert_eq!(screen.cursor.col, 3);
+    }
+
+    #[test]
+    fn cht_moves_forward_n_tab_stops() {
+        // Use a wider screen so we have at least two default stops.
+        let screen_cols = 24;
+        let mut screen = Screen::new(
+            screen_cols,
+            TEST_ROWS,
+            100,
+            color::default_fg(),
+            color::default_bg(),
+        );
+        let viewport = Viewport {
+            rows: TEST_ROWS,
+            cols: screen_cols,
+        };
+        // Default stops at 8, 16. CSI 2 I from col 0 should jump to 16.
+        feed(b"\x1b[2I", &mut screen, &viewport);
+        assert_eq!(screen.cursor.col, 16);
+    }
+
+    #[test]
+    fn cbt_moves_backward_n_tab_stops() {
+        let screen_cols = 24;
+        let mut screen = Screen::new(
+            screen_cols,
+            TEST_ROWS,
+            100,
+            color::default_fg(),
+            color::default_bg(),
+        );
+        let viewport = Viewport {
+            rows: TEST_ROWS,
+            cols: screen_cols,
+        };
+        // Park at col 20, then CSI 2 Z (back 2 stops) should land at 8.
+        screen.cursor.col = 20;
+        feed(b"\x1b[2Z", &mut screen, &viewport);
+        assert_eq!(screen.cursor.col, 8);
+    }
+
+    #[test]
+    fn tbc_0_clears_at_cursor() {
+        let (mut screen, viewport) = setup();
+        // Default stop at col 8. Move there and clear it.
+        screen.cursor.col = 8;
+        feed(b"\x1b[0g", &mut screen, &viewport);
+        assert!(!screen.tab_stops[8]);
+        // Tab from col 0 should now go to the last column.
+        screen.cursor.col = 0;
+        execute(&mut screen, &viewport, b'\t', &mut false);
+        assert_eq!(screen.cursor.col, TEST_COLS - 1);
+    }
+
+    #[test]
+    fn tbc_3_clears_all_tab_stops() {
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[3g", &mut screen, &viewport);
+        assert!(screen.tab_stops.iter().all(|&s| !s));
+        // Tab from col 0 should go to last column.
+        screen.cursor.col = 0;
+        execute(&mut screen, &viewport, b'\t', &mut false);
+        assert_eq!(screen.cursor.col, TEST_COLS - 1);
+    }
+
+    // -- Insert Mode (IRM) ---------------------------------------------------
+
+    #[test]
+    fn default_mode_is_replace() {
+        let (mut screen, viewport) = setup();
+        feed(b"abc", &mut screen, &viewport);
+        // Overwrite at col 0.
+        feed(b"\x1b[1;1H", &mut screen, &viewport);
+        feed(b"X", &mut screen, &viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "X");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "b");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "c");
+    }
+
+    #[test]
+    fn insert_mode_shifts_text_right() {
+        let (mut screen, viewport) = setup();
+        feed(b"abc", &mut screen, &viewport);
+        // Enable insert mode (CSI 4 h), move to col 0, type 'X'.
+        feed(b"\x1b[4h\x1b[1;1HX", &mut screen, &viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "X");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "a");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "b");
+        assert_eq!(screen.grid.rows[r].cells[3].as_str(), "c");
+    }
+
+    #[test]
+    fn insert_mode_disable_returns_to_replace() {
+        let (mut screen, viewport) = setup();
+        feed(b"abc", &mut screen, &viewport);
+        // Enable insert, then disable it.
+        feed(b"\x1b[4h\x1b[4l\x1b[1;1HX", &mut screen, &viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        // Replace mode: 'X' overwrites 'a'.
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "X");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "b");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "c");
+    }
+
+    // -- Origin Mode (DECOM) -------------------------------------------------
+
+    #[test]
+    fn origin_mode_cup_relative_to_scroll_region() {
+        let (mut screen, viewport) = setup();
+        // Set scroll region to rows 2..3 (1-based).
+        feed(b"\x1b[2;3r", &mut screen, &viewport);
+        // Enable origin mode.
+        feed(b"\x1b[?6h", &mut screen, &viewport);
+        // CUP(1,1) should land at top of scroll region (row 1 in 0-based).
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 0);
+        // CUP(2,1) should land at row 2 (scroll_bottom).
+        feed(b"\x1b[2;1H", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 2);
+    }
+
+    #[test]
+    fn origin_mode_cup_clamps_to_scroll_region() {
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[2;3r", &mut screen, &viewport);
+        feed(b"\x1b[?6h", &mut screen, &viewport);
+        // CUP(99,1) should clamp to scroll_bottom.
+        feed(b"\x1b[99;1H", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 2);
+    }
+
+    #[test]
+    fn origin_mode_disable_returns_to_absolute() {
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[2;3r", &mut screen, &viewport);
+        feed(b"\x1b[?6h", &mut screen, &viewport);
+        // Disable origin mode — cursor homes to absolute (0,0).
+        feed(b"\x1b[?6l", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 0);
+        assert_eq!(screen.cursor.col, 0);
+        // CUP(1,1) is now absolute row 0.
+        feed(b"\x1b[1;1H", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 0);
+    }
+
+    #[test]
+    fn origin_mode_vpa_relative_to_scroll_region() {
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[2;3r", &mut screen, &viewport);
+        feed(b"\x1b[?6h", &mut screen, &viewport);
+        // VPA(2) should land at scroll_top + 1 = row 2.
+        feed(b"\x1b[2d", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 2);
+    }
+
+    #[test]
+    fn decrqm_reports_origin_mode() {
+        let (mut screen, viewport) = setup();
+        // Default is off.
+        let out = feed_with_output(b"\x1b[?6$p", &mut screen, &viewport);
+        assert_eq!(out, b"\x1b[?6;2$y");
+        // Enable and re-query.
+        let out = feed_with_output(b"\x1b[?6h\x1b[?6$p", &mut screen, &viewport);
+        assert_eq!(out, b"\x1b[?6;1$y");
+    }
+
+    #[test]
+    fn decrqm_irm_reports_insert_mode() {
+        let (mut screen, viewport) = setup();
+        // Default is replace (off) → Pm=2.
         let out = feed_with_output(b"\x1b[4$p", &mut screen, &viewport);
-        assert_eq!(out, b"\x1b[4;0$y");
+        assert_eq!(out, b"\x1b[4;2$y");
+        // Enable and re-query → Pm=1.
+        let out = feed_with_output(b"\x1b[4h\x1b[4$p", &mut screen, &viewport);
+        assert_eq!(out, b"\x1b[4;1$y");
+    }
+
+    // -- DEC Special Graphics (SCS) ------------------------------------------
+
+    #[test]
+    fn scs_g0_drawing_translates_box_chars() {
+        let (mut screen, viewport) = setup();
+        // ESC ( 0 designates DEC drawing into G0, then print box-drawing bytes.
+        // 0x6C = ┌, 0x71 = ─, 0x6B = ┐
+        feed(b"\x1b(0\x6c\x71\x6b", &mut screen, &viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{250C}"); // ┌
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "\u{2500}"); // ─
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "\u{2510}"); // ┐
+    }
+
+    #[test]
+    fn scs_g0_ascii_restores_normal() {
+        let (mut screen, viewport) = setup();
+        // Enable drawing, write a box char, then switch back to ASCII.
+        feed(b"\x1b(0\x6c\x1b(B\x6c", &mut screen, &viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{250C}"); // ┌
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "l"); // plain ASCII
+    }
+
+    #[test]
+    fn scs_drawing_does_not_translate_below_0x60() {
+        let (mut screen, viewport) = setup();
+        // In drawing mode, bytes below 0x60 should pass through as ASCII.
+        feed(b"\x1b(0ABC", &mut screen, &viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "A");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "B");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "C");
+    }
+
+    #[test]
+    fn scs_so_si_switch_between_g0_g1() {
+        let (mut screen, viewport) = setup();
+        // G0 = ASCII (default), G1 = drawing.
+        // SO (0x0E) invokes G1, SI (0x0F) invokes G0.
+        feed(b"\x1b)0", &mut screen, &viewport); // G1 = drawing
+        feed(b"\x0E", &mut screen, &viewport); // SO → GL = G1
+        feed(b"\x6c", &mut screen, &viewport); // should translate
+        feed(b"\x0F", &mut screen, &viewport); // SI → GL = G0
+        feed(b"\x6c", &mut screen, &viewport); // should be plain ASCII
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{250C}"); // ┌
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "l"); // plain
+    }
+
+    #[test]
+    fn scs_decstr_resets_charset_state() {
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b(0", &mut screen, &viewport);
+        assert!(screen.charset_g0_is_drawing);
+        // DECSTR should reset charset state.
+        feed(b"\x1b[!p", &mut screen, &viewport);
+        assert!(!screen.charset_g0_is_drawing);
+        assert!(!screen.charset_g1_is_drawing);
+        assert!(screen.charset_gl_is_g0);
+    }
+
+    #[test]
+    fn scs_ris_resets_charset_state() {
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b(0\x1b)0\x0E", &mut screen, &viewport);
+        assert!(screen.charset_g0_is_drawing);
+        assert!(screen.charset_g1_is_drawing);
+        assert!(!screen.charset_gl_is_g0);
+        // RIS should reset everything.
+        feed(b"\x1bc", &mut screen, &viewport);
+        assert!(!screen.charset_g0_is_drawing);
+        assert!(!screen.charset_g1_is_drawing);
+        assert!(screen.charset_gl_is_g0);
+    }
+
+    #[test]
+    fn scs_save_restore_cursor_preserves_charset() {
+        let (mut screen, viewport) = setup();
+        // Enable drawing in G0, save cursor.
+        feed(b"\x1b(0\x1b7", &mut screen, &viewport);
+        // Switch back to ASCII.
+        feed(b"\x1b(B", &mut screen, &viewport);
+        assert!(!screen.charset_g0_is_drawing);
+        // Restore cursor — should bring back DEC drawing.
+        feed(b"\x1b8", &mut screen, &viewport);
+        assert!(screen.charset_g0_is_drawing);
+    }
+
+    #[test]
+    fn scs_full_box_top_bottom() {
+        // Simulate a typical box-drawing sequence: ┌──┐ on top, └──┘ on bottom.
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b(0", &mut screen, &viewport);
+        feed(b"\x6c\x71\x71\x6b", &mut screen, &viewport); // ┌──┐
+        feed(b"\r\n", &mut screen, &viewport);
+        feed(b"\x6d\x71\x71\x6a", &mut screen, &viewport); // └──┘
+        let top = row_text(&screen, &viewport, 0);
+        assert!(top.starts_with("\u{250C}\u{2500}\u{2500}\u{2510}"));
+        let bot = row_text(&screen, &viewport, 1);
+        assert!(bot.starts_with("\u{2514}\u{2500}\u{2500}\u{2518}"));
     }
 }

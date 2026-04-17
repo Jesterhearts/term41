@@ -118,6 +118,10 @@ pub(super) struct TerminalModes {
     /// [`SYNCHRONIZED_UPDATE_TIMEOUT`] safety deadline passes; otherwise
     /// `None`.
     pub synchronized_update_since: Option<Instant>,
+    /// IRM (ANSI mode 4) — Insert/Replace mode. When `true`, printing a
+    /// character shifts existing text right before writing. Default is
+    /// replace (overwrite) mode.
+    pub insert_mode: bool,
 }
 
 impl TerminalModes {
@@ -128,6 +132,7 @@ impl TerminalModes {
             bracketed_paste: false,
             focus_reporting: false,
             synchronized_update_since: None,
+            insert_mode: false,
         }
     }
 }
@@ -1373,8 +1378,15 @@ impl Terminal {
         let popped_before: usize = self.active.grid.total_popped;
 
         match action {
-            Action::PrintAscii(run) => put_ascii_run(&mut self.active, &self.viewport, run),
-            Action::Print(c) => put_char(&mut self.active, &self.viewport, c),
+            Action::PrintAscii(run) => put_ascii_run(
+                &mut self.active,
+                &self.viewport,
+                run,
+                self.modes.insert_mode,
+            ),
+            Action::Print(c) => {
+                put_char(&mut self.active, &self.viewport, c, self.modes.insert_mode)
+            }
             Action::Execute(byte) => {
                 execute(
                     &mut self.active,
@@ -1599,6 +1611,82 @@ impl Drop for TerminalThread {
     }
 }
 
+/// Handle XTGETTCAP (DCS + q). The payload is a semicolon-separated list of
+/// hex-encoded terminfo capability names. For each recognized name, reply
+/// `DCS 1 + r <hex_name>=<hex_value> ST`; for unknown names reply
+/// `DCS 0 + r <hex_name> ST`.
+///
+/// This lets tmux and neovim discover features like truecolor, styled
+/// underlines, and cursor shapes without relying on a terminfo entry.
+fn handle_xtgettcap(
+    payload: &[u8],
+    output: &mut Vec<u8>,
+) {
+    use std::io::Write;
+
+    for cap_hex in payload.split(|&b| b == b';') {
+        if cap_hex.is_empty() {
+            continue;
+        }
+        let cap_name = hex_decode(cap_hex);
+        let cap_str = std::str::from_utf8(&cap_name).unwrap_or("");
+        if let Some(value) = xtgettcap_value(cap_str) {
+            let value_hex = hex_encode(value.as_bytes());
+            write!(output, "\x1bP1+r").expect("write to Vec is infallible");
+            output.extend_from_slice(cap_hex);
+            output.push(b'=');
+            output.extend_from_slice(value_hex.as_bytes());
+            output.extend_from_slice(b"\x1b\\");
+        } else {
+            write!(output, "\x1bP0+r").expect("write to Vec is infallible");
+            output.extend_from_slice(cap_hex);
+            output.extend_from_slice(b"\x1b\\");
+        }
+    }
+}
+
+/// Map a terminfo capability name to its value string. Returns `None` for
+/// unrecognized capabilities.
+fn xtgettcap_value(name: &str) -> Option<&'static str> {
+    match name {
+        // Truecolor support (tmux, neovim gate on this).
+        "RGB" => Some(""),
+        // Number of colors.
+        "colors" => Some("256"),
+        // Set cursor shape: CSI Ps SP q (DECSCUSR).
+        "Ss" => Some("\x1b[%p1%d q"),
+        // Reset cursor shape.
+        "Se" => Some("\x1b[2 q"),
+        // Styled underlines (kitty extension). CSI 4:Pm m.
+        "Smulx" => Some("\x1b[4:%p1%dm"),
+        // Set underline color. CSI 58:2::%p1%d:%p2%d:%p3%d m.
+        "Setulc" => Some("\x1b[58:2::%p1%{65536}%*%p2%{256}%*%+%p3%+m"),
+        // Set RGB foreground. CSI 38:2::R:G:B m.
+        "setrgbf" => Some("\x1b[38:2:%p1%d:%p2%d:%p3%dm"),
+        // Set RGB background. CSI 48:2::R:G:B m.
+        "setrgbb" => Some("\x1b[48:2:%p1%d:%p2%d:%p3%dm"),
+        // Terminal name.
+        "TN" => Some("xterm-256color"),
+        _ => None,
+    }
+}
+
+fn hex_decode(hex: &[u8]) -> Vec<u8> {
+    hex.chunks(2)
+        .filter_map(|pair| {
+            if pair.len() == 2 {
+                u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
+            } else {
+                None
+            }
+        })
+        .collect()
+}
+
+fn hex_encode(bytes: &[u8]) -> String {
+    bytes.iter().map(|b| format!("{b:02X}")).collect()
+}
+
 /// Main loop for the per-tab terminal thread. Drains PTY data, parses it
 /// (without the terminal lock), and applies each action under a brief lock.
 pub fn run_terminal_thread(
@@ -1610,6 +1698,7 @@ pub fn run_terminal_thread(
     let mut parser = vtepp::Parser::new();
     let mut hook_bytes: Vec<Vec<u8>> = vec![];
     let mut hook_params: Vec<vtepp::Params> = vec![];
+    let mut hook_intermediates: Vec<vtepp::Intermediates> = vec![];
     let mut hook_action: Vec<char> = vec![];
     let mut buf = [0u8; MAX_READ_CHUNK];
 
@@ -1627,9 +1716,14 @@ pub fn run_terminal_thread(
             did_work = true;
             for action in parser.parse(&buf[..n]) {
                 match action {
-                    vtepp::Action::Hook { params, action } => {
+                    vtepp::Action::Hook {
+                        params,
+                        intermediates,
+                        action,
+                    } => {
                         hook_bytes.push(vec![]);
                         hook_params.push(params);
+                        hook_intermediates.push(intermediates);
                         hook_action.push(action);
                     }
                     vtepp::Action::Put(bytes) => {
@@ -1639,12 +1733,19 @@ pub fn run_terminal_thread(
                     }
                     vtepp::Action::Unhook => {
                         let bytes = hook_bytes.pop().unwrap();
-                        let params = hook_params.pop().unwrap();
+                        let _params = hook_params.pop().unwrap();
+                        let intermediates = hook_intermediates.pop().unwrap();
                         let act = hook_action.pop().unwrap();
-                        if act == 'q' {
+                        if act == 'q' && intermediates.as_slice() == b"+" {
+                            // XTGETTCAP — terminal capability query. tmux and
+                            // neovim use this to discover features like
+                            // truecolor, cursor shapes, styled underlines.
+                            let mut t = terminal.lock().unwrap();
+                            handle_xtgettcap(&bytes, &mut t.pending_output);
+                        } else if act == 'q' && intermediates.as_slice().is_empty() {
                             // Sixel parsing is CPU-heavy — done outside the
                             // lock so rendering isn't blocked.
-                            let image = crate::image::sixel::parse_sixel(params, bytes);
+                            let image = crate::image::sixel::parse_sixel(_params, bytes);
                             terminal.lock().unwrap().place_sixel_image(image);
                         }
                     }
