@@ -9,6 +9,7 @@ use smol_str::SmolStr;
 use crate::image::PlacedImage;
 use crate::image::clear_in_range;
 use crate::image::shift_in_region;
+use crate::row::LineAttr;
 use crate::row::Row;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
@@ -337,6 +338,9 @@ impl Grid {
                             prompt_start: false,
                             output_start: false,
                             exit_status: None,
+                            // The overflow row is a reflow artifact, not a
+                            // DEC-attributed line, so it gets no line attr.
+                            line_attr: LineAttr::Normal,
                         };
 
                         self.rows[row].wrapped = true;

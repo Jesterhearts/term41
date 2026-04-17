@@ -12,6 +12,7 @@ bitflags::bitflags! {
         const STRIKETHROUGH = 0b0001_0000;
         const OVERLINE      = 0b0010_0000;
         const HIDDEN        = 0b0100_0000;
+        const BLINK         = 0b1000_0000;
     }
 }
 

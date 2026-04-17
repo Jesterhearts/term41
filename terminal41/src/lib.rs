@@ -58,6 +58,7 @@ use self::parser::esc_dispatch;
 use self::parser::execute;
 use self::parser::put_ascii_run;
 use self::parser::put_char;
+pub use self::row::LineAttr;
 pub use self::row::Row;
 pub use self::screen::Screen;
 use self::screen::resize_screen;
@@ -1441,25 +1442,25 @@ impl Terminal {
                     // The two bytes may arrive batched in one PrintAscii run.
                     // If so, consume the second byte (col) immediately and
                     // then fall through to process any remaining bytes normally.
-                    if let Action::PrintAscii(run) = &action {
-                        if run.len() >= 2 {
-                            let col = run[1].saturating_sub(0x20) as u32;
-                            let row = b.saturating_sub(0x20) as u32;
-                            self.active.cursor.row = row.min(self.viewport.rows.saturating_sub(1));
-                            self.active.cursor.col = col.min(self.viewport.cols.saturating_sub(1));
-                            self.vt52_cursor_addr = Vt52CursorAddr::Idle;
-                            // Any bytes after the two position bytes are normal text.
-                            if run.len() > 2 {
-                                put_ascii_run(
-                                    &mut self.active,
-                                    &self.viewport,
-                                    &run[2..],
-                                    self.modes.insert_mode,
-                                );
-                            }
-                            self.track_scroll(popped_before);
-                            return;
+                    if let Action::PrintAscii(run) = &action
+                        && run.len() >= 2
+                    {
+                        let col = run[1].saturating_sub(0x20) as u32;
+                        let row = b.saturating_sub(0x20) as u32;
+                        self.active.cursor.row = row.min(self.viewport.rows.saturating_sub(1));
+                        self.active.cursor.col = col.min(self.viewport.cols.saturating_sub(1));
+                        self.vt52_cursor_addr = Vt52CursorAddr::Idle;
+                        // Any bytes after the two position bytes are normal text.
+                        if run.len() > 2 {
+                            put_ascii_run(
+                                &mut self.active,
+                                &self.viewport,
+                                &run[2..],
+                                self.modes.insert_mode,
+                            );
                         }
+                        self.track_scroll(popped_before);
+                        return;
                     }
                     self.track_scroll(popped_before);
                     return;
@@ -1471,15 +1472,15 @@ impl Terminal {
                     self.vt52_cursor_addr = Vt52CursorAddr::Idle;
 
                     // If more bytes follow in the same PrintAscii run, print them.
-                    if let Action::PrintAscii(run) = &action {
-                        if run.len() > 1 {
-                            put_ascii_run(
-                                &mut self.active,
-                                &self.viewport,
-                                &run[1..],
-                                self.modes.insert_mode,
-                            );
-                        }
+                    if let Action::PrintAscii(run) = &action
+                        && run.len() > 1
+                    {
+                        put_ascii_run(
+                            &mut self.active,
+                            &self.viewport,
+                            &run[1..],
+                            self.modes.insert_mode,
+                        );
                     }
                     self.track_scroll(popped_before);
                     return;
@@ -1495,11 +1496,9 @@ impl Terminal {
         // In VT52 mode, CSI sequences are not valid and should be silently
         // dropped — vtepp still parses them because it doesn't know the
         // terminal mode, but executing them would be wrong.
-        if self.modes.vt52_mode {
-            if matches!(action, Action::CsiDispatch { .. }) {
-                self.track_scroll(popped_before);
-                return;
-            }
+        if self.modes.vt52_mode && matches!(action, Action::CsiDispatch { .. }) {
+            self.track_scroll(popped_before);
+            return;
         }
 
         match action {

@@ -4,6 +4,7 @@
 //! grid to verify correct behavior.
 
 use terminal41::ColorPalette;
+use terminal41::LineAttr;
 use terminal41::Terminal;
 use vtepp::Parser;
 
@@ -736,4 +737,54 @@ fn vttest_screen2_star_borders() {
         assert_eq!(t.cell_char(row, 78), '+', "row {row} right +");
         assert_eq!(t.cell_char(row, 79), '*', "row {row} right *");
     }
+}
+
+// ---------------------------------------------------------------------------
+// DEC line attributes (ESC # 3/4/5/6)
+// ---------------------------------------------------------------------------
+
+/// ESC#6 sets DoubleWidth, ESC#3/4 set DoubleHeightTop/Bottom, ESC#5 resets.
+#[test]
+fn dec_line_attrs_set_and_clear() {
+    let mut t = VtTerm::new_80x24();
+    // Row 2 (0-based): double-width single-height
+    t.process(b"\x1b[3;1H\x1b#6");
+    // Row 3: double-height top half
+    t.process(b"\x1b[4;1H\x1b#3");
+    // Row 4: double-height bottom half
+    t.process(b"\x1b[5;1H\x1b#4");
+    // Row 5: reset to normal via ESC#5
+    t.process(b"\x1b[6;1H\x1b#5");
+
+    assert_eq!(t.terminal.visible_row(2).line_attr, LineAttr::DoubleWidth);
+    assert_eq!(
+        t.terminal.visible_row(3).line_attr,
+        LineAttr::DoubleHeightTop
+    );
+    assert_eq!(
+        t.terminal.visible_row(4).line_attr,
+        LineAttr::DoubleHeightBottom
+    );
+    assert_eq!(t.terminal.visible_row(5).line_attr, LineAttr::Normal);
+}
+
+/// ESC#3 on the top row followed immediately by ESC#4 on the next row
+/// (the typical vttest double-height pair) preserves both attrs.
+#[test]
+fn dec_double_height_pair_survives_write() {
+    let mut t = VtTerm::new_80x24();
+    // Write text and apply ESC#3, then write same text and apply ESC#4.
+    t.process(b"\x1b[4;1HThis is a Double-width-and-height line\x1b#3");
+    t.process(b"\x1b[5;1HThis is a Double-width-and-height line\x1b#4");
+
+    assert_eq!(
+        t.terminal.visible_row(3).line_attr,
+        LineAttr::DoubleHeightTop,
+        "row 3 should be DoubleHeightTop"
+    );
+    assert_eq!(
+        t.terminal.visible_row(4).line_attr,
+        LineAttr::DoubleHeightBottom,
+        "row 4 should be DoubleHeightBottom"
+    );
 }

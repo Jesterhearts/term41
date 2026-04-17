@@ -12,6 +12,18 @@ pub(super) const fn blank_cell() -> SmolStr {
     SmolStr::new_inline(" ")
 }
 
+/// DEC line rendering attribute. Set by ESC#3 (DECDHL top), ESC#4 (DECDHL
+/// bottom), ESC#5 (DECSWL, normal single-width), and ESC#6 (DECDWL,
+/// double-width). Applies to the whole row; per-cell attrs are separate.
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum LineAttr {
+    #[default]
+    Normal,
+    DoubleWidth,
+    DoubleHeightTop,
+    DoubleHeightBottom,
+}
+
 /// A terminal row stored as struct-of-arrays for cache-friendly access.
 /// Each cell holds one grapheme cluster as a [`SmolStr`] (inline up to
 /// 23 bytes), so combining marks are stored alongside their base character.
@@ -49,6 +61,11 @@ pub struct Row {
     /// shell-integration `D`, or when `D` arrived after the prompt row
     /// scrolled out of history.
     pub exit_status: Option<i32>,
+    /// DEC double-width / double-height attribute for this row. Set by ESC#3
+    /// (DECDHL top half), ESC#4 (DECDHL bottom half), ESC#5 (DECSWL, reset
+    /// to normal), and ESC#6 (DECDWL, double-width single-height). Cleared
+    /// to `Normal` on a full-row wipe (`clear()`).
+    pub line_attr: LineAttr,
 }
 
 impl Row {
@@ -70,6 +87,7 @@ impl Row {
             prompt_start: false,
             output_start: false,
             exit_status: None,
+            line_attr: LineAttr::Normal,
         }
     }
 
@@ -130,6 +148,9 @@ impl Row {
         self.prompt_start = false;
         self.output_start = false;
         self.exit_status = None;
+        // DEC line attribute is a whole-row property; reset it when the row is
+        // fully wiped so a double-width row doesn't stay wide after an ED/EL.
+        self.line_attr = LineAttr::Normal;
     }
 
     /// Reset this row for reuse at the bottom of the grid — used when the
@@ -228,7 +249,8 @@ impl Row {
         right_excl: usize,
     ) -> Self {
         let right_excl = right_excl.min(self.cells.len());
-        let snap = Self {
+
+        Self {
             cells: self.cells[left..right_excl].to_vec(),
             fg: self.fg[left..right_excl].to_vec(),
             bg: self.bg[left..right_excl].to_vec(),
@@ -240,8 +262,8 @@ impl Row {
             prompt_start: false,
             output_start: false,
             exit_status: None,
-        };
-        snap
+            line_attr: LineAttr::Normal,
+        }
     }
 
     /// Write a snapshot row (from `snap_range`) into this row starting at
@@ -292,9 +314,11 @@ impl Row {
                     }
                     1 => self.attrs[c] |= CellAttrs::BOLD,
                     4 => self.underline[c] = UnderlineStyle::Single,
+                    5 | 6 => self.attrs[c] |= CellAttrs::BLINK,
                     7 => self.attrs[c] |= CellAttrs::REVERSE,
                     22 => self.attrs[c] &= !CellAttrs::BOLD,
                     24 => self.underline[c] = UnderlineStyle::None,
+                    25 => self.attrs[c] &= !CellAttrs::BLINK,
                     27 => self.attrs[c] &= !CellAttrs::REVERSE,
                     _ => {}
                 }
@@ -318,13 +342,14 @@ impl Row {
         let mut flags = CellAttrs::empty();
         let mut toggle_ul = false;
         if sgr_params.is_empty() || sgr_params.contains(&0) {
-            flags |= CellAttrs::BOLD | CellAttrs::REVERSE;
+            flags |= CellAttrs::BOLD | CellAttrs::REVERSE | CellAttrs::BLINK;
             toggle_ul = true;
         }
         for &p in sgr_params {
             match p {
                 1 => flags |= CellAttrs::BOLD,
                 4 => toggle_ul = true,
+                5 | 6 => flags |= CellAttrs::BLINK,
                 7 => flags |= CellAttrs::REVERSE,
                 _ => {}
             }

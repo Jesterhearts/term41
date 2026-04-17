@@ -11,6 +11,7 @@ use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use terminal41::ColorPalette;
 use terminal41::CursorShape;
+use terminal41::LineAttr;
 use terminal41::Terminal;
 use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
@@ -903,8 +904,18 @@ impl Renderer {
 
             // Background quads for the whole row.
             let grid_row = terminal.visible_row(row);
-            for col in 0..terminal.viewport.cols {
-                let x = col as f32 * cell_w + gutter_px;
+            let line_attr = grid_row.line_attr;
+            // Double-wide rows render each cell at 2× horizontal width, so only
+            // the left half of the column count holds visible content.
+            let is_double_wide = !matches!(line_attr, LineAttr::Normal);
+            let effective_cell_w = if is_double_wide { cell_w * 2.0 } else { cell_w };
+            let visible_cols = if is_double_wide {
+                terminal.viewport.cols / 2
+            } else {
+                terminal.viewport.cols
+            };
+            for col in 0..visible_cols {
+                let x = col as f32 * effective_cell_w + gutter_px;
                 // A cell is rendered with altered fg/bg when it is selected,
                 // matches the search query, or sits under a visible block
                 // cursor. Selection / non-active match / block cursor fully
@@ -955,7 +966,7 @@ impl Renderer {
                             color: bg_color,
                         },
                         BgVertex {
-                            pos: [x + cell_w, y],
+                            pos: [x + effective_cell_w, y],
                             color: bg_color,
                         },
                         BgVertex {
@@ -963,7 +974,7 @@ impl Renderer {
                             color: bg_color,
                         },
                         BgVertex {
-                            pos: [x + cell_w, y + cell_h],
+                            pos: [x + effective_cell_w, y + cell_h],
                             color: bg_color,
                         },
                     ]);
@@ -991,7 +1002,7 @@ impl Renderer {
                         effective_ul,
                         x,
                         uy,
-                        cell_w,
+                        effective_cell_w,
                         thickness,
                         cell_h,
                         ul_packed,
@@ -1007,7 +1018,7 @@ impl Renderer {
                     push_rect(
                         x,
                         y,
-                        cell_w,
+                        effective_cell_w,
                         thickness,
                         ol_color,
                         &mut bg_vertices,
@@ -1027,7 +1038,7 @@ impl Renderer {
                             color: st_color,
                         },
                         BgVertex {
-                            pos: [x + cell_w, sy],
+                            pos: [x + effective_cell_w, sy],
                             color: st_color,
                         },
                         BgVertex {
@@ -1035,7 +1046,7 @@ impl Renderer {
                             color: st_color,
                         },
                         BgVertex {
-                            pos: [x + cell_w, sy + thickness],
+                            pos: [x + effective_cell_w, sy + thickness],
                             color: st_color,
                         },
                     ]);
@@ -1076,12 +1087,23 @@ impl Renderer {
             // pick its bold/italic variant of the primary family.
             let shaped = font_system.shape_row(&grid_row.cells, &grid_row.attrs);
 
+            // Blink: every 500 ms the glyph quad is suppressed while the bg
+            // quad (already emitted) remains, so the cursor and background
+            // are still visible. The bg_animated path keeps the render thread
+            // running at 125 fps, so no extra wake-up is needed.
+            let blink_off = (self.started.elapsed().as_millis() / 500) & 1 == 1;
+
             for sg in &shaped {
+                // Double-wide rows only use the left half of the columns.
+                if sg.col as u32 >= visible_cols {
+                    continue;
+                }
+
                 // Skip glyphs that fall behind the popup panel so
                 // terminal text doesn't bleed through the overlay.
                 if let Some((cl, ct, cr, cb)) = popup_clip {
-                    let cx = sg.col as f32 * cell_w + gutter_px;
-                    if cx < cr && cx + cell_w > cl && y < cb && y + cell_h > ct {
+                    let cx = sg.col as f32 * effective_cell_w + gutter_px;
+                    if cx < cr && cx + effective_cell_w > cl && y < cb && y + cell_h > ct {
                         continue;
                     }
                 }
@@ -1112,15 +1134,58 @@ impl Renderer {
                     continue;
                 }
 
+                // Blink off-phase: suppress the glyph quad but keep the bg
+                // quad already emitted so selection/cursor overlays remain.
+                if cell_attrs.contains(CellAttrs::BLINK) && blink_off {
+                    continue;
+                }
+
                 let sx = slot.x();
                 let sy = slot.y();
                 let sw = slot.width();
                 let sh = slot.height();
 
-                let gx = sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset + gutter_px;
-                let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
-                let gw = sw as f32;
-                let gh = sh as f32;
+                // Double-wide: scale glyph placement and width by 2×.
+                let scale_x = if is_double_wide { 2.0_f32 } else { 1.0 };
+                let gx = sg.col as f32 * effective_cell_w
+                    + slot.bearing_x as f32 * scale_x
+                    + sg.x_offset * scale_x
+                    + gutter_px;
+                let gw = sw as f32 * scale_x;
+
+                // Double-height: each cell of the pair shows exactly half the
+                // glyph's UV range, stretched to fill the entire cell height.
+                // The virtual 2× glyph is anchored at the top of the pair
+                // (y_origin) and occupies 2×cell_h pixels. DoubleHeightTop clips
+                // to [y_origin, y_origin+cell_h] (top half) and DoubleHeightBottom
+                // to [y_origin+cell_h, y_origin+2×cell_h] (bottom half). Each
+                // half fills its cell fully, giving a clean 2× visual.
+                let is_double_height = matches!(
+                    line_attr,
+                    LineAttr::DoubleHeightTop | LineAttr::DoubleHeightBottom
+                );
+                let (gy, gh, uv_y_top, uv_y_bot) = if is_double_height {
+                    // Top of the virtual 2× glyph — always the top of the pair.
+                    let y_origin = if matches!(line_attr, LineAttr::DoubleHeightTop) {
+                        y
+                    } else {
+                        y - cell_h
+                    };
+                    // Span the full 2-cell height; clip to the current row.
+                    let gy_v = y_origin + (baseline - slot.bearing_y as f32 - sg.y_offset) * 2.0;
+                    let gh_v = 2.0 * sh as f32;
+                    let vis_top = gy_v.max(y);
+                    let vis_bot = (gy_v + gh_v).min(y + cell_h);
+                    if vis_bot <= vis_top {
+                        continue; // entirely outside this cell row
+                    }
+                    let uv_top = sy as f32 + sh as f32 * (vis_top - gy_v) / gh_v;
+                    let uv_bot = sy as f32 + sh as f32 * (vis_bot - gy_v) / gh_v;
+                    (vis_top, vis_bot - vis_top, uv_top, uv_bot)
+                } else {
+                    let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
+                    (gy, sh as f32, sy as f32, (sy + sh) as f32)
+                };
 
                 // Fake italic by shearing the glyph quad around the cell
                 // baseline: vertices above the baseline shift right, below
@@ -1159,25 +1224,25 @@ impl Renderer {
                 fg_vertices.extend_from_slice(&[
                     FgVertex {
                         pos: [gx + shear_at(gy), gy],
-                        uv: [sx as f32, sy as f32],
+                        uv: [sx as f32, uv_y_top],
                         color: fg_color,
                         flags,
                     },
                     FgVertex {
                         pos: [gx + gw + shear_at(gy), gy],
-                        uv: [(sx + sw) as f32, sy as f32],
+                        uv: [(sx + sw) as f32, uv_y_top],
                         color: fg_color,
                         flags,
                     },
                     FgVertex {
                         pos: [gx + shear_at(gy + gh), gy + gh],
-                        uv: [sx as f32, (sy + sh) as f32],
+                        uv: [sx as f32, uv_y_bot],
                         color: fg_color,
                         flags,
                     },
                     FgVertex {
                         pos: [gx + gw + shear_at(gy + gh), gy + gh],
-                        uv: [(sx + sw) as f32, (sy + sh) as f32],
+                        uv: [(sx + sw) as f32, uv_y_bot],
                         color: fg_color,
                         flags,
                     },

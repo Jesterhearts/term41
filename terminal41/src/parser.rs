@@ -19,6 +19,7 @@ use crate::keyboard::KittyKeyboardState;
 use crate::keyboard::handle_kitty_keyboard;
 use crate::mouse::MouseTracking;
 use crate::mouse::apply_mouse_mode;
+use crate::row::LineAttr;
 use crate::row::Row;
 use crate::screen;
 use crate::screen::Screen;
@@ -1037,24 +1038,22 @@ pub(super) fn csi_dispatch(
                 let ch_code = p.get(4).copied().unwrap_or(0x20) as u32;
                 // Only code points 32–126 and 160–255 are valid fill chars.
                 let valid = (32..=126).contains(&ch_code) || (160..=255).contains(&ch_code);
-                if valid {
-                    if let Some(ch) = char::from_u32(ch_code) {
-                        let mut buf = [0u8; 4];
-                        let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
-                        ctx.screen.grid.fill_rect(
-                            ctx.viewport,
-                            rect_top,
-                            rect_left,
-                            rect_bottom,
-                            rect_right,
-                            s,
-                            ctx.screen.fg,
-                            ctx.screen.bg,
-                            ctx.screen.attrs,
-                            ctx.screen.underline,
-                            ctx.screen.underline_color,
-                        );
-                    }
+                if valid && let Some(ch) = char::from_u32(ch_code) {
+                    let mut buf = [0u8; 4];
+                    let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
+                    ctx.screen.grid.fill_rect(
+                        ctx.viewport,
+                        rect_top,
+                        rect_left,
+                        rect_bottom,
+                        rect_right,
+                        s,
+                        ctx.screen.fg,
+                        ctx.screen.bg,
+                        ctx.screen.attrs,
+                        ctx.screen.underline,
+                        ctx.screen.underline_color,
+                    );
                 }
             }
             // DECCRA — Copy Rectangular Area. Source/dest pages ignored (always 1).
@@ -1476,16 +1475,12 @@ pub(super) fn esc_dispatch(
                 ctx.screen.cursor.row = ctx.screen.cursor.row.saturating_sub(1);
             }
             // ESC B — cursor down (no scroll).
-            b'B' => {
-                if ctx.screen.cursor.row + 1 < ctx.viewport.rows {
-                    ctx.screen.cursor.row += 1;
-                }
+            b'B' if ctx.screen.cursor.row + 1 < ctx.viewport.rows => {
+                ctx.screen.cursor.row += 1;
             }
             // ESC C — cursor right (no scroll).
-            b'C' => {
-                if ctx.screen.cursor.col + 1 < ctx.viewport.cols {
-                    ctx.screen.cursor.col += 1;
-                }
+            b'C' if ctx.screen.cursor.col + 1 < ctx.viewport.cols => {
+                ctx.screen.cursor.col += 1;
             }
             // ESC D — cursor left (no scroll).
             b'D' => {
@@ -1602,9 +1597,25 @@ pub(super) fn esc_dispatch(
                 ctx.screen.cursor.row = 0;
                 ctx.screen.cursor.col = 0;
             }
-            // DECDWL (# 6), DECDHL (# 3/4), DECSWL (# 5) — double-width /
-            // double-height line attributes. Silently accepted as no-ops.
-            b'3' | b'4' | b'5' | b'6' => {}
+            // DECDWL (# 6), DECDHL top (# 3), DECDHL bottom (# 4), DECSWL (# 5).
+            // Set the per-row DEC line attribute for the cursor's current row.
+            b'3' | b'4' | b'5' | b'6' => {
+                let visible_start = ctx
+                    .screen
+                    .grid
+                    .rows
+                    .len()
+                    .saturating_sub(ctx.viewport.rows as usize);
+                let abs_row = visible_start + ctx.screen.cursor.row as usize;
+                if let Some(row) = ctx.screen.grid.rows.get_mut(abs_row) {
+                    row.line_attr = match byte {
+                        b'3' => LineAttr::DoubleHeightTop,
+                        b'4' => LineAttr::DoubleHeightBottom,
+                        b'5' => LineAttr::Normal,
+                        _ => LineAttr::DoubleWidth, // b'6'
+                    };
+                }
+            }
             _ => {}
         }
         return;
@@ -1837,18 +1848,18 @@ mod tests {
                     (crate::Vt52CursorAddr::AwaitingRow, Some(b)) => {
                         vt52_cursor_addr =
                             crate::Vt52CursorAddr::AwaitingCol(b.saturating_sub(0x20));
-                        if let Action::PrintAscii(run) = &action {
-                            if run.len() >= 2 {
-                                let row = b.saturating_sub(0x20) as u32;
-                                let col = run[1].saturating_sub(0x20) as u32;
-                                screen.cursor.row = row.min(viewport.rows.saturating_sub(1));
-                                screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
-                                vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                                if run.len() > 2 {
-                                    put_ascii_run(screen, viewport, &run[2..], modes.insert_mode);
-                                }
-                                continue;
+                        if let Action::PrintAscii(run) = &action
+                            && run.len() >= 2
+                        {
+                            let row = b.saturating_sub(0x20) as u32;
+                            let col = run[1].saturating_sub(0x20) as u32;
+                            screen.cursor.row = row.min(viewport.rows.saturating_sub(1));
+                            screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
+                            vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+                            if run.len() > 2 {
+                                put_ascii_run(screen, viewport, &run[2..], modes.insert_mode);
                             }
+                            continue;
                         }
                         continue;
                     }
@@ -1857,10 +1868,10 @@ mod tests {
                         screen.cursor.row = (row as u32).min(viewport.rows.saturating_sub(1));
                         screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
                         vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                        if let Action::PrintAscii(run) = &action {
-                            if run.len() > 1 {
-                                put_ascii_run(screen, viewport, &run[1..], modes.insert_mode);
-                            }
+                        if let Action::PrintAscii(run) = &action
+                            && run.len() > 1
+                        {
+                            put_ascii_run(screen, viewport, &run[1..], modes.insert_mode);
                         }
                         continue;
                     }
@@ -2712,18 +2723,18 @@ mod tests {
                     (crate::Vt52CursorAddr::AwaitingRow, Some(b)) => {
                         vt52_cursor_addr =
                             crate::Vt52CursorAddr::AwaitingCol(b.saturating_sub(0x20));
-                        if let Action::PrintAscii(run) = &action {
-                            if run.len() >= 2 {
-                                let row = b.saturating_sub(0x20) as u32;
-                                let col = run[1].saturating_sub(0x20) as u32;
-                                screen.cursor.row = row.min(viewport.rows.saturating_sub(1));
-                                screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
-                                vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                                if run.len() > 2 {
-                                    put_ascii_run(screen, viewport, &run[2..], modes.insert_mode);
-                                }
-                                continue;
+                        if let Action::PrintAscii(run) = &action
+                            && run.len() >= 2
+                        {
+                            let row = b.saturating_sub(0x20) as u32;
+                            let col = run[1].saturating_sub(0x20) as u32;
+                            screen.cursor.row = row.min(viewport.rows.saturating_sub(1));
+                            screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
+                            vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+                            if run.len() > 2 {
+                                put_ascii_run(screen, viewport, &run[2..], modes.insert_mode);
                             }
+                            continue;
                         }
                         continue;
                     }
@@ -2732,10 +2743,10 @@ mod tests {
                         screen.cursor.row = (row as u32).min(viewport.rows.saturating_sub(1));
                         screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
                         vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                        if let Action::PrintAscii(run) = &action {
-                            if run.len() > 1 {
-                                put_ascii_run(screen, viewport, &run[1..], modes.insert_mode);
-                            }
+                        if let Action::PrintAscii(run) = &action
+                            && run.len() > 1
+                        {
+                            put_ascii_run(screen, viewport, &run[1..], modes.insert_mode);
                         }
                         continue;
                     }
