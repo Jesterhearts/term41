@@ -1,4 +1,4 @@
-//! Animated-GIF decoding via ffmpeg-next. Compiled in behind the `ffmpeg`
+//! GIF and video decoding via ffmpeg-next. Compiled in behind the `ffmpeg`
 //! cargo feature so light builds (no libav* on the host) keep working.
 //!
 //! The decoder drives ffmpeg against the raw byte buffer via a custom
@@ -334,7 +334,11 @@ pub struct FrameReader {
     stream_index: usize,
     time_base: ff::Rational,
     decoder: ff::decoder::Video,
-    scaler: SwsContext,
+    /// Lazily created on the first decoded frame. Codec parameters can
+    /// report `Pixel::None` for video codecs whose format isn't known
+    /// until after the first frame is decoded (H.264, VP9, etc.); the
+    /// decoded frame always carries the correct format.
+    scaler: Option<SwsContext>,
     /// Reusable holding cell for the scaled RGBA output so we don't
     /// reallocate a fresh `VideoFrame` every pull.
     pending_rgba: VideoFrame,
@@ -372,16 +376,6 @@ impl FrameReader {
         if width == 0 || height == 0 {
             return None;
         }
-        let scaler = SwsContext::get(
-            decoder.format(),
-            width,
-            height,
-            Pixel::RGBA,
-            width,
-            height,
-            SwsFlags::BILINEAR,
-        )
-        .ok()?;
         Some(Self {
             width,
             height,
@@ -389,7 +383,7 @@ impl FrameReader {
             stream_index,
             time_base,
             decoder,
-            scaler,
+            scaler: None,
             pending_rgba: VideoFrame::empty(),
             finished: false,
         })
@@ -490,7 +484,25 @@ impl FrameReader {
         if self.decoder.receive_frame(&mut frame).is_err() {
             return None;
         }
-        if self.scaler.run(&frame, &mut self.pending_rgba).is_err() {
+        // Lazily create the scaler from the first decoded frame's actual
+        // pixel format. Codec parameters can report None or a mismatched
+        // format for video codecs (H.264, VP9, …); using the decoded
+        // frame's format avoids the swscale assertion that fires when the
+        // configured source format doesn't match what the frame carries.
+        if self.scaler.is_none() {
+            self.scaler = SwsContext::get(
+                frame.format(),
+                self.width,
+                self.height,
+                Pixel::RGBA,
+                self.width,
+                self.height,
+                SwsFlags::BILINEAR,
+            )
+            .ok();
+        }
+        let scaler = self.scaler.as_mut()?;
+        if scaler.run(&frame, &mut self.pending_rgba).is_err() {
             return None;
         }
         let stride = self.pending_rgba.stride(0);

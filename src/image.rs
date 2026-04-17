@@ -90,13 +90,15 @@ impl DecodedImage {
 /// crate and dispatches to the right decoder. Returns `None` on unknown
 /// formats, malformed data, or formats whose decoder isn't compiled in.
 ///
-/// PNG is always available. GIF requires the `ffmpeg` cargo feature.
+/// PNG is always available. GIF and video formats require the `ffmpeg`
+/// cargo feature.
 pub fn decode_image(data: &[u8]) -> Option<DecodedImage> {
     let kind = infer::get(data)?;
     match kind.mime_type() {
         "image/png" => decode_png(data),
         #[cfg(feature = "ffmpeg")]
-        "image/gif" => ffmpeg_decoder::decode(data),
+        "image/gif" | "video/mp4" | "video/webm" | "video/x-matroska" | "video/quicktime"
+        | "video/x-msvideo" => ffmpeg_decoder::decode(data),
         _ => None,
     }
 }

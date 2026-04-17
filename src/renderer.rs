@@ -364,8 +364,7 @@ impl RenderHost {
                 // Surface the precedence rule once at startup so the user
                 // isn't confused why their config edit appears to do
                 // nothing — the pasted bg overrides until cleared.
-                if let Some(pasted) = pasted_background_path()
-                    && pasted.exists()
+                if let Some(pasted) = find_pasted_background()
                     && self.config.background_image.is_some()
                 {
                     info!(
@@ -1004,26 +1003,61 @@ impl RenderHost {
     // -- Background-image actions ------------------------------------------
 
     fn handle_paste_as_background(&mut self) {
+        let Some(dir) = pasted_background_dir() else {
+            warn!("paste-as-background: no data directory available on this platform");
+            self.fire_ui_bell();
+            return;
+        };
+        if let Err(e) = std::fs::create_dir_all(&dir) {
+            warn!(
+                "paste-as-background: failed to create {}: {e}",
+                dir.display()
+            );
+            self.fire_ui_bell();
+            return;
+        }
+
+        // Try raw clipboard bytes first — preserves GIF animation that
+        // arboard's decoded-RGBA path would flatten to a single frame.
+        if let Some(bytes) = crate::clipboard::get_raw_image_bytes() {
+            if let Some(kind) = infer::get(&bytes) {
+                let ext = kind.extension();
+                let path = dir.join(format!("pasted_background.{ext}"));
+                clear_pasted_backgrounds();
+                if let Err(e) = std::fs::write(&path, &bytes) {
+                    warn!(
+                        "paste-as-background: failed to write {}: {e}",
+                        path.display()
+                    );
+                    self.fire_ui_bell();
+                    return;
+                }
+                info!(
+                    "background: pasted {} saved to {} ({} bytes)",
+                    kind.mime_type(),
+                    path.display(),
+                    bytes.len()
+                );
+                if let Some(renderer) = self.renderer.as_mut() {
+                    renderer.set_background(Some(&path), self.config.background_opacity);
+                }
+                return;
+            }
+        }
+
+        // Fallback: arboard decoded RGBA → PNG. Handles cases where the
+        // raw-bytes path isn't available (non-Linux, tools not installed,
+        // or the clipboard holds a bitmap with no encoded-format version).
         let Some(img) = self.clipboard.get_image() else {
             warn!("paste-as-background: clipboard does not hold image data");
             self.fire_ui_bell();
             return;
         };
-        let Some(path) = pasted_background_path() else {
-            warn!("paste-as-background: no data directory available on this platform");
+        let Some(path) = pasted_background_path("png") else {
             self.fire_ui_bell();
             return;
         };
-        if let Some(parent) = path.parent()
-            && let Err(e) = std::fs::create_dir_all(parent)
-        {
-            warn!(
-                "paste-as-background: failed to create {}: {e}",
-                parent.display()
-            );
-            self.fire_ui_bell();
-            return;
-        }
+        clear_pasted_backgrounds();
         if let Err(e) = encode_png_rgba(&path, img.width, img.height, &img.rgba) {
             warn!(
                 "paste-as-background: failed to write {}: {e}",
@@ -1044,20 +1078,10 @@ impl RenderHost {
     }
 
     fn handle_clear_pasted_background(&mut self) {
-        let Some(path) = pasted_background_path() else {
+        let Some(path) = find_pasted_background() else {
             return;
         };
-        if !path.exists() {
-            return;
-        }
-        if let Err(e) = std::fs::remove_file(&path) {
-            warn!(
-                "clear-pasted-background: failed to remove {}: {e}",
-                path.display()
-            );
-            self.fire_ui_bell();
-            return;
-        }
+        clear_pasted_backgrounds();
         info!(
             "background: pasted image at {} cleared, reverting to config",
             path.display()
@@ -1944,23 +1968,63 @@ fn named_key_to_bytes(key: NamedKey) -> Option<Vec<u8>> {
     }
 }
 
-/// Where the `PasteAsBackground` action persists the clipboard image.
-/// Lives under the user's data dir (`~/.local/share/term41/...` on Linux,
-/// `~/Library/Application Support/term41/...` on macOS, `%APPDATA%\term41\...`
-/// on Windows). Returns `None` on platforms where `dirs` can't resolve a
-/// data dir (rare — usually broken environment).
-fn pasted_background_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("term41").join("pasted_background.png"))
+/// Directory where `PasteAsBackground` persists images.
+/// `~/.local/share/term41/` on Linux, `~/Library/Application Support/term41/`
+/// on macOS, `%APPDATA%\term41\` on Windows. Returns `None` on platforms
+/// where `dirs` can't resolve a data dir (rare — usually broken environment).
+fn pasted_background_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("term41"))
+}
+
+/// Build the full pasted-background path for a given file extension.
+fn pasted_background_path(ext: &str) -> Option<PathBuf> {
+    pasted_background_dir().map(|d| d.join(format!("pasted_background.{ext}")))
+}
+
+/// Find an existing pasted-background file, regardless of extension.
+/// Returns the first match found; there should only ever be one because
+/// `clear_pasted_backgrounds` deletes all variants before a new save.
+fn find_pasted_background() -> Option<PathBuf> {
+    let dir = pasted_background_dir()?;
+    let entries = std::fs::read_dir(&dir).ok()?;
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with("pasted_background."))
+        {
+            return Some(entry.path());
+        }
+    }
+    None
+}
+
+/// Delete every `pasted_background.*` file in the data directory so a
+/// fresh paste doesn't leave a stale file from a previous format.
+fn clear_pasted_backgrounds() {
+    let Some(dir) = pasted_background_dir() else {
+        return;
+    };
+    let Ok(entries) = std::fs::read_dir(&dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|n| n.starts_with("pasted_background."))
+        {
+            let _ = std::fs::remove_file(entry.path());
+        }
+    }
 }
 
 /// Resolve which background image to actually load: pasted-image-on-disk
 /// always wins over the config-supplied path. The "pasted always wins
 /// until cleared" rule keeps the precedence one-line debuggable —
-/// "does the pasted file exist?" is the whole question.
+/// "does a pasted file exist?" is the whole question.
 fn effective_bg_path(config: &Config) -> Option<PathBuf> {
-    pasted_background_path()
-        .filter(|p| p.exists())
-        .or_else(|| config.background_image.clone())
+    find_pasted_background().or_else(|| config.background_image.clone())
 }
 
 /// Encode an RGBA byte buffer to PNG at `path`. Always RGBA8 — the

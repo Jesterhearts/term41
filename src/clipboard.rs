@@ -119,6 +119,62 @@ impl Clipboard {
     }
 }
 
+/// Try to read raw encoded image bytes from the system clipboard,
+/// preserving the original format (important for animated GIFs which
+/// `arboard` decodes to a single RGBA frame, losing animation).
+///
+/// Tries `image/gif` first so animated content is preserved when
+/// available, then falls back to `image/png`. Returns `None` when
+/// neither format is on the clipboard or the platform tools aren't
+/// installed.
+///
+/// On Linux this shells out to `wl-paste` (Wayland) or `xclip` (X11).
+/// Other platforms return `None` — the caller should fall back to
+/// `Clipboard::get_image()`.
+pub fn get_raw_image_bytes() -> Option<Vec<u8>> {
+    #[cfg(target_os = "linux")]
+    {
+        for mime in &["image/gif", "image/png"] {
+            if let Some(bytes) = raw_clipboard_bytes(mime) {
+                return Some(bytes);
+            }
+        }
+    }
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn raw_clipboard_bytes(mime: &str) -> Option<Vec<u8>> {
+    use std::process::Command;
+    use std::process::Stdio;
+
+    // Wayland — wl-paste from the wl-clipboard package.
+    if std::env::var_os("WAYLAND_DISPLAY").is_some()
+        && let Ok(output) = Command::new("wl-paste")
+            .args(["--no-newline", "--type", mime])
+            .stderr(Stdio::null())
+            .output()
+        && output.status.success()
+        && !output.stdout.is_empty()
+    {
+        return Some(output.stdout);
+    }
+
+    // X11 — xclip.
+    if std::env::var_os("DISPLAY").is_some()
+        && let Ok(output) = Command::new("xclip")
+            .args(["-selection", "clipboard", "-t", mime, "-o"])
+            .stderr(Stdio::null())
+            .output()
+        && output.status.success()
+        && !output.stdout.is_empty()
+    {
+        return Some(output.stdout);
+    }
+
+    None
+}
+
 /// Owned RGBA pixel data from the system clipboard. `width * height * 4`
 /// bytes, row-major, top-down — same layout as `DecodedImage` everywhere
 /// else in the codebase, so the bytes can be re-encoded or passed

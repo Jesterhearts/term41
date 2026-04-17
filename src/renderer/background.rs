@@ -5,7 +5,7 @@
 //! to swap the texture's pixels when an animated image advances frames.
 //!
 //! Static images (PNG) decode once at load time; the texture is written
-//! and the job is done. Animated content (GIF today, video later) runs on
+//! and the job is done. Animated content (GIF, MP4, WebM, etc.) runs on
 //! a dedicated decoder thread that produces frames through a bounded
 //! [`sync_channel`]. The render thread drains the channel each cycle and
 //! uploads the newest buffered frame — so memory stays bounded at the
@@ -149,8 +149,8 @@ impl Background {
             Some(img) => img,
             None => {
                 error!(
-                    "background image: failed to decode {} (only PNG and GIF are supported today; \
-                     other formats need a follow-up)",
+                    "background image: failed to decode {} (supported: PNG, GIF, MP4, WebM, MKV, \
+                     MOV, AVI — GIF/video require the ffmpeg feature)",
                     path.display()
                 );
                 return None;
@@ -490,16 +490,23 @@ fn decoder_thread(
 }
 
 /// Sniff whether the bytes represent a format we treat as animated (and
-/// therefore route through the streaming decoder). Today that's just
-/// GIF; video containers will plug in here as the same animated path
-/// without further wiring. Unknown or non-matching formats fall back to
-/// the static path — `decode_image` will either handle them or report
-/// a clean "unsupported format" error there.
+/// therefore route through the streaming decoder). Covers GIF and the
+/// common video containers ffmpeg supports. Unknown or non-matching
+/// formats fall back to the static path — `decode_image` will either
+/// handle them or report a clean "unsupported format" error there.
 fn is_animated_format(bytes: &[u8]) -> bool {
     let Some(kind) = infer::get(bytes) else {
         return false;
     };
-    matches!(kind.mime_type(), "image/gif")
+    matches!(
+        kind.mime_type(),
+        "image/gif"
+            | "video/mp4"
+            | "video/webm"
+            | "video/x-matroska"
+            | "video/quicktime"
+            | "video/x-msvideo"
+    )
 }
 
 /// Bind group layout for the background pipeline: one texture + one
@@ -675,6 +682,20 @@ mod tests {
         // GIF magic: "GIF89a" / "GIF87a".
         assert!(is_animated_format(b"GIF89a\x00\x00"));
         assert!(is_animated_format(b"GIF87a\x00\x00"));
+    }
+
+    #[test]
+    fn sniffs_video_as_animated() {
+        // Minimal ftyp box header for MP4/MOV.
+        let mut ftyp = vec![0u8; 12];
+        ftyp[3] = 12; // box size
+        ftyp[4..8].copy_from_slice(b"ftyp");
+        ftyp[8..12].copy_from_slice(b"isom");
+        assert!(is_animated_format(&ftyp));
+
+        // WebM/MKV: EBML header magic 0x1A45DFA3.
+        let ebml = [0x1A, 0x45, 0xDF, 0xA3, 0, 0, 0, 0];
+        assert!(is_animated_format(&ebml));
     }
 
     #[test]
