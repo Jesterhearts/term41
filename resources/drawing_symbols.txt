@@ -43,7 +43,7 @@ Partial braille — rows of dots:
 ⠁⠁⠁⠁  ⠂⠂⠂⠂  ⠄⠄⠄⠄  ⡀⡀⡀⡀
 ⠉⠉⠉⠉  ⠒⠒⠒⠒  ⠤⠤⠤⠤  ⣀⣀⣀⣀
 ⠋⠉⠉⠉⠉⠛  (rounded top-row bar)
-⡇      ⢸  (left + right verticals)
+⡇    ⢸  (left + right verticals)
 ⣇⣀⣀⣀⣀⣸  (rounded bottom-row bar)
 
 Braille diagonal sweep:
