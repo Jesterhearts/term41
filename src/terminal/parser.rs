@@ -108,6 +108,10 @@ pub(super) fn put_ascii_run(
     let attrs = screen.attrs;
     let link = screen.current_hyperlink;
 
+    // Record the last byte of the run for REP (CSI Ps b).
+    let last_byte = *run.last().unwrap();
+    screen.last_char = Some(ASCII_CELLS[(last_byte - 0x20) as usize].clone());
+
     let mut i = 0;
     while i < run.len() {
         // Pre-wrap: a cursor parked past the last column wraps before
@@ -192,7 +196,7 @@ pub(super) fn put_char(
     // at clear/erase/reflow.
     break_wide_glyphs_around_write(&mut screen.grid.rows[r], col, width);
 
-    screen.grid.rows[r].cells[col] = s;
+    screen.grid.rows[r].cells[col] = s.clone();
     screen.grid.rows[r].fg[col] = fg;
     screen.grid.rows[r].bg[col] = bg;
     screen.grid.rows[r].attrs[col] = attrs;
@@ -204,6 +208,7 @@ pub(super) fn put_char(
         screen.grid.rows[r].attrs[col + i] = attrs;
         screen.grid.rows[r].links[col + i] = link;
     }
+    screen.last_char = Some(s);
     screen.cursor.col += width as u32;
 }
 
@@ -447,6 +452,27 @@ pub(super) fn csi_dispatch(
         return;
     }
 
+    if action == 'p' && intermediates == b"!" {
+        // DECSTR (Soft Terminal Reset). Resets modes, colors, attributes,
+        // scroll region, and cursor style back to defaults without clearing
+        // the screen or scrollback. tmux and neovim use this for a
+        // lightweight cleanup between sessions.
+        let screen = &mut *ctx.screen;
+        screen.fg = color::default_fg();
+        screen.bg = color::default_bg();
+        screen.attrs = CellAttrs::default();
+        screen.scroll_top = 0;
+        screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+        screen.saved_cursor = None;
+        screen.current_hyperlink = None;
+        screen.cursor_visible = true;
+        screen.last_char = None;
+        *ctx.modes = TerminalModes::new();
+        *ctx.kitty_keyboard = KittyKeyboardState::new();
+        *ctx.cursor_style = CursorStyle::default();
+        return;
+    }
+
     // -- No-intermediates sequences -----------------------------------------
 
     if !intermediates.is_empty() {
@@ -521,6 +547,24 @@ pub(super) fn csi_dispatch(
                 .expect("write to Vec is infallible");
             }
             _ => {}
+        }
+        return;
+    }
+
+    // REP (Repeat preceding graphic character). Handled before the main
+    // match because `put_char` needs `&mut Screen` which conflicts with
+    // the `cursor` borrow below.
+    if action == 'b' {
+        let n = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(1)
+            .max(1);
+        if let Some(ch) = ctx.screen.last_char.clone() {
+            for _ in 0..n {
+                put_char(ctx.screen, ctx.viewport, ch.clone());
+            }
         }
         return;
     }
@@ -708,6 +752,7 @@ pub(super) fn esc_dispatch(
                 s.saved_cursor = None;
                 s.current_hyperlink = None;
                 s.cursor_visible = true;
+                s.last_char = None;
             }
             *ctx.modes = TerminalModes::new();
             *ctx.kitty_keyboard = KittyKeyboardState::new();
@@ -1436,5 +1481,84 @@ mod tests {
         feed(b"\x1b>", &mut screen, &viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 3);
+    }
+
+    // -- REP (CSI Ps b) ---------------------------------------------------
+
+    #[test]
+    fn rep_repeats_last_printed_char() {
+        let (mut screen, viewport) = setup();
+        // Print 'A' then repeat it 3 times.
+        feed(b"A\x1b[3b", &mut screen, &viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "A");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "A");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "A");
+        assert_eq!(screen.grid.rows[r].cells[3].as_str(), "A");
+        assert_eq!(screen.cursor.col, 4);
+    }
+
+    #[test]
+    fn rep_without_prior_char_is_noop() {
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[3b", &mut screen, &viewport);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    #[test]
+    fn rep_defaults_to_one_repetition() {
+        let (mut screen, viewport) = setup();
+        feed(b"X\x1b[b", &mut screen, &viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "X");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "X");
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    // -- DECSTR (CSI ! p) -------------------------------------------------
+
+    #[test]
+    fn decstr_resets_attrs_and_colors() {
+        let (mut screen, viewport) = setup();
+        // Set bold + reverse + custom colors.
+        feed(b"\x1b[1;7;31;42m", &mut screen, &viewport);
+        assert!(screen.attrs.contains(CellAttrs::BOLD));
+        assert!(screen.attrs.contains(CellAttrs::REVERSE));
+        assert_ne!(screen.fg, color::default_fg());
+        // Soft reset.
+        feed(b"\x1b[!p", &mut screen, &viewport);
+        assert_eq!(screen.attrs, CellAttrs::default());
+        assert_eq!(screen.fg, color::default_fg());
+        assert_eq!(screen.bg, color::default_bg());
+    }
+
+    #[test]
+    fn decstr_resets_scroll_region() {
+        let (mut screen, viewport) = setup();
+        // Set a restrictive scroll region.
+        feed(b"\x1b[2;3r", &mut screen, &viewport);
+        assert_eq!(screen.scroll_top, 1);
+        assert_eq!(screen.scroll_bottom, 2);
+        // Soft reset should restore full region.
+        feed(b"\x1b[!p", &mut screen, &viewport);
+        assert_eq!(screen.scroll_top, 0);
+        assert_eq!(screen.scroll_bottom, viewport.rows - 1);
+    }
+
+    #[test]
+    fn decstr_preserves_screen_contents() {
+        let (mut screen, viewport) = setup();
+        feed(b"Hello", &mut screen, &viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        let before: Vec<_> = screen.grid.rows[r].cells[..5]
+            .iter()
+            .map(|s| s.as_str().to_owned())
+            .collect();
+        feed(b"\x1b[!p", &mut screen, &viewport);
+        let after: Vec<_> = screen.grid.rows[r].cells[..5]
+            .iter()
+            .map(|s| s.as_str().to_owned())
+            .collect();
+        assert_eq!(before, after);
     }
 }

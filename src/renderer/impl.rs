@@ -85,6 +85,23 @@ fn blend(
     )
 }
 
+/// Apply SGR reverse (swap fg/bg) and dim (halve fg brightness) to a cell's
+/// stored colours, returning the effective (fg, bg) pair for rendering.
+fn resolve_cell_colors(
+    fg: &Srgb<u8>,
+    bg: &Srgb<u8>,
+    attrs: CellAttrs,
+) -> (Srgb<u8>, Srgb<u8>) {
+    let (mut fg, mut bg) = (*fg, *bg);
+    if attrs.contains(CellAttrs::REVERSE) {
+        std::mem::swap(&mut fg, &mut bg);
+    }
+    if attrs.contains(CellAttrs::DIM) {
+        fg = Srgb::new(fg.red / 2, fg.green / 2, fg.blue / 2);
+    }
+    (fg, bg)
+}
+
 /// Lightweight snapshot of tab state for the renderer. Built by the host
 /// each frame so the renderer doesn't couple to the `App` struct.
 pub struct TabInfo<'s> {
@@ -785,8 +802,12 @@ impl Renderer {
                 let matched = terminal.is_cell_match(row, col);
                 let active_match = terminal.is_cell_active_match(row, col);
                 let block_cursor_here = cursor_state.is_block_at(row, col);
-                let cell_fg = grid_row.fg[col as usize];
-                let cell_bg = grid_row.bg[col as usize];
+                let cell_attrs = grid_row.attrs[col as usize];
+                let (cell_fg, cell_bg) = resolve_cell_colors(
+                    &grid_row.fg[col as usize],
+                    &grid_row.bg[col as usize],
+                    cell_attrs,
+                );
                 let bg_effective = if active_match {
                     blend(cell_fg, cell_bg, 0.5)
                 } else if selected || matched || block_cursor_here {
@@ -839,10 +860,9 @@ impl Renderer {
                 // only draws the line once. Sits in the bg pass so the
                 // glyph paints over any pixels the line would otherwise eat.
                 let has_link = grid_row.links[col as usize].is_some();
-                let has_attr_underline =
-                    grid_row.attrs[col as usize].contains(CellAttrs::UNDERLINE);
+                let has_attr_underline = cell_attrs.contains(CellAttrs::UNDERLINE);
                 if has_link || has_attr_underline {
-                    let underline_color = pack_color(&grid_row.fg[col as usize], 255);
+                    let underline_color = pack_color(&cell_fg, 255);
                     let thickness = (cell_h * 0.06).max(1.0);
                     let uy = y + cell_h - thickness;
                     let bi = bg_vertices.len() as u32;
@@ -964,8 +984,11 @@ impl Renderer {
                 let matched = terminal.is_cell_match(row, sg.col as u32);
                 let active_match = terminal.is_cell_active_match(row, sg.col as u32);
                 let block_cursor_here = cursor_state.is_block_at(row, sg.col as u32);
-                let cell_fg = grid_row.fg[sg.col as usize];
-                let cell_bg = grid_row.bg[sg.col as usize];
+                let (cell_fg, cell_bg) = resolve_cell_colors(
+                    &grid_row.fg[sg.col as usize],
+                    &grid_row.bg[sg.col as usize],
+                    cell_attrs,
+                );
                 let fg_effective = if active_match {
                     cell_fg
                 } else if selected || matched || block_cursor_here {

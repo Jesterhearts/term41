@@ -3,6 +3,7 @@ use std::collections::VecDeque;
 
 use font41::attrs::CellAttrs;
 use palette::Srgb;
+use smol_str::SmolStr;
 
 use crate::terminal::color::default_bg;
 use crate::terminal::color::default_fg;
@@ -58,6 +59,9 @@ pub struct Screen {
     /// `CSI ? 25 h`. Per-screen so an alt-screen full-screen TUI that hides
     /// the cursor doesn't leave the primary screen hidden on exit.
     pub cursor_visible: bool,
+    /// Last character placed by `put_char` or `put_ascii_run`, used by REP
+    /// (`CSI Ps b`) to repeat the preceding graphic character.
+    pub last_char: Option<SmolStr>,
 }
 
 impl Screen {
@@ -87,6 +91,7 @@ impl Screen {
             saved_cursor: None,
             current_hyperlink: None,
             cursor_visible: true,
+            last_char: None,
         }
     }
 }

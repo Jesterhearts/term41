@@ -105,13 +105,15 @@ pub(super) fn apply_sgr(
                 *attrs = CellAttrs::default();
             }
             1 => attrs.insert(CellAttrs::BOLD),
+            2 => attrs.insert(CellAttrs::DIM),
             3 => attrs.insert(CellAttrs::ITALIC),
             4 => attrs.insert(CellAttrs::UNDERLINE),
-            // SGR 22 resets both bold and faint — we don't track faint, so
-            // this is just a bold clear.
-            22 => attrs.remove(CellAttrs::BOLD),
+            7 => attrs.insert(CellAttrs::REVERSE),
+            // SGR 22 resets both bold and faint per ECMA-48.
+            22 => attrs.remove(CellAttrs::BOLD | CellAttrs::DIM),
             23 => attrs.remove(CellAttrs::ITALIC),
             24 => attrs.remove(CellAttrs::UNDERLINE),
+            27 => attrs.remove(CellAttrs::REVERSE),
             30..=37 => *fg = ansi_color((params[i] - 30) as u8),
             39 => *fg = default_fg(),
             40..=47 => *bg = ansi_color((params[i] - 40) as u8),
@@ -439,5 +441,48 @@ mod tests {
         let (fg, bg) = apply(b"\x1b[31;42;0m");
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
+    }
+
+    #[test]
+    fn sgr_2_sets_dim() {
+        let mut attrs = CellAttrs::default();
+        apply_with_attrs(b"\x1b[2m", &mut attrs);
+        assert!(attrs.contains(CellAttrs::DIM));
+        assert!(!attrs.contains(CellAttrs::BOLD));
+    }
+
+    #[test]
+    fn sgr_7_sets_reverse() {
+        let mut attrs = CellAttrs::default();
+        apply_with_attrs(b"\x1b[7m", &mut attrs);
+        assert!(attrs.contains(CellAttrs::REVERSE));
+    }
+
+    #[test]
+    fn sgr_27_clears_reverse() {
+        let mut attrs = CellAttrs::default();
+        apply_with_attrs(b"\x1b[7m", &mut attrs);
+        assert!(attrs.contains(CellAttrs::REVERSE));
+        apply_with_attrs(b"\x1b[27m", &mut attrs);
+        assert!(!attrs.contains(CellAttrs::REVERSE));
+    }
+
+    #[test]
+    fn sgr_22_clears_both_bold_and_dim() {
+        let mut attrs = CellAttrs::default();
+        apply_with_attrs(b"\x1b[1;2m", &mut attrs);
+        assert!(attrs.contains(CellAttrs::BOLD));
+        assert!(attrs.contains(CellAttrs::DIM));
+        apply_with_attrs(b"\x1b[22m", &mut attrs);
+        assert!(!attrs.contains(CellAttrs::BOLD));
+        assert!(!attrs.contains(CellAttrs::DIM));
+    }
+
+    #[test]
+    fn sgr_0_clears_reverse_and_dim() {
+        let mut attrs = CellAttrs::default();
+        apply_with_attrs(b"\x1b[2;7m", &mut attrs);
+        apply_with_attrs(b"\x1b[0m", &mut attrs);
+        assert_eq!(attrs, CellAttrs::default());
     }
 }
