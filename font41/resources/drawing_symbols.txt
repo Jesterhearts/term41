@@ -99,6 +99,135 @@ Shaded halves (half-block geometry at medium density):
 🮎🮎🮎🮎   (upper)
 🮏🮏🮏🮏   (lower)
 
+== Smooth-mosaic wedge shapes (U+1FB3C–U+1FB67) ==
+
+Lower-left triangles, smallest to largest (5 sizes):
+🬼🬽🬾🬿🭀
+
+Lower-left complements (full cell minus upper-left triangle):
+🭁🭂🭃🭄🭅
+
+Lower-right triangles:
+🭇🭈🭉🭊🭋
+
+Lower-right complements:
+🭌🭍🭎🭏🭐
+
+Upper-left triangles:
+🭗🭘🭙🭚🭛
+
+Upper-left complements:
+🭝🭞🭟🭠🭡
+
+Upper-right triangles:
+🭢🭣🭤🭥🭦
+
+Upper-right complements:
+🭒🭓🭔🭕🭖
+
+Diagonal band trapezoids (one per corner):
+🭆🭑🭜🭧
+
+Triangle + complement pairs (each pair tiles the full cell):
+🬼🭒  🬽🭓  🬾🭔  🬿🭕  🭀🭖
+
+All 44 wedge shapes in codepoint order:
+🬼🬽🬾🬿🭀🭁🭂🭃🭄🭅🭆🭇🭈🭉🭊🭋🭌🭍🭎🭏🭐🭑
+🭒🭓🭔🭕🭖🭗🭘🭙🭚🭛🭜🭝🭞🭟🭠🭡🭢🭣🭤🭥🭦🭧
+
+Beveled rectangle outline (wedge corners + block edges):
+🭘▀▀▀▀▀🭣
+▌     ▐
+▌     ▐
+🭈▄▄▄▄▄🭌
+
+Steep beveled rectangle (larger corner triangles):
+🭚▀▀▀▀▀🭥
+🭛     🭦
+🬿▄▄▄▄▄🭏
+
+== Block diagonal shapes (U+1FB68–U+1FB6F) ==
+
+Quarter-cell triangles (left, upper, right, lower):
+🭬🭭🭮🭯
+
+Three-quarter fills (cell minus left, upper, right, lower):
+🭨🭩🭪🭫
+
+Diamond from quarter triangles (3×3 with spaces):
+ 🭭
+🭬 🭮
+ 🭯
+
+Diagonal half-block splits — bowtie / hourglass patterns:
+🮚🮚🮚🮚🮚🮚🮚🮚  (upper + lower triangles)
+🮛🮛🮛🮛🮛🮛🮛🮛  (left + right triangles)
+
+== Shade patterns (U+1FB90–U+1FB9F) ==
+
+Inverse medium shade:
+🮐🮐🮐🮐🮐🮐🮐🮐
+
+Mixed shade halves (one half solid, other half medium shade):
+🮑🮑🮑🮑  (upper solid + lower shade)
+🮒🮒🮒🮒  (upper shade + lower solid)
+🮓🮓🮓🮓  (left solid + right shade)
+🮔🮔🮔🮔  (left shade + right solid)
+
+Checkerboard fills (should tile seamlessly between cells):
+🮕🮕🮕🮕🮕🮕🮕🮕
+🮕🮕🮕🮕🮕🮕🮕🮕
+🮕🮕🮕🮕🮕🮕🮕🮕
+
+Inverse checkerboard (complement of above):
+🮖🮖🮖🮖🮖🮖🮖🮖
+
+Heavy horizontal fill (2-on / 2-off horizontal stripes):
+🮗🮗🮗🮗🮗🮗🮗🮗
+🮗🮗🮗🮗🮗🮗🮗🮗
+
+Diagonal hatching (UL-to-LR stripes, UR-to-LL stripes):
+🮘🮘🮘🮘🮘🮘🮘🮘
+🮙🮙🮙🮙🮙🮙🮙🮙
+
+Triangular medium shade (half-cell diagonal at 50% alpha):
+🮜🮝  (upper-left, upper-right)
+🮟🮞  (lower-left, lower-right)
+
+Shade gradient using triangular shade + solid halves:
+🮜▀▀▀🮝
+🮟▄▄▄🮞
+
+== Diagonal box-drawing lines (U+1FBA0–U+1FBAF) ==
+
+Single segments (UL, UR, LL, LR):
+🮠  🮡  🮢  🮣
+
+Zigzags (left, right):
+🮤🮤🮤🮤  🮥🮥🮥🮥
+
+V-shapes (bottom, top):
+🮦🮦🮦🮦  🮧🮧🮧🮧
+
+X-patterns (backslash pair, slash pair):
+🮨🮨🮨🮨  🮩🮩🮩🮩
+
+Three-segment combinations:
+🮪🮫🮬🮭
+
+Full diamond (all four segments, should tile into a lattice):
+🮮🮮🮮🮮🮮🮮🮮🮮
+🮮🮮🮮🮮🮮🮮🮮🮮
+
+Plus / cross (horizontal + vertical through centre):
+🮯🮯🮯🮯🮯🮯🮯🮯
+
+Diamond lattice border:
+🮧🮧🮧🮧🮧🮧🮧🮧
+🮤      🮥
+🮤      🮥
+🮦🮦🮦🮦🮦🮦🮦🮦
+
 == Adjacency / tiling torture tests ==
 
 Horizontal tiling of left 1/8 blocks (should form a solid horizontal line
@@ -127,6 +256,26 @@ Sextant wall plus partial interior:
 🬛🬀🬁🬂🬃🬄🬅🬛
 🬛🬆🬇🬈🬉🬊🬋🬛
 🬛🬛🬛🬛🬛🬛🬛🬛
+
+Wedge complement tiling (triangle + complement = full cell, no seams):
+🬼🭒🬼🭒🬼🭒🬼🭒
+🭀🭖🭀🭖🭀🭖🭀🭖
+
+Checkerboard + inverse checkerboard (together = full cell):
+🮕🮖🮕🮖🮕🮖🮕🮖
+🮖🮕🮖🮕🮖🮕🮖🮕
+
+Diamond lattice tiling (should form a continuous grid):
+🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮
+🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮
+
+Block diagonal quarters (all four = full cell, no gaps):
+🭬🭮🭬🭮🭬🭮🭬🭮
+🭯🭭🭯🭭🭯🭭🭯🭭
+
+Diagonal hatching tiling (stripes should continue across cells):
+🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘
+🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙🮙
 
 == Colour shades side by side ==
 

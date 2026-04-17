@@ -4,8 +4,13 @@
 //! - Block Elements (U+2580–U+259F) — halves, eighths, quadrants, shades
 //! - Braille Patterns (U+2800–U+28FF) — all 256 8-dot combinations
 //! - Symbols for Legacy Computing sextants (U+1FB00–U+1FB3B)
+//! - SFLC smooth-mosaic wedge/triangle shapes (U+1FB3C–U+1FB67)
+//! - SFLC block diagonal quarter/three-quarter fills (U+1FB68–U+1FB6F)
 //! - SFLC one-eighth blocks and partial fills (U+1FB70–U+1FB80,
 //!   U+1FB82–U+1FB8F)
+//! - SFLC shade combos, checkerboards, hatching, diagonal splits, and
+//!   triangular medium shade (U+1FB90–U+1FB9F)
+//! - SFLC diagonal box-drawing lines and plus/cross (U+1FBA0–U+1FBAF)
 //!
 //! These codepoints are the building blocks of "pixel art" in the terminal,
 //! where users expect adjacent filled cells to abut without visible gaps and
@@ -13,7 +18,7 @@
 //! glyphs for the same characters typically render dots as circles, reserve
 //! empty margins around each cell, or anti-alias the pixel boundaries — all
 //! fine for isolated use, ruinous when you're using them as drawing
-//! primitives. We side-step the font entirely and fill the exact rectangles
+//! primitives. We side-step the font entirely and fill the exact shapes
 //! each codepoint represents.
 //!
 //! Output contract matches the outline path: alpha coverage in the RGBA
@@ -52,17 +57,17 @@ fn encode(c: char) -> Option<u16> {
     let cp = c as u32;
     match cp {
         0x2580..=0x259F | 0x2800..=0x28FF => Some(cp as u16),
-        // SFLC ranges fit into u16 after subtracting 0x10000 (max is 0xFB8F,
+        // SFLC ranges fit into u16 after subtracting 0x10000 (max is 0xFBAF,
         // disjoint from both BMP ranges above). 0x1FB81 is excluded because
         // its dithered "horizontal one eighth block-1358" pattern isn't a
         // pure rectangle and we'd rather defer to whatever the font provides.
-        0x1FB00..=0x1FB3B | 0x1FB70..=0x1FB80 | 0x1FB82..=0x1FB8F => Some((cp - 0x10000) as u16),
+        0x1FB00..=0x1FB80 | 0x1FB82..=0x1FBAF => Some((cp - 0x10000) as u16),
         _ => None,
     }
 }
 
 fn decode(glyph_id: u16) -> u32 {
-    // Range disambiguation: the SFLC shapes encode to 0xFB00..=0xFB8F,
+    // Range disambiguation: the SFLC shapes encode to 0xFB00..=0xFBAF,
     // disjoint from 0x2580..=0x259F and 0x2800..=0x28FF. A plain threshold
     // check recovers the original plane.
     let v = glyph_id as u32;
@@ -91,7 +96,11 @@ pub fn rasterize(
         cp @ 0x2580..=0x259F => draw_block_element(cp, &mut alpha, w, h),
         cp @ 0x2800..=0x28FF => draw_braille(cp, &mut alpha, w, h),
         cp @ 0x1FB00..=0x1FB3B => draw_sextant(cp, &mut alpha, w, h),
+        cp @ 0x1FB3C..=0x1FB67 => draw_wedge(cp, &mut alpha, w, h),
+        cp @ 0x1FB68..=0x1FB6F => draw_block_diagonal(cp, &mut alpha, w, h),
         cp @ 0x1FB70..=0x1FB8F => draw_sflc_block(cp, &mut alpha, w, h),
+        cp @ 0x1FB90..=0x1FB9F => draw_shade_pattern(cp, &mut alpha, w, h),
+        cp @ 0x1FBA0..=0x1FBAF => draw_diagonal_lines(cp, &mut alpha, w, h),
         _ => {}
     }
 
@@ -167,6 +176,131 @@ fn eighths(
     total: usize,
 ) -> usize {
     (n * total + 4) / 8
+}
+
+/// Signed area of the triangle edge (a→b) evaluated at point p.
+/// Positive when p is to the left of a→b, negative to the right.
+fn edge_fn(
+    a: (f32, f32),
+    b: (f32, f32),
+    p: (f32, f32),
+) -> f32 {
+    (b.0 - a.0) * (p.1 - a.1) - (b.1 - a.1) * (p.0 - a.0)
+}
+
+/// Fill a triangle defined by three vertices. Uses an edge-function test
+/// at each pixel centre — O(w×h) per call, which is fine for the small
+/// cell sizes we deal with.
+fn fill_tri(
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+    v0: (f32, f32),
+    v1: (f32, f32),
+    v2: (f32, f32),
+) {
+    fill_tri_with(alpha, w, h, v0, v1, v2, 0xFF);
+}
+
+fn fill_tri_with(
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+    v0: (f32, f32),
+    v1: (f32, f32),
+    v2: (f32, f32),
+    value: u8,
+) {
+    for py in 0..h {
+        let cy = py as f32 + 0.5;
+        for px in 0..w {
+            let cx = px as f32 + 0.5;
+            let d0 = edge_fn(v0, v1, (cx, cy));
+            let d1 = edge_fn(v1, v2, (cx, cy));
+            let d2 = edge_fn(v2, v0, (cx, cy));
+            // Inside when all edge functions share the same sign (handles
+            // both CW and CCW winding). Boundary pixels (d=0) are included.
+            let has_neg = d0 < 0.0 || d1 < 0.0 || d2 < 0.0;
+            let has_pos = d0 > 0.0 || d1 > 0.0 || d2 > 0.0;
+            if !(has_neg && has_pos) {
+                alpha[py * w + px] = value;
+            }
+        }
+    }
+}
+
+/// Fill a convex quadrilateral by decomposing into two triangles.
+fn fill_quad(
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+    v0: (f32, f32),
+    v1: (f32, f32),
+    v2: (f32, f32),
+    v3: (f32, f32),
+) {
+    fill_tri(alpha, w, h, v0, v1, v2);
+    fill_tri(alpha, w, h, v0, v2, v3);
+}
+
+/// Fill the triangle, then invert the entire alpha buffer so that the
+/// triangle region becomes empty and everything else becomes filled.
+/// The caller must ensure the buffer is zeroed before this call.
+fn complement_tri(
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+    v0: (f32, f32),
+    v1: (f32, f32),
+    v2: (f32, f32),
+) {
+    fill_tri(alpha, w, h, v0, v1, v2);
+    for a in alpha.iter_mut() {
+        *a = 0xFF - *a;
+    }
+}
+
+/// Squared distance from point `p` to the line segment `a`→`b`.
+fn dist_to_segment_sq(
+    p: (f32, f32),
+    a: (f32, f32),
+    b: (f32, f32),
+) -> f32 {
+    let dx = b.0 - a.0;
+    let dy = b.1 - a.1;
+    let len_sq = dx * dx + dy * dy;
+    if len_sq < 1e-6 {
+        let ex = p.0 - a.0;
+        let ey = p.1 - a.1;
+        return ex * ex + ey * ey;
+    }
+    let t = ((p.0 - a.0) * dx + (p.1 - a.1) * dy) / len_sq;
+    let t = t.clamp(0.0, 1.0);
+    let ex = p.0 - (a.0 + t * dx);
+    let ey = p.1 - (a.1 + t * dy);
+    ex * ex + ey * ey
+}
+
+/// Draw a thick line segment from `a` to `b`. Each pixel whose centre
+/// falls within `thickness / 2` of the segment is set to 0xFF.
+fn stroke_line(
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+    a: (f32, f32),
+    b: (f32, f32),
+    thickness: f32,
+) {
+    let half_t_sq = (thickness / 2.0) * (thickness / 2.0);
+    for py in 0..h {
+        let cy = py as f32 + 0.5;
+        for px in 0..w {
+            let cx = px as f32 + 0.5;
+            if dist_to_segment_sq((cx, cy), a, b) <= half_t_sq {
+                alpha[py * w + px] = 0xFF;
+            }
+        }
+    }
 }
 
 // --- Block Elements (U+2580–U+259F) ---------------------------------------
@@ -443,6 +577,308 @@ fn draw_sflc_block(
     }
 }
 
+// --- Smooth-mosaic wedge shapes (U+1FB3C–U+1FB67) -------------------------
+//
+// 44 characters: 20 direct triangles (5 per corner), 20 complement shapes
+// (full cell minus a triangle from the opposite corner), and 4 diagonal-band
+// trapezoids. Reference grid uses the sextant 2×3 intersections:
+//   x: 0, w/2, w    y: 0, h/3, 2h/3, h
+
+fn draw_wedge(
+    cp: u32,
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+) {
+    let wf = w as f32;
+    let hf = h as f32;
+    let xm = wf / 2.0;
+    let y1 = hf / 3.0;
+    let y2 = 2.0 * hf / 3.0;
+
+    match cp {
+        // Lower-left triangles — diagonal from left edge to bottom edge,
+        // filled below and left.
+        0x1FB3C => fill_tri(alpha, w, h, (0.0, y2), (0.0, hf), (xm, hf)),
+        0x1FB3D => fill_tri(alpha, w, h, (0.0, y2), (0.0, hf), (wf, hf)),
+        0x1FB3E => fill_tri(alpha, w, h, (0.0, y1), (0.0, hf), (xm, hf)),
+        0x1FB3F => fill_tri(alpha, w, h, (0.0, y1), (0.0, hf), (wf, hf)),
+        0x1FB40 => fill_tri(alpha, w, h, (0.0, 0.0), (0.0, hf), (xm, hf)),
+        // Lower-left complements (full cell minus upper-left triangles).
+        0x1FB41 => complement_tri(alpha, w, h, (0.0, 0.0), (xm, 0.0), (0.0, y1)),
+        0x1FB42 => complement_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (0.0, y1)),
+        0x1FB43 => complement_tri(alpha, w, h, (0.0, 0.0), (xm, 0.0), (0.0, y2)),
+        0x1FB44 => complement_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (0.0, y2)),
+        0x1FB45 => complement_tri(alpha, w, h, (0.0, 0.0), (xm, 0.0), (0.0, hf)),
+        // Lower-left diagonal band (trapezoid).
+        0x1FB46 => fill_quad(alpha, w, h, (0.0, y2), (wf, y1), (wf, hf), (0.0, hf)),
+
+        // Lower-right triangles.
+        0x1FB47 => fill_tri(alpha, w, h, (xm, hf), (wf, y2), (wf, hf)),
+        0x1FB48 => fill_tri(alpha, w, h, (0.0, hf), (wf, y2), (wf, hf)),
+        0x1FB49 => fill_tri(alpha, w, h, (xm, hf), (wf, y1), (wf, hf)),
+        0x1FB4A => fill_tri(alpha, w, h, (0.0, hf), (wf, y1), (wf, hf)),
+        0x1FB4B => fill_tri(alpha, w, h, (xm, hf), (wf, 0.0), (wf, hf)),
+        // Lower-right complements (full cell minus upper-right triangles).
+        0x1FB4C => complement_tri(alpha, w, h, (xm, 0.0), (wf, 0.0), (wf, y1)),
+        0x1FB4D => complement_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (wf, y1)),
+        0x1FB4E => complement_tri(alpha, w, h, (xm, 0.0), (wf, 0.0), (wf, y2)),
+        0x1FB4F => complement_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (wf, y2)),
+        0x1FB50 => complement_tri(alpha, w, h, (xm, 0.0), (wf, 0.0), (wf, hf)),
+        // Lower-right diagonal band.
+        0x1FB51 => fill_quad(alpha, w, h, (0.0, y1), (wf, y2), (wf, hf), (0.0, hf)),
+
+        // Upper-right complements (full cell minus lower-left triangles).
+        0x1FB52 => complement_tri(alpha, w, h, (0.0, y2), (0.0, hf), (xm, hf)),
+        0x1FB53 => complement_tri(alpha, w, h, (0.0, y2), (0.0, hf), (wf, hf)),
+        0x1FB54 => complement_tri(alpha, w, h, (0.0, y1), (0.0, hf), (xm, hf)),
+        0x1FB55 => complement_tri(alpha, w, h, (0.0, y1), (0.0, hf), (wf, hf)),
+        0x1FB56 => complement_tri(alpha, w, h, (0.0, 0.0), (0.0, hf), (xm, hf)),
+
+        // Upper-left triangles — diagonal from left edge to top edge.
+        0x1FB57 => fill_tri(alpha, w, h, (0.0, 0.0), (xm, 0.0), (0.0, y1)),
+        0x1FB58 => fill_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (0.0, y1)),
+        0x1FB59 => fill_tri(alpha, w, h, (0.0, 0.0), (xm, 0.0), (0.0, y2)),
+        0x1FB5A => fill_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (0.0, y2)),
+        0x1FB5B => fill_tri(alpha, w, h, (0.0, 0.0), (xm, 0.0), (0.0, hf)),
+        // Upper-left diagonal band.
+        0x1FB5C => fill_quad(alpha, w, h, (0.0, 0.0), (wf, 0.0), (wf, y1), (0.0, y2)),
+
+        // Upper-left complements (full cell minus lower-right triangles).
+        0x1FB5D => complement_tri(alpha, w, h, (xm, hf), (wf, y2), (wf, hf)),
+        0x1FB5E => complement_tri(alpha, w, h, (0.0, hf), (wf, y2), (wf, hf)),
+        0x1FB5F => complement_tri(alpha, w, h, (xm, hf), (wf, y1), (wf, hf)),
+        0x1FB60 => complement_tri(alpha, w, h, (0.0, hf), (wf, y1), (wf, hf)),
+        0x1FB61 => complement_tri(alpha, w, h, (xm, hf), (wf, 0.0), (wf, hf)),
+
+        // Upper-right triangles — diagonal from top edge to right edge.
+        0x1FB62 => fill_tri(alpha, w, h, (xm, 0.0), (wf, 0.0), (wf, y1)),
+        0x1FB63 => fill_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (wf, y1)),
+        0x1FB64 => fill_tri(alpha, w, h, (xm, 0.0), (wf, 0.0), (wf, y2)),
+        0x1FB65 => fill_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (wf, y2)),
+        0x1FB66 => fill_tri(alpha, w, h, (xm, 0.0), (wf, 0.0), (wf, hf)),
+        // Upper-right diagonal band.
+        0x1FB67 => fill_quad(alpha, w, h, (0.0, 0.0), (wf, 0.0), (wf, y2), (0.0, y1)),
+
+        _ => {}
+    }
+}
+
+// --- Block diagonal shapes (U+1FB68–U+1FB6F) ------------------------------
+//
+// The cell is divided into 4 triangles meeting at the centre point (w/2, h/2):
+//   LEFT  = top-left → centre → bottom-left
+//   UPPER = top-left → top-right → centre
+//   RIGHT = top-right → bottom-right → centre
+//   LOWER = bottom-left → bottom-right → centre
+//
+// 0x1FB6C–6F draw one quarter; 0x1FB68–6B draw the three-quarter complement.
+
+fn draw_block_diagonal(
+    cp: u32,
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+) {
+    let wf = w as f32;
+    let hf = h as f32;
+    let cx = wf / 2.0;
+    let cy = hf / 2.0;
+
+    match cp {
+        // Quarter triangles (direct).
+        0x1FB6C => fill_tri(alpha, w, h, (0.0, 0.0), (cx, cy), (0.0, hf)),
+        0x1FB6D => fill_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (cx, cy)),
+        0x1FB6E => fill_tri(alpha, w, h, (wf, 0.0), (wf, hf), (cx, cy)),
+        0x1FB6F => fill_tri(alpha, w, h, (0.0, hf), (wf, hf), (cx, cy)),
+        // Three-quarter complements.
+        0x1FB68 => complement_tri(alpha, w, h, (0.0, 0.0), (cx, cy), (0.0, hf)),
+        0x1FB69 => complement_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (cx, cy)),
+        0x1FB6A => complement_tri(alpha, w, h, (wf, 0.0), (wf, hf), (cx, cy)),
+        0x1FB6B => complement_tri(alpha, w, h, (0.0, hf), (wf, hf), (cx, cy)),
+        _ => {}
+    }
+}
+
+// --- Shade patterns and diagonal splits (U+1FB90–U+1FB9F) -----------------
+
+fn draw_shade_pattern(
+    cp: u32,
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+) {
+    let wf = w as f32;
+    let hf = h as f32;
+    let xm = wf / 2.0;
+    let ym = hf / 2.0;
+
+    match cp {
+        // Inverse medium shade — same density as U+2592 but semantically
+        // inverted by the terminal's fg/bg swap. We emit the same alpha.
+        0x1FB90 => fill_rect_with(alpha, w, h, 0, 0, w, h, 0x80),
+        // Mixed shade halves: one half solid, the other half medium shade.
+        0x1FB91 => {
+            let mid = eighths(4, h);
+            fill_rect(alpha, w, h, 0, 0, w, mid);
+            fill_rect_with(alpha, w, h, 0, mid, w, h, 0x80);
+        }
+        0x1FB92 => {
+            let mid = eighths(4, h);
+            fill_rect_with(alpha, w, h, 0, 0, w, mid, 0x80);
+            fill_rect(alpha, w, h, 0, mid, w, h);
+        }
+        0x1FB93 => {
+            let mid = eighths(4, w);
+            fill_rect(alpha, w, h, 0, 0, mid, h);
+            fill_rect_with(alpha, w, h, mid, 0, w, h, 0x80);
+        }
+        0x1FB94 => {
+            let mid = eighths(4, w);
+            fill_rect_with(alpha, w, h, 0, 0, mid, h, 0x80);
+            fill_rect(alpha, w, h, mid, 0, w, h);
+        }
+        // Checkerboard fills — 1-pixel alternating pattern at full alpha.
+        0x1FB95 => {
+            for py in 0..h {
+                for px in 0..w {
+                    if (px + py) % 2 == 0 {
+                        alpha[py * w + px] = 0xFF;
+                    }
+                }
+            }
+        }
+        0x1FB96 => {
+            for py in 0..h {
+                for px in 0..w {
+                    if (px + py) % 2 != 0 {
+                        alpha[py * w + px] = 0xFF;
+                    }
+                }
+            }
+        }
+        // Heavy horizontal fill — 2-on / 2-off horizontal stripes.
+        0x1FB97 => {
+            for py in 0..h {
+                if (py / 2) % 2 == 1 {
+                    for px in 0..w {
+                        alpha[py * w + px] = 0xFF;
+                    }
+                }
+            }
+        }
+        // Diagonal hatching fills.
+        0x1FB98 => {
+            // UL-to-LR stripes: perpendicular coordinate is (x + y).
+            for py in 0..h {
+                for px in 0..w {
+                    if (px + py) % 4 < 2 {
+                        alpha[py * w + px] = 0xFF;
+                    }
+                }
+            }
+        }
+        0x1FB99 => {
+            // UR-to-LL stripes: perpendicular coordinate is (x − y).
+            for py in 0..h {
+                for px in 0..w {
+                    if (px as isize - py as isize).rem_euclid(4) < 2 {
+                        alpha[py * w + px] = 0xFF;
+                    }
+                }
+            }
+        }
+        // Diagonal half blocks — two opposite quarter-triangles meeting
+        // at the cell centre, forming a bowtie / hourglass shape.
+        0x1FB9A => {
+            // Upper + lower.
+            fill_tri(alpha, w, h, (0.0, 0.0), (wf, 0.0), (xm, ym));
+            fill_tri(alpha, w, h, (0.0, hf), (wf, hf), (xm, ym));
+        }
+        0x1FB9B => {
+            // Left + right.
+            fill_tri(alpha, w, h, (0.0, 0.0), (xm, ym), (0.0, hf));
+            fill_tri(alpha, w, h, (wf, 0.0), (wf, hf), (xm, ym));
+        }
+        // Triangular medium shade — half-cell triangle (corner-to-corner
+        // diagonal) at 50% alpha.
+        0x1FB9C => fill_tri_with(alpha, w, h, (0.0, 0.0), (wf, 0.0), (0.0, hf), 0x80),
+        0x1FB9D => fill_tri_with(alpha, w, h, (0.0, 0.0), (wf, 0.0), (wf, hf), 0x80),
+        0x1FB9E => fill_tri_with(alpha, w, h, (wf, 0.0), (wf, hf), (0.0, hf), 0x80),
+        0x1FB9F => fill_tri_with(alpha, w, h, (0.0, 0.0), (0.0, hf), (wf, hf), 0x80),
+        _ => {}
+    }
+}
+
+// --- Diagonal box-drawing lines (U+1FBA0–U+1FBAF) -------------------------
+//
+// Four possible line segments connecting mid-edge points, encoded as a
+// bitmask:  bit 0 = UL (top-centre → left-centre),
+//           bit 1 = UR (top-centre → right-centre),
+//           bit 2 = LL (left-centre → bottom-centre),
+//           bit 3 = LR (right-centre → bottom-centre).
+
+fn draw_diagonal_lines(
+    cp: u32,
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+) {
+    let wf = w as f32;
+    let hf = h as f32;
+    let xm = wf / 2.0;
+    let ym = hf / 2.0;
+
+    // U+1FBAF is a plus/cross (horizontal + vertical through centre).
+    // Use fill_rect for pixel-perfect axis-aligned strokes.
+    if cp == 0x1FBAF {
+        let lw = ((wf.min(hf) / 8.0).round() as usize).max(1);
+        let vx = (w - lw) / 2;
+        let hy = (h - lw) / 2;
+        fill_rect(alpha, w, h, vx, 0, vx + lw, h);
+        fill_rect(alpha, w, h, 0, hy, w, hy + lw);
+        return;
+    }
+
+    let mask: u8 = match cp {
+        0x1FBA0 => 0b0001,
+        0x1FBA1 => 0b0010,
+        0x1FBA2 => 0b0100,
+        0x1FBA3 => 0b1000,
+        0x1FBA4 => 0b0101,
+        0x1FBA5 => 0b1010,
+        0x1FBA6 => 0b1100,
+        0x1FBA7 => 0b0011,
+        0x1FBA8 => 0b1001,
+        0x1FBA9 => 0b0110,
+        0x1FBAA => 0b1110,
+        0x1FBAB => 0b1101,
+        0x1FBAC => 0b1011,
+        0x1FBAD => 0b0111,
+        0x1FBAE => 0b1111,
+        _ => return,
+    };
+
+    let thickness = (wf.min(hf) / 8.0).max(1.0);
+    let tc = (xm, 0.0); // top-centre
+    let lc = (0.0, ym); // left-centre
+    let rc = (wf, ym); // right-centre
+    let bc = (xm, hf); // bottom-centre
+
+    if mask & 0b0001 != 0 {
+        stroke_line(alpha, w, h, tc, lc, thickness);
+    }
+    if mask & 0b0010 != 0 {
+        stroke_line(alpha, w, h, tc, rc, thickness);
+    }
+    if mask & 0b0100 != 0 {
+        stroke_line(alpha, w, h, lc, bc, thickness);
+    }
+    if mask & 0b1000 != 0 {
+        stroke_line(alpha, w, h, rc, bc, thickness);
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -651,5 +1087,223 @@ mod tests {
             g1_end, g2_start,
             "left-1/8 ends at x={g1_end}, column-2 starts at x={g2_start}"
         );
+    }
+
+    // --- Wedge / diagonal / new-shape tests --------------------------------
+
+    #[test]
+    fn encode_round_trip_extended() {
+        for cp in [
+            0x1FB3Cu32, 0x1FB67, 0x1FB68, 0x1FB6F, 0x1FB90, 0x1FB93, 0x1FB9F, 0x1FBA0, 0x1FBAF,
+        ] {
+            let c = char::from_u32(cp).unwrap();
+            let g = encode(c).expect("encode");
+            assert_eq!(decode(g), cp, "round trip for U+{cp:04X}");
+        }
+    }
+
+    #[test]
+    fn complement_plus_triangle_fills_cell() {
+        // U+1FB3C (small lower-left triangle) and U+1FB52 (its complement)
+        // together must cover every pixel exactly once.
+        let w = 8u32;
+        let h = 12u32;
+        let tri = rasterize(0xFB3C, w, h, 10.0);
+        let comp = rasterize(0xFB52, w, h, 10.0);
+        for i in 0..(w * h) as usize {
+            let ta = tri.bitmap[i * 4 + 3];
+            let ca = comp.bitmap[i * 4 + 3];
+            assert_eq!(
+                ta as u16 + ca as u16,
+                0xFF,
+                "pixel {i}: triangle {ta} + complement {ca} ≠ 0xFF"
+            );
+        }
+    }
+
+    #[test]
+    fn all_wedge_complement_pairs_partition_cell() {
+        // Every direct/complement pair must sum to 0xFF at every pixel.
+        let pairs: [(u16, u16); 20] = [
+            // lower-left ↔ upper-right
+            (0xFB3C, 0xFB52),
+            (0xFB3D, 0xFB53),
+            (0xFB3E, 0xFB54),
+            (0xFB3F, 0xFB55),
+            (0xFB40, 0xFB56),
+            // lower-right ↔ upper-left (of lower-right)
+            (0xFB47, 0xFB5D),
+            (0xFB48, 0xFB5E),
+            (0xFB49, 0xFB5F),
+            (0xFB4A, 0xFB60),
+            (0xFB4B, 0xFB61),
+            // upper-left ↔ lower-left complement
+            (0xFB57, 0xFB41),
+            (0xFB58, 0xFB42),
+            (0xFB59, 0xFB43),
+            (0xFB5A, 0xFB44),
+            (0xFB5B, 0xFB45),
+            // upper-right ↔ lower-right complement
+            (0xFB62, 0xFB4C),
+            (0xFB63, 0xFB4D),
+            (0xFB64, 0xFB4E),
+            (0xFB65, 0xFB4F),
+            (0xFB66, 0xFB50),
+        ];
+        let w = 10u32;
+        let h = 15u32;
+        for (a_id, b_id) in pairs {
+            let a = rasterize(a_id, w, h, 12.0);
+            let b = rasterize(b_id, w, h, 12.0);
+            for i in 0..(w * h) as usize {
+                assert_eq!(
+                    a.bitmap[i * 4 + 3] as u16 + b.bitmap[i * 4 + 3] as u16,
+                    0xFF,
+                    "pair ({a_id:#06X}, {b_id:#06X}) pixel {i}"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn block_diagonal_quarter_fills_quarter_cell() {
+        let w = 16u32;
+        let h = 24u32;
+        let g = rasterize(0xFB6C, w, h, 20.0); // LEFT quarter
+        let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
+        let total = (w * h) as usize;
+        let quarter = total / 4;
+        assert!(
+            filled > quarter * 80 / 100 && filled < quarter * 120 / 100,
+            "left quarter: filled {filled}, expected ~{quarter}"
+        );
+    }
+
+    #[test]
+    fn block_diagonal_quarter_and_complement_partition() {
+        let w = 12u32;
+        let h = 18u32;
+        // LEFT quarter (0x1FB6C) + its complement (0x1FB68).
+        let q = rasterize(0xFB6C, w, h, 14.0);
+        let c = rasterize(0xFB68, w, h, 14.0);
+        for i in 0..(w * h) as usize {
+            assert_eq!(
+                q.bitmap[i * 4 + 3] as u16 + c.bitmap[i * 4 + 3] as u16,
+                0xFF,
+                "quarter/complement pixel {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagonal_half_blocks_are_bowties() {
+        let w = 16u32;
+        let h = 24u32;
+        let g = rasterize(0xFB9A, w, h, 20.0); // upper + lower
+        let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
+        let total = (w * h) as usize;
+        let half = total / 2;
+        assert!(
+            filled > half * 80 / 100 && filled < half * 120 / 100,
+            "bowtie: filled {filled}, expected ~{half}"
+        );
+    }
+
+    #[test]
+    fn checkerboard_is_half_filled() {
+        let w = 8u32;
+        let h = 12u32;
+        let g = rasterize(0xFB95, w, h, 10.0);
+        let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
+        assert_eq!(filled, (w * h / 2) as usize);
+    }
+
+    #[test]
+    fn inverse_checkerboard_complements_checkerboard() {
+        let w = 8u32;
+        let h = 12u32;
+        let a = rasterize(0xFB95, w, h, 10.0);
+        let b = rasterize(0xFB96, w, h, 10.0);
+        for i in 0..(w * h) as usize {
+            assert_eq!(
+                a.bitmap[i * 4 + 3] as u16 + b.bitmap[i * 4 + 3] as u16,
+                0xFF,
+                "checkerboard pixel {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn diagonal_line_produces_output() {
+        let w = 16u32;
+        let h = 24u32;
+        let g = rasterize(0xFBA0, w, h, 20.0); // single diagonal segment
+        let any_filled = g.bitmap.chunks_exact(4).any(|c| c[3] > 0);
+        assert!(any_filled, "diagonal line should produce visible output");
+    }
+
+    #[test]
+    fn all_four_diagonal_lines_fill_diamond() {
+        let w = 16u32;
+        let h = 24u32;
+        let g = rasterize(0xFBAE, w, h, 20.0); // all 4 segments
+        // Should produce roughly a diamond shape; check 4 quadrants have coverage.
+        let qw = w / 2;
+        let qh = h / 2;
+        let count_in = |x0: u32, y0: u32, x1: u32, y1: u32| -> usize {
+            let mut n = 0;
+            for y in y0..y1 {
+                for x in x0..x1 {
+                    if g.bitmap[((y * w + x) * 4 + 3) as usize] > 0 {
+                        n += 1;
+                    }
+                }
+            }
+            n
+        };
+        assert!(count_in(0, 0, qw, qh) > 0, "upper-left quadrant empty");
+        assert!(count_in(qw, 0, w, qh) > 0, "upper-right quadrant empty");
+        assert!(count_in(0, qh, qw, h) > 0, "lower-left quadrant empty");
+        assert!(count_in(qw, qh, w, h) > 0, "lower-right quadrant empty");
+    }
+
+    #[test]
+    fn triangular_medium_shade_is_half_alpha() {
+        let w = 16u32;
+        let h = 24u32;
+        let g = rasterize(0xFB9C, w, h, 20.0); // upper-left triangular medium shade
+        let shaded: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0x80).count();
+        let total = (w * h) as usize;
+        let half = total / 2;
+        assert!(
+            shaded > half * 80 / 100 && shaded < half * 120 / 100,
+            "triangular shade: {shaded} at 0x80, expected ~{half}"
+        );
+    }
+
+    #[test]
+    fn plus_cross_has_horizontal_and_vertical() {
+        let w = 16u32;
+        let h = 24u32;
+        let g = rasterize(0xFBAF, w, h, 20.0);
+        // Check centre row has coverage and centre column has coverage.
+        let mid_y = h / 2;
+        let mid_x = w / 2;
+        let row_filled = (0..w).any(|x| g.bitmap[((mid_y * w + x) * 4 + 3) as usize] > 0);
+        let col_filled = (0..h).any(|y| g.bitmap[((y * w + mid_x) * 4 + 3) as usize] > 0);
+        assert!(row_filled, "plus/cross missing horizontal");
+        assert!(col_filled, "plus/cross missing vertical");
+    }
+
+    #[test]
+    fn mixed_shade_half_has_both_regions() {
+        let w = 8u32;
+        let h = 12u32;
+        let g = rasterize(0xFB91, w, h, 10.0); // upper solid + lower shade
+        let solid: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
+        let shade: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0x80).count();
+        assert!(solid > 0, "missing solid region");
+        assert!(shade > 0, "missing shade region");
+        assert_eq!(solid + shade, (w * h) as usize, "gaps in coverage");
     }
 }
