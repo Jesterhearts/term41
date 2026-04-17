@@ -152,7 +152,9 @@ mod tests {
     use crate::terminal::Row;
 
     fn row_from(text: &str) -> Row {
-        let mut r = Row::new(text.chars().count() as u32);
+        use crate::terminal::ColorPalette;
+        let pal = ColorPalette::default();
+        let mut r = Row::new(text.chars().count() as u32, pal.fg, pal.bg);
         let mut buf = [0u8; 4];
         for (i, c) in text.chars().enumerate() {
             r.cells[i] = smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf));

@@ -2,6 +2,7 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
 use font41::attrs::CellAttrs;
+use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
@@ -25,6 +26,8 @@ pub struct SavedCursor {
     pub fg: Srgb<u8>,
     pub bg: Srgb<u8>,
     pub attrs: CellAttrs,
+    pub underline: UnderlineStyle,
+    pub underline_color: Option<Srgb<u8>>,
 }
 
 /// State for a single screen buffer (primary or alt). The terminal holds
@@ -36,10 +39,14 @@ pub struct Screen {
     pub cursor: Cursor,
     pub fg: Srgb<u8>,
     pub bg: Srgb<u8>,
-    /// Current text attributes (bold/italic/underline) applied to new cell
+    /// Current text attributes (bold/italic/strikethrough) applied to new cell
     /// writes. Managed via SGR — updated by `apply_sgr`, snapshotted into
     /// `SavedCursor` on DECSC.
     pub attrs: CellAttrs,
+    /// Current underline style applied to new cell writes.
+    pub underline: UnderlineStyle,
+    /// Current underline color override. `None` = use foreground color.
+    pub underline_color: Option<Srgb<u8>>,
     /// Top row of the scroll region (0-indexed, inclusive).
     pub scroll_top: u32,
     /// Bottom row of the scroll region (0-indexed, inclusive).
@@ -69,21 +76,27 @@ impl Screen {
         cols: u32,
         rows: u32,
         scrollback_limit: u32,
+        fg: Srgb<u8>,
+        bg: Srgb<u8>,
     ) -> Self {
         let mut grid_rows = VecDeque::with_capacity(rows as usize + scrollback_limit as usize);
         for _ in 0..rows {
-            grid_rows.push_back(Row::new(cols));
+            grid_rows.push_back(Row::new(cols, fg, bg));
         }
         Self {
             grid: Grid {
                 rows: grid_rows,
                 scrollback_limit,
                 total_popped: 0,
+                default_fg: fg,
+                default_bg: bg,
             },
             cursor: Cursor::default(),
             fg: default_fg(),
             bg: default_bg(),
             attrs: CellAttrs::default(),
+            underline: UnderlineStyle::None,
+            underline_color: None,
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             offset: 0,
@@ -104,6 +117,8 @@ pub(super) fn save_cursor_slot(screen: &mut Screen) {
         fg: screen.fg,
         bg: screen.bg,
         attrs: screen.attrs,
+        underline: screen.underline,
+        underline_color: screen.underline_color,
     });
 }
 
@@ -121,6 +136,8 @@ pub(super) fn restore_cursor_slot(
             screen.fg = saved.fg;
             screen.bg = saved.bg;
             screen.attrs = saved.attrs;
+            screen.underline = saved.underline;
+            screen.underline_color = saved.underline_color;
         }
         None => {
             screen.cursor.row = 0;
@@ -142,8 +159,10 @@ pub(super) fn clear_visible(
         .rows
         .len()
         .saturating_sub(viewport.rows as usize);
+    let fg = screen.grid.default_fg;
+    let bg = screen.grid.default_bg;
     for r in first_visible..screen.grid.rows.len() {
-        screen.grid.rows[r].clear();
+        screen.grid.rows[r].clear(fg, bg);
     }
     clear_in_range(&mut screen.images, first_visible, screen.grid.rows.len());
 }
@@ -267,7 +286,8 @@ pub(super) fn resize_screen(
         let new_abs = grid.rows.len().saturating_sub(old_distance_from_bottom + 1);
 
         while grid.rows.len() < new_rows as usize {
-            grid.rows.push_back(Row::new(new_cols));
+            grid.rows
+                .push_back(Row::new(new_cols, grid.default_fg, grid.default_bg));
         }
 
         let visible_start = grid.rows.len().saturating_sub(new_rows as usize);
@@ -286,7 +306,8 @@ pub(super) fn resize_screen(
         let popped = old_len - grid.rows.len();
 
         while grid.rows.len() < new_rows as usize {
-            grid.rows.push_back(Row::new(new_cols));
+            grid.rows
+                .push_back(Row::new(new_cols, grid.default_fg, grid.default_bg));
         }
 
         if popped > 0 {

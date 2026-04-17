@@ -1221,6 +1221,7 @@ impl RenderHost {
             scrollback,
             self.font_system.cell_height,
             self.font_system.cell_width,
+            self.config.palette.clone(),
         );
         if let Some(tab) = self.active_tab() {
             terminal.set_default_cursor_style(tab.terminal.lock().unwrap().cursor_style);
@@ -1346,9 +1347,11 @@ impl RenderHost {
             let mut terminal = tab.terminal.lock().unwrap();
             terminal.set_default_cursor_style(cfg.cursor_style);
             terminal.set_scrollback_limit(cfg.scrollback_lines);
+            terminal.palette = cfg.palette.clone();
         }
         self.config.keybindings = cfg.keybindings;
         self.config.bell = cfg.bell;
+        self.config.palette = cfg.palette.clone();
 
         if cfg.gutter != self.config.gutter {
             self.config.gutter = cfg.gutter;

@@ -1,6 +1,8 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
+use palette::Srgb;
+
 use crate::terminal::image::PlacedImage;
 use crate::terminal::image::clear_in_range;
 use crate::terminal::image::shift_in_region;
@@ -28,6 +30,10 @@ pub struct Grid {
     /// Running count of rows popped from the front (for image position
     /// tracking).
     pub total_popped: usize,
+    /// Default foreground color for new / cleared cells (from palette).
+    pub default_fg: Srgb<u8>,
+    /// Default background color for new / cleared cells (from palette).
+    pub default_bg: Srgb<u8>,
 }
 
 impl Grid {
@@ -49,11 +55,12 @@ impl Grid {
         let max_rows = viewport.rows as usize + self.scrollback_limit as usize;
         if self.rows.len() >= max_rows && max_rows > 0 {
             let mut recycled = self.rows.pop_front().expect("max_rows > 0");
-            recycled.reset_for_reuse(viewport.cols);
+            recycled.reset_for_reuse(viewport.cols, self.default_fg, self.default_bg);
             self.rows.push_back(recycled);
             self.total_popped += 1;
         } else {
-            self.rows.push_back(Row::new(viewport.cols));
+            self.rows
+                .push_back(Row::new(viewport.cols, self.default_fg, self.default_bg));
         }
     }
 
@@ -72,24 +79,24 @@ impl Grid {
             // Erase from cursor to end of screen.
             0 => {
                 let cols = self.rows[active].cells.len();
-                self.rows[active].clear_range(col..cols);
+                self.rows[active].clear_range(col..cols, self.default_fg, self.default_bg);
                 for r in (active + 1)..self.rows.len() {
-                    self.rows[r].clear();
+                    self.rows[r].clear(self.default_fg, self.default_bg);
                 }
             }
             // Erase from start of screen to cursor (inclusive).
             1 => {
                 for r in first_visible..active {
-                    self.rows[r].clear();
+                    self.rows[r].clear(self.default_fg, self.default_bg);
                 }
-                self.rows[active].clear_range(0..col + 1);
+                self.rows[active].clear_range(0..col + 1, self.default_fg, self.default_bg);
             }
             // Erase entire screen — cells *and* any images sitting on them.
             // Without the image sweep an app that draws sixels, calls ED 2,
             // and redraws would stack ghost copies over every cycle.
             2 => {
                 for r in first_visible..self.rows.len() {
-                    self.rows[r].clear();
+                    self.rows[r].clear(self.default_fg, self.default_bg);
                 }
                 clear_in_range(images, first_visible, self.rows.len());
             }
@@ -116,11 +123,11 @@ impl Grid {
 
         match mode {
             // Erase from cursor to end of line.
-            0 => self.rows[active].clear_range(col..cols),
+            0 => self.rows[active].clear_range(col..cols, self.default_fg, self.default_bg),
             // Erase from start of line to cursor (inclusive).
-            1 => self.rows[active].clear_range(0..col + 1),
+            1 => self.rows[active].clear_range(0..col + 1, self.default_fg, self.default_bg),
             // Erase entire line.
-            2 => self.rows[active].clear(),
+            2 => self.rows[active].clear(self.default_fg, self.default_bg),
             _ => {}
         }
     }
@@ -137,7 +144,7 @@ impl Grid {
         let count = (n as usize).min(cols - col);
 
         self.rows[active].copy_within(col + count..cols, col);
-        self.rows[active].clear_range(cols - count..cols);
+        self.rows[active].clear_range(cols - count..cols, self.default_fg, self.default_bg);
     }
 
     pub fn insert_chars(
@@ -152,7 +159,7 @@ impl Grid {
         let count = (n as usize).min(cols - col);
 
         self.rows[active].copy_within(col..cols - count, col + count);
-        self.rows[active].clear_range(col..col + count);
+        self.rows[active].clear_range(col..col + count, self.default_fg, self.default_bg);
     }
 
     pub fn erase_chars(
@@ -166,7 +173,7 @@ impl Grid {
         let col = cursor.col as usize;
         let end = (col + n as usize).min(cols);
 
-        self.rows[active].clear_range(col..end);
+        self.rows[active].clear_range(col..end, self.default_fg, self.default_bg);
     }
 
     /// Scroll content up within a region: remove line at `top`, insert blank
@@ -187,7 +194,10 @@ impl Grid {
         let n = (n as usize).min(abs_bottom - abs_top + 1);
         for _ in 0..n {
             self.rows.remove(abs_top);
-            self.rows.insert(abs_bottom, Row::new(viewport.cols));
+            self.rows.insert(
+                abs_bottom,
+                Row::new(viewport.cols, self.default_fg, self.default_bg),
+            );
         }
         shift_in_region(images, abs_top, abs_bottom, -(n as i64));
     }
@@ -210,7 +220,10 @@ impl Grid {
         let n = (n as usize).min(abs_bottom - abs_top + 1);
         for _ in 0..n {
             self.rows.remove(abs_bottom);
-            self.rows.insert(abs_top, Row::new(viewport.cols));
+            self.rows.insert(
+                abs_top,
+                Row::new(viewport.cols, self.default_fg, self.default_bg),
+            );
         }
         shift_in_region(images, abs_top, abs_bottom, n as i64);
     }
@@ -237,13 +250,15 @@ impl Grid {
 
         if new_width > self.rows[0].len() {
             let new_width = new_width as usize;
+            let fg = self.default_fg;
+            let bg = self.default_bg;
             let mut dst = 0;
             let mut dst_col = self.rows[0].content_len() as usize;
             let mut src = 1;
             let mut src_col: usize = 0;
 
             while dst < self.rows.len() && src < self.rows.len() {
-                self.rows[dst].resize(new_width as u32);
+                self.rows[dst].resize(new_width as u32, fg, bg);
 
                 if !self.rows[dst].wrapped {
                     dst += 1;
@@ -268,7 +283,7 @@ impl Grid {
                 // If src exhausted: inherit its wrap state, clear it, advance.
                 if src_col >= s_content {
                     d.wrapped = s.wrapped;
-                    s.clear();
+                    s.clear(fg, bg);
                     s.wrapped = true;
                     src += 1;
                     src_col = 0;
@@ -286,7 +301,7 @@ impl Grid {
                         // Shift remaining content to front and advance src.
                         self.rows[dst].copy_within(src_col.., 0);
                         let len = self.rows[dst].len() as usize;
-                        self.rows[dst].clear_range(len - src_col..len);
+                        self.rows[dst].clear_range(len - src_col..len, fg, bg);
                         dst_col = len - src_col;
                         src += 1;
                         src_col = 0;
@@ -294,7 +309,7 @@ impl Grid {
                 }
             }
 
-            self.rows[dst].resize(new_width as u32);
+            self.rows[dst].resize(new_width as u32, fg, bg);
             self.rows
                 .truncate(dst + if self.rows[dst].wrapped { 0 } else { 1 });
         } else {
@@ -307,6 +322,10 @@ impl Grid {
                             fg: self.rows[row].fg.split_off(new_width as usize),
                             bg: self.rows[row].bg.split_off(new_width as usize),
                             attrs: self.rows[row].attrs.split_off(new_width as usize),
+                            underline: self.rows[row].underline.split_off(new_width as usize),
+                            underline_color: self.rows[row]
+                                .underline_color
+                                .split_off(new_width as usize),
                             links: self.rows[row].links.split_off(new_width as usize),
                             wrapped: self.rows[row].wrapped,
                             // Semantic marks only live on the head of a
@@ -325,7 +344,7 @@ impl Grid {
                     }
                 } else {
                     let mut content = self.rows[row].len() as usize;
-                    self.rows[row].resize(new_width);
+                    self.rows[row].resize(new_width, self.default_fg, self.default_bg);
 
                     // Pull content from continuation rows to fill space left
                     // by a short overflow. This maintains the invariant that
@@ -400,6 +419,7 @@ mod tests {
     use palette::Srgb;
 
     use super::*;
+    use crate::terminal::color::default_bg;
     use crate::terminal::color::default_fg;
 
     /// Build a grid from `(text, wrapped)` pairs. Each row is padded to `width`
@@ -410,7 +430,7 @@ mod tests {
     ) -> Grid {
         let mut grid_rows = VecDeque::new();
         for &(text, wrapped) in rows {
-            let mut row = Row::new(width);
+            let mut row = Row::new(width, default_fg(), default_bg());
             for (i, ch) in text.chars().enumerate() {
                 if i < width as usize {
                     row.cells[i] = char_cell(ch);
@@ -423,6 +443,8 @@ mod tests {
             rows: grid_rows,
             scrollback_limit: 1000,
             total_popped: 0,
+            default_fg: default_fg(),
+            default_bg: default_bg(),
         }
     }
 
@@ -805,7 +827,7 @@ mod tests {
         let vp = make_viewport(visible, width);
         let mut rows = VecDeque::new();
         for &ch in labels {
-            let mut row = Row::new(width);
+            let mut row = Row::new(width, default_fg(), default_bg());
             for c in row.cells.iter_mut() {
                 *c = char_cell(ch);
             }
@@ -815,6 +837,8 @@ mod tests {
             rows,
             scrollback_limit: 1000,
             total_popped: 0,
+            default_fg: default_fg(),
+            default_bg: default_bg(),
         };
         (grid, vp)
     }
@@ -1152,6 +1176,8 @@ mod tests {
             rows: VecDeque::new(),
             scrollback_limit: 1000,
             total_popped: 0,
+            default_fg: default_fg(),
+            default_bg: default_bg(),
         };
         grid.reflow(10); // should not panic
         assert_eq!(grid.rows.len(), 0);
@@ -1216,10 +1242,12 @@ mod tests {
             rows: VecDeque::new(),
             scrollback_limit: 2,
             total_popped: 0,
+            default_fg: default_fg(),
+            default_bg: default_bg(),
         };
         // Fill 3 visible + 2 scrollback = 5 rows (at the limit).
         for ch in ['S', 'T', 'A', 'B', 'C'] {
-            let mut row = Row::new(4);
+            let mut row = Row::new(4, default_fg(), default_bg());
             row.cells.fill(char_cell(ch));
             grid.rows.push_back(row);
         }
@@ -1238,10 +1266,12 @@ mod tests {
             rows: VecDeque::new(),
             scrollback_limit: 0,
             total_popped: 0,
+            default_fg: default_fg(),
+            default_bg: default_bg(),
         };
         // Start with 2 visible rows.
         for ch in ['A', 'B'] {
-            let mut row = Row::new(3);
+            let mut row = Row::new(3, default_fg(), default_bg());
             row.cells.fill(char_cell(ch));
             grid.rows.push_back(row);
         }

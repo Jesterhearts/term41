@@ -9,6 +9,7 @@ use percent_encoding::percent_decode;
 use crate::clipboard::Clipboard;
 use crate::clipboard::ClipboardKind;
 use crate::terminal::CommandMeta;
+use crate::terminal::color;
 use crate::terminal::grid::Viewport;
 use crate::terminal::hyperlink::HyperlinkId;
 use crate::terminal::hyperlink::HyperlinkRegistry;
@@ -39,6 +40,7 @@ pub(super) struct OscContext<'a> {
     /// Per-prompt metadata: command column (from B), output row (from C),
     /// and timestamps for duration calculation.
     pub command_metas: &'a mut HashMap<u64, CommandMeta>,
+    pub palette: &'a color::ColorPalette,
 }
 
 /// Split an OSC payload into its numeric command prefix and the remainder.
@@ -107,6 +109,12 @@ pub(super) fn handle_osc(
             ctx.hyperlinks,
             &mut ctx.active_screen.current_hyperlink,
         ),
+        // OSC 4;N;? — query the Nth palette color.
+        b"4" => handle_osc_4(rest, ctx.palette, ctx.pending_output),
+        // OSC 10 ? — query foreground color.
+        b"10" => handle_osc_color_query(rest, 10, ctx.palette.fg, ctx.pending_output),
+        // OSC 11 ? — query background color.
+        b"11" => handle_osc_color_query(rest, 11, ctx.palette.bg, ctx.pending_output),
         b"52" => handle_osc_52(rest, ctx.clipboard, ctx.pending_output),
         b"133" => handle_osc_133(
             rest,
@@ -262,6 +270,68 @@ fn handle_osc_title(
     *current_title = Some(text.to_owned());
 }
 
+/// Format an 8-bit color channel as the 16-bit hex representation used in
+/// X11 color replies. Each 8-bit value is scaled to 16 bits by repeating the
+/// byte (e.g. 0xCC → 0xCCCC).
+fn rgb_reply(
+    r: u8,
+    g: u8,
+    b: u8,
+) -> String {
+    let r16 = (r as u16) << 8 | r as u16;
+    let g16 = (g as u16) << 8 | g as u16;
+    let b16 = (b as u16) << 8 | b as u16;
+    format!("rgb:{r16:04x}/{g16:04x}/{b16:04x}")
+}
+
+/// OSC 10 / OSC 11 — foreground / background color query. If the payload is
+/// `?` the terminal replies with the current default color in X11
+/// `rgb:RR/GG/BB` format. Setting colors is not supported (silently ignored).
+fn handle_osc_color_query(
+    rest: &[u8],
+    cmd: u8,
+    current: palette::Srgb<u8>,
+    pending_output: &mut Vec<u8>,
+) {
+    if rest != b"?" {
+        return;
+    }
+    let reply = rgb_reply(current.red, current.green, current.blue);
+    pending_output.extend_from_slice(b"\x1b]");
+    pending_output.extend_from_slice(cmd.to_string().as_bytes());
+    pending_output.push(b';');
+    pending_output.extend_from_slice(reply.as_bytes());
+    pending_output.extend_from_slice(b"\x1b\\");
+}
+
+/// OSC 4;N;? — query the Nth entry of the 256-color palette. The response
+/// mirrors the query format: `OSC 4;N;rgb:RR/GG/BB ST`. Only query (`?`) is
+/// handled; set-palette payloads are silently ignored.
+fn handle_osc_4(
+    rest: &[u8],
+    palette: &color::ColorPalette,
+    pending_output: &mut Vec<u8>,
+) {
+    // Payload format: N;? (index, semicolon, question mark).
+    let (idx_bytes, query) = split_osc(rest);
+    if query != b"?" {
+        return;
+    }
+    let Ok(idx_str) = std::str::from_utf8(idx_bytes) else {
+        return;
+    };
+    let Ok(idx) = idx_str.parse::<u8>() else {
+        return;
+    };
+    let c = color::palette_color(palette, idx);
+    let reply = rgb_reply(c.red, c.green, c.blue);
+    pending_output.extend_from_slice(b"\x1b]4;");
+    pending_output.extend_from_slice(idx_str.as_bytes());
+    pending_output.push(b';');
+    pending_output.extend_from_slice(reply.as_bytes());
+    pending_output.extend_from_slice(b"\x1b\\");
+}
+
 /// Implements OSC 52 clipboard read/write as used by vim, tmux, etc.
 ///
 /// Format: `OSC 52 ; Pc ; Pd ST` — Pc is one or more selector characters and
@@ -401,6 +471,7 @@ mod tests {
         title: Option<String>,
         prompt_row: Option<u64>,
         command_metas: HashMap<u64, CommandMeta>,
+        palette: color::ColorPalette,
     }
 
     impl Bag {
@@ -417,11 +488,12 @@ mod tests {
                 pending: Vec::new(),
                 cwd: None,
                 registry: HyperlinkRegistry::new(),
-                screen: Screen::new(cols, rows, 100),
+                screen: Screen::new(cols, rows, 100, color::default_fg(), color::default_bg()),
                 viewport: Viewport { rows, cols },
                 title: None,
                 prompt_row: None,
                 command_metas: HashMap::new(),
+                palette: color::ColorPalette::default(),
             }
         }
 
@@ -443,6 +515,7 @@ mod tests {
                 current_title: &mut self.title,
                 current_prompt_row: &mut self.prompt_row,
                 command_metas: &mut self.command_metas,
+                palette: &self.palette,
             };
             handle_osc(payload, &mut ctx);
         }
@@ -660,6 +733,61 @@ mod tests {
         let mut bag = Bag::new();
         bag.dispatch(b"1;icon-name-only");
         assert!(bag.title.is_none());
+    }
+
+    // ---- OSC 10 / OSC 11 / OSC 4 — color queries ----
+
+    #[test]
+    fn osc_10_query_returns_default_fg() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"10;?");
+        // default_fg() = (204,204,204) → 0xCCCC/0xCCCC/0xCCCC
+        assert_eq!(bag.pending, b"\x1b]10;rgb:cccc/cccc/cccc\x1b\\");
+    }
+
+    #[test]
+    fn osc_11_query_returns_default_bg() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"11;?");
+        // default_bg() = (0,0,0) → 0x0000/0x0000/0x0000
+        assert_eq!(bag.pending, b"\x1b]11;rgb:0000/0000/0000\x1b\\");
+    }
+
+    #[test]
+    fn osc_10_non_query_is_ignored() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"10;rgb:ffff/ffff/ffff");
+        assert!(bag.pending.is_empty());
+    }
+
+    #[test]
+    fn osc_4_query_returns_palette_color() {
+        let mut bag = Bag::new();
+        // Palette color 1 = (205, 0, 0) → cd00/0000/0000
+        bag.dispatch(b"4;1;?");
+        assert_eq!(bag.pending, b"\x1b]4;1;rgb:cdcd/0000/0000\x1b\\");
+    }
+
+    #[test]
+    fn osc_4_query_high_index() {
+        let mut bag = Bag::new();
+        // Palette color 15 = (255,255,255) → ffff/ffff/ffff
+        bag.dispatch(b"4;15;?");
+        assert_eq!(bag.pending, b"\x1b]4;15;rgb:ffff/ffff/ffff\x1b\\");
+    }
+
+    #[test]
+    fn osc_4_non_query_is_ignored() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"4;1;rgb:ffff/0000/0000");
+        assert!(bag.pending.is_empty());
+    }
+
+    #[test]
+    fn osc_4_invalid_index_is_ignored() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"4;999;?");
+        assert!(bag.pending.is_empty());
     }
 
     #[test]

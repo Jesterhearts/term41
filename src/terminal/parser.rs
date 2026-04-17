@@ -3,6 +3,7 @@ use std::sync::LazyLock;
 use std::time::Instant;
 
 use font41::attrs::CellAttrs;
+use font41::attrs::UnderlineStyle;
 use smol_str::SmolStr;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
@@ -16,6 +17,7 @@ use crate::terminal::grid;
 use crate::terminal::grid::Viewport;
 use crate::terminal::keyboard::KittyKeyboardState;
 use crate::terminal::keyboard::handle_kitty_keyboard;
+use crate::terminal::mouse::MouseTracking;
 use crate::terminal::mouse::apply_mouse_mode;
 use crate::terminal::row::Row;
 use crate::terminal::screen;
@@ -35,6 +37,7 @@ pub(super) struct CsiContext<'a> {
     pub cursor_style: &'a mut CursorStyle,
     pub cell_width: u32,
     pub cell_height: u32,
+    pub palette: &'a color::ColorPalette,
 }
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that ESC handlers
@@ -50,6 +53,7 @@ pub(super) struct EscContext<'a> {
     pub current_title: &'a mut Option<String>,
     pub current_prompt_row: &'a mut Option<u64>,
     pub bell_pending: &'a mut bool,
+    pub palette: &'a color::ColorPalette,
 }
 
 /// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
@@ -106,6 +110,8 @@ pub(super) fn put_ascii_run(
     let fg = screen.fg;
     let bg = screen.bg;
     let attrs = screen.attrs;
+    let ul = screen.underline;
+    let ul_color = screen.underline_color;
     let link = screen.current_hyperlink;
 
     // Record the last byte of the run for REP (CSI Ps b).
@@ -145,6 +151,8 @@ pub(super) fn put_ascii_run(
         row.fg[col..col + chunk_len].fill(fg);
         row.bg[col..col + chunk_len].fill(bg);
         row.attrs[col..col + chunk_len].fill(attrs);
+        row.underline[col..col + chunk_len].fill(ul);
+        row.underline_color[col..col + chunk_len].fill(ul_color);
         row.links[col..col + chunk_len].fill(link);
 
         screen.cursor.col += chunk_len as u32;
@@ -186,6 +194,8 @@ pub(super) fn put_char(
     let fg = screen.fg;
     let bg = screen.bg;
     let attrs = screen.attrs;
+    let ul = screen.underline;
+    let ul_color = screen.underline_color;
     let link = screen.current_hyperlink;
     let r = screen.grid.active_row_index(&screen.cursor, viewport);
     let col = screen.cursor.col as usize;
@@ -200,12 +210,16 @@ pub(super) fn put_char(
     screen.grid.rows[r].fg[col] = fg;
     screen.grid.rows[r].bg[col] = bg;
     screen.grid.rows[r].attrs[col] = attrs;
+    screen.grid.rows[r].underline[col] = ul;
+    screen.grid.rows[r].underline_color[col] = ul_color;
     screen.grid.rows[r].links[col] = link;
     for i in 1..width {
         screen.grid.rows[r].cells[col + i] = continuation_cell();
         screen.grid.rows[r].fg[col + i] = fg;
         screen.grid.rows[r].bg[col + i] = bg;
         screen.grid.rows[r].attrs[col + i] = attrs;
+        screen.grid.rows[r].underline[col + i] = ul;
+        screen.grid.rows[r].underline_color[col + i] = ul_color;
         screen.grid.rows[r].links[col + i] = link;
     }
     screen.last_char = Some(s);
@@ -278,6 +292,78 @@ fn soft_wrap(
     } else if screen.cursor.row < viewport.rows - 1 {
         screen.cursor.row += 1;
     }
+}
+
+/// Map a private-mode number to its DECRQM response value:
+/// 1 = set, 2 = reset, 0 = not recognized. Queries every private mode
+/// we track so apps can probe capabilities without side effects.
+fn query_private_mode(
+    ps: u16,
+    ctx: &CsiContext<'_>,
+) -> u8 {
+    match ps {
+        // DECTCEM — cursor visible.
+        25 => {
+            if ctx.screen.cursor_visible {
+                1
+            } else {
+                2
+            }
+        }
+        // Alt-screen family.
+        47 | 1047 | 1049 => {
+            if *ctx.on_alt_screen {
+                1
+            } else {
+                2
+            }
+        }
+        // Mouse tracking modes. Report "set" if that specific mode is active.
+        9 => match_tracking(ctx.modes.mouse_tracking, MouseTracking::X10),
+        1000 => match_tracking(ctx.modes.mouse_tracking, MouseTracking::Normal),
+        1002 => match_tracking(ctx.modes.mouse_tracking, MouseTracking::ButtonEvent),
+        1003 => match_tracking(ctx.modes.mouse_tracking, MouseTracking::AnyEvent),
+        // Focus reporting.
+        1004 => {
+            if ctx.modes.focus_reporting {
+                1
+            } else {
+                2
+            }
+        }
+        // DECSC/DECRC cursor save (we always support it; "set" = saved).
+        1048 => {
+            if ctx.screen.saved_cursor.is_some() {
+                1
+            } else {
+                2
+            }
+        }
+        // Bracketed paste.
+        2004 => {
+            if ctx.modes.bracketed_paste {
+                1
+            } else {
+                2
+            }
+        }
+        // Synchronized update.
+        2026 => {
+            if ctx.modes.synchronized_update_since.is_some() {
+                1
+            } else {
+                2
+            }
+        }
+        _ => 0,
+    }
+}
+
+fn match_tracking(
+    current: MouseTracking,
+    target: MouseTracking,
+) -> u8 {
+    if current == target { 1 } else { 2 }
 }
 
 /// If appending `s` to the previously-written cell keeps it a single grapheme
@@ -446,6 +532,31 @@ pub(super) fn csi_dispatch(
         return;
     }
 
+    // DECRQM — Request Mode (CSI ? Ps $ p for private, CSI Ps $ p for ANSI).
+    // Apps query terminal capabilities by checking whether specific modes are
+    // set or reset. Reply: CSI [?] Ps ; Pm $ y where Pm = 1 (set), 2 (reset),
+    // or 0 (not recognized).
+    if action == 'p' && (intermediates == b"?$" || intermediates == b"$") {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        let private = intermediates == b"?$";
+        let pm = if private {
+            query_private_mode(ps, ctx)
+        } else {
+            // We don't implement any ANSI (non-private) modes.
+            0
+        };
+        if private {
+            write!(ctx.pending_output, "\x1b[?{ps};{pm}$y").expect("write to Vec is infallible");
+        } else {
+            write!(ctx.pending_output, "\x1b[{ps};{pm}$y").expect("write to Vec is infallible");
+        }
+        return;
+    }
+
     if action == 'c' && intermediates == b">" {
         // DA2 (Secondary Device Attributes).
         ctx.pending_output.extend_from_slice(b"\x1b[>41;0;0c");
@@ -458,9 +569,11 @@ pub(super) fn csi_dispatch(
         // the screen or scrollback. tmux and neovim use this for a
         // lightweight cleanup between sessions.
         let screen = &mut *ctx.screen;
-        screen.fg = color::default_fg();
-        screen.bg = color::default_bg();
+        screen.fg = ctx.palette.fg;
+        screen.bg = ctx.palette.bg;
         screen.attrs = CellAttrs::default();
+        screen.underline = UnderlineStyle::None;
+        screen.underline_color = None;
         screen.scroll_top = 0;
         screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
         screen.saved_cursor = None;
@@ -607,7 +720,15 @@ pub(super) fn csi_dispatch(
             let mode = p.first().copied().unwrap_or(0);
             screen.grid.erase_in_line(&screen.cursor, viewport, mode);
         }
-        'm' => apply_sgr(&mut screen.fg, &mut screen.bg, &mut screen.attrs, params),
+        'm' => apply_sgr(
+            &mut screen.fg,
+            &mut screen.bg,
+            &mut screen.attrs,
+            &mut screen.underline,
+            &mut screen.underline_color,
+            params,
+            ctx.palette,
+        ),
         'd' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             cursor.row = row.min(viewport.rows - 1);
@@ -743,9 +864,11 @@ pub(super) fn esc_dispatch(
             screen::clear_visible(ctx.stash, ctx.viewport);
             for s in [&mut *ctx.screen, &mut *ctx.stash] {
                 s.cursor = grid::Cursor::default();
-                s.fg = color::default_fg();
-                s.bg = color::default_bg();
+                s.fg = ctx.palette.fg;
+                s.bg = ctx.palette.bg;
                 s.attrs = CellAttrs::default();
+                s.underline = UnderlineStyle::None;
+                s.underline_color = None;
                 s.scroll_top = 0;
                 s.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
                 s.offset = 0;
@@ -794,7 +917,13 @@ mod tests {
     const TEST_ROWS: u32 = 4;
 
     fn setup() -> (Screen, Viewport) {
-        let screen = Screen::new(TEST_COLS, TEST_ROWS, 100);
+        let screen = Screen::new(
+            TEST_COLS,
+            TEST_ROWS,
+            100,
+            color::default_fg(),
+            color::default_bg(),
+        );
         let viewport = Viewport {
             rows: TEST_ROWS,
             cols: TEST_COLS,
@@ -810,8 +939,15 @@ mod tests {
         screen: &mut Screen,
         viewport: &Viewport,
     ) {
+        let pal = color::ColorPalette::default();
         let mut parser = Parser::new();
-        let mut stash = Screen::new(viewport.cols, viewport.rows, 0);
+        let mut stash = Screen::new(
+            viewport.cols,
+            viewport.rows,
+            0,
+            color::default_fg(),
+            color::default_bg(),
+        );
         let mut on_alt_screen = false;
         let mut modes = TerminalModes::new();
         let mut kitty_keyboard = KittyKeyboardState::new();
@@ -842,6 +978,7 @@ mod tests {
                         cursor_style: &mut cursor_style,
                         cell_width: 8,
                         cell_height: 16,
+                        palette: &pal,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -860,6 +997,7 @@ mod tests {
                         current_title: &mut current_title,
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
+                        palette: &pal,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
@@ -1560,5 +1698,121 @@ mod tests {
             .map(|s| s.as_str().to_owned())
             .collect();
         assert_eq!(before, after);
+    }
+
+    // -- DECRQM (CSI ? Ps $ p) -----------------------------------------------
+
+    /// Like `feed` but returns the `pending_output` bytes written by query
+    /// responses (DECRQM, DSR, etc.).
+    fn feed_with_output(
+        input: &[u8],
+        screen: &mut Screen,
+        viewport: &Viewport,
+    ) -> Vec<u8> {
+        let pal = color::ColorPalette::default();
+        let mut parser = Parser::new();
+        let mut stash = Screen::new(
+            viewport.cols,
+            viewport.rows,
+            0,
+            color::default_fg(),
+            color::default_bg(),
+        );
+        let mut on_alt_screen = false;
+        let mut modes = TerminalModes::new();
+        let mut kitty_keyboard = KittyKeyboardState::new();
+        let mut pending_output = Vec::new();
+        let mut cursor_style = CursorStyle::default();
+        let mut bell_pending = false;
+        let mut current_title = None;
+        let mut current_prompt_row = None;
+
+        for action in parser.parse(input) {
+            match action {
+                Action::PrintAscii(run) => put_ascii_run(screen, viewport, run),
+                Action::Print(s) => put_char(screen, viewport, s),
+                Action::Execute(b) => execute(screen, viewport, b, &mut bell_pending),
+                Action::CsiDispatch {
+                    params,
+                    intermediates,
+                    action,
+                } => {
+                    let mut ctx = CsiContext {
+                        screen,
+                        stash: &mut stash,
+                        viewport,
+                        on_alt_screen: &mut on_alt_screen,
+                        modes: &mut modes,
+                        kitty_keyboard: &mut kitty_keyboard,
+                        pending_output: &mut pending_output,
+                        cursor_style: &mut cursor_style,
+                        cell_width: 8,
+                        cell_height: 16,
+                        palette: &pal,
+                    };
+                    csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
+                }
+                Action::EscDispatch {
+                    intermediates,
+                    byte,
+                } => {
+                    let mut ctx = EscContext {
+                        screen,
+                        stash: &mut stash,
+                        viewport,
+                        on_alt_screen: &mut on_alt_screen,
+                        modes: &mut modes,
+                        kitty_keyboard: &mut kitty_keyboard,
+                        cursor_style: &mut cursor_style,
+                        current_title: &mut current_title,
+                        current_prompt_row: &mut current_prompt_row,
+                        bell_pending: &mut bell_pending,
+                        palette: &pal,
+                    };
+                    esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
+                }
+                _ => {}
+            }
+        }
+        pending_output
+    }
+
+    #[test]
+    fn decrqm_reports_cursor_visible_set() {
+        let (mut screen, viewport) = setup();
+        // Cursor is visible by default.
+        let out = feed_with_output(b"\x1b[?25$p", &mut screen, &viewport);
+        assert_eq!(out, b"\x1b[?25;1$y");
+    }
+
+    #[test]
+    fn decrqm_reports_cursor_visible_reset() {
+        let (mut screen, viewport) = setup();
+        screen.cursor_visible = false;
+        let out = feed_with_output(b"\x1b[?25$p", &mut screen, &viewport);
+        assert_eq!(out, b"\x1b[?25;2$y");
+    }
+
+    #[test]
+    fn decrqm_reports_bracketed_paste() {
+        let (mut screen, viewport) = setup();
+        // Enable bracketed paste first, then query.
+        let out = feed_with_output(b"\x1b[?2004h\x1b[?2004$p", &mut screen, &viewport);
+        assert_eq!(out, b"\x1b[?2004;1$y");
+    }
+
+    #[test]
+    fn decrqm_unknown_mode_reports_zero() {
+        let (mut screen, viewport) = setup();
+        let out = feed_with_output(b"\x1b[?9999$p", &mut screen, &viewport);
+        assert_eq!(out, b"\x1b[?9999;0$y");
+    }
+
+    #[test]
+    fn decrqm_ansi_mode_reports_zero_for_unknown() {
+        let (mut screen, viewport) = setup();
+        // ANSI (non-private) mode query.
+        let out = feed_with_output(b"\x1b[4$p", &mut screen, &viewport);
+        assert_eq!(out, b"\x1b[4;0$y");
     }
 }

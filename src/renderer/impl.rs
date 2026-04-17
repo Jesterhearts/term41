@@ -7,6 +7,7 @@ use std::time::Instant;
 
 use font41::FontSystem;
 use font41::attrs::CellAttrs;
+use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
@@ -24,6 +25,7 @@ use crate::renderer::background::BgImageVertex;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
+use crate::terminal::ColorPalette;
 use crate::terminal::CursorShape;
 use crate::terminal::Terminal;
 
@@ -100,6 +102,113 @@ fn resolve_cell_colors(
         fg = Srgb::new(fg.red / 2, fg.green / 2, fg.blue / 2);
     }
     (fg, bg)
+}
+
+/// Emit background-pass quads for the given underline style. `uy` is the
+/// baseline Y position for a single underline; `cell_w` and `cell_h` set
+/// the horizontal span and vertical budget for multi-line / patterned
+/// styles.
+fn push_underline_quads(
+    style: UnderlineStyle,
+    x: f32,
+    uy: f32,
+    cell_w: f32,
+    thickness: f32,
+    cell_h: f32,
+    color: u32,
+    verts: &mut Vec<BgVertex>,
+    idxs: &mut Vec<u32>,
+) {
+    match style {
+        UnderlineStyle::None => {}
+        UnderlineStyle::Single => {
+            push_rect(x, uy, cell_w, thickness, color, verts, idxs);
+        }
+        UnderlineStyle::Double => {
+            let gap = thickness;
+            push_rect(
+                x,
+                uy - gap - thickness,
+                cell_w,
+                thickness,
+                color,
+                verts,
+                idxs,
+            );
+            push_rect(x, uy, cell_w, thickness, color, verts, idxs);
+        }
+        UnderlineStyle::Curly => {
+            // Approximate a sine wave with short line-segment quads. Four
+            // segments per cell gives a recognisable wave without bloating the
+            // vertex count.
+            let segments = 4u32;
+            let seg_w = cell_w / segments as f32;
+            let amplitude = (cell_h * 0.08).max(1.5);
+            for s in 0..segments {
+                let t0 = s as f32 / segments as f32;
+                let t1 = (s + 1) as f32 / segments as f32;
+                let y0 = uy - amplitude * (t0 * std::f32::consts::TAU).sin();
+                let y1 = uy - amplitude * (t1 * std::f32::consts::TAU).sin();
+                let sx = x + s as f32 * seg_w;
+                let (top, bot) = if y0 < y1 {
+                    (y0, y1 + thickness)
+                } else {
+                    (y1, y0 + thickness)
+                };
+                push_rect(sx, top, seg_w, bot - top, color, verts, idxs);
+            }
+        }
+        UnderlineStyle::Dotted => {
+            // Dots spaced at roughly 2× thickness apart.
+            let dot_size = thickness.max(1.0);
+            let gap = dot_size * 2.0;
+            let mut dx = x;
+            while dx + dot_size <= x + cell_w {
+                push_rect(dx, uy, dot_size, thickness, color, verts, idxs);
+                dx += gap;
+            }
+        }
+        UnderlineStyle::Dashed => {
+            // Three dashes per cell.
+            let dash_w = cell_w / 5.0;
+            let gap = dash_w;
+            let mut dx = x;
+            while dx + dash_w <= x + cell_w {
+                push_rect(dx, uy, dash_w, thickness, color, verts, idxs);
+                dx += dash_w + gap;
+            }
+        }
+    }
+}
+
+/// Push a single axis-aligned rectangle into the background vertex/index
+/// buffers.
+fn push_rect(
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
+    color: u32,
+    verts: &mut Vec<BgVertex>,
+    idxs: &mut Vec<u32>,
+) {
+    let bi = verts.len() as u32;
+    verts.extend_from_slice(&[
+        BgVertex { pos: [x, y], color },
+        BgVertex {
+            pos: [x + w, y],
+            color,
+        },
+        BgVertex {
+            pos: [x, y + h],
+            color,
+        },
+        BgVertex {
+            pos: [x + w, y + h],
+            color,
+        },
+    ]);
+    idxs.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
 }
 
 /// Lightweight snapshot of tab state for the renderer. Built by the host
@@ -810,7 +919,11 @@ impl Renderer {
                 );
                 let bg_effective = if active_match {
                     blend(cell_fg, cell_bg, 0.5)
-                } else if selected || matched || block_cursor_here {
+                } else if selected {
+                    terminal.palette.selection_bg.unwrap_or(cell_fg)
+                } else if block_cursor_here {
+                    terminal.palette.cursor.unwrap_or(cell_fg)
+                } else if matched {
                     cell_fg
                 } else {
                     cell_bg
@@ -827,7 +940,7 @@ impl Renderer {
                 let interaction_overlay = selected || matched || active_match || block_cursor_here;
                 let skip_default_bg = self.background.is_some()
                     && !interaction_overlay
-                    && cell_bg == crate::terminal::default_bg();
+                    && cell_bg == terminal.palette.bg;
                 if !skip_default_bg {
                     let bg_color = pack_color(&bg_effective, self.bg_alpha);
                     let bi = bg_vertices.len() as u32;
@@ -852,36 +965,58 @@ impl Renderer {
                     bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
                 }
 
-                // Underline quad. Drawn for either of two sources:
+                // Underline quads. Drawn for either of two sources:
                 //   * OSC 8 hyperlinks — so the user can see what's clickable.
-                //   * SGR underline (CSI 4m) — the normal text attribute.
-                // Either case stacks a thin quad at the cell baseline using
-                // the foreground colour; a cell that carries both still
-                // only draws the line once. Sits in the bg pass so the
-                // glyph paints over any pixels the line would otherwise eat.
+                //   * SGR underline (CSI 4m / 4:Nm) — styled text attribute.
+                // Sits in the bg pass so the glyph paints over any pixels the
+                // line would otherwise eat.
+                let ul_style = grid_row.underline[col as usize];
                 let has_link = grid_row.links[col as usize].is_some();
-                let has_attr_underline = cell_attrs.contains(CellAttrs::UNDERLINE);
-                if has_link || has_attr_underline {
-                    let underline_color = pack_color(&cell_fg, 255);
+                let effective_ul = if has_link && ul_style == UnderlineStyle::None {
+                    UnderlineStyle::Single
+                } else {
+                    ul_style
+                };
+                if effective_ul != UnderlineStyle::None {
+                    let ul_rgb = grid_row.underline_color[col as usize].unwrap_or(cell_fg);
+                    let ul_packed = pack_color(&ul_rgb, 255);
                     let thickness = (cell_h * 0.06).max(1.0);
                     let uy = y + cell_h - thickness;
+                    push_underline_quads(
+                        effective_ul,
+                        x,
+                        uy,
+                        cell_w,
+                        thickness,
+                        cell_h,
+                        ul_packed,
+                        &mut bg_vertices,
+                        &mut bg_indices,
+                    );
+                }
+
+                // Strikethrough: horizontal line through the vertical centre.
+                if cell_attrs.contains(CellAttrs::STRIKETHROUGH) {
+                    let st_color = pack_color(&cell_fg, 255);
+                    let thickness = (cell_h * 0.06).max(1.0);
+                    let sy = y + (cell_h - thickness) * 0.5;
                     let bi = bg_vertices.len() as u32;
                     bg_vertices.extend_from_slice(&[
                         BgVertex {
-                            pos: [x, uy],
-                            color: underline_color,
+                            pos: [x, sy],
+                            color: st_color,
                         },
                         BgVertex {
-                            pos: [x + cell_w, uy],
-                            color: underline_color,
+                            pos: [x + cell_w, sy],
+                            color: st_color,
                         },
                         BgVertex {
-                            pos: [x, uy + thickness],
-                            color: underline_color,
+                            pos: [x, sy + thickness],
+                            color: st_color,
                         },
                         BgVertex {
-                            pos: [x + cell_w, uy + thickness],
-                            color: underline_color,
+                            pos: [x + cell_w, sy + thickness],
+                            color: st_color,
                         },
                     ]);
                     bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
@@ -991,7 +1126,9 @@ impl Renderer {
                 );
                 let fg_effective = if active_match {
                     cell_fg
-                } else if selected || matched || block_cursor_here {
+                } else if selected {
+                    terminal.palette.selection_fg.unwrap_or(cell_bg)
+                } else if matched || block_cursor_here {
                     cell_bg
                 } else {
                     cell_fg
@@ -1090,6 +1227,7 @@ impl Renderer {
         self.render_tab_bar(
             font_system,
             tabs,
+            &terminal.palette,
             &mut bg_vertices,
             &mut bg_indices,
             &mut fg_vertices,
@@ -1383,12 +1521,13 @@ impl Renderer {
 
     /// Paint the tab bar at the top of the window. Each tab gets a
     /// background quad and a label shaped through the glyph atlas. The
-    /// active tab uses `default_bg`, inactive tabs use a 50/50 blend of
-    /// `default_bg` and `default_fg`.
+    /// active tab uses the palette bg, inactive tabs use a 50/50 blend
+    /// of palette bg and fg.
     fn render_tab_bar(
         &mut self,
         font_system: &mut FontSystem,
         tabs: &[TabInfo],
+        palette: &ColorPalette,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
         fg_vertices: &mut Vec<FgVertex>,
@@ -1402,12 +1541,8 @@ impl Renderer {
         let baseline = font_system.baseline_offset();
         let surface_w = self.surface_config.width as f32;
 
-        let active_bg = crate::terminal::default_bg();
-        let inactive_bg = blend(
-            crate::terminal::default_bg(),
-            crate::terminal::default_fg(),
-            0.5,
-        );
+        let active_bg = palette.bg;
+        let inactive_bg = blend(palette.bg, palette.fg, 0.5);
 
         // Full-width bar background (inactive colour as the base).
         let bar_bg = pack_color(&inactive_bg, 255);
@@ -1437,7 +1572,7 @@ impl Renderer {
         let max_tab_w = cell_w * 30.0;
         let tab_w = (surface_w / tabs.len() as f32).min(max_tab_w);
 
-        let label_fg = pack_color(&crate::terminal::default_fg(), 255);
+        let label_fg = pack_color(&palette.fg, 255);
 
         for (i, tab) in tabs.iter().enumerate() {
             let x0 = i as f32 * tab_w;

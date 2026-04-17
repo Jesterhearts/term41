@@ -24,8 +24,7 @@ use std::time::Instant;
 
 use vtepp::Action;
 
-pub use self::color::default_bg;
-pub use self::color::default_fg;
+pub use self::color::ColorPalette;
 pub use self::cursor::CursorShape;
 pub use self::cursor::CursorStyle;
 pub use self::grid::Viewport;
@@ -237,6 +236,10 @@ pub struct Terminal {
     /// Accumulates chunks for multi-part iTerm2 graphics transmissions
     /// (`MultipartFile` → `FilePart*` → `FileEnd`).
     iterm_chunked: crate::image::iterm::ChunkedTransmission,
+
+    /// Runtime color palette. Stored here so SGR resets, OSC color queries,
+    /// and the renderer can all resolve themed colors.
+    pub palette: ColorPalette,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -252,13 +255,14 @@ impl Terminal {
         scrollback_limit: u32,
         cell_height: u32,
         cell_width: u32,
+        palette: ColorPalette,
     ) -> Self {
         Self {
-            active: Screen::new(cols, rows, scrollback_limit),
+            active: Screen::new(cols, rows, scrollback_limit, palette.fg, palette.bg),
             // Stash starts as a blank alt screen (no scrollback). When the
             // first ?1049h / ?47h arrives we simply swap `active` and
             // `stash` — no lazy construction needed.
-            stash: Screen::new(cols, rows, 0),
+            stash: Screen::new(cols, rows, 0, palette.fg, palette.bg),
             viewport: Viewport { rows, cols },
             on_alt_screen: false,
             cell_height,
@@ -280,6 +284,7 @@ impl Terminal {
             kitty_chunked: crate::image::kitty::ChunkedTransmission::new(),
             iterm_chunked: crate::image::iterm::ChunkedTransmission::new(),
             cell_width,
+            palette,
         }
     }
 
@@ -1394,6 +1399,7 @@ impl Terminal {
                     cursor_style: &mut self.cursor_style,
                     cell_width: self.cell_width,
                     cell_height: self.cell_height,
+                    palette: &self.palette,
                 };
                 csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
             }
@@ -1412,6 +1418,7 @@ impl Terminal {
                     current_title: &mut self.current_title,
                     current_prompt_row: &mut self.current_prompt_row,
                     bell_pending: &mut self.bell_pending,
+                    palette: &self.palette,
                 };
                 esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
             }
@@ -1443,6 +1450,7 @@ impl Terminal {
                         current_title: &mut self.current_title,
                         current_prompt_row: &mut self.current_prompt_row,
                         command_metas: &mut self.command_metas,
+                        palette: &self.palette,
                     };
                     handle_osc(&data, &mut ctx);
                 }
@@ -2175,7 +2183,14 @@ mod tests {
             cell_w: u32,
         ) -> Self {
             Self {
-                inner: Terminal::new(cols, rows, scrollback, cell_h, cell_w),
+                inner: Terminal::new(
+                    cols,
+                    rows,
+                    scrollback,
+                    cell_h,
+                    cell_w,
+                    ColorPalette::default(),
+                ),
                 parser: Parser::new(),
             }
         }

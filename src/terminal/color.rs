@@ -1,4 +1,5 @@
 use font41::attrs::CellAttrs;
+use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use vtepp::Params;
 
@@ -37,25 +38,78 @@ pub const fn default_bg() -> Srgb<u8> {
     Srgb::new(0, 0, 0)
 }
 
-/// The standard 256-color palette.
-pub(super) const fn ansi_color(index: u8) -> Srgb<u8> {
+/// Runtime color palette. Stores the 16 ANSI colors, default fg/bg,
+/// cursor color, and selection colors. Built from the `[colors]` config
+/// section (Rio palette format), falling back to the hardcoded defaults
+/// for any value not overridden.
+#[derive(Debug, Clone)]
+pub struct ColorPalette {
+    /// Default foreground (SGR 39 / row clear).
+    pub fg: Srgb<u8>,
+    /// Default background (SGR 49 / row clear / wallpaper transparency).
+    pub bg: Srgb<u8>,
+    /// Cursor color. `None` = use cell foreground (current behavior).
+    pub cursor: Option<Srgb<u8>>,
+    /// Selection background. `None` = invert (current behavior).
+    pub selection_bg: Option<Srgb<u8>>,
+    /// Selection text color. `None` = invert (current behavior).
+    pub selection_fg: Option<Srgb<u8>>,
+    /// The 16 ANSI colors: indices 0–7 are normal, 8–15 are bright.
+    pub ansi: [Srgb<u8>; 16],
+}
+
+impl Default for ColorPalette {
+    fn default() -> Self {
+        Self {
+            fg: default_fg(),
+            bg: default_bg(),
+            cursor: None,
+            selection_bg: None,
+            selection_fg: None,
+            ansi: DEFAULT_ANSI_COLORS,
+        }
+    }
+}
+
+/// The hardcoded 16-color ANSI palette, matching the values in
+/// [`ansi_color`] for indices 0–15.
+const DEFAULT_ANSI_COLORS: [Srgb<u8>; 16] = [
+    Srgb::new(0, 0, 0),       // 0  black           rgb(0, 0, 0)
+    Srgb::new(205, 0, 0),     // 1  red             rgb(205, 0, 0)
+    Srgb::new(0, 205, 0),     // 2  green           rgb(0, 205, 0)
+    Srgb::new(205, 205, 0),   // 3  yellow          rgb(205, 205, 0)
+    Srgb::new(0, 0, 238),     // 4  blue            rgb(0, 0, 238)
+    Srgb::new(205, 0, 205),   // 5  magenta         rgb(205, 0, 205)
+    Srgb::new(0, 205, 205),   // 6  cyan            rgb(0, 205, 205)
+    Srgb::new(229, 229, 229), // 7  white           rgb(229, 229, 229)
+    Srgb::new(127, 127, 127), // 8  bright black    rgb(127, 127, 127)
+    Srgb::new(255, 0, 0),     // 9  bright red      rgb(255, 0, 0)
+    Srgb::new(0, 255, 0),     // 10 bright green    rgb(0, 255, 0)
+    Srgb::new(255, 255, 0),   // 11 bright yellow   rgb(255, 255, 0)
+    Srgb::new(92, 92, 255),   // 12 bright blue     rgb(92, 92, 255)
+    Srgb::new(255, 0, 255),   // 13 bright magenta  rgb(255, 0, 255)
+    Srgb::new(0, 255, 255),   // 14 bright cyan     rgb(0, 255, 255)
+    Srgb::new(255, 255, 255), // 15 bright white    rgb(255, 255, 255)
+];
+
+/// Look up a 256-color palette index using the given [`ColorPalette`] for
+/// indices 0–15 and the computed cube/grayscale ramp for 16–255.
+pub(super) fn palette_color(
+    palette: &ColorPalette,
+    index: u8,
+) -> Srgb<u8> {
+    if index < 16 {
+        palette.ansi[index as usize]
+    } else {
+        computed_color(index)
+    }
+}
+
+/// Compute the RGB value for 256-color palette indices 16–255 (the 6×6×6
+/// cube and 24-step grayscale ramp). Indices 0–15 are returned as black;
+/// callers that need theme-aware 0–15 should use [`palette_color`] instead.
+const fn computed_color(index: u8) -> Srgb<u8> {
     match index {
-        0 => Srgb::new(0, 0, 0),
-        1 => Srgb::new(205, 0, 0),
-        2 => Srgb::new(0, 205, 0),
-        3 => Srgb::new(205, 205, 0),
-        4 => Srgb::new(0, 0, 238),
-        5 => Srgb::new(205, 0, 205),
-        6 => Srgb::new(0, 205, 205),
-        7 => Srgb::new(229, 229, 229),
-        8 => Srgb::new(127, 127, 127),
-        9 => Srgb::new(255, 0, 0),
-        10 => Srgb::new(0, 255, 0),
-        11 => Srgb::new(255, 255, 0),
-        12 => Srgb::new(92, 92, 255),
-        13 => Srgb::new(255, 0, 255),
-        14 => Srgb::new(0, 255, 255),
-        15 => Srgb::new(255, 255, 255),
         CUBE_PALETTE_START..=CUBE_PALETTE_END => {
             const fn to_val(c: u8) -> u8 {
                 if c == 0 {
@@ -64,7 +118,6 @@ pub(super) const fn ansi_color(index: u8) -> Srgb<u8> {
                     CUBE_CHANNEL_BASE + CUBE_CHANNEL_STEP * c
                 }
             }
-
             let idx = index - CUBE_PALETTE_START;
             let r = idx / (CUBE_SIDE * CUBE_SIDE);
             let g = (idx % (CUBE_SIDE * CUBE_SIDE)) / CUBE_SIDE;
@@ -75,91 +128,164 @@ pub(super) const fn ansi_color(index: u8) -> Srgb<u8> {
             let v = GRAY_BASE + GRAY_STEP * (index - GRAY_PALETTE_START);
             Srgb::new(v, v, v)
         }
+        _ => Srgb::new(0, 0, 0),
     }
 }
 
 /// Apply SGR (Select Graphic Rendition) parameters to the current fg/bg
-/// colors and text attributes. `CSI m` with no params (or param 0) is a full
-/// reset — colors go back to defaults and every attribute flag clears.
+/// colors, underline state, and text attributes. `CSI m` with no params
+/// (or param 0) is a full reset — colors go back to defaults and every
+/// attribute flag clears.
+///
+/// Sub-parameters (colon-separated, e.g. `4:3` for curly underline) are
+/// preserved through the group iterator; the legacy semicolon form
+/// (`38;5;N`) is still supported by consuming subsequent groups.
 pub(super) fn apply_sgr(
     fg: &mut Srgb<u8>,
     bg: &mut Srgb<u8>,
     attrs: &mut CellAttrs,
+    underline: &mut UnderlineStyle,
+    underline_color: &mut Option<Srgb<u8>>,
     params: &Params,
+    palette: &ColorPalette,
 ) {
-    let params: Vec<u16> = params.iter().map(|p| p[0]).collect();
+    let groups: Vec<&[u16]> = params.iter().collect();
 
-    if params.is_empty() {
-        *fg = default_fg();
-        *bg = default_bg();
-        *attrs = CellAttrs::default();
+    if groups.is_empty() {
+        reset_all(fg, bg, attrs, underline, underline_color, palette);
         return;
     }
 
     let mut i = 0;
-    while i < params.len() {
-        match params[i] {
-            0 => {
-                *fg = default_fg();
-                *bg = default_bg();
-                *attrs = CellAttrs::default();
-            }
+    while i < groups.len() {
+        let g = groups[i];
+        match g[0] {
+            0 => reset_all(fg, bg, attrs, underline, underline_color, palette),
             1 => attrs.insert(CellAttrs::BOLD),
             2 => attrs.insert(CellAttrs::DIM),
             3 => attrs.insert(CellAttrs::ITALIC),
-            4 => attrs.insert(CellAttrs::UNDERLINE),
+            4 => {
+                // Sub-parameter determines style: bare `4` or `4:1` = single,
+                // `4:0` = none, `4:2` = double, `4:3` = curly, etc.
+                let sub = g.get(1).copied().unwrap_or(1);
+                *underline = UnderlineStyle::from_sgr(sub);
+            }
             7 => attrs.insert(CellAttrs::REVERSE),
+            9 => attrs.insert(CellAttrs::STRIKETHROUGH),
+            21 => *underline = UnderlineStyle::Double,
             // SGR 22 resets both bold and faint per ECMA-48.
             22 => attrs.remove(CellAttrs::BOLD | CellAttrs::DIM),
             23 => attrs.remove(CellAttrs::ITALIC),
-            24 => attrs.remove(CellAttrs::UNDERLINE),
+            24 => *underline = UnderlineStyle::None,
             27 => attrs.remove(CellAttrs::REVERSE),
-            30..=37 => *fg = ansi_color((params[i] - 30) as u8),
-            39 => *fg = default_fg(),
-            40..=47 => *bg = ansi_color((params[i] - 40) as u8),
-            49 => *bg = default_bg(),
-            90..=97 => *fg = ansi_color((params[i] - 90) as u8 + BRIGHT_OFFSET),
-            100..=107 => *bg = ansi_color((params[i] - 100) as u8 + BRIGHT_OFFSET),
+            29 => attrs.remove(CellAttrs::STRIKETHROUGH),
+            30..=37 => *fg = palette_color(palette, (g[0] - 30) as u8),
             38 => {
-                if let Some(color) = parse_extended_color(&params, &mut i) {
+                if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
                     *fg = color;
                 }
             }
+            39 => *fg = palette.fg,
+            40..=47 => *bg = palette_color(palette, (g[0] - 40) as u8),
             48 => {
-                if let Some(color) = parse_extended_color(&params, &mut i) {
+                if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
                     *bg = color;
                 }
             }
+            49 => *bg = palette.bg,
+            58 => {
+                if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
+                    *underline_color = Some(color);
+                }
+            }
+            59 => *underline_color = None,
+            90..=97 => *fg = palette_color(palette, (g[0] - 90) as u8 + BRIGHT_OFFSET),
+            100..=107 => *bg = palette_color(palette, (g[0] - 100) as u8 + BRIGHT_OFFSET),
             _ => {}
         }
         i += 1;
     }
 }
 
+fn reset_all(
+    fg: &mut Srgb<u8>,
+    bg: &mut Srgb<u8>,
+    attrs: &mut CellAttrs,
+    underline: &mut UnderlineStyle,
+    underline_color: &mut Option<Srgb<u8>>,
+    palette: &ColorPalette,
+) {
+    *fg = palette.fg;
+    *bg = palette.bg;
+    *attrs = CellAttrs::default();
+    *underline = UnderlineStyle::None;
+    *underline_color = None;
+}
+
+/// Parse an extended color from either the colon sub-parameter form
+/// (`38:5:N` or `38:2:R:G:B`) or the legacy semicolon form (`38;5;N`
+/// or `38;2;R;G;B`). In the colon form all values sit in one group; in
+/// the semicolon form subsequent groups are consumed and `i` is advanced.
 fn parse_extended_color(
-    params: &[u16],
+    groups: &[&[u16]],
     i: &mut usize,
+    palette: &ColorPalette,
 ) -> Option<Srgb<u8>> {
-    if *i + 1 >= params.len() {
+    let group = groups[*i];
+
+    // Colon form: sub-parameters sit in the same group (e.g. [38, 5, 196]).
+    if group.len() > 1 {
+        return parse_color_subparams(&group[1..], palette);
+    }
+
+    // Semicolon form: sub-type and value(s) in subsequent groups.
+    if *i + 1 >= groups.len() {
         return None;
     }
-    match params[*i + 1] {
+    match groups[*i + 1][0] {
         SGR_EXT_INDEXED => {
-            if *i + 2 < params.len() {
+            if *i + 2 < groups.len() {
                 *i += 2;
-                Some(ansi_color(params[*i] as u8))
+                Some(palette_color(palette, groups[*i][0] as u8))
             } else {
                 None
             }
         }
         SGR_EXT_RGB => {
-            if *i + 4 < params.len() {
+            if *i + 4 < groups.len() {
                 *i += 4;
                 Some(Srgb::new(
-                    params[*i - 2] as u8,
-                    params[*i - 1] as u8,
-                    params[*i] as u8,
+                    groups[*i - 2][0] as u8,
+                    groups[*i - 1][0] as u8,
+                    groups[*i][0] as u8,
                 ))
+            } else {
+                None
+            }
+        }
+        _ => None,
+    }
+}
+
+/// Decode `;5;N` or `;2;[CS;]R;G;B` from colon-separated sub-parameters.
+/// `sub` starts after the leading `38`/`48`/`58`.
+fn parse_color_subparams(
+    sub: &[u16],
+    palette: &ColorPalette,
+) -> Option<Srgb<u8>> {
+    match *sub.first()? {
+        SGR_EXT_INDEXED => {
+            let idx = *sub.get(1)?;
+            Some(palette_color(palette, idx as u8))
+        }
+        SGR_EXT_RGB => {
+            // The full form is `2:CS:R:G:B` (5 values after the lead param).
+            // When CS (color space) is omitted the shorter `2:R:G:B` form
+            // has 4 values. We accept both.
+            if sub.len() >= 5 {
+                Some(Srgb::new(sub[2] as u8, sub[3] as u8, sub[4] as u8))
+            } else if sub.len() >= 4 {
+                Some(Srgb::new(sub[1] as u8, sub[2] as u8, sub[3] as u8))
             } else {
                 None
             }
@@ -193,10 +319,21 @@ mod tests {
     }
 
     fn apply(input: &[u8]) -> (Srgb<u8>, Srgb<u8>) {
+        let pal = ColorPalette::default();
         let mut fg = default_fg();
         let mut bg = default_bg();
         let mut attrs = CellAttrs::default();
-        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(input));
+        let mut ul = UnderlineStyle::None;
+        let mut ul_color = None;
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(input),
+            &pal,
+        );
         (fg, bg)
     }
 
@@ -204,10 +341,41 @@ mod tests {
         input: &[u8],
         attrs: &mut CellAttrs,
     ) -> (Srgb<u8>, Srgb<u8>) {
+        let pal = ColorPalette::default();
         let mut fg = default_fg();
         let mut bg = default_bg();
-        apply_sgr(&mut fg, &mut bg, attrs, &parse_sgr(input));
+        let mut ul = UnderlineStyle::None;
+        let mut ul_color = None;
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(input),
+            &pal,
+        );
         (fg, bg)
+    }
+
+    /// Like `apply_with_attrs` but also returns underline state.
+    fn apply_full(input: &[u8]) -> (CellAttrs, UnderlineStyle, Option<Srgb<u8>>) {
+        let pal = ColorPalette::default();
+        let mut fg = default_fg();
+        let mut bg = default_bg();
+        let mut attrs = CellAttrs::default();
+        let mut ul = UnderlineStyle::None;
+        let mut ul_color = None;
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(input),
+            &pal,
+        );
+        (attrs, ul, ul_color)
     }
 
     #[test]
@@ -217,71 +385,63 @@ mod tests {
     }
 
     #[test]
-    fn ansi_color_returns_standard_sixteen() {
-        assert_eq!(ansi_color(0), Srgb::new(0, 0, 0));
-        assert_eq!(ansi_color(1), Srgb::new(205, 0, 0));
-        assert_eq!(ansi_color(7), Srgb::new(229, 229, 229));
-        assert_eq!(ansi_color(8), Srgb::new(127, 127, 127));
-        assert_eq!(ansi_color(15), Srgb::new(255, 255, 255));
-    }
-
-    #[test]
-    fn ansi_color_computes_6x6x6_cube() {
-        // Index 16 is the cube origin: all channels at level 0.
-        assert_eq!(ansi_color(16), Srgb::new(0, 0, 0));
-        // Index 231 is the cube's opposite corner: all channels at level 5
-        // → 55 + 40 * 5 = 255.
-        assert_eq!(ansi_color(231), Srgb::new(255, 255, 255));
-        // Cube diagonal at level 3 in each channel: idx = 16 + 3*36 + 3*6 + 3 = 145,
-        // channel value = 55 + 40*3 = 175.
-        assert_eq!(ansi_color(145), Srgb::new(175, 175, 175));
-        // Pure red at level 1: idx = 16 + 1*36 = 52, value = 55 + 40 = 95.
-        assert_eq!(ansi_color(52), Srgb::new(95, 0, 0));
-    }
-
-    #[test]
-    fn ansi_color_computes_grayscale_ramp() {
-        assert_eq!(ansi_color(232), Srgb::new(8, 8, 8));
-        assert_eq!(ansi_color(233), Srgb::new(18, 18, 18));
-        assert_eq!(ansi_color(255), Srgb::new(238, 238, 238));
-    }
-
-    #[test]
     fn empty_sgr_resets_to_defaults() {
+        let pal = ColorPalette::default();
         let mut fg = Srgb::new(1, 2, 3);
         let mut bg = Srgb::new(4, 5, 6);
         let mut attrs = CellAttrs::BOLD;
-        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[m"));
+        let mut ul = UnderlineStyle::Single;
+        let mut ul_color = Some(Srgb::new(255, 0, 0));
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[m"),
+            &pal,
+        );
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
         assert_eq!(attrs, CellAttrs::default());
+        assert_eq!(ul, UnderlineStyle::None);
+        assert_eq!(ul_color, None);
     }
 
     #[test]
     fn sgr_0_resets_to_defaults() {
+        let pal = ColorPalette::default();
         let mut fg = Srgb::new(1, 2, 3);
         let mut bg = Srgb::new(4, 5, 6);
         let mut attrs = CellAttrs::BOLD;
-        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[0m"));
+        let mut ul = UnderlineStyle::Curly;
+        let mut ul_color = None;
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[0m"),
+            &pal,
+        );
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
         assert_eq!(attrs, CellAttrs::default());
+        assert_eq!(ul, UnderlineStyle::None);
     }
 
     #[test]
     fn sgr_30_through_37_sets_foreground() {
         let (fg, _) = apply(b"\x1b[31m");
-        assert_eq!(fg, ansi_color(1));
+        assert_eq!(fg, DEFAULT_ANSI_COLORS[1]);
         let (fg, _) = apply(b"\x1b[37m");
-        assert_eq!(fg, ansi_color(7));
+        assert_eq!(fg, DEFAULT_ANSI_COLORS[7]);
     }
 
     #[test]
     fn sgr_39_restores_default_foreground() {
-        let mut fg = Srgb::new(1, 2, 3);
-        let mut bg = default_bg();
-        let mut attrs = CellAttrs::default();
-        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[39m"));
+        let (fg, bg) = apply(b"\x1b[39m");
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
@@ -289,17 +449,14 @@ mod tests {
     #[test]
     fn sgr_40_through_47_sets_background() {
         let (_, bg) = apply(b"\x1b[42m");
-        assert_eq!(bg, ansi_color(2));
+        assert_eq!(bg, DEFAULT_ANSI_COLORS[2]);
         let (_, bg) = apply(b"\x1b[47m");
-        assert_eq!(bg, ansi_color(7));
+        assert_eq!(bg, DEFAULT_ANSI_COLORS[7]);
     }
 
     #[test]
     fn sgr_49_restores_default_background() {
-        let mut fg = default_fg();
-        let mut bg = Srgb::new(1, 2, 3);
-        let mut attrs = CellAttrs::default();
-        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[49m"));
+        let (fg, bg) = apply(b"\x1b[49m");
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
@@ -307,29 +464,29 @@ mod tests {
     #[test]
     fn sgr_90_through_97_sets_bright_foreground() {
         let (fg, _) = apply(b"\x1b[90m");
-        assert_eq!(fg, ansi_color(8));
+        assert_eq!(fg, DEFAULT_ANSI_COLORS[8]);
         let (fg, _) = apply(b"\x1b[97m");
-        assert_eq!(fg, ansi_color(15));
+        assert_eq!(fg, DEFAULT_ANSI_COLORS[15]);
     }
 
     #[test]
     fn sgr_100_through_107_sets_bright_background() {
         let (_, bg) = apply(b"\x1b[100m");
-        assert_eq!(bg, ansi_color(8));
+        assert_eq!(bg, DEFAULT_ANSI_COLORS[8]);
         let (_, bg) = apply(b"\x1b[107m");
-        assert_eq!(bg, ansi_color(15));
+        assert_eq!(bg, DEFAULT_ANSI_COLORS[15]);
     }
 
     #[test]
     fn sgr_38_5_sets_indexed_foreground() {
         let (fg, _) = apply(b"\x1b[38;5;196m");
-        assert_eq!(fg, ansi_color(196));
+        assert_eq!(fg, computed_color(196));
     }
 
     #[test]
     fn sgr_48_5_sets_indexed_background() {
         let (_, bg) = apply(b"\x1b[48;5;21m");
-        assert_eq!(bg, ansi_color(21));
+        assert_eq!(bg, computed_color(21));
     }
 
     #[test]
@@ -347,15 +504,15 @@ mod tests {
     #[test]
     fn sgr_chained_parameters_apply_in_order() {
         let (fg, bg) = apply(b"\x1b[31;42m");
-        assert_eq!(fg, ansi_color(1));
-        assert_eq!(bg, ansi_color(2));
+        assert_eq!(fg, DEFAULT_ANSI_COLORS[1]);
+        assert_eq!(bg, DEFAULT_ANSI_COLORS[2]);
     }
 
     #[test]
     fn sgr_reset_then_colors_applies_colors_after_reset() {
         let (fg, bg) = apply(b"\x1b[0;36;44m");
-        assert_eq!(fg, ansi_color(6));
-        assert_eq!(bg, ansi_color(4));
+        assert_eq!(fg, DEFAULT_ANSI_COLORS[6]);
+        assert_eq!(bg, DEFAULT_ANSI_COLORS[4]);
     }
 
     #[test]
@@ -368,70 +525,76 @@ mod tests {
 
     #[test]
     fn sgr_3_sets_italic_and_4_sets_underline() {
-        let mut attrs = CellAttrs::default();
-        apply_with_attrs(b"\x1b[3;4m", &mut attrs);
+        let (attrs, ul, _) = apply_full(b"\x1b[3;4m");
         assert!(attrs.contains(CellAttrs::ITALIC));
-        assert!(attrs.contains(CellAttrs::UNDERLINE));
+        assert_eq!(ul, UnderlineStyle::Single);
     }
 
     #[test]
     fn sgr_22_23_24_clear_individual_attrs() {
-        let mut attrs = CellAttrs::default();
-        apply_with_attrs(b"\x1b[1;3;4m", &mut attrs);
+        let pal = ColorPalette::default();
+        let (attrs, ul, _) = apply_full(b"\x1b[1;3;4m");
         assert!(attrs.contains(CellAttrs::BOLD));
         assert!(attrs.contains(CellAttrs::ITALIC));
-        assert!(attrs.contains(CellAttrs::UNDERLINE));
+        assert_eq!(ul, UnderlineStyle::Single);
 
-        apply_with_attrs(b"\x1b[22m", &mut attrs);
+        let mut fg = default_fg();
+        let mut bg = default_bg();
+        let mut attrs = attrs;
+        let mut ul = ul;
+        let mut ul_color = None;
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[22m"),
+            &pal,
+        );
         assert!(!attrs.contains(CellAttrs::BOLD));
         assert!(attrs.contains(CellAttrs::ITALIC));
-        assert!(attrs.contains(CellAttrs::UNDERLINE));
+        assert_eq!(ul, UnderlineStyle::Single);
 
-        apply_with_attrs(b"\x1b[23;24m", &mut attrs);
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[23;24m"),
+            &pal,
+        );
         assert_eq!(attrs, CellAttrs::default());
+        assert_eq!(ul, UnderlineStyle::None);
     }
 
     #[test]
     fn sgr_0_clears_attrs() {
-        let mut attrs = CellAttrs::default();
-        apply_with_attrs(b"\x1b[1;3;4m", &mut attrs);
-        apply_with_attrs(b"\x1b[0m", &mut attrs);
+        let (_, ul, _) = apply_full(b"\x1b[1;3;4m");
+        assert_eq!(ul, UnderlineStyle::Single);
+        let (attrs, ul, _) = apply_full(b"\x1b[0m");
         assert_eq!(attrs, CellAttrs::default());
+        assert_eq!(ul, UnderlineStyle::None);
     }
 
     #[test]
     fn sgr_38_without_subtype_is_ignored() {
-        let mut fg = default_fg();
-        let mut bg = default_bg();
-        let mut attrs = CellAttrs::default();
-        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[38m"));
+        let (fg, bg) = apply(b"\x1b[38m");
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
 
     #[test]
     fn sgr_truncated_truecolor_is_ignored() {
-        let mut fg = default_fg();
-        let mut bg = default_bg();
-        let mut attrs = CellAttrs::default();
-        // Missing the blue component.
-        apply_sgr(
-            &mut fg,
-            &mut bg,
-            &mut attrs,
-            &parse_sgr(b"\x1b[38;2;10;20m"),
-        );
+        let (fg, bg) = apply(b"\x1b[38;2;10;20m");
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
 
     #[test]
     fn sgr_truncated_indexed_is_ignored() {
-        let mut fg = default_fg();
-        let mut bg = default_bg();
-        let mut attrs = CellAttrs::default();
-        // `48;5` with no palette index.
-        apply_sgr(&mut fg, &mut bg, &mut attrs, &parse_sgr(b"\x1b[48;5m"));
+        let (fg, bg) = apply(b"\x1b[48;5m");
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
@@ -484,5 +647,190 @@ mod tests {
         apply_with_attrs(b"\x1b[2;7m", &mut attrs);
         apply_with_attrs(b"\x1b[0m", &mut attrs);
         assert_eq!(attrs, CellAttrs::default());
+    }
+
+    // -- strikethrough -------------------------------------------------------
+
+    #[test]
+    fn sgr_9_sets_strikethrough() {
+        let (attrs, _, _) = apply_full(b"\x1b[9m");
+        assert!(attrs.contains(CellAttrs::STRIKETHROUGH));
+    }
+
+    #[test]
+    fn sgr_29_clears_strikethrough() {
+        let pal = ColorPalette::default();
+        let mut fg = default_fg();
+        let mut bg = default_bg();
+        let mut attrs = CellAttrs::default();
+        let mut ul = UnderlineStyle::None;
+        let mut ul_color = None;
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[9m"),
+            &pal,
+        );
+        assert!(attrs.contains(CellAttrs::STRIKETHROUGH));
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[29m"),
+            &pal,
+        );
+        assert!(!attrs.contains(CellAttrs::STRIKETHROUGH));
+    }
+
+    // -- curly / styled underline --------------------------------------------
+
+    #[test]
+    fn sgr_4_bare_sets_single_underline() {
+        let (_, ul, _) = apply_full(b"\x1b[4m");
+        assert_eq!(ul, UnderlineStyle::Single);
+    }
+
+    #[test]
+    fn sgr_4_colon_0_clears_underline() {
+        let (_, ul, _) = apply_full(b"\x1b[4:0m");
+        assert_eq!(ul, UnderlineStyle::None);
+    }
+
+    #[test]
+    fn sgr_4_colon_1_sets_single() {
+        let (_, ul, _) = apply_full(b"\x1b[4:1m");
+        assert_eq!(ul, UnderlineStyle::Single);
+    }
+
+    #[test]
+    fn sgr_4_colon_2_sets_double() {
+        let (_, ul, _) = apply_full(b"\x1b[4:2m");
+        assert_eq!(ul, UnderlineStyle::Double);
+    }
+
+    #[test]
+    fn sgr_4_colon_3_sets_curly() {
+        let (_, ul, _) = apply_full(b"\x1b[4:3m");
+        assert_eq!(ul, UnderlineStyle::Curly);
+    }
+
+    #[test]
+    fn sgr_4_colon_4_sets_dotted() {
+        let (_, ul, _) = apply_full(b"\x1b[4:4m");
+        assert_eq!(ul, UnderlineStyle::Dotted);
+    }
+
+    #[test]
+    fn sgr_4_colon_5_sets_dashed() {
+        let (_, ul, _) = apply_full(b"\x1b[4:5m");
+        assert_eq!(ul, UnderlineStyle::Dashed);
+    }
+
+    #[test]
+    fn sgr_21_sets_double_underline() {
+        let (_, ul, _) = apply_full(b"\x1b[21m");
+        assert_eq!(ul, UnderlineStyle::Double);
+    }
+
+    #[test]
+    fn sgr_24_clears_underline() {
+        let pal = ColorPalette::default();
+        let mut fg = default_fg();
+        let mut bg = default_bg();
+        let mut attrs = CellAttrs::default();
+        let mut ul = UnderlineStyle::Curly;
+        let mut ul_color = None;
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[24m"),
+            &pal,
+        );
+        assert_eq!(ul, UnderlineStyle::None);
+    }
+
+    // -- underline color (SGR 58 / 59) ---------------------------------------
+
+    #[test]
+    fn sgr_58_5_sets_indexed_underline_color() {
+        let (_, _, ul_color) = apply_full(b"\x1b[58;5;196m");
+        assert_eq!(ul_color, Some(computed_color(196)));
+    }
+
+    #[test]
+    fn sgr_58_2_sets_truecolor_underline_color() {
+        let (_, _, ul_color) = apply_full(b"\x1b[58;2;10;20;30m");
+        assert_eq!(ul_color, Some(Srgb::new(10, 20, 30)));
+    }
+
+    #[test]
+    fn sgr_58_colon_5_sets_indexed_underline_color() {
+        let (_, _, ul_color) = apply_full(b"\x1b[58:5:196m");
+        assert_eq!(ul_color, Some(computed_color(196)));
+    }
+
+    #[test]
+    fn sgr_58_colon_2_sets_truecolor_underline_color() {
+        let (_, _, ul_color) = apply_full(b"\x1b[58:2:10:20:30m");
+        assert_eq!(ul_color, Some(Srgb::new(10, 20, 30)));
+    }
+
+    #[test]
+    fn sgr_59_resets_underline_color() {
+        let pal = ColorPalette::default();
+        let mut fg = default_fg();
+        let mut bg = default_bg();
+        let mut attrs = CellAttrs::default();
+        let mut ul = UnderlineStyle::None;
+        let mut ul_color = None;
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[58;5;196m"),
+            &pal,
+        );
+        assert!(ul_color.is_some());
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[59m"),
+            &pal,
+        );
+        assert_eq!(ul_color, None);
+    }
+
+    // -- colon-form extended colors ------------------------------------------
+
+    #[test]
+    fn sgr_38_colon_5_sets_indexed_foreground() {
+        let (fg, _) = apply(b"\x1b[38:5:196m");
+        assert_eq!(fg, computed_color(196));
+    }
+
+    #[test]
+    fn sgr_38_colon_2_sets_truecolor_foreground() {
+        let (fg, _) = apply(b"\x1b[38:2:10:20:30m");
+        assert_eq!(fg, Srgb::new(10, 20, 30));
+    }
+
+    #[test]
+    fn sgr_38_colon_2_with_colorspace_sets_truecolor_foreground() {
+        // 38:2:0:10:20:30 — the 0 is the color-space id, skipped.
+        let (fg, _) = apply(b"\x1b[38:2:0:10:20:30m");
+        assert_eq!(fg, Srgb::new(10, 20, 30));
     }
 }

@@ -1,11 +1,14 @@
 use std::path::PathBuf;
+use std::str::FromStr;
 
+use palette::Srgb;
 use serde::Deserialize;
 use wgpu::PowerPreference;
 
 use crate::keybindings::Keybinding;
 use crate::keybindings::KeybindingConfig;
 use crate::keybindings::Keybindings;
+use crate::terminal::ColorPalette;
 use crate::terminal::CursorShape;
 use crate::terminal::CursorStyle;
 
@@ -54,6 +57,144 @@ pub enum BellMode {
     /// when the window is focused; eye-catching when it isn't.
     #[serde(alias = "attention")]
     Urgent,
+}
+
+// ---------------------------------------------------------------------------
+// [colors] — Rio/Alacritty-format palette config
+// ---------------------------------------------------------------------------
+
+/// Top-level `[colors]` table in the config file.
+#[derive(Deserialize, Default)]
+struct ColorsConfig {
+    /// Cursor color override (hex string, e.g. `"#009fff"`).
+    cursor: Option<String>,
+    /// `[colors.primary]` — default foreground / background.
+    primary: Option<PrimaryColors>,
+    /// `[colors.selection]` — selection highlight colors.
+    selection: Option<SelectionColors>,
+    /// `[colors.normal]` — the 8 standard ANSI colors.
+    normal: Option<AnsiColors>,
+    /// `[colors.bright]` — the 8 bright ANSI colors.
+    bright: Option<AnsiColors>,
+}
+
+#[derive(Deserialize, Default)]
+struct PrimaryColors {
+    foreground: Option<String>,
+    background: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct SelectionColors {
+    background: Option<String>,
+    text: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct AnsiColors {
+    black: Option<String>,
+    red: Option<String>,
+    green: Option<String>,
+    yellow: Option<String>,
+    blue: Option<String>,
+    magenta: Option<String>,
+    cyan: Option<String>,
+    white: Option<String>,
+}
+
+/// Try to parse a hex color, logging a warning on failure and returning the
+/// provided fallback.
+fn parse_color_or_default(
+    s: &Option<String>,
+    fallback: Srgb<u8>,
+    label: &str,
+) -> Srgb<u8> {
+    match s {
+        Some(string) => match palette::Srgb::from_str(string)
+            .ok()
+            .or_else(|| palette::named::from_str(string))
+        {
+            Some(c) => c,
+            None => {
+                warn!("invalid color for {label}: {string:?}; using default");
+                fallback
+            }
+        },
+        None => fallback,
+    }
+}
+
+/// Build a [`ColorPalette`] from the deserialized `[colors]` config,
+/// falling back to hardcoded defaults for any value not specified.
+fn build_palette(colors: Option<ColorsConfig>) -> ColorPalette {
+    let mut pal = ColorPalette::default();
+    let Some(c) = colors else {
+        return pal;
+    };
+
+    if let Some(ref p) = c.primary {
+        pal.fg = parse_color_or_default(&p.foreground, pal.fg, "colors.primary.foreground");
+        pal.bg = parse_color_or_default(&p.background, pal.bg, "colors.primary.background");
+    }
+
+    pal.cursor = c.cursor.as_ref().and_then(|s| {
+        Srgb::from_str(s)
+            .ok()
+            .or_else(|| palette::named::from_str(s))
+            .or_else(|| {
+                warn!("invalid hex color for colors.cursor: {s:?}; ignoring");
+                None
+            })
+    });
+
+    if let Some(ref sel) = c.selection {
+        pal.selection_bg = sel.background.as_ref().and_then(|s| {
+            Srgb::from_str(s)
+                .ok()
+                .or_else(|| palette::named::from_str(s))
+                .or_else(|| {
+                    warn!("invalid hex color for colors.selection.background: {s:?}; ignoring");
+                    None
+                })
+        });
+        pal.selection_fg = sel.text.as_ref().and_then(|s| {
+            Srgb::from_str(s)
+                .ok()
+                .or_else(|| palette::named::from_str(s))
+                .or_else(|| {
+                    warn!("invalid hex color for colors.selection.text: {s:?}; ignoring");
+                    None
+                })
+        });
+    }
+
+    if let Some(ref n) = c.normal {
+        let names = [
+            "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+        ];
+        let fields = [
+            &n.black, &n.red, &n.green, &n.yellow, &n.blue, &n.magenta, &n.cyan, &n.white,
+        ];
+        for (i, (field, name)) in fields.iter().zip(names.iter()).enumerate() {
+            pal.ansi[i] =
+                parse_color_or_default(field, pal.ansi[i], &format!("colors.normal.{name}"));
+        }
+    }
+
+    if let Some(ref b) = c.bright {
+        let names = [
+            "black", "red", "green", "yellow", "blue", "magenta", "cyan", "white",
+        ];
+        let fields = [
+            &b.black, &b.red, &b.green, &b.yellow, &b.blue, &b.magenta, &b.cyan, &b.white,
+        ];
+        for (i, (field, name)) in fields.iter().zip(names.iter()).enumerate() {
+            pal.ansi[8 + i] =
+                parse_color_or_default(field, pal.ansi[8 + i], &format!("colors.bright.{name}"));
+        }
+    }
+
+    pal
 }
 
 #[derive(Deserialize)]
@@ -129,6 +270,10 @@ struct ConfigFile {
     #[serde(deserialize_with = "u32_opt_clamp_1_16")]
     #[serde(default)]
     font_supersampling: Option<u32>,
+
+    /// Color palette in Rio format.
+    #[serde(default)]
+    colors: Option<ColorsConfig>,
 }
 
 #[derive(Debug)]
@@ -154,6 +299,8 @@ pub struct Config {
     /// smoother results at the cost of increased CPU usage and memory
     /// consumption. Default is 4.
     pub font_supersampling: i32,
+    /// Color palette (ANSI 16 colors, default fg/bg, cursor, selection).
+    pub palette: ColorPalette,
 }
 
 impl Default for Config {
@@ -173,6 +320,7 @@ impl Default for Config {
             background_image: None,
             background_opacity: 1.0,
             font_supersampling: 4,
+            palette: ColorPalette::default(),
         }
     }
 }
@@ -205,6 +353,7 @@ fn parse_config(
 
     let cursor_style = build_cursor_style(file.cursor_shape, file.cursor_blink);
     let keybindings = build_keybindings(file.keybindings, source);
+    let palette = build_palette(file.colors);
 
     Config {
         opacity: file.opacity.unwrap_or(1.0),
@@ -221,6 +370,7 @@ fn parse_config(
         background_image: file.background_image.map(expand_path),
         background_opacity: file.background_opacity.unwrap_or(1.0),
         font_supersampling: file.font_supersampling.unwrap_or(4) as i32,
+        palette,
     }
 }
 
@@ -547,5 +697,93 @@ mod tests {
             cfg.background_image.as_deref(),
             Some(std::path::Path::new("/srv/share/wall.png"))
         );
+    }
+
+    // ---- color palette ----
+
+    #[test]
+    fn empty_config_uses_default_palette() {
+        let cfg = parse("");
+        assert_eq!(cfg.palette.fg, Srgb::new(204, 204, 204));
+        assert_eq!(cfg.palette.bg, Srgb::new(0, 0, 0));
+        assert!(cfg.palette.cursor.is_none());
+        assert!(cfg.palette.selection_bg.is_none());
+        // Default ANSI red
+        assert_eq!(cfg.palette.ansi[1], Srgb::new(205, 0, 0));
+    }
+
+    #[test]
+    fn full_rio_palette_parses() {
+        let cfg = parse(
+            r##"
+[colors]
+cursor = "#009fff"
+
+[colors.primary]
+foreground = "#fbfbfb"
+background = "#070707"
+
+[colors.selection]
+background = "#fbfbfb"
+text = "#070707"
+
+[colors.normal]
+black = "#141415"
+red = "#ff2e3f"
+green = "#0dbe4e"
+yellow = "#ffca00"
+blue = "#009fff"
+magenta = "#c635e4"
+cyan = "#08c0ef"
+white = "#c6c6c8"
+
+[colors.bright]
+black = "#6c6c71"
+red = "#ff6762"
+green = "#5ecc71"
+yellow = "#ffd452"
+blue = "#69b1ff"
+magenta = "#d568ea"
+cyan = "#68cdf2"
+white = "#fbfbfb"
+"##,
+        );
+        assert_eq!(cfg.palette.fg, Srgb::new(0xfb, 0xfb, 0xfb));
+        assert_eq!(cfg.palette.bg, Srgb::new(0x07, 0x07, 0x07));
+        assert_eq!(cfg.palette.cursor, Some(Srgb::new(0x00, 0x9f, 0xff)));
+        assert_eq!(cfg.palette.selection_bg, Some(Srgb::new(0xfb, 0xfb, 0xfb)));
+        assert_eq!(cfg.palette.selection_fg, Some(Srgb::new(0x07, 0x07, 0x07)));
+        // Spot-check a few ANSI colors
+        assert_eq!(cfg.palette.ansi[0], Srgb::new(0x14, 0x14, 0x15)); // normal black
+        assert_eq!(cfg.palette.ansi[1], Srgb::new(0xff, 0x2e, 0x3f)); // normal red
+        assert_eq!(cfg.palette.ansi[8], Srgb::new(0x6c, 0x6c, 0x71)); // bright black
+        assert_eq!(cfg.palette.ansi[15], Srgb::new(0xfb, 0xfb, 0xfb)); // bright white
+    }
+
+    #[test]
+    fn partial_palette_keeps_defaults_for_unspecified() {
+        let cfg = parse(
+            r##"
+[colors.primary]
+foreground = "#ff0000"
+"##,
+        );
+        assert_eq!(cfg.palette.fg, Srgb::new(255, 0, 0));
+        // Background stays default
+        assert_eq!(cfg.palette.bg, Srgb::new(0, 0, 0));
+        // ANSI colors stay default
+        assert_eq!(cfg.palette.ansi[1], Srgb::new(205, 0, 0));
+    }
+
+    #[test]
+    fn invalid_hex_color_falls_back_to_default() {
+        let cfg = parse(
+            r##"
+[colors.primary]
+foreground = "not-a-color"
+"##,
+        );
+        // Should fall back to default fg
+        assert_eq!(cfg.palette.fg, Srgb::new(204, 204, 204));
     }
 }

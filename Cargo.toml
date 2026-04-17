@@ -48,7 +48,9 @@ log                  = { workspace = true }
 notify               = "8.2.0"
 open                 = "5.3.3"
 palette              = { version = "0.7.6", default-features = false, features = [
-  "std"
+  "named",
+  "named_from_str",
+  "std",
 ] }
 percent-encoding     = "2.3.2"
 png                  = { workspace = true }

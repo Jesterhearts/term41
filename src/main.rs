@@ -344,6 +344,7 @@ fn main() {
         config.scrollback_lines,
         cell_height,
         cell_width,
+        config.palette.clone(),
     );
     terminal.set_default_cursor_style(config.cursor_style);
     let terminal = Arc::new(Mutex::new(terminal));
