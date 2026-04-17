@@ -124,6 +124,7 @@ pub struct FontSystem {
     plan_cache: HashMap<PlanKey, ShapePlan>,
     pub cell_width: u32,
     pub cell_height: u32,
+    pub supersample: i32,
     pub font_size: f32,
     ascent: f32,
     /// The user-configured font size before DPI scaling.
@@ -134,6 +135,7 @@ impl FontSystem {
     pub fn new(
         fonts_config: Option<String>,
         font_size: f32,
+        supersample: i32,
     ) -> Self {
         let _ = thread::Builder::new().name("font-loader".into()).spawn(|| {
             let mut fonts: Vec<LoadedFont> = Vec::new();
@@ -248,6 +250,7 @@ impl FontSystem {
             font_size,
             ascent,
             base_font_size: font_size,
+            supersample,
         }
     }
 
@@ -630,9 +633,11 @@ impl FontSystem {
 
         let gid = GlyphId::new(glyph_index as u32);
         match loca.get_glyf(gid, &glyf) {
-            Ok(Some(Glyph::Simple(simple))) => rasterize_simple_glyph(&simple, scale),
+            Ok(Some(Glyph::Simple(simple))) => {
+                rasterize_simple_glyph(&simple, scale, self.supersample)
+            }
             Ok(Some(Glyph::Composite(composite))) => {
-                rasterize_composite_glyph(&composite, &loca, &glyf, scale)
+                rasterize_composite_glyph(&composite, &loca, &glyf, scale, self.supersample)
             }
             _ => empty_glyph(),
         }
@@ -837,18 +842,10 @@ fn charmap_lookup(
 // Rasterization via raqote
 // ---------------------------------------------------------------------------
 
-/// Supersample factor for outline glyph rasterization. Glyphs are
-/// rasterized at `SS × SS` the target resolution and then box-filter
-/// downsampled. `2` gives 4 coverage samples per output pixel — a
-/// significant AA improvement over binary on/off coverage at 1x — at
-/// the cost of ~4× raqote fill work per glyph. Glyph bitmaps are cached
-/// in the atlas, so the extra work only fires on the first render of
-/// each glyph at each size, not per-frame.
-const SUPERSAMPLE: i32 = 2;
-
 fn rasterize_simple_glyph(
     simple: &SimpleGlyph,
     scale: f32,
+    supersample: i32,
 ) -> RasterizedGlyph {
     // 1× bounds — these define the output size and bearing so the glyph
     // lands at the same position it would without supersampling.
@@ -862,11 +859,17 @@ fn rasterize_simple_glyph(
     }
 
     // Rasterize at SS× resolution then downsample.
-    let ss = SUPERSAMPLE;
+    let ss = supersample;
     let ss_scale = scale * ss as f32;
     let ss_w = width * ss;
     let ss_h = height * ss;
-    let path = build_path(simple, ss_scale, x_min * ss as f32, y_max * ss as f32);
+    let path = build_path(
+        simple,
+        ss_scale,
+        x_min * ss as f32,
+        y_max * ss as f32,
+        STEM_DARKEN_SS_PX,
+    );
     let mut dt = DrawTarget::new(ss_w, ss_h);
     dt.fill(
         &path,
@@ -973,6 +976,7 @@ fn composite_to_path(
     y_max: f32,
     parent_dx: f32,
     parent_dy: f32,
+    embolden: f32,
 ) {
     for comp in composite.components() {
         let gid = GlyphId::new(comp.glyph.to_u32());
@@ -988,10 +992,12 @@ fn composite_to_path(
 
         match glyph {
             Glyph::Simple(simple) => {
-                add_simple_glyph_to_path(pb, &simple, scale, x_min, y_max, dx, dy);
+                add_simple_glyph_to_path(pb, &simple, scale, x_min, y_max, dx, dy, embolden);
             }
             Glyph::Composite(inner) => {
-                composite_to_path(pb, &inner, loca, glyf, scale, x_min, y_max, dx, dy);
+                composite_to_path(
+                    pb, &inner, loca, glyf, scale, x_min, y_max, dx, dy, embolden,
+                );
             }
         }
     }
@@ -1002,6 +1008,7 @@ fn rasterize_composite_glyph(
     loca: &Loca,
     glyf: &read_fonts::tables::glyf::Glyf,
     scale: f32,
+    supersample: i32,
 ) -> RasterizedGlyph {
     // 1× bounds for output.
     let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
@@ -1022,7 +1029,7 @@ fn rasterize_composite_glyph(
     }
 
     // Rasterize at SS× resolution then downsample.
-    let ss = SUPERSAMPLE;
+    let ss = supersample;
     let ss_scale = scale * ss as f32;
     let ss_w = width * ss;
     let ss_h = height * ss;
@@ -1038,6 +1045,7 @@ fn rasterize_composite_glyph(
         y_max * ss as f32,
         0.0,
         0.0,
+        STEM_DARKEN_SS_PX,
     );
 
     let path = pb.finish();
@@ -1066,6 +1074,7 @@ fn add_simple_glyph_to_path(
     y_max: f32,
     dx: f32,
     dy: f32,
+    embolden: f32,
 ) {
     let points: Vec<CurvePoint> = simple.points().collect();
     let contour_ends: Vec<usize> = simple
@@ -1077,7 +1086,7 @@ fn add_simple_glyph_to_path(
     let mut contour_start = 0;
     for &contour_end in &contour_ends {
         let contour = &points[contour_start..=contour_end];
-        add_contour_to_path_with_offset(pb, contour, scale, x_min, y_max, dx, dy);
+        add_contour_to_path_with_offset(pb, contour, scale, x_min, y_max, dx, dy, embolden);
         contour_start = contour_end + 1;
     }
 }
@@ -1087,10 +1096,83 @@ fn build_path(
     scale: f32,
     x_min: f32,
     y_max: f32,
+    embolden: f32,
 ) -> raqote::Path {
     let mut pb = PathBuilder::new();
-    add_simple_glyph_to_path(&mut pb, simple, scale, x_min, y_max, 0.0, 0.0);
+    add_simple_glyph_to_path(&mut pb, simple, scale, x_min, y_max, 0.0, 0.0, embolden);
     pb.finish()
+}
+
+/// Stem darkening amount in supersample pixels. Each contour point is
+/// moved outward along its vertex normal by this amount, uniformly
+/// thickening stems. 0.4 SS-px = 0.2 display pixels at SUPERSAMPLE=2.
+const STEM_DARKEN_SS_PX: f32 = 0.4;
+
+/// Move each point in a closed contour outward along its vertex normal by
+/// `amount` pixels. Outer contours expand; inner contours (holes) shrink —
+/// both actions increase the filled area, thickening stems uniformly.
+///
+/// The vertex normal at each point is the average of the two adjacent edge
+/// normals, normalised. At sharp corners (where the averaged normal is very
+/// short), the offset is capped at `2 * amount` to prevent miter spikes.
+fn embolden_contour(
+    points: &mut [(f32, f32, bool)],
+    amount: f32,
+) {
+    let n = points.len();
+    if n < 3 || amount <= 0.0 {
+        return;
+    }
+
+    // Signed area via the shoelace formula. In screen-space (Y-down) a
+    // positive result means CW winding (inner/hole contour), negative
+    // means CCW (outer contour).
+    let mut area2 = 0.0f32;
+    for i in 0..n {
+        let j = (i + 1) % n;
+        area2 += points[i].0 * points[j].1 - points[j].0 * points[i].1;
+    }
+    // Outer (CCW in screen, negative area): expand outward.
+    // Inner (CW in screen, positive area): shrink the hole = expand fill.
+    // Both use the same "outward" normal relative to the contour's own
+    // winding; we just need to pick a consistent perpendicular direction
+    // and flip the sign for inner contours.
+    let sign = if area2 >= 0.0 { -amount } else { amount };
+    let max_offset = 2.0 * amount;
+
+    let offsets: Vec<(f32, f32)> = (0..n)
+        .map(|i| {
+            let prev = if i == 0 { n - 1 } else { i - 1 };
+            let next = (i + 1) % n;
+
+            let (px, py, _) = points[prev];
+            let (cx, cy, _) = points[i];
+            let (nx, ny, _) = points[next];
+
+            // Edge vectors.
+            let (e1x, e1y) = (cx - px, cy - py);
+            let (e2x, e2y) = (nx - cx, ny - cy);
+
+            // Per-edge normals (rotate 90° CCW: (-y, x)).
+            let len1 = (e1x * e1x + e1y * e1y).sqrt().max(1e-6);
+            let len2 = (e2x * e2x + e2y * e2y).sqrt().max(1e-6);
+            let (n1x, n1y) = (-e1y / len1, e1x / len1);
+            let (n2x, n2y) = (-e2y / len2, e2x / len2);
+
+            // Average normal. The length naturally shrinks at sharp corners
+            // (the two normals point in different directions); we cap the
+            // reciprocal to avoid miter spikes.
+            let (ax, ay) = (n1x + n2x, n1y + n2y);
+            let alen = (ax * ax + ay * ay).sqrt().max(1e-6);
+            let offset = (sign / alen).clamp(-max_offset, max_offset);
+            (ax * offset, ay * offset)
+        })
+        .collect();
+
+    for (i, &(dx, dy)) in offsets.iter().enumerate() {
+        points[i].0 += dx;
+        points[i].1 += dy;
+    }
 }
 
 fn add_contour_to_path_with_offset(
@@ -1101,6 +1183,7 @@ fn add_contour_to_path_with_offset(
     y_max: f32,
     dx: f32,
     dy: f32,
+    embolden: f32,
 ) {
     if contour.is_empty() {
         return;
@@ -1135,6 +1218,9 @@ fn add_contour_to_path_with_offset(
         expanded.push(((lx + fx) / 2.0, (ly + fy) / 2.0, true));
     }
 
+    // Stem darkening: dilate the outline along vertex normals.
+    embolden_contour(&mut expanded, embolden);
+
     let start_idx = expanded.iter().position(|p| p.2).unwrap_or(0);
     let n = expanded.len();
     let (sx, sy, _) = expanded[start_idx];
@@ -1166,7 +1252,7 @@ mod tests {
     /// composites (composite referencing another composite).
     #[test]
     fn shaped_glyphs_rasterize() {
-        let mut fs = FontSystem::new(None, 18.0);
+        let mut fs = FontSystem::new(None, 18.0, 4);
 
         for text in [":: ", "a::b ", "Hello "] {
             let cells: Vec<SmolStr> = text

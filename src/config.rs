@@ -122,6 +122,13 @@ struct ConfigFile {
     #[serde(deserialize_with = "float_opt_clamp_0_1")]
     #[serde(default)]
     background_opacity: Option<f32>,
+
+    /// Supersampling factor for font rasterization. Higher values produce
+    /// smoother results at the cost of increased CPU usage and memory
+    /// consumption. Default is 4.
+    #[serde(deserialize_with = "u32_opt_clamp_1_16")]
+    #[serde(default)]
+    font_supersampling: Option<u32>,
 }
 
 #[derive(Debug)]
@@ -143,6 +150,10 @@ pub struct Config {
     pub background_image: Option<PathBuf>,
     /// RGB multiplier applied to the background image. Always in `[0.0, 1.0]`.
     pub background_opacity: f32,
+    /// Supersampling factor for font rasterization. Higher values produce
+    /// smoother results at the cost of increased CPU usage and memory
+    /// consumption. Default is 4.
+    pub font_supersampling: i32,
 }
 
 impl Default for Config {
@@ -161,6 +172,7 @@ impl Default for Config {
             dpi_scale: None,
             background_image: None,
             background_opacity: 1.0,
+            font_supersampling: 4,
         }
     }
 }
@@ -208,6 +220,7 @@ fn parse_config(
         dpi_scale: file.dpi_scale.map(|v| v.max(0.25)),
         background_image: file.background_image.map(expand_path),
         background_opacity: file.background_opacity.unwrap_or(1.0),
+        font_supersampling: file.font_supersampling.unwrap_or(4) as i32,
     }
 }
 
@@ -413,6 +426,28 @@ where
         Ok(opt) => Ok(opt),
         Err(e) => {
             warn!("failed to parse vsync setting in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn u32_opt_clamp_1_16<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<u32>::deserialize(deserializer) {
+        Ok(opt) => {
+            if let Some(v) = opt {
+                if !(1..=16).contains(&v) {
+                    warn!("integer value {v} out of range [1, 16]; clamping");
+                }
+                Ok(Some(v.clamp(1, 16)))
+            } else {
+                Ok(None)
+            }
+        }
+        Err(e) => {
+            warn!("failed to parse integer in config: {e}");
             Ok(None)
         }
     }

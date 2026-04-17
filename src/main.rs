@@ -293,7 +293,11 @@ fn main() {
         .build()
         .expect("create event loop");
 
-    let font_system = FontSystem::new(config.fonts.clone(), config.font_size);
+    let font_system = FontSystem::new(
+        config.fonts.clone(),
+        config.font_size,
+        config.font_supersampling,
+    );
     let cell_width = font_system.cell_width;
     let cell_height = font_system.cell_height;
     let opacity = config.opacity;
