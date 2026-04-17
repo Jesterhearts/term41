@@ -1,7 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
-mod clipboard;
 mod config;
 mod image;
 mod keybindings;

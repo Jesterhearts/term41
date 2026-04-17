@@ -6,6 +6,9 @@
 
 use arboard::Clipboard as ArboardClipboard;
 
+#[macro_use]
+extern crate log;
+
 /// Which selection an OSC 52 or right-click-copy operation targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClipboardKind {
@@ -15,6 +18,12 @@ pub enum ClipboardKind {
 
 pub struct Clipboard {
     backend: Backend,
+}
+
+impl Default for Clipboard {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 enum Backend {
@@ -37,10 +46,6 @@ impl Clipboard {
         Self { backend }
     }
 
-    /// Construct a Clipboard that never touches the system — used by tests
-    /// so results are deterministic regardless of whether a display server
-    /// happens to be reachable from the test environment.
-    #[cfg(test)]
     pub fn in_memory() -> Self {
         Self {
             backend: Backend::InMemory {

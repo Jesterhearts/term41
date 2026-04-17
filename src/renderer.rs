@@ -15,6 +15,8 @@ use std::thread::Thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use clip41::Clipboard;
+use clip41::ClipboardKind;
 use font41::FontSystem;
 use winit::event::MouseButton;
 use winit::event_loop::EventLoopProxy;
@@ -31,7 +33,6 @@ use crate::MULTI_CLICK_WINDOW;
 use crate::MouseButtonState;
 use crate::Tab;
 use crate::TabId;
-use crate::clipboard::ClipboardKind;
 use crate::config::BellMode;
 use crate::config::Config;
 use crate::config::DEFAULT_SCROLLBACK;
@@ -223,7 +224,7 @@ pub struct RenderHost {
     /// clipboards (which exist so OSC 52 sets are scoped per-tab). Used
     /// by `PasteAsBackground` to read image data from the system
     /// clipboard regardless of which tab is active.
-    clipboard: crate::clipboard::Clipboard,
+    clipboard: Clipboard,
 
     should_exit: bool,
 }
@@ -282,7 +283,7 @@ impl RenderHost {
             window: None,
             preedit: None,
             ime_cursor_area: None,
-            clipboard: crate::clipboard::Clipboard::new(),
+            clipboard: Clipboard::new(),
             should_exit: false,
         }
     }
@@ -1039,7 +1040,7 @@ impl RenderHost {
 
         // Try raw clipboard bytes first — preserves GIF animation that
         // arboard's decoded-RGBA path would flatten to a single frame.
-        if let Some(bytes) = crate::clipboard::get_raw_image_bytes()
+        if let Some(bytes) = clip41::get_raw_image_bytes()
             && let Some(kind) = infer::get(&bytes)
         {
             let ext = kind.extension();

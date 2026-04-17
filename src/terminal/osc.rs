@@ -4,10 +4,10 @@ use std::time::Instant;
 
 use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
+use clip41::Clipboard;
+use clip41::ClipboardKind;
 use percent_encoding::percent_decode;
 
-use crate::clipboard::Clipboard;
-use crate::clipboard::ClipboardKind;
 use crate::terminal::CommandMeta;
 use crate::terminal::color;
 use crate::terminal::grid::Viewport;
