@@ -87,6 +87,10 @@ pub struct Screen {
     /// `true` when G0 is active (GL = G0, default). `false` when G1 is active
     /// (GL = G1, after SO).
     pub charset_gl_is_g0: bool,
+    /// DECAWM (`?7`) — when true (default), printing past the right margin
+    /// wraps to the next line. When false, the cursor stays at the right
+    /// margin and overwrites the last column.
+    pub autowrap: bool,
 }
 
 impl Screen {
@@ -137,6 +141,7 @@ impl Screen {
             charset_g0_is_drawing: false,
             charset_g1_is_drawing: false,
             charset_gl_is_g0: true,
+            autowrap: true,
         }
     }
 }
@@ -255,6 +260,7 @@ pub(super) fn set_private_mode(
             active.cursor.row = if enable { active.scroll_top } else { 0 };
             active.cursor.col = 0;
         }
+        7 => active.autowrap = enable,
         25 => active.cursor_visible = enable,
         47 => switch_screen(enable, active, stash, on_alt),
         1047 => {

@@ -122,6 +122,9 @@ pub(super) struct TerminalModes {
     /// character shifts existing text right before writing. Default is
     /// replace (overwrite) mode.
     pub insert_mode: bool,
+    /// LNM (ANSI mode 20) — Line Feed/New Line mode. When `true`, LF, VT,
+    /// and FF perform an implicit CR before the line feed. Default is off.
+    pub newline_mode: bool,
 }
 
 impl TerminalModes {
@@ -133,6 +136,7 @@ impl TerminalModes {
             focus_reporting: false,
             synchronized_update_since: None,
             insert_mode: false,
+            newline_mode: false,
         }
     }
 }
@@ -1393,6 +1397,7 @@ impl Terminal {
                     &self.viewport,
                     byte,
                     &mut self.bell_pending,
+                    self.modes.newline_mode,
                 );
             }
             Action::CsiDispatch {
@@ -3298,7 +3303,7 @@ mod tests {
     fn da1_replies_vt220() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[c");
-        assert_eq!(term.take_pending_output(), b"\x1b[?62;c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?62;22;29c");
     }
 
     #[test]
@@ -3306,7 +3311,7 @@ mod tests {
         // Apps sometimes send `CSI 0 c` explicitly; the reply is the same.
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[0c");
-        assert_eq!(term.take_pending_output(), b"\x1b[?62;c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?62;22;29c");
     }
 
     #[test]

@@ -207,9 +207,14 @@ pub(super) fn put_ascii_run(
     let mut i = 0;
     while i < run.len() {
         // Pre-wrap: a cursor parked past the last column wraps before
-        // writing, matching put_char's soft-wrap behaviour.
+        // writing when DECAWM is on. When off, clamp to the last column
+        // so subsequent writes overwrite in place.
         if screen.cursor.col >= viewport.cols {
-            soft_wrap(screen, viewport);
+            if screen.autowrap {
+                soft_wrap(screen, viewport);
+            } else {
+                screen.cursor.col = viewport.cols - 1;
+            }
         }
 
         let r = screen.grid.active_row_index(&screen.cursor, viewport);
@@ -279,10 +284,13 @@ pub(super) fn put_char(
     let width = raw_width.max(1);
 
     // Soft-wrap when the incoming cluster (possibly wide) would overhang the
-    // right edge. The existing pre-wrap also covers the cursor-past-end case
-    // left behind by the previous character.
+    // right edge. When DECAWM is off, clamp instead of wrapping.
     if screen.cursor.col + width as u32 > viewport.cols {
-        soft_wrap(screen, viewport);
+        if screen.autowrap {
+            soft_wrap(screen, viewport);
+        } else {
+            screen.cursor.col = viewport.cols.saturating_sub(width as u32);
+        }
     }
 
     // IRM: shift existing content right before overwriting.
@@ -411,6 +419,14 @@ fn query_private_mode(
                 2
             }
         }
+        // DECAWM — auto-wrap mode.
+        7 => {
+            if ctx.screen.autowrap {
+                1
+            } else {
+                2
+            }
+        }
         // DECTCEM — cursor visible.
         25 => {
             if ctx.screen.cursor_visible {
@@ -531,9 +547,14 @@ pub(super) fn execute(
     viewport: &Viewport,
     byte: u8,
     bell_pending: &mut bool,
+    newline_mode: bool,
 ) {
     match byte {
         b'\n' => {
+            // LNM (mode 20): when enabled, LF implies CR.
+            if newline_mode {
+                screen.cursor.col = 0;
+            }
             if screen.cursor.row == screen.scroll_bottom {
                 if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
                     screen.grid.push_visible_row(viewport);
@@ -706,6 +727,7 @@ pub(super) fn csi_dispatch(
         screen.last_char = None;
         screen.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
         screen.origin_mode = false;
+        screen.autowrap = true;
         screen.charset_g0_is_drawing = false;
         screen.charset_g1_is_drawing = false;
         screen.charset_gl_is_g0 = true;
@@ -724,8 +746,9 @@ pub(super) fn csi_dispatch(
     // DA1 needs pending_output, which lives on ctx rather than on the screen.
     // Handle it before borrowing ctx.screen for the screen-only match below.
     if action == 'c' {
-        // DA1 (Primary Device Attributes). Reply as a VT220 (62).
-        ctx.pending_output.extend_from_slice(b"\x1b[?62;c");
+        // DA1 (Primary Device Attributes). Reply as a VT220 (62) with
+        // ANSI color (22) and ANSI text locator (29) attributes.
+        ctx.pending_output.extend_from_slice(b"\x1b[?62;22;29c");
         return;
     }
 
@@ -1009,8 +1032,10 @@ pub(super) fn csi_dispatch(
             // intermediate) are handled above.
             let enable = action == 'h';
             for &mode in &p {
-                if mode == 4 {
-                    ctx.modes.insert_mode = enable;
+                match mode {
+                    4 => ctx.modes.insert_mode = enable,
+                    20 => ctx.modes.newline_mode = enable,
+                    _ => {}
                 }
             }
         }
@@ -1034,6 +1059,42 @@ pub(super) fn esc_dispatch(
         }
         return;
     }
+    // ESC # sequences (DECALN, DECDWL, DECDHL).
+    if intermediates == b"#" {
+        match byte {
+            // DECALN — Screen Alignment Pattern. Fills the entire visible
+            // screen with 'E' characters. Used by vttest and for service
+            // alignment testing.
+            b'8' => {
+                let first_visible = ctx
+                    .screen
+                    .grid
+                    .rows
+                    .len()
+                    .saturating_sub(ctx.viewport.rows as usize);
+                let e_cell = SmolStr::new_inline("E");
+                let fg = ctx.palette.fg;
+                let bg = ctx.palette.bg;
+                for r in first_visible..ctx.screen.grid.rows.len() {
+                    let row = &mut ctx.screen.grid.rows[r];
+                    for cell in row.cells.iter_mut() {
+                        *cell = e_cell.clone();
+                    }
+                    row.fg.fill(fg);
+                    row.bg.fill(bg);
+                    row.attrs.fill(CellAttrs::default());
+                }
+                ctx.screen.cursor.row = 0;
+                ctx.screen.cursor.col = 0;
+            }
+            // DECDWL (# 6), DECDHL (# 3/4), DECSWL (# 5) — double-width /
+            // double-height line attributes. Silently accepted as no-ops.
+            b'3' | b'4' | b'5' | b'6' => {}
+            _ => {}
+        }
+        return;
+    }
+
     if !intermediates.is_empty() {
         return;
     }
@@ -1041,6 +1102,45 @@ pub(super) fn esc_dispatch(
     match byte {
         b'7' => screen::save_cursor_slot(ctx.screen),
         b'8' => screen::restore_cursor_slot(ctx.screen, ctx.viewport),
+        // IND — Index. Move the cursor down one line; if at the bottom of
+        // the scroll region, scroll the region up.
+        b'D' => {
+            if ctx.screen.cursor.row == ctx.screen.scroll_bottom {
+                if ctx.screen.scroll_top == 0 && ctx.screen.scroll_bottom == ctx.viewport.rows - 1 {
+                    ctx.screen.grid.push_visible_row(ctx.viewport);
+                } else {
+                    ctx.screen.grid.scroll_up_in_region(
+                        ctx.viewport,
+                        &mut ctx.screen.images,
+                        ctx.screen.scroll_top,
+                        ctx.screen.scroll_bottom,
+                        1,
+                    );
+                }
+            } else if ctx.screen.cursor.row < ctx.viewport.rows - 1 {
+                ctx.screen.cursor.row += 1;
+            }
+        }
+        // NEL — Next Line. Move to column 0 of the next line; scroll if
+        // at the bottom of the scroll region.
+        b'E' => {
+            ctx.screen.cursor.col = 0;
+            if ctx.screen.cursor.row == ctx.screen.scroll_bottom {
+                if ctx.screen.scroll_top == 0 && ctx.screen.scroll_bottom == ctx.viewport.rows - 1 {
+                    ctx.screen.grid.push_visible_row(ctx.viewport);
+                } else {
+                    ctx.screen.grid.scroll_up_in_region(
+                        ctx.viewport,
+                        &mut ctx.screen.images,
+                        ctx.screen.scroll_top,
+                        ctx.screen.scroll_bottom,
+                        1,
+                    );
+                }
+            } else if ctx.screen.cursor.row < ctx.viewport.rows - 1 {
+                ctx.screen.cursor.row += 1;
+            }
+        }
         b'H' => {
             // HTS — set a tab stop at the current cursor column.
             let col = ctx.screen.cursor.col as usize;
@@ -1079,6 +1179,7 @@ pub(super) fn esc_dispatch(
                 s.last_char = None;
                 s.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
                 s.origin_mode = false;
+                s.autowrap = true;
                 s.charset_g0_is_drawing = false;
                 s.charset_g1_is_drawing = false;
                 s.charset_gl_is_g0 = true;
@@ -1167,7 +1268,9 @@ mod tests {
             match action {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
                 Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
-                Action::Execute(b) => execute(screen, viewport, b, &mut bell_pending),
+                Action::Execute(b) => {
+                    execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)
+                }
                 Action::CsiDispatch {
                     params,
                     intermediates,
@@ -1330,7 +1433,7 @@ mod tests {
         feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &viewport);
         assert_eq!(screen.cursor.col, 1);
 
-        execute(&mut screen, &viewport, BS, &mut false);
+        execute(&mut screen, &viewport, BS, &mut false, false);
         assert_eq!(screen.cursor.col, 0);
 
         // A full rub-out of `\b \b` from bash lands us back at col 0 with
@@ -1464,7 +1567,7 @@ mod tests {
     #[test]
     fn execute_lf_moves_cursor_down() {
         let (mut screen, viewport) = setup();
-        execute(&mut screen, &viewport, b'\n', &mut false);
+        execute(&mut screen, &viewport, b'\n', &mut false, false);
         assert_eq!(screen.cursor.row, 1);
     }
 
@@ -1474,7 +1577,7 @@ mod tests {
         screen.cursor.row = screen.scroll_bottom;
         let rows_before = screen.grid.rows.len();
 
-        execute(&mut screen, &viewport, b'\n', &mut false);
+        execute(&mut screen, &viewport, b'\n', &mut false, false);
 
         assert_eq!(screen.cursor.row, screen.scroll_bottom);
         assert_eq!(screen.grid.rows.len(), rows_before + 1);
@@ -1484,7 +1587,7 @@ mod tests {
     fn execute_cr_resets_col_to_zero() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 5;
-        execute(&mut screen, &viewport, b'\r', &mut false);
+        execute(&mut screen, &viewport, b'\r', &mut false, false);
         assert_eq!(screen.cursor.col, 0);
     }
 
@@ -1492,22 +1595,22 @@ mod tests {
     fn execute_bs_saturates_at_zero() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 2;
-        execute(&mut screen, &viewport, BS, &mut false);
+        execute(&mut screen, &viewport, BS, &mut false, false);
         assert_eq!(screen.cursor.col, 1);
-        execute(&mut screen, &viewport, BS, &mut false);
-        execute(&mut screen, &viewport, BS, &mut false);
-        execute(&mut screen, &viewport, BS, &mut false);
+        execute(&mut screen, &viewport, BS, &mut false, false);
+        execute(&mut screen, &viewport, BS, &mut false, false);
+        execute(&mut screen, &viewport, BS, &mut false, false);
         assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
     fn execute_tab_advances_to_next_tab_stop() {
         let (mut screen, viewport) = setup();
-        execute(&mut screen, &viewport, b'\t', &mut false);
+        execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
 
         screen.cursor.col = 3;
-        execute(&mut screen, &viewport, b'\t', &mut false);
+        execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
     }
 
@@ -1515,7 +1618,7 @@ mod tests {
     fn execute_tab_clamps_at_rightmost_column() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = TEST_COLS - 1;
-        execute(&mut screen, &viewport, b'\t', &mut false);
+        execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
 
@@ -1525,7 +1628,7 @@ mod tests {
         let mut bell = false;
         screen.cursor.col = 3;
         screen.cursor.row = 2;
-        execute(&mut screen, &viewport, BEL, &mut bell);
+        execute(&mut screen, &viewport, BEL, &mut bell, false);
         assert!(bell);
         assert_eq!(screen.cursor.col, 3);
         assert_eq!(screen.cursor.row, 2);
@@ -1536,7 +1639,7 @@ mod tests {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 3;
         screen.cursor.row = 2;
-        execute(&mut screen, &viewport, NUL, &mut false);
+        execute(&mut screen, &viewport, NUL, &mut false, false);
         assert_eq!(screen.cursor.col, 3);
         assert_eq!(screen.cursor.row, 2);
     }
@@ -1979,7 +2082,9 @@ mod tests {
             match action {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
                 Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
-                Action::Execute(b) => execute(screen, viewport, b, &mut bell_pending),
+                Action::Execute(b) => {
+                    execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)
+                }
                 Action::CsiDispatch {
                     params,
                     intermediates,
@@ -2071,7 +2176,7 @@ mod tests {
         // 10-col screen: only column 8 is a stop.
         let (mut screen, viewport) = setup();
         assert_eq!(screen.cursor.col, 0);
-        execute(&mut screen, &viewport, b'\t', &mut false);
+        execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
     }
 
@@ -2079,7 +2184,7 @@ mod tests {
     fn tab_from_mid_column_goes_to_next_stop() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 3;
-        execute(&mut screen, &viewport, b'\t', &mut false);
+        execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
     }
 
@@ -2087,7 +2192,7 @@ mod tests {
     fn tab_at_last_column_stays() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = TEST_COLS - 1;
-        execute(&mut screen, &viewport, b'\t', &mut false);
+        execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
 
@@ -2098,7 +2203,7 @@ mod tests {
         feed(b"\x1b[1;4H\x1bH", &mut screen, &viewport);
         assert!(screen.tab_stops[3]);
         screen.cursor.col = 0;
-        execute(&mut screen, &viewport, b'\t', &mut false);
+        execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 3);
     }
 
@@ -2151,7 +2256,7 @@ mod tests {
         assert!(!screen.tab_stops[8]);
         // Tab from col 0 should now go to the last column.
         screen.cursor.col = 0;
-        execute(&mut screen, &viewport, b'\t', &mut false);
+        execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
 
@@ -2162,7 +2267,7 @@ mod tests {
         assert!(screen.tab_stops.iter().all(|&s| !s));
         // Tab from col 0 should go to last column.
         screen.cursor.col = 0;
-        execute(&mut screen, &viewport, b'\t', &mut false);
+        execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
 
@@ -2381,5 +2486,85 @@ mod tests {
         assert!(top.starts_with("\u{250C}\u{2500}\u{2500}\u{2510}"));
         let bot = row_text(&screen, &viewport, 1);
         assert!(bot.starts_with("\u{2514}\u{2500}\u{2500}\u{2518}"));
+    }
+
+    // -- DECALN (ESC # 8) ---------------------------------------------------
+
+    #[test]
+    fn decaln_fills_screen_with_e() {
+        let (mut screen, viewport) = setup();
+        feed(b"hello", &mut screen, &viewport);
+        feed(b"\x1b#8", &mut screen, &viewport);
+        let text = row_text(&screen, &viewport, 0);
+        assert!(text.chars().all(|c| c == 'E'));
+        let text2 = row_text(&screen, &viewport, TEST_ROWS - 1);
+        assert!(text2.chars().all(|c| c == 'E'));
+    }
+
+    // -- IND (ESC D) and NEL (ESC E) ----------------------------------------
+
+    #[test]
+    fn ind_moves_cursor_down() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.col = 5;
+        feed(b"\x1bD", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 5); // col preserved
+    }
+
+    #[test]
+    fn ind_at_scroll_bottom_scrolls_up() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.row = screen.scroll_bottom;
+        let rows_before = screen.grid.rows.len();
+        feed(b"\x1bD", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, screen.scroll_bottom);
+        assert!(screen.grid.rows.len() > rows_before);
+    }
+
+    #[test]
+    fn nel_moves_to_col_0_of_next_line() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.col = 5;
+        feed(b"\x1bE", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    // -- DECAWM (mode ?7) ---------------------------------------------------
+
+    #[test]
+    fn decawm_off_prevents_wrap() {
+        let (mut screen, viewport) = setup();
+        // Disable auto-wrap.
+        feed(b"\x1b[?7l", &mut screen, &viewport);
+        // Write more chars than columns — should stay on last column.
+        feed(b"abcdefghijXX", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 0);
+        // Last column should have the last char written.
+        let text = row_text(&screen, &viewport, 0);
+        assert_eq!(&text[..TEST_COLS as usize], "abcdefghiX");
+    }
+
+    #[test]
+    fn decawm_on_wraps_normally() {
+        let (mut screen, viewport) = setup();
+        feed(b"\x1b[?7l", &mut screen, &viewport);
+        feed(b"\x1b[?7h", &mut screen, &viewport);
+        feed(b"abcdefghijkl", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 1);
+    }
+
+    // -- LNM (mode 20) ------------------------------------------------------
+
+    #[test]
+    fn lnm_enabled_lf_implies_cr() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.col = 5;
+        // Enable LNM and issue LF in one feed call so the modes object
+        // persists across both sequences.
+        feed(b"\x1b[20h\n", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 0); // CR implied
     }
 }
