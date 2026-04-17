@@ -1031,7 +1031,13 @@ pub(super) fn csi_dispatch(
             let bottom = p.get(1).copied().unwrap_or(viewport.rows as u16).max(1) as u32 - 1;
             screen.scroll_top = top.min(viewport.rows - 1);
             screen.scroll_bottom = bottom.min(viewport.rows - 1).max(screen.scroll_top);
-            screen.cursor.row = 0;
+            // Home cursor. In origin mode, home means the scroll region
+            // top; in absolute mode, home means row 0.
+            screen.cursor.row = if screen.origin_mode {
+                screen.scroll_top
+            } else {
+                0
+            };
             screen.cursor.col = 0;
         }
         's' => {
