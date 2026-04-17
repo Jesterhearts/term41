@@ -818,7 +818,7 @@ impl Renderer {
         if !self.gutter_enabled {
             return 0;
         }
-        (cell_width / 3).max(12)
+        compute_gutter_width(cell_width)
     }
 
     fn update_screen_size(
@@ -2463,6 +2463,10 @@ impl CursorRenderState {
             }
         }
     }
+}
+
+pub fn compute_gutter_width(cell_width: u32) -> u32 {
+    (cell_width / 3).max(12)
 }
 
 /// Paint one status bar per visible prompt row. Each bar spans the full

@@ -44,6 +44,7 @@ use winit::window::Window;
 use winit::window::WindowId;
 
 use crate::renderer::RenderEvent;
+use crate::renderer::compute_gutter_width;
 use crate::terminal::TerminalThread;
 
 #[macro_use]
@@ -134,7 +135,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             return;
         }
 
-        let pixel_width = INITIAL_COLS * self.cell_width;
+        let pixel_width = INITIAL_COLS * self.cell_width + compute_gutter_width(self.cell_width);
         let pixel_height = INITIAL_ROWS * self.cell_height;
         let transparent = self.opacity < 1.0;
         // LogicalSize so the window occupies the same visual area regardless
