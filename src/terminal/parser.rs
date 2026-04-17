@@ -557,8 +557,11 @@ pub(super) fn execute(
     }
 
     match byte {
-        b'\n' => {
-            // LNM (mode 20): when enabled, LF implies CR.
+        // LF, VT, FF all perform the same index-down operation. VT and FF
+        // are defined as equivalent to LF by ECMA-48; vttest's "control
+        // characters inside ESC sequences" test relies on VT working.
+        b'\n' | 0x0B | 0x0C => {
+            // LNM (mode 20): when enabled, LF/VT/FF imply CR.
             if newline_mode {
                 screen.cursor.col = 0;
             }
@@ -609,6 +612,14 @@ pub(super) fn csi_dispatch(
     intermediates: &[u8],
     action: char,
 ) {
+    // Cancel the pending-wrap state. After writing the last column,
+    // cursor.col sits at viewport.cols (one past the right edge). Any CSI
+    // sequence — cursor movement, erase, DSR report, even SGR — cancels
+    // this state so the cursor reports and behaves as if on the last column.
+    if ctx.screen.cursor.col >= ctx.viewport.cols {
+        ctx.screen.cursor.col = ctx.viewport.cols - 1;
+    }
+
     // -- Sequences that carry intermediates ----------------------------------
 
     if intermediates == b"?" && matches!(action, 'h' | 'l') {
@@ -845,15 +856,6 @@ pub(super) fn csi_dispatch(
     let screen = &mut *ctx.screen;
     let viewport = ctx.viewport;
     let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
-
-    // Cancel the pending-wrap state before any cursor movement or erase.
-    // After writing the last column, cursor.col sits at viewport.cols
-    // (one past the right edge). Movement sequences and erases should
-    // treat the cursor as being on the last column, not past it.
-    if screen.cursor.col >= viewport.cols {
-        screen.cursor.col = viewport.cols - 1;
-    }
-
     let cursor = &mut screen.cursor;
 
     match action {
