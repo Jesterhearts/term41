@@ -884,11 +884,21 @@ pub(super) fn csi_dispatch(
     match action {
         'A' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            cursor.row = cursor.row.saturating_sub(n);
+            let top = if screen.origin_mode {
+                screen.scroll_top
+            } else {
+                0
+            };
+            cursor.row = cursor.row.saturating_sub(n).max(top);
         }
         'B' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            cursor.row = (cursor.row + n).min(viewport.rows - 1);
+            let bottom = if screen.origin_mode {
+                screen.scroll_bottom
+            } else {
+                viewport.rows - 1
+            };
+            cursor.row = (cursor.row + n).min(bottom);
         }
         'C' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
