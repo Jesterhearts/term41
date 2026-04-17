@@ -1499,7 +1499,7 @@ mod tests {
 
     #[test]
     fn put_char_writes_with_current_colors_and_advances() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         screen.fg = Srgb::new(1, 2, 3);
         screen.bg = Srgb::new(4, 5, 6);
 
@@ -1732,14 +1732,14 @@ mod tests {
 
     #[test]
     fn execute_lf_moves_cursor_down() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         execute(&mut screen, &viewport, b'\n', &mut false, false);
         assert_eq!(screen.cursor.row, 1);
     }
 
     #[test]
     fn execute_lf_at_scroll_bottom_scrolls_up() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         screen.cursor.row = screen.scroll_bottom;
         let rows_before = screen.grid.rows.len();
 
@@ -1751,7 +1751,7 @@ mod tests {
 
     #[test]
     fn execute_cr_resets_col_to_zero() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         screen.cursor.col = 5;
         execute(&mut screen, &viewport, b'\r', &mut false, false);
         assert_eq!(screen.cursor.col, 0);
@@ -1759,7 +1759,7 @@ mod tests {
 
     #[test]
     fn execute_bs_saturates_at_zero() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         screen.cursor.col = 2;
         execute(&mut screen, &viewport, BS, &mut false, false);
         assert_eq!(screen.cursor.col, 1);
@@ -1771,7 +1771,7 @@ mod tests {
 
     #[test]
     fn execute_tab_advances_to_next_tab_stop() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
 
@@ -1782,7 +1782,7 @@ mod tests {
 
     #[test]
     fn execute_tab_clamps_at_rightmost_column() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         screen.cursor.col = TEST_COLS - 1;
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
@@ -1790,7 +1790,7 @@ mod tests {
 
     #[test]
     fn execute_bel_sets_bell_pending() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         let mut bell = false;
         screen.cursor.col = 3;
         screen.cursor.row = 2;
@@ -1802,7 +1802,7 @@ mod tests {
 
     #[test]
     fn execute_nul_is_noop() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         screen.cursor.col = 3;
         screen.cursor.row = 2;
         execute(&mut screen, &viewport, NUL, &mut false, false);
@@ -2351,7 +2351,7 @@ mod tests {
     #[test]
     fn default_tab_stops_every_8_columns() {
         // 10-col screen: only column 8 is a stop.
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         assert_eq!(screen.cursor.col, 0);
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
@@ -2359,7 +2359,7 @@ mod tests {
 
     #[test]
     fn tab_from_mid_column_goes_to_next_stop() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         screen.cursor.col = 3;
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
@@ -2367,7 +2367,7 @@ mod tests {
 
     #[test]
     fn tab_at_last_column_stays() {
-        let (mut screen, mut viewport) = setup();
+        let (mut screen, viewport) = setup();
         screen.cursor.col = TEST_COLS - 1;
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
