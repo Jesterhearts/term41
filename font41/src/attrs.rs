@@ -10,6 +10,8 @@ bitflags::bitflags! {
         const REVERSE       = 0b0000_0100;
         const DIM           = 0b0000_1000;
         const STRIKETHROUGH = 0b0001_0000;
+        const OVERLINE      = 0b0010_0000;
+        const HIDDEN        = 0b0100_0000;
     }
 }
 

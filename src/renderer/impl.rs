@@ -101,6 +101,11 @@ fn resolve_cell_colors(
     if attrs.contains(CellAttrs::DIM) {
         fg = Srgb::new(fg.red / 2, fg.green / 2, fg.blue / 2);
     }
+    // SGR 8 — concealed text. Foreground matches background so the text
+    // is invisible but still selectable / copyable.
+    if attrs.contains(CellAttrs::HIDDEN) {
+        fg = bg;
+    }
     (fg, bg)
 }
 
@@ -990,6 +995,21 @@ impl Renderer {
                         thickness,
                         cell_h,
                         ul_packed,
+                        &mut bg_vertices,
+                        &mut bg_indices,
+                    );
+                }
+
+                // Overline: horizontal line at the top of the cell.
+                if cell_attrs.contains(CellAttrs::OVERLINE) {
+                    let ol_color = pack_color(&cell_fg, 255);
+                    let thickness = (cell_h * 0.06).max(1.0);
+                    push_rect(
+                        x,
+                        y,
+                        cell_w,
+                        thickness,
+                        ol_color,
                         &mut bg_vertices,
                         &mut bg_indices,
                     );

@@ -704,6 +704,18 @@ pub(super) fn csi_dispatch(
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
             cursor.col = cursor.col.saturating_sub(n);
         }
+        // CNL — Cursor Next Line. Move down Ps lines and to column 1.
+        'E' => {
+            let n = p.first().copied().unwrap_or(1).max(1) as u32;
+            cursor.row = (cursor.row + n).min(viewport.rows - 1);
+            cursor.col = 0;
+        }
+        // CPL — Cursor Previous Line. Move up Ps lines and to column 1.
+        'F' => {
+            let n = p.first().copied().unwrap_or(1).max(1) as u32;
+            cursor.row = cursor.row.saturating_sub(n);
+            cursor.col = 0;
+        }
         'H' | 'f' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             let col = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
@@ -1388,6 +1400,47 @@ mod tests {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 2;
         feed(b"\x1b[5D", &mut screen, &viewport);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    // -- CNL / CPL -----------------------------------------------------------
+
+    #[test]
+    fn csi_e_moves_down_and_homes_column() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.row = 0;
+        screen.cursor.col = 5;
+        feed(b"\x1b[2E", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 2);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    #[test]
+    fn csi_e_clamps_at_bottom() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.col = 3;
+        feed(b"\x1b[99E", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, TEST_ROWS - 1);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    #[test]
+    fn csi_f_moves_up_and_homes_column() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.row = 3;
+        screen.cursor.col = 7;
+        feed(b"\x1b[2F", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    #[test]
+    fn csi_f_saturates_at_top() {
+        let (mut screen, viewport) = setup();
+        screen.cursor.row = 1;
+        screen.cursor.col = 5;
+        feed(b"\x1b[99F", &mut screen, &viewport);
+        assert_eq!(screen.cursor.row, 0);
         assert_eq!(screen.cursor.col, 0);
     }
 

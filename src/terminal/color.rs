@@ -171,6 +171,7 @@ pub(super) fn apply_sgr(
                 *underline = UnderlineStyle::from_sgr(sub);
             }
             7 => attrs.insert(CellAttrs::REVERSE),
+            8 => attrs.insert(CellAttrs::HIDDEN),
             9 => attrs.insert(CellAttrs::STRIKETHROUGH),
             21 => *underline = UnderlineStyle::Double,
             // SGR 22 resets both bold and faint per ECMA-48.
@@ -178,7 +179,10 @@ pub(super) fn apply_sgr(
             23 => attrs.remove(CellAttrs::ITALIC),
             24 => *underline = UnderlineStyle::None,
             27 => attrs.remove(CellAttrs::REVERSE),
+            28 => attrs.remove(CellAttrs::HIDDEN),
             29 => attrs.remove(CellAttrs::STRIKETHROUGH),
+            53 => attrs.insert(CellAttrs::OVERLINE),
+            55 => attrs.remove(CellAttrs::OVERLINE),
             30..=37 => *fg = palette_color(palette, (g[0] - 30) as u8),
             38 => {
                 if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
@@ -832,5 +836,81 @@ mod tests {
         // 38:2:0:10:20:30 — the 0 is the color-space id, skipped.
         let (fg, _) = apply(b"\x1b[38:2:0:10:20:30m");
         assert_eq!(fg, Srgb::new(10, 20, 30));
+    }
+
+    // -- overline (SGR 53/55) ------------------------------------------------
+
+    #[test]
+    fn sgr_53_sets_overline() {
+        let (attrs, _, _) = apply_full(b"\x1b[53m");
+        assert!(attrs.contains(CellAttrs::OVERLINE));
+    }
+
+    #[test]
+    fn sgr_55_clears_overline() {
+        let pal = ColorPalette::default();
+        let mut attrs = CellAttrs::default();
+        let mut ul = UnderlineStyle::None;
+        let mut ul_color = None;
+        let mut fg = default_fg();
+        let mut bg = default_bg();
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[53m"),
+            &pal,
+        );
+        assert!(attrs.contains(CellAttrs::OVERLINE));
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[55m"),
+            &pal,
+        );
+        assert!(!attrs.contains(CellAttrs::OVERLINE));
+    }
+
+    // -- hidden text (SGR 8/28) ----------------------------------------------
+
+    #[test]
+    fn sgr_8_sets_hidden() {
+        let (attrs, _, _) = apply_full(b"\x1b[8m");
+        assert!(attrs.contains(CellAttrs::HIDDEN));
+    }
+
+    #[test]
+    fn sgr_28_clears_hidden() {
+        let pal = ColorPalette::default();
+        let mut attrs = CellAttrs::default();
+        let mut ul = UnderlineStyle::None;
+        let mut ul_color = None;
+        let mut fg = default_fg();
+        let mut bg = default_bg();
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[8m"),
+            &pal,
+        );
+        assert!(attrs.contains(CellAttrs::HIDDEN));
+        apply_sgr(
+            &mut fg,
+            &mut bg,
+            &mut attrs,
+            &mut ul,
+            &mut ul_color,
+            &parse_sgr(b"\x1b[28m"),
+            &pal,
+        );
+        assert!(!attrs.contains(CellAttrs::HIDDEN));
     }
 }
