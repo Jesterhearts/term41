@@ -5,4 +5,4 @@ edition = "2024"
 
 [dependencies]
 pulp     = "0.22.2"
-smol_str = "0.3.6"
+smol_str = { workspace = true }
