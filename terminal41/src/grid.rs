@@ -1,7 +1,10 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
+use font41::attrs::CellAttrs;
+use font41::attrs::UnderlineStyle;
 use palette::Srgb;
+use smol_str::SmolStr;
 
 use crate::image::PlacedImage;
 use crate::image::clear_in_range;
@@ -389,6 +392,241 @@ impl Grid {
                 }
                 row += 1;
             }
+        }
+    }
+
+    /// Scroll every row in [top, bottom] left by `n` columns (SL, `CSI SP @`).
+    /// Cells on the right edge are cleared. Viewport-relative row indices.
+    pub(super) fn scroll_left(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        bottom: u32,
+        n: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let cols = viewport.cols as usize;
+        let n = (n as usize).min(cols);
+        if n == 0 {
+            return;
+        }
+        for r in top..=bottom {
+            let abs = first_visible + r as usize;
+            self.rows[abs].copy_within(n..cols, 0);
+            self.rows[abs].clear_range(cols - n..cols, self.default_fg, self.default_bg);
+        }
+    }
+
+    /// Scroll every row in [top, bottom] right by `n` columns (SR, `CSI SP A`).
+    /// Cells on the left edge are cleared. Viewport-relative row indices.
+    pub(super) fn scroll_right(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        bottom: u32,
+        n: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let cols = viewport.cols as usize;
+        let n = (n as usize).min(cols);
+        if n == 0 {
+            return;
+        }
+        for r in top..=bottom {
+            let abs = first_visible + r as usize;
+            self.rows[abs].copy_within(0..cols - n, n);
+            self.rows[abs].clear_range(0..n, self.default_fg, self.default_bg);
+        }
+    }
+
+    /// Insert `n` blank columns at the cursor column in every row of the
+    /// scroll region (DECIC, `CSI ' }`). Columns from cursor to right margin
+    /// shift right; columns pushed off the right edge are lost.
+    /// `cursor_col` and `top`/`bottom` are viewport-relative.
+    pub(super) fn insert_cols(
+        &mut self,
+        viewport: &Viewport,
+        cursor_col: u32,
+        top: u32,
+        bottom: u32,
+        n: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let cols = viewport.cols as usize;
+        let col = cursor_col as usize;
+        let n = (n as usize).min(cols - col);
+        if n == 0 {
+            return;
+        }
+        for r in top..=bottom {
+            let abs = first_visible + r as usize;
+            self.rows[abs].copy_within(col..cols - n, col + n);
+            self.rows[abs].clear_range(col..col + n, self.default_fg, self.default_bg);
+        }
+    }
+
+    /// Delete `n` columns at the cursor column in every row of the scroll
+    /// region (DECDC, `CSI ' ~`). Columns after the cursor shift left;
+    /// columns vacated on the right edge are cleared.
+    /// `cursor_col` and `top`/`bottom` are viewport-relative.
+    pub(super) fn delete_cols(
+        &mut self,
+        viewport: &Viewport,
+        cursor_col: u32,
+        top: u32,
+        bottom: u32,
+        n: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let cols = viewport.cols as usize;
+        let col = cursor_col as usize;
+        let n = (n as usize).min(cols - col);
+        if n == 0 {
+            return;
+        }
+        for r in top..=bottom {
+            let abs = first_visible + r as usize;
+            self.rows[abs].copy_within(col + n..cols, col);
+            self.rows[abs].clear_range(cols - n..cols, self.default_fg, self.default_bg);
+        }
+    }
+
+    /// Erase (fill with blank default-color cells) a rectangular region
+    /// (DECERA, `CSI $ z`). All coordinates are 0-based, viewport-relative,
+    /// inclusive on all four sides.
+    pub(super) fn erase_rect(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        left: u32,
+        bottom: u32,
+        right: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let left = left as usize;
+        let right_excl = (right as usize + 1).min(viewport.cols as usize);
+        for r in top..=bottom {
+            let abs = first_visible + r as usize;
+            self.rows[abs].clear_range(left..right_excl, self.default_fg, self.default_bg);
+        }
+    }
+
+    /// Fill a rectangular region with `ch` using the provided SGR attributes
+    /// (DECFRA, `CSI $ x`). Only characters 32–126 and 160–255 are valid;
+    /// other code points are a no-op. Coordinates are 0-based, viewport-
+    /// relative, inclusive on all four sides.
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn fill_rect(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        left: u32,
+        bottom: u32,
+        right: u32,
+        ch: SmolStr,
+        fg: Srgb<u8>,
+        bg: Srgb<u8>,
+        attrs: CellAttrs,
+        underline: UnderlineStyle,
+        underline_color: Option<Srgb<u8>>,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let left = left as usize;
+        let right_excl = (right as usize + 1).min(viewport.cols as usize);
+        for r in top..=bottom {
+            let abs = first_visible + r as usize;
+            let row = &mut self.rows[abs];
+            for c in left..right_excl {
+                row.cells[c] = ch.clone();
+                row.fg[c] = fg;
+                row.bg[c] = bg;
+                row.attrs[c] = attrs;
+                row.underline[c] = underline;
+                row.underline_color[c] = underline_color;
+                row.links[c] = None;
+            }
+        }
+    }
+
+    /// Copy a rectangular region to a destination position (DECCRA,
+    /// `CSI $ v`). Takes a full snapshot of the source first so that
+    /// overlapping source and destination produce well-defined results.
+    /// All coordinates are 0-based, viewport-relative; the copy is clipped
+    /// to viewport bounds.
+    pub(super) fn copy_rect(
+        &mut self,
+        viewport: &Viewport,
+        src_top: u32,
+        src_left: u32,
+        src_bottom: u32,
+        src_right: u32,
+        dst_top: u32,
+        dst_left: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let rows = viewport.rows as usize;
+        let cols = viewport.cols as usize;
+
+        let src_left = src_left as usize;
+        let src_right_excl = (src_right as usize + 1).min(cols);
+        let dst_left = dst_left as usize;
+
+        // Snapshot all source rows before writing anything.
+        let snaps: Vec<_> = (src_top..=src_bottom)
+            .filter(|&r| (r as usize) < rows)
+            .map(|r| {
+                let abs = first_visible + r as usize;
+                self.rows[abs].snap_range(src_left, src_right_excl)
+            })
+            .collect();
+
+        for (i, snap) in snaps.iter().enumerate() {
+            let dst_r = dst_top as usize + i;
+            if dst_r >= rows {
+                break;
+            }
+            let abs = first_visible + dst_r;
+            self.rows[abs].paste_range(snap, dst_left);
+        }
+    }
+
+    /// Apply SGR attribute changes to a rectangular region (DECCARA,
+    /// `CSI $ t`). Coordinates are 0-based, viewport-relative, inclusive.
+    pub(super) fn change_attrs_rect(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        left: u32,
+        bottom: u32,
+        right: u32,
+        sgr_params: &[u16],
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let left = left as usize;
+        let right_excl = (right as usize + 1).min(viewport.cols as usize);
+        for r in top..=bottom {
+            let abs = first_visible + r as usize;
+            self.rows[abs].apply_attrs_in_range(left, right_excl, sgr_params);
+        }
+    }
+
+    /// Reverse (toggle) SGR attributes in a rectangular region (DECRARA,
+    /// `CSI $ r`). Coordinates are 0-based, viewport-relative, inclusive.
+    pub(super) fn reverse_attrs_rect(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        left: u32,
+        bottom: u32,
+        right: u32,
+        sgr_params: &[u16],
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let left = left as usize;
+        let right_excl = (right as usize + 1).min(viewport.cols as usize);
+        for r in top..=bottom {
+            let abs = first_visible + r as usize;
+            self.rows[abs].toggle_attrs_in_range(left, right_excl, sgr_params);
         }
     }
 

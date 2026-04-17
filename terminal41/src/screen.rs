@@ -31,6 +31,8 @@ pub struct SavedCursor {
     pub origin_mode: bool,
     pub charset_g0_is_drawing: bool,
     pub charset_g1_is_drawing: bool,
+    pub charset_g2_is_drawing: bool,
+    pub charset_g3_is_drawing: bool,
     pub charset_gl_is_g0: bool,
 }
 
@@ -84,9 +86,18 @@ pub struct Screen {
     pub charset_g0_is_drawing: bool,
     /// Character set designated to G1.
     pub charset_g1_is_drawing: bool,
+    /// Character set designated to G2. `true` = DEC Special Graphics.
+    pub charset_g2_is_drawing: bool,
+    /// Character set designated to G3.
+    pub charset_g3_is_drawing: bool,
     /// `true` when G0 is active (GL = G0, default). `false` when G1 is active
     /// (GL = G1, after SO).
     pub charset_gl_is_g0: bool,
+    /// Pending single-shift: `Some(2)` after SS2 (ESC N), `Some(3)` after
+    /// SS3 (ESC O). The next graphic character is fetched from G2 or G3,
+    /// then this is cleared. Not saved/restored by DECSC — it applies only
+    /// to the very next character.
+    pub single_shift: Option<u8>,
     /// DECAWM (`?7`) — when true (default), printing past the right margin
     /// wraps to the next line. When false, the cursor stays at the right
     /// margin and overwrites the last column.
@@ -145,7 +156,10 @@ impl Screen {
             origin_mode: false,
             charset_g0_is_drawing: false,
             charset_g1_is_drawing: false,
+            charset_g2_is_drawing: false,
+            charset_g3_is_drawing: false,
             charset_gl_is_g0: true,
+            single_shift: None,
             autowrap: true,
             app_cursor_keys: false,
         }
@@ -177,6 +191,8 @@ pub(super) fn save_cursor_slot(screen: &mut Screen) {
         origin_mode: screen.origin_mode,
         charset_g0_is_drawing: screen.charset_g0_is_drawing,
         charset_g1_is_drawing: screen.charset_g1_is_drawing,
+        charset_g2_is_drawing: screen.charset_g2_is_drawing,
+        charset_g3_is_drawing: screen.charset_g3_is_drawing,
         charset_gl_is_g0: screen.charset_gl_is_g0,
     });
 }
@@ -200,6 +216,8 @@ pub(super) fn restore_cursor_slot(
             screen.origin_mode = saved.origin_mode;
             screen.charset_g0_is_drawing = saved.charset_g0_is_drawing;
             screen.charset_g1_is_drawing = saved.charset_g1_is_drawing;
+            screen.charset_g2_is_drawing = saved.charset_g2_is_drawing;
+            screen.charset_g3_is_drawing = saved.charset_g3_is_drawing;
             screen.charset_gl_is_g0 = saved.charset_gl_is_g0;
         }
         None => {

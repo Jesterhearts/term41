@@ -219,6 +219,130 @@ impl Row {
 
         copy_len
     }
+
+    /// Snapshot a column slice [left, right_excl) into a new Row for DECCRA.
+    /// The returned Row is as wide as the slice; semantic flags are not copied.
+    pub(super) fn snap_range(
+        &self,
+        left: usize,
+        right_excl: usize,
+    ) -> Self {
+        let right_excl = right_excl.min(self.cells.len());
+        let snap = Self {
+            cells: self.cells[left..right_excl].to_vec(),
+            fg: self.fg[left..right_excl].to_vec(),
+            bg: self.bg[left..right_excl].to_vec(),
+            attrs: self.attrs[left..right_excl].to_vec(),
+            underline: self.underline[left..right_excl].to_vec(),
+            underline_color: self.underline_color[left..right_excl].to_vec(),
+            links: self.links[left..right_excl].to_vec(),
+            wrapped: false,
+            prompt_start: false,
+            output_start: false,
+            exit_status: None,
+        };
+        snap
+    }
+
+    /// Write a snapshot row (from `snap_range`) into this row starting at
+    /// `dst_start`. Columns outside [dst_start, dst_start+snap.len()) are
+    /// left untouched.
+    pub(super) fn paste_range(
+        &mut self,
+        snap: &Self,
+        dst_start: usize,
+    ) {
+        let avail = self.cells.len().saturating_sub(dst_start);
+        let copy_len = snap.cells.len().min(avail);
+        if copy_len == 0 {
+            return;
+        }
+        self.cells[dst_start..dst_start + copy_len].clone_from_slice(&snap.cells[..copy_len]);
+        self.fg[dst_start..dst_start + copy_len].copy_from_slice(&snap.fg[..copy_len]);
+        self.bg[dst_start..dst_start + copy_len].copy_from_slice(&snap.bg[..copy_len]);
+        self.attrs[dst_start..dst_start + copy_len].copy_from_slice(&snap.attrs[..copy_len]);
+        self.underline[dst_start..dst_start + copy_len]
+            .copy_from_slice(&snap.underline[..copy_len]);
+        self.underline_color[dst_start..dst_start + copy_len]
+            .copy_from_slice(&snap.underline_color[..copy_len]);
+        self.links[dst_start..dst_start + copy_len].copy_from_slice(&snap.links[..copy_len]);
+    }
+
+    /// Apply SGR attribute parameters to every cell in [left, right_excl).
+    /// Used by DECCARA. Only the subset of SGR params that DECCARA recognises
+    /// (bold, underline, blink, reverse, protected) are handled; the rest are
+    /// ignored. Underline here means "turn on single underline"; clearing is
+    /// done via param 24.
+    pub(super) fn apply_attrs_in_range(
+        &mut self,
+        left: usize,
+        right_excl: usize,
+        sgr_params: &[u16],
+    ) {
+        let right_excl = right_excl.min(self.cells.len());
+        if left >= right_excl {
+            return;
+        }
+        for c in left..right_excl {
+            for &p in sgr_params {
+                match p {
+                    0 => {
+                        self.attrs[c] = CellAttrs::empty();
+                        self.underline[c] = UnderlineStyle::None;
+                    }
+                    1 => self.attrs[c] |= CellAttrs::BOLD,
+                    4 => self.underline[c] = UnderlineStyle::Single,
+                    7 => self.attrs[c] |= CellAttrs::REVERSE,
+                    22 => self.attrs[c] &= !CellAttrs::BOLD,
+                    24 => self.underline[c] = UnderlineStyle::None,
+                    27 => self.attrs[c] &= !CellAttrs::REVERSE,
+                    _ => {}
+                }
+            }
+        }
+    }
+
+    /// Toggle (XOR) SGR attributes in [left, right_excl). Used by DECRARA.
+    /// Underline is toggled between None and Single (it is an enum, not a
+    /// bitflag, so it must be handled separately).
+    pub(super) fn toggle_attrs_in_range(
+        &mut self,
+        left: usize,
+        right_excl: usize,
+        sgr_params: &[u16],
+    ) {
+        let right_excl = right_excl.min(self.cells.len());
+        if left >= right_excl {
+            return;
+        }
+        let mut flags = CellAttrs::empty();
+        let mut toggle_ul = false;
+        if sgr_params.is_empty() || sgr_params.contains(&0) {
+            flags |= CellAttrs::BOLD | CellAttrs::REVERSE;
+            toggle_ul = true;
+        }
+        for &p in sgr_params {
+            match p {
+                1 => flags |= CellAttrs::BOLD,
+                4 => toggle_ul = true,
+                7 => flags |= CellAttrs::REVERSE,
+                _ => {}
+            }
+        }
+        if flags.is_empty() && !toggle_ul {
+            return;
+        }
+        for c in left..right_excl {
+            self.attrs[c] ^= flags;
+            if toggle_ul {
+                self.underline[c] = if self.underline[c] != UnderlineStyle::None {
+                    UnderlineStyle::None
+                } else {
+                    UnderlineStyle::Single
+                };
+            }
+        }
+    }
 }
 
 fn range_bounds<R: RangeBounds<usize>>(

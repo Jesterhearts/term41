@@ -59,6 +59,12 @@ pub(super) struct EscContext<'a> {
     pub current_prompt_row: &'a mut Option<u64>,
     pub bell_pending: &'a mut bool,
     pub palette: &'a color::ColorPalette,
+    /// Bytes to write back to the PTY (e.g. VT52 identify response `ESC / Z`).
+    pub pending_output: &'a mut Vec<u8>,
+    /// State machine for VT52 `ESC Y Pr Pc`. Set to `AwaitingRow` when the
+    /// `ESC Y` byte is dispatched; the subsequent bytes are consumed in
+    /// [`Terminal::apply`] before any other dispatch occurs.
+    pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
 }
 
 /// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
@@ -183,6 +189,30 @@ pub(super) fn put_ascii_run(
         return;
     }
 
+    // Single-shift (SS2/SS3): the first character uses G2 or G3 for one
+    // character only. Consume it via put_char (which handles DEC drawing
+    // translation), then continue with the rest of the run.
+    let run = if let Some(ss) = screen.single_shift.take() {
+        let b = run[0];
+        let is_drawing = if ss == 2 {
+            screen.charset_g2_is_drawing
+        } else {
+            screen.charset_g3_is_drawing
+        };
+        let ch = if is_drawing && (0x60..=0x7E).contains(&b) {
+            SmolStr::new_inline(translate_drawing_char(b))
+        } else {
+            ASCII_CELLS[(b - 0x20) as usize].clone()
+        };
+        put_char(screen, viewport, ch, insert_mode);
+        &run[1..]
+    } else {
+        run
+    };
+    if run.is_empty() {
+        return;
+    }
+
     // When DEC Special Graphics is active, bytes 0x60-0x7E need to be
     // translated to Unicode box-drawing characters. Fall back to a
     // per-character path that handles the translation.
@@ -285,6 +315,11 @@ pub(super) fn put_char(
         try_extend_prev_cell(screen, viewport, &s);
         return;
     }
+
+    // Single-shift was already consumed by put_ascii_run for ASCII input.
+    // For non-ASCII graphic characters there is no drawing-table translation,
+    // so just clear the pending shift so it doesn't linger.
+    screen.single_shift = None;
 
     let width = raw_width.max(1);
 
@@ -417,7 +452,12 @@ fn apply_private_mode(
     enable: bool,
     ctx: &mut CsiContext<'_>,
 ) {
-    if mode == 2004 {
+    if mode == 2 {
+        // DECANM — ANSI/VT52 mode. `h` (enable) = ANSI mode; `l` (disable) =
+        // VT52 compatibility mode. The sense is inverted: the mode *being set*
+        // means ANSI is active, so VT52 is off.
+        ctx.modes.vt52_mode = !enable;
+    } else if mode == 2004 {
         ctx.modes.bracketed_paste = enable;
     } else if mode == 1004 {
         ctx.modes.focus_reporting = enable;
@@ -451,6 +491,14 @@ fn query_private_mode(
     ctx: &CsiContext<'_>,
 ) -> u8 {
     match ps {
+        // DECANM — ANSI/VT52 mode. Set (1) means ANSI mode is active.
+        2 => {
+            if !ctx.modes.vt52_mode {
+                1
+            } else {
+                2
+            }
+        }
         // DECCKM — application cursor keys.
         1 => {
             if ctx.screen.app_cursor_keys {
@@ -673,7 +721,10 @@ pub(super) fn csi_dispatch(
     if intermediates == b"?" && matches!(action, 'h' | 'l') {
         let enable = action == 'h';
         for p in params.iter() {
-            if p[0] == 2004 {
+            if p[0] == 2 {
+                // DECANM — ANSI/VT52 mode. `h` = ANSI (vt52_mode off); `l` = VT52.
+                ctx.modes.vt52_mode = !enable;
+            } else if p[0] == 2004 {
                 ctx.modes.bracketed_paste = enable;
             } else if p[0] == 1004 {
                 ctx.modes.focus_reporting = enable;
@@ -841,10 +892,215 @@ pub(super) fn csi_dispatch(
         screen.app_cursor_keys = false;
         screen.charset_g0_is_drawing = false;
         screen.charset_g1_is_drawing = false;
+        screen.charset_g2_is_drawing = false;
+        screen.charset_g3_is_drawing = false;
         screen.charset_gl_is_g0 = true;
+        screen.single_shift = None;
+        // DECSTR resets all terminal-level modes including DECANM
+        // (vt52_mode), returning the terminal to ANSI mode.
         *ctx.modes = TerminalModes::new();
         *ctx.kitty_keyboard = KittyKeyboardState::new();
         *ctx.cursor_style = CursorStyle::default();
+        return;
+    }
+
+    // DA3 (Tertiary Device Attributes, CSI = c).
+    if action == 'c' && intermediates == b"=" {
+        ctx.pending_output
+            .extend_from_slice(b"\x1bP!|000000000\x1b\\");
+        return;
+    }
+
+    // DECXCPR — Extended Cursor Position Report (CSI ? 6 n). Reports the
+    // cursor row, column, and page (always 1) as CSI ? row ; col ; 1 R.
+    if action == 'n' && intermediates == b"?" {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        if ps == 6 {
+            let row = ctx.screen.cursor.row + 1;
+            let col = ctx.screen.cursor.col + 1;
+            write!(ctx.pending_output, "\x1b[?{row};{col};1R").expect("write to Vec is infallible");
+        }
+        return;
+    }
+
+    // SL — Scroll Left (CSI Ps SP @). Shifts every row in the scroll region
+    // left by Ps columns; vacated columns on the right are cleared.
+    if action == '@' && intermediates == b" " {
+        let n = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(1)
+            .max(1) as u32;
+        ctx.screen.grid.scroll_left(
+            ctx.viewport,
+            ctx.screen.scroll_top,
+            ctx.screen.scroll_bottom,
+            n,
+        );
+        return;
+    }
+
+    // SR — Scroll Right (CSI Ps SP A). Shifts every row in the scroll region
+    // right by Ps columns; vacated columns on the left are cleared.
+    if action == 'A' && intermediates == b" " {
+        let n = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(1)
+            .max(1) as u32;
+        ctx.screen.grid.scroll_right(
+            ctx.viewport,
+            ctx.screen.scroll_top,
+            ctx.screen.scroll_bottom,
+            n,
+        );
+        return;
+    }
+
+    // DECIC — Insert Column (CSI Ps ' }). Inserts Ps blank columns at the
+    // cursor column in every row of the scroll region.
+    if action == '}' && intermediates == b"'" {
+        let n = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(1)
+            .max(1) as u32;
+        ctx.screen.grid.insert_cols(
+            ctx.viewport,
+            ctx.screen.cursor.col,
+            ctx.screen.scroll_top,
+            ctx.screen.scroll_bottom,
+            n,
+        );
+        return;
+    }
+
+    // DECDC — Delete Column (CSI Ps ' ~). Deletes Ps columns at the cursor
+    // column in every row of the scroll region.
+    if action == '~' && intermediates == b"'" {
+        let n = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(1)
+            .max(1) as u32;
+        ctx.screen.grid.delete_cols(
+            ctx.viewport,
+            ctx.screen.cursor.col,
+            ctx.screen.scroll_top,
+            ctx.screen.scroll_bottom,
+            n,
+        );
+        return;
+    }
+
+    // DEC rectangular-area operations (CSI $ <action>).
+    // Params are 1-based; converted to 0-based before calling grid methods.
+    if intermediates == b"$" {
+        let rows = ctx.viewport.rows;
+        let cols = ctx.viewport.cols;
+        let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
+
+        // Clamp and convert 1-based DEC rect params to 0-based.
+        let rect_top = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
+        let rect_left = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
+        let rect_bottom = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
+            .min(rows.saturating_sub(1));
+        let rect_right = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
+            .min(cols.saturating_sub(1));
+
+        // Ignore empty or inverted rects.
+        if rect_top > rect_bottom || rect_left > rect_right {
+            return;
+        }
+
+        match action {
+            // DECERA — Erase Rectangular Area. Fills with spaces, default colors.
+            'z' => {
+                ctx.screen.grid.erase_rect(
+                    ctx.viewport,
+                    rect_top,
+                    rect_left,
+                    rect_bottom,
+                    rect_right,
+                );
+            }
+            // DECFRA — Fill Rectangular Area with character. Uses current SGR.
+            'x' => {
+                let ch_code = p.get(4).copied().unwrap_or(0x20) as u32;
+                // Only code points 32–126 and 160–255 are valid fill chars.
+                let valid = (32..=126).contains(&ch_code) || (160..=255).contains(&ch_code);
+                if valid {
+                    if let Some(ch) = char::from_u32(ch_code) {
+                        let mut buf = [0u8; 4];
+                        let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
+                        ctx.screen.grid.fill_rect(
+                            ctx.viewport,
+                            rect_top,
+                            rect_left,
+                            rect_bottom,
+                            rect_right,
+                            s,
+                            ctx.screen.fg,
+                            ctx.screen.bg,
+                            ctx.screen.attrs,
+                            ctx.screen.underline,
+                            ctx.screen.underline_color,
+                        );
+                    }
+                }
+            }
+            // DECCRA — Copy Rectangular Area. Source/dest pages ignored (always 1).
+            // Params: src_top, src_left, src_bottom, src_right, _src_page,
+            //         dst_top, dst_left [, _dst_page].
+            'v' => {
+                let dst_top = p.get(5).copied().unwrap_or(1).max(1) as u32 - 1;
+                let dst_left = p.get(6).copied().unwrap_or(1).max(1) as u32 - 1;
+                ctx.screen.grid.copy_rect(
+                    ctx.viewport,
+                    rect_top,
+                    rect_left,
+                    rect_bottom,
+                    rect_right,
+                    dst_top,
+                    dst_left,
+                );
+            }
+            // DECRARA — Reverse Attributes in Rectangular Area.
+            // Params: top, left, bottom, right, [SGR attrs...]
+            'r' => {
+                let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+                ctx.screen.grid.reverse_attrs_rect(
+                    ctx.viewport,
+                    rect_top,
+                    rect_left,
+                    rect_bottom,
+                    rect_right,
+                    &sgr,
+                );
+            }
+            // DECCARA — Change Attributes in Rectangular Area.
+            // Params: top, left, bottom, right, [SGR attrs...]
+            't' => {
+                let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+                ctx.screen.grid.change_attrs_rect(
+                    ctx.viewport,
+                    rect_top,
+                    rect_left,
+                    rect_bottom,
+                    rect_right,
+                    &sgr,
+                );
+            }
+            _ => {}
+        }
         return;
     }
 
@@ -1043,9 +1299,25 @@ pub(super) fn csi_dispatch(
                 cursor.row = row.min(viewport.rows - 1);
             }
         }
-        'G' => {
+        // CHA — Cursor Horizontal Absolute. HPA (`) is an alias.
+        'G' | '`' => {
             let col = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             cursor.col = col.min(viewport.cols - 1);
+        }
+        // HPR — Horizontal Position Relative. Alias for CUF (C).
+        'a' => {
+            let n = p.first().copied().unwrap_or(1).max(1) as u32;
+            cursor.col = (cursor.col + n).min(viewport.cols - 1);
+        }
+        // VPR — Vertical Position Relative. Alias for CUD (B).
+        'e' => {
+            let n = p.first().copied().unwrap_or(1).max(1) as u32;
+            let bottom = if screen.origin_mode {
+                screen.scroll_bottom
+            } else {
+                viewport.rows - 1
+            };
+            cursor.row = (cursor.row + n).min(bottom);
         }
         'L' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
@@ -1190,6 +1462,96 @@ pub(super) fn esc_dispatch(
     intermediates: &[u8],
     byte: u8,
 ) {
+    // VT52 mode — completely different ESC vocabulary, no CSI or parameters.
+    // The `/` intermediate (ESC / Z identify response) shares the intermediate
+    // byte space with ANSI SCS, so we must gate on vt52_mode *first*.
+    if ctx.modes.vt52_mode && intermediates.is_empty() {
+        // Cancel pending wrap before any cursor-moving sequence.
+        if ctx.screen.cursor.col >= ctx.viewport.cols {
+            ctx.screen.cursor.col = ctx.viewport.cols.saturating_sub(1);
+        }
+        match byte {
+            // ESC A — cursor up (no scroll).
+            b'A' => {
+                ctx.screen.cursor.row = ctx.screen.cursor.row.saturating_sub(1);
+            }
+            // ESC B — cursor down (no scroll).
+            b'B' => {
+                if ctx.screen.cursor.row + 1 < ctx.viewport.rows {
+                    ctx.screen.cursor.row += 1;
+                }
+            }
+            // ESC C — cursor right (no scroll).
+            b'C' => {
+                if ctx.screen.cursor.col + 1 < ctx.viewport.cols {
+                    ctx.screen.cursor.col += 1;
+                }
+            }
+            // ESC D — cursor left (no scroll).
+            b'D' => {
+                ctx.screen.cursor.col = ctx.screen.cursor.col.saturating_sub(1);
+            }
+            // ESC F — enter DEC Special Graphics mode (same as SCS G0 = 0).
+            b'F' => {
+                ctx.screen.charset_g0_is_drawing = true;
+            }
+            // ESC G — exit DEC Special Graphics mode (same as SCS G0 = B).
+            b'G' => {
+                ctx.screen.charset_g0_is_drawing = false;
+            }
+            // ESC H — cursor home (0, 0).
+            b'H' => {
+                ctx.screen.cursor.row = 0;
+                ctx.screen.cursor.col = 0;
+            }
+            // ESC I — reverse index (identical to ANSI RI / ESC M): scroll
+            // down if at the top of the scroll region, else cursor up.
+            b'I' => {
+                if ctx.screen.cursor.row == ctx.screen.scroll_top {
+                    ctx.screen.grid.scroll_down_in_region(
+                        ctx.viewport,
+                        &mut ctx.screen.images,
+                        ctx.screen.scroll_top,
+                        ctx.screen.scroll_bottom,
+                        1,
+                    );
+                } else if ctx.screen.cursor.row > 0 {
+                    ctx.screen.cursor.row -= 1;
+                }
+            }
+            // ESC J — erase to end of screen (same as ANSI ED 0).
+            b'J' => {
+                ctx.screen.grid.erase_in_display(
+                    &ctx.screen.cursor,
+                    ctx.viewport,
+                    &mut ctx.screen.images,
+                    0,
+                );
+            }
+            // ESC K — erase to end of line (same as ANSI EL 0).
+            b'K' => {
+                ctx.screen
+                    .grid
+                    .erase_in_line(&ctx.screen.cursor, ctx.viewport, 0);
+            }
+            // ESC Y — direct cursor address. The two parameter bytes are
+            // absorbed by Terminal::apply via Vt52CursorAddr state.
+            b'Y' => {
+                *ctx.vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
+            }
+            // ESC Z — identify. VT52 responds ESC / Z (0x1b 0x2f 0x5a).
+            b'Z' => {
+                ctx.pending_output.extend_from_slice(b"\x1b/Z");
+            }
+            // ESC < — exit VT52 mode, return to ANSI mode (sets DECANM).
+            b'<' => {
+                ctx.modes.vt52_mode = false;
+            }
+            _ => {}
+        }
+        return;
+    }
+
     if let Some(&inter) = intermediates.first()
         && SCS_INTERMEDIATES.contains(&inter)
     {
@@ -1197,7 +1559,9 @@ pub(super) fn esc_dispatch(
         match inter {
             b'(' => ctx.screen.charset_g0_is_drawing = is_drawing,
             b')' => ctx.screen.charset_g1_is_drawing = is_drawing,
-            _ => {} // G2/G3 (*/+) silently ignored
+            b'*' => ctx.screen.charset_g2_is_drawing = is_drawing,
+            b'+' => ctx.screen.charset_g3_is_drawing = is_drawing,
+            _ => {}
         }
         return;
     }
@@ -1339,7 +1703,10 @@ pub(super) fn esc_dispatch(
                 s.app_cursor_keys = false;
                 s.charset_g0_is_drawing = false;
                 s.charset_g1_is_drawing = false;
+                s.charset_g2_is_drawing = false;
+                s.charset_g3_is_drawing = false;
                 s.charset_gl_is_g0 = true;
+                s.single_shift = None;
             }
             *ctx.modes = TerminalModes::new();
             *ctx.kitty_keyboard = KittyKeyboardState::new();
@@ -1364,6 +1731,38 @@ pub(super) fn esc_dispatch(
             }
         }
         b'=' | b'>' => {}
+        // SS2 — Single Shift G2. Next graphic character uses G2.
+        b'N' => ctx.screen.single_shift = Some(2),
+        // SS3 — Single Shift G3. Next graphic character uses G3.
+        b'O' => ctx.screen.single_shift = Some(3),
+        // DECBI — Back Index. Scroll region right if at left margin, else
+        // move cursor left.
+        b'6' => {
+            if ctx.screen.cursor.col == 0 {
+                ctx.screen.grid.scroll_right(
+                    ctx.viewport,
+                    ctx.screen.scroll_top,
+                    ctx.screen.scroll_bottom,
+                    1,
+                );
+            } else {
+                ctx.screen.cursor.col -= 1;
+            }
+        }
+        // DECFI — Forward Index. Scroll region left if at right margin, else
+        // move cursor right.
+        b'9' => {
+            if ctx.screen.cursor.col >= ctx.viewport.cols - 1 {
+                ctx.screen.grid.scroll_left(
+                    ctx.viewport,
+                    ctx.screen.scroll_top,
+                    ctx.screen.scroll_bottom,
+                    1,
+                );
+            } else {
+                ctx.screen.cursor.col += 1;
+            }
+        }
         _ => {}
     }
 }
@@ -1424,8 +1823,56 @@ mod tests {
         let mut title_stack = Vec::new();
         let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
+        let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
 
         for action in parser.parse(input) {
+            // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
+            if vt52_cursor_addr != crate::Vt52CursorAddr::Idle {
+                let byte_opt: Option<u8> = match &action {
+                    Action::PrintAscii(run) => run.first().copied(),
+                    Action::Execute(b) => Some(*b),
+                    _ => None,
+                };
+                match (vt52_cursor_addr, byte_opt) {
+                    (crate::Vt52CursorAddr::AwaitingRow, Some(b)) => {
+                        vt52_cursor_addr =
+                            crate::Vt52CursorAddr::AwaitingCol(b.saturating_sub(0x20));
+                        if let Action::PrintAscii(run) = &action {
+                            if run.len() >= 2 {
+                                let row = b.saturating_sub(0x20) as u32;
+                                let col = run[1].saturating_sub(0x20) as u32;
+                                screen.cursor.row = row.min(viewport.rows.saturating_sub(1));
+                                screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
+                                vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+                                if run.len() > 2 {
+                                    put_ascii_run(screen, viewport, &run[2..], modes.insert_mode);
+                                }
+                                continue;
+                            }
+                        }
+                        continue;
+                    }
+                    (crate::Vt52CursorAddr::AwaitingCol(row), Some(b)) => {
+                        let col = b.saturating_sub(0x20) as u32;
+                        screen.cursor.row = (row as u32).min(viewport.rows.saturating_sub(1));
+                        screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
+                        vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+                        if let Action::PrintAscii(run) = &action {
+                            if run.len() > 1 {
+                                put_ascii_run(screen, viewport, &run[1..], modes.insert_mode);
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {
+                        vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+                    }
+                }
+            }
+            // In VT52 mode, CSI sequences are invalid and must be dropped.
+            if modes.vt52_mode && matches!(action, Action::CsiDispatch { .. }) {
+                continue;
+            }
             match action {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
                 Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
@@ -1473,6 +1920,8 @@ mod tests {
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
                         palette: &pal,
+                        pending_output: &mut pending_output,
+                        vt52_cursor_addr: &mut vt52_cursor_addr,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
@@ -2249,8 +2698,56 @@ mod tests {
         let mut title_stack = Vec::new();
         let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
+        let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
 
         for action in parser.parse(input) {
+            // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
+            if vt52_cursor_addr != crate::Vt52CursorAddr::Idle {
+                let byte_opt: Option<u8> = match &action {
+                    Action::PrintAscii(run) => run.first().copied(),
+                    Action::Execute(b) => Some(*b),
+                    _ => None,
+                };
+                match (vt52_cursor_addr, byte_opt) {
+                    (crate::Vt52CursorAddr::AwaitingRow, Some(b)) => {
+                        vt52_cursor_addr =
+                            crate::Vt52CursorAddr::AwaitingCol(b.saturating_sub(0x20));
+                        if let Action::PrintAscii(run) = &action {
+                            if run.len() >= 2 {
+                                let row = b.saturating_sub(0x20) as u32;
+                                let col = run[1].saturating_sub(0x20) as u32;
+                                screen.cursor.row = row.min(viewport.rows.saturating_sub(1));
+                                screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
+                                vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+                                if run.len() > 2 {
+                                    put_ascii_run(screen, viewport, &run[2..], modes.insert_mode);
+                                }
+                                continue;
+                            }
+                        }
+                        continue;
+                    }
+                    (crate::Vt52CursorAddr::AwaitingCol(row), Some(b)) => {
+                        let col = b.saturating_sub(0x20) as u32;
+                        screen.cursor.row = (row as u32).min(viewport.rows.saturating_sub(1));
+                        screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
+                        vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+                        if let Action::PrintAscii(run) = &action {
+                            if run.len() > 1 {
+                                put_ascii_run(screen, viewport, &run[1..], modes.insert_mode);
+                            }
+                        }
+                        continue;
+                    }
+                    _ => {
+                        vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+                    }
+                }
+            }
+            // In VT52 mode, CSI sequences are invalid and must be dropped.
+            if modes.vt52_mode && matches!(action, Action::CsiDispatch { .. }) {
+                continue;
+            }
             match action {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
                 Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
@@ -2298,6 +2795,8 @@ mod tests {
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
                         palette: &pal,
+                        pending_output: &mut pending_output,
+                        vt52_cursor_addr: &mut vt52_cursor_addr,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
@@ -2780,5 +3279,198 @@ mod tests {
         feed(b"\x1b[J", &mut screen, &mut viewport);
         let text = row_text(&screen, &viewport, 0);
         assert_eq!(&text[..TEST_COLS as usize], "abcdefghi ");
+    }
+
+    // -- VT52 mode -----------------------------------------------------------
+    //
+    // Each test uses a single feed() / feed_with_output() call so that mode
+    // changes set by `CSI ? 2 l` remain active for the sequences that follow.
+    // Separate calls create fresh TerminalModes, so VT52 state would not
+    // persist across call boundaries.
+
+    /// DECRQM reports DECANM as set (ANSI) by default.
+    #[test]
+    fn decrqm_reports_decanm_set_in_ansi_mode() {
+        let (mut screen, mut viewport) = setup();
+        let out = feed_with_output(b"\x1b[?2$p", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1b[?2;1$y");
+    }
+
+    /// DECRQM after entering and immediately exiting VT52 mode (via ESC <)
+    /// reports DECANM as set again.
+    #[test]
+    fn decrqm_reports_decanm_restored_after_exit() {
+        let (mut screen, mut viewport) = setup();
+        // Enter VT52 then exit with ESC < — DECRQM should see ANSI mode.
+        let out = feed_with_output(b"\x1b[?2l\x1b<\x1b[?2$p", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1b[?2;1$y");
+    }
+
+    /// Enter VT52 then exit via `ESC <`; DECRQM should see ANSI mode restored.
+    #[test]
+    fn vt52_enter_and_exit_via_esc_lt() {
+        let (mut screen, mut viewport) = setup();
+        // `CSI ? 2 l` → VT52; `ESC <` → back to ANSI; DECRQM → set.
+        let out = feed_with_output(b"\x1b[?2l\x1b<\x1b[?2$p", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1b[?2;1$y");
+    }
+
+    /// VT52 ESC A/B/C/D cursor movement.
+    #[test]
+    fn vt52_cursor_up() {
+        let (mut screen, mut viewport) = setup();
+        // CUP to row 2, col 3 (1-based: 3;4), then VT52 ESC A.
+        feed(b"\x1b[3;4H\x1b[?2l\x1bA", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (1, 3));
+    }
+
+    #[test]
+    fn vt52_cursor_down() {
+        let (mut screen, mut viewport) = setup();
+        // CUP to row 1, col 0, then VT52 ESC B.
+        feed(b"\x1b[2;1H\x1b[?2l\x1bB", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (2, 0));
+    }
+
+    #[test]
+    fn vt52_cursor_right() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[1;3H\x1b[?2l\x1bC", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (0, 3));
+    }
+
+    #[test]
+    fn vt52_cursor_left() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[1;5H\x1b[?2l\x1bD", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (0, 3));
+    }
+
+    /// VT52 cursor up at row 0 does not underflow.
+    #[test]
+    fn vt52_cursor_up_clamps_at_top() {
+        let (mut screen, mut viewport) = setup();
+        // Already at row 0 (home). VT52 mode, ESC A.
+        feed(b"\x1b[?2l\x1bA", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.row, 0);
+    }
+
+    /// VT52 ESC H homes the cursor.
+    #[test]
+    fn vt52_cursor_home() {
+        let (mut screen, mut viewport) = setup();
+        // CUP to row 3, col 6 (1-based), then VT52 ESC H.
+        feed(b"\x1b[3;6H\x1b[?2l\x1bH", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (0, 0));
+    }
+
+    /// VT52 ESC Y <row+0x20> <col+0x20> direct cursor address — bytes split.
+    #[test]
+    fn vt52_direct_cursor_address() {
+        let (mut screen, mut viewport) = setup();
+        // Enter VT52 then ESC Y: row 2 ('"'=0x22), col 4 ('$'=0x24).
+        feed(b"\x1b[?2l\x1bY\"$", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (2, 4));
+    }
+
+    /// VT52 ESC Y where both position bytes arrive in the same PrintAscii run.
+    #[test]
+    fn vt52_direct_cursor_address_batched() {
+        let (mut screen, mut viewport) = setup();
+        // Row 1 ('!'=0x21), col 3 ('#'=0x23).
+        feed(b"\x1b[?2l\x1bY!#", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (1, 3));
+    }
+
+    /// Text after ESC Y position bytes is printed normally.
+    #[test]
+    fn vt52_direct_cursor_address_then_text() {
+        let (mut screen, mut viewport) = setup();
+        // Row 0, col 0 (both 0x20 = space), then 'A'.
+        feed(b"\x1b[?2l\x1bY  A", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (0, 1));
+        assert_eq!(&row_text(&screen, &viewport, 0)[..1], "A");
+    }
+
+    /// VT52 ESC J erases from cursor to end of screen (same as ED 0).
+    #[test]
+    fn vt52_erase_to_end_of_screen() {
+        let (mut screen, mut viewport) = setup();
+        // Fill row 0 with 'a', row 1 with 'b', then enter VT52 at row 0
+        // col 5 (via CUP before VT52 entry) and erase.
+        feed(
+            b"aaaaaaaaaa\r\nbbbbbbbbbb\x1b[1;6H\x1b[?2l\x1bJ",
+            &mut screen,
+            &mut viewport,
+        );
+        let r0 = row_text(&screen, &viewport, 0);
+        let r1 = row_text(&screen, &viewport, 1);
+        assert_eq!(&r0[..5], "aaaaa", "text before cursor preserved");
+        assert_eq!(r0[5..].trim(), "", "text from cursor erased");
+        assert_eq!(r1.trim(), "", "row 1 cleared");
+    }
+
+    /// VT52 ESC K erases from cursor to end of line (same as EL 0).
+    #[test]
+    fn vt52_erase_to_end_of_line() {
+        let (mut screen, mut viewport) = setup();
+        // Fill row 0, position at col 3, enter VT52, erase to EOL.
+        feed(
+            b"aaaaaaaaaa\x1b[1;4H\x1b[?2l\x1bK",
+            &mut screen,
+            &mut viewport,
+        );
+        let r0 = row_text(&screen, &viewport, 0);
+        assert_eq!(&r0[..3], "aaa");
+        assert_eq!(r0[3..].trim(), "");
+    }
+
+    /// VT52 ESC F/G toggle DEC Special Graphics on G0 within one parse pass.
+    #[test]
+    fn vt52_graphics_mode_on() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[?2l\x1bF", &mut screen, &mut viewport);
+        assert!(screen.charset_g0_is_drawing);
+    }
+
+    #[test]
+    fn vt52_graphics_mode_off() {
+        let (mut screen, mut viewport) = setup();
+        // Enable then disable in the same parse pass.
+        feed(b"\x1b[?2l\x1bF\x1bG", &mut screen, &mut viewport);
+        assert!(!screen.charset_g0_is_drawing);
+    }
+
+    /// VT52 ESC Z identify returns ESC / Z.
+    #[test]
+    fn vt52_identify() {
+        let (mut screen, mut viewport) = setup();
+        let out = feed_with_output(b"\x1b[?2l\x1bZ", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1b/Z");
+    }
+
+    /// CSI sequences are silently dropped in VT52 mode.
+    #[test]
+    fn vt52_csi_suppressed() {
+        let (mut screen, mut viewport) = setup();
+        // Position cursor at col 5 (1-based col 6), enter VT52, send CSI CUB.
+        feed(b"\x1b[1;6H\x1b[?2l\x1b[3D", &mut screen, &mut viewport);
+        // CSI cursor-back should have been dropped.
+        assert_eq!(screen.cursor.col, 5, "cursor should not move in VT52 mode");
+    }
+
+    /// VT52 reverse index (ESC I) scrolls down at the top of the scroll region.
+    #[test]
+    fn vt52_reverse_index_scrolls() {
+        let (mut screen, mut viewport) = setup();
+        // Fill row 0 with text, CUP to row 0, enter VT52, reverse index.
+        feed(
+            b"line0\r\nline1\r\nline2\x1b[1;1H\x1b[?2l\x1bI",
+            &mut screen,
+            &mut viewport,
+        );
+        // Row 0 should now be blank (scrolled down).
+        let r0 = row_text(&screen, &viewport, 0);
+        assert_eq!(r0.trim(), "");
     }
 }

@@ -101,6 +101,19 @@ impl CommandMeta {
     }
 }
 
+/// State machine for absorbing the two parameter bytes of a VT52
+/// `ESC Y Pr Pc` direct cursor address. The bytes arrive as separate
+/// parser actions after the `EscDispatch { byte: 'Y' }` is handled.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum Vt52CursorAddr {
+    /// Not inside a VT52 ESC Y sequence.
+    Idle,
+    /// Got `ESC Y`; the next byte(s) contain the row.
+    AwaitingRow,
+    /// Got the row byte; waiting for the column byte.
+    AwaitingCol(u8),
+}
+
 /// Terminal-level modes toggled by escape sequences (DECSET/DECRST, mode
 /// 2004, mode 2026, etc.) and reset together by RIS. Grouping them keeps
 /// the `Terminal` struct focused and lets handler functions accept a single
@@ -132,6 +145,10 @@ pub struct TerminalModes {
     /// Saved column count from before DECCOLM switched to 132 columns.
     /// `None` when in normal (80-column) mode.
     pub deccolm_saved_cols: Option<u32>,
+    /// DECANM (`?2`) — when `true` the terminal operates in VT52 compatibility
+    /// mode. Set via `CSI ? 2 l`, cleared by `CSI ? 2 h` or RIS. VT52 mode
+    /// uses a completely different (non-CSI) escape sequence vocabulary.
+    pub vt52_mode: bool,
 }
 
 impl TerminalModes {
@@ -145,6 +162,7 @@ impl TerminalModes {
             insert_mode: false,
             newline_mode: false,
             deccolm_saved_cols: None,
+            vt52_mode: false,
         }
     }
 }
@@ -264,6 +282,12 @@ pub struct Terminal {
     /// Runtime color palette. Stored here so SGR resets, OSC color queries,
     /// and the renderer can all resolve themed colors.
     pub palette: ColorPalette,
+
+    /// State machine for the VT52 `ESC Y Pr Pc` direct cursor address. After
+    /// `ESC Y` is dispatched, the next 1–2 byte actions carry the row and
+    /// column values. This field persists across `apply` calls so the state
+    /// survives the per-action dispatch boundary.
+    vt52_cursor_addr: Vt52CursorAddr,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -311,6 +335,7 @@ impl Terminal {
             iterm_chunked: image41::iterm::ChunkedTransmission::new(),
             cell_width,
             palette,
+            vt52_cursor_addr: Vt52CursorAddr::Idle,
         }
     }
 
@@ -1398,6 +1423,85 @@ impl Terminal {
     ) {
         let popped_before: usize = self.active.grid.total_popped;
 
+        // VT52 ESC Y direct cursor address: absorb the two parameter bytes that
+        // follow the EscDispatch. They arrive as PrintAscii or Execute actions
+        // because vtepp is still in ANSI ground state; we intercept them here
+        // before the normal dispatch so they are not printed as characters.
+        if self.vt52_cursor_addr != Vt52CursorAddr::Idle {
+            let byte_opt: Option<u8> = match &action {
+                Action::PrintAscii(run) => run.first().copied(),
+                Action::Execute(b) => Some(*b),
+                _ => None,
+            };
+
+            match (self.vt52_cursor_addr, byte_opt) {
+                (Vt52CursorAddr::AwaitingRow, Some(b)) => {
+                    self.vt52_cursor_addr = Vt52CursorAddr::AwaitingCol(b.saturating_sub(0x20));
+
+                    // The two bytes may arrive batched in one PrintAscii run.
+                    // If so, consume the second byte (col) immediately and
+                    // then fall through to process any remaining bytes normally.
+                    if let Action::PrintAscii(run) = &action {
+                        if run.len() >= 2 {
+                            let col = run[1].saturating_sub(0x20) as u32;
+                            let row = b.saturating_sub(0x20) as u32;
+                            self.active.cursor.row = row.min(self.viewport.rows.saturating_sub(1));
+                            self.active.cursor.col = col.min(self.viewport.cols.saturating_sub(1));
+                            self.vt52_cursor_addr = Vt52CursorAddr::Idle;
+                            // Any bytes after the two position bytes are normal text.
+                            if run.len() > 2 {
+                                put_ascii_run(
+                                    &mut self.active,
+                                    &self.viewport,
+                                    &run[2..],
+                                    self.modes.insert_mode,
+                                );
+                            }
+                            self.track_scroll(popped_before);
+                            return;
+                        }
+                    }
+                    self.track_scroll(popped_before);
+                    return;
+                }
+                (Vt52CursorAddr::AwaitingCol(row), Some(b)) => {
+                    let col = b.saturating_sub(0x20) as u32;
+                    self.active.cursor.row = (row as u32).min(self.viewport.rows.saturating_sub(1));
+                    self.active.cursor.col = col.min(self.viewport.cols.saturating_sub(1));
+                    self.vt52_cursor_addr = Vt52CursorAddr::Idle;
+
+                    // If more bytes follow in the same PrintAscii run, print them.
+                    if let Action::PrintAscii(run) = &action {
+                        if run.len() > 1 {
+                            put_ascii_run(
+                                &mut self.active,
+                                &self.viewport,
+                                &run[1..],
+                                self.modes.insert_mode,
+                            );
+                        }
+                    }
+                    self.track_scroll(popped_before);
+                    return;
+                }
+                _ => {
+                    // Unexpected action type: abort the ESC Y sequence and
+                    // fall through to process this action normally.
+                    self.vt52_cursor_addr = Vt52CursorAddr::Idle;
+                }
+            }
+        }
+
+        // In VT52 mode, CSI sequences are not valid and should be silently
+        // dropped — vtepp still parses them because it doesn't know the
+        // terminal mode, but executing them would be wrong.
+        if self.modes.vt52_mode {
+            if matches!(action, Action::CsiDispatch { .. }) {
+                self.track_scroll(popped_before);
+                return;
+            }
+        }
+
         match action {
             Action::PrintAscii(run) => put_ascii_run(
                 &mut self.active,
@@ -1458,6 +1562,8 @@ impl Terminal {
                     current_prompt_row: &mut self.current_prompt_row,
                     bell_pending: &mut self.bell_pending,
                     palette: &self.palette,
+                    pending_output: &mut self.pending_output,
+                    vt52_cursor_addr: &mut self.vt52_cursor_addr,
                 };
                 esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
             }
