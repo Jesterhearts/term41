@@ -730,37 +730,41 @@ impl Grid {
     /// to viewport bounds.
     pub(super) fn copy_rect(
         &mut self,
-        viewport: &Viewport,
+        src_viewport: &Viewport,
         src_top: u32,
         src_left: u32,
         src_bottom: u32,
         src_right: u32,
         dst_top: u32,
         dst_left: u32,
+        dst_viewport: &Viewport,
     ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let rows = viewport.rows as usize;
-        let cols = viewport.cols as usize;
+        let src_first_visible = src_viewport.top_index(self.rows.len());
+        let dst_first_visible = dst_viewport.top_index(self.rows.len());
+        let src_rows = src_viewport.rows as usize;
+        let src_cols = src_viewport.cols as usize;
+        let dst_rows = dst_viewport.rows as usize;
+        let dst_cols = dst_viewport.cols as usize;
 
         let src_left = src_left as usize;
-        let src_right_excl = (src_right as usize + 1).min(cols);
+        let src_right_excl = (src_right as usize + 1).min(src_cols);
         let dst_left = dst_left as usize;
 
         // Snapshot all source rows before writing anything.
         let snaps: Vec<_> = (src_top..=src_bottom)
-            .filter(|&r| (r as usize) < rows)
+            .filter(|&r| (r as usize) < src_rows)
             .map(|r| {
-                let abs = first_visible + r as usize;
+                let abs = src_first_visible + r as usize;
                 self.rows[abs].snap_range(src_left, src_right_excl)
             })
             .collect();
 
         for (i, snap) in snaps.iter().enumerate() {
             let dst_r = dst_top as usize + i;
-            if dst_r >= rows {
+            if dst_r >= dst_rows || dst_left >= dst_cols {
                 break;
             }
-            let abs = first_visible + dst_r;
+            let abs = dst_first_visible + dst_r;
             self.rows[abs].paste_range(snap, dst_left);
         }
     }

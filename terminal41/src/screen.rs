@@ -292,6 +292,33 @@ pub(super) fn page_rows(screen: &Screen) -> Option<u32> {
     screen.page_memory.as_ref().map(|page| page.lines_per_page)
 }
 
+pub(super) fn ensure_page_memory(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    if screen.page_memory.is_none() {
+        activate_page_memory(screen, viewport, viewport.rows);
+    }
+}
+
+pub(super) fn page_viewport(
+    screen: &Screen,
+    viewport: &Viewport,
+    page_number: u16,
+) -> Option<Viewport> {
+    let page_number = page_number.max(1) as usize;
+    let Some(page) = screen.page_memory.as_ref() else {
+        return (page_number == 1).then_some(screen_viewport(screen, viewport));
+    };
+    let page_index = page_number - 1;
+    let page_start = *page.page_starts.get(page_index)?;
+    Some(Viewport {
+        rows: viewport.rows.min(page.lines_per_page),
+        cols: viewport.cols,
+        top: page_start,
+    })
+}
+
 pub(super) fn page_can_scroll_down(
     screen: &Screen,
     viewport: &Viewport,

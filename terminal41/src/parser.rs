@@ -1399,7 +1399,7 @@ pub(super) fn csi_dispatch(
     }
 
     // DECXCPR — Extended Cursor Position Report (CSI ? 6 n). Reports the
-    // cursor row, column, and page (always 1) as CSI ? row ; col ; 1 R.
+    // cursor row, column, and active page as CSI ? row ; col ; page R.
     if action == 'n' && intermediates == b"?" {
         let ps = params
             .iter()
@@ -1579,20 +1579,34 @@ pub(super) fn csi_dispatch(
                     );
                 }
             }
-            // DECCRA — Copy Rectangular Area. Source/dest pages ignored (always 1).
-            // Params: src_top, src_left, src_bottom, src_right, _src_page,
-            //         dst_top, dst_left [, _dst_page].
+            // DECCRA — Copy Rectangular Area.
+            // Params: src_top, src_left, src_bottom, src_right, src_page,
+            //         dst_top, dst_left [, dst_page].
             'v' => {
+                let src_page = p.get(4).copied().unwrap_or(1);
                 let dst_top = p.get(5).copied().unwrap_or(1).max(1) as u32 - 1;
                 let dst_left = p.get(6).copied().unwrap_or(1).max(1) as u32 - 1;
+                let dst_page = p.get(7).copied().unwrap_or(1);
+                if src_page > 1 || dst_page > 1 {
+                    screen::ensure_page_memory(ctx.screen, ctx.viewport);
+                }
+                let Some(src_view) = screen::page_viewport(ctx.screen, ctx.viewport, src_page)
+                else {
+                    return;
+                };
+                let Some(dst_view) = screen::page_viewport(ctx.screen, ctx.viewport, dst_page)
+                else {
+                    return;
+                };
                 ctx.screen.grid.copy_rect(
-                    &view,
+                    &src_view,
                     rect_top,
                     rect_left,
                     rect_bottom,
                     rect_right,
                     dst_top,
                     dst_left,
+                    &dst_view,
                 );
             }
             // DECRARA — Reverse Attributes in Rectangular Area.
@@ -2498,7 +2512,8 @@ mod tests {
                             screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
                             vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
                             if run.len() > 2 {
-                                put_ascii_run(screen, viewport, &run[2..], modes.insert_mode);
+                                let view = screen::screen_viewport(screen, viewport);
+                                put_ascii_run(screen, &view, &run[2..], modes.insert_mode);
                             }
                             continue;
                         }
@@ -2512,7 +2527,8 @@ mod tests {
                         if let Action::PrintAscii(run) = &action
                             && run.len() > 1
                         {
-                            put_ascii_run(screen, viewport, &run[1..], modes.insert_mode);
+                            let view = screen::screen_viewport(screen, viewport);
+                            put_ascii_run(screen, &view, &run[1..], modes.insert_mode);
                         }
                         continue;
                     }
@@ -2526,12 +2542,25 @@ mod tests {
                 continue;
             }
             match action {
-                Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
-                Action::PrintText(run) => put_text_run(screen, viewport, run, modes.insert_mode),
-                Action::Print(s) => put_printable(screen, viewport, s, modes.insert_mode),
-                Action::Print8Bit(byte) => put_8bit_byte(screen, viewport, byte, modes.insert_mode),
+                Action::PrintAscii(run) => {
+                    let view = screen::screen_viewport(screen, viewport);
+                    put_ascii_run(screen, &view, run, modes.insert_mode)
+                }
+                Action::PrintText(run) => {
+                    let view = screen::screen_viewport(screen, viewport);
+                    put_text_run(screen, &view, run, modes.insert_mode)
+                }
+                Action::Print(s) => {
+                    let view = screen::screen_viewport(screen, viewport);
+                    put_printable(screen, &view, s, modes.insert_mode)
+                }
+                Action::Print8Bit(byte) => {
+                    let view = screen::screen_viewport(screen, viewport);
+                    put_8bit_byte(screen, &view, byte, modes.insert_mode)
+                }
                 Action::Execute(b) => {
-                    execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)
+                    let view = screen::screen_viewport(screen, viewport);
+                    execute(screen, &view, b, &mut bell_pending, modes.newline_mode)
                 }
                 Action::CsiDispatch {
                     params,
@@ -3382,7 +3411,8 @@ mod tests {
                             screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
                             vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
                             if run.len() > 2 {
-                                put_ascii_run(screen, viewport, &run[2..], modes.insert_mode);
+                                let view = screen::screen_viewport(screen, viewport);
+                                put_ascii_run(screen, &view, &run[2..], modes.insert_mode);
                             }
                             continue;
                         }
@@ -3396,7 +3426,8 @@ mod tests {
                         if let Action::PrintAscii(run) = &action
                             && run.len() > 1
                         {
-                            put_ascii_run(screen, viewport, &run[1..], modes.insert_mode);
+                            let view = screen::screen_viewport(screen, viewport);
+                            put_ascii_run(screen, &view, &run[1..], modes.insert_mode);
                         }
                         continue;
                     }
@@ -3410,12 +3441,25 @@ mod tests {
                 continue;
             }
             match action {
-                Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
-                Action::PrintText(run) => put_text_run(screen, viewport, run, modes.insert_mode),
-                Action::Print(s) => put_printable(screen, viewport, s, modes.insert_mode),
-                Action::Print8Bit(byte) => put_8bit_byte(screen, viewport, byte, modes.insert_mode),
+                Action::PrintAscii(run) => {
+                    let view = screen::screen_viewport(screen, viewport);
+                    put_ascii_run(screen, &view, run, modes.insert_mode)
+                }
+                Action::PrintText(run) => {
+                    let view = screen::screen_viewport(screen, viewport);
+                    put_text_run(screen, &view, run, modes.insert_mode)
+                }
+                Action::Print(s) => {
+                    let view = screen::screen_viewport(screen, viewport);
+                    put_printable(screen, &view, s, modes.insert_mode)
+                }
+                Action::Print8Bit(byte) => {
+                    let view = screen::screen_viewport(screen, viewport);
+                    put_8bit_byte(screen, &view, byte, modes.insert_mode)
+                }
                 Action::Execute(b) => {
-                    execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)
+                    let view = screen::screen_viewport(screen, viewport);
+                    execute(screen, &view, b, &mut bell_pending, modes.newline_mode)
                 }
                 Action::CsiDispatch {
                     params,
@@ -3538,6 +3582,32 @@ mod tests {
         assert_eq!(page.active_page, 2);
         assert_eq!(screen.cursor.row, 0);
         assert_eq!(screen.cursor.col, 0);
+    }
+
+    #[test]
+    fn deccra_copies_between_pages() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[1U\x1b[1;1H", &mut screen, &mut viewport);
+        feed(b"Z", &mut screen, &mut viewport);
+        feed(b"\x1b[1V", &mut screen, &mut viewport);
+        let page1 = screen::page_viewport(&screen, &viewport, 1).unwrap();
+        let page2 = screen::page_viewport(&screen, &viewport, 2).unwrap();
+        assert_eq!(
+            screen.grid.rows[page2.top].cells[0].as_str(),
+            "Z",
+            "page 2 should receive direct printable writes"
+        );
+        feed(b"\x1b[1;1;1;1;2;1;1;1$v", &mut screen, &mut viewport);
+        assert_eq!(
+            screen.grid.rows[page1.top].cells[0].as_str(),
+            "Z",
+            "page 1 should receive copied cell from page 2"
+        );
+        assert_eq!(
+            screen.grid.rows[page2.top].cells[0].as_str(),
+            "Z",
+            "source page should remain unchanged"
+        );
     }
 
     #[test]
