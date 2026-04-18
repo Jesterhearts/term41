@@ -22,7 +22,6 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::config::VSync;
-use crate::renderer::BUTTON_CELLS;
 use crate::renderer::GUTTER_MENU_ITEMS;
 use crate::renderer::GutterPopup;
 use crate::renderer::POPUP_WIDTH_CELLS;
@@ -32,6 +31,8 @@ use crate::renderer::background::BgImageVertex;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
+use crate::renderer::paint::build_tab_bar_plan;
+use crate::renderer::paint::resolve_painted_cell;
 
 pub const MAX_TAB_WIDTH: f32 = 30.0;
 pub const SUCCESS: [u8; 3] = [80, 200, 120];
@@ -168,37 +169,7 @@ pub(crate) fn collect_row_glyphs(
         let synth_bold = wants_bold && !font_system.font_is_bold(sg.font_index);
         let synth_italic = wants_italic && !font_system.font_is_italic(sg.font_index);
 
-        let selected = snap_row
-            .selected
-            .get(sg.col as usize)
-            .copied()
-            .unwrap_or(false);
-        let matched = snap_row
-            .matched
-            .get(sg.col as usize)
-            .copied()
-            .unwrap_or(false);
-        let active_match = snap_row
-            .active_match
-            .get(sg.col as usize)
-            .copied()
-            .unwrap_or(false);
-        let block_cursor_here = block_cursor == Some((row, sg.col as u32));
-        let (cell_fg, cell_bg) = resolve_cell_colors(
-            &snap_row.fg[sg.col as usize],
-            &snap_row.bg[sg.col as usize],
-            cell_attrs,
-            snap.screen_reverse,
-        );
-        let fg = if active_match {
-            cell_fg
-        } else if selected {
-            snap.palette.selection_fg.unwrap_or(cell_bg)
-        } else if matched || block_cursor_here {
-            cell_bg
-        } else {
-            cell_fg
-        };
+        let painted = resolve_painted_cell(snap, snap_row, row, sg.col as u32, block_cursor, false);
 
         collected.push(CollectedGlyph {
             font_index: sg.font_index,
@@ -207,7 +178,7 @@ pub(crate) fn collect_row_glyphs(
             col: sg.col,
             x_offset: sg.x_offset,
             y_offset: sg.y_offset,
-            fg,
+            fg: painted.fg,
             synth_bold,
             synth_italic,
         });
@@ -446,15 +417,9 @@ pub struct WindowControls {
     pub hovered: Option<u8>,
     /// Whether the window is currently maximized (affects the maximize icon).
     pub maximized: bool,
-    /// Width of the button region in physical pixels, computed from cell
-    /// metrics.
-    pub region_width: f32,
     /// Tab context menu state, if open: (x position, hovered item index).
     pub tab_menu: Option<(f32, Option<usize>)>,
 }
-
-/// Button index for the close button (rightmost).
-const BTN_CLOSE: u8 = 2;
 
 struct FrameLayout {
     cell_w: f32,
@@ -1425,41 +1390,18 @@ impl Renderer {
 
         for col in 0..visible_cols {
             let x = col as f32 * effective_cell_w + layout.gutter_px;
-            let selected = snap_row
-                .selected
-                .get(col as usize)
-                .copied()
-                .unwrap_or(false);
-            let matched = snap_row.matched.get(col as usize).copied().unwrap_or(false);
-            let active_match = snap_row
-                .active_match
-                .get(col as usize)
-                .copied()
-                .unwrap_or(false);
-            let block_cursor_here = cursor_state.is_block_at(row, col);
-            let cell_attrs = snap_row.attrs[col as usize];
-            let (cell_fg, cell_bg) = resolve_cell_colors(
-                &snap_row.fg[col as usize],
-                &snap_row.bg[col as usize],
-                cell_attrs,
-                snap.screen_reverse,
+            let block_cursor = cursor_state.block_cursor();
+            let painted = resolve_painted_cell(
+                snap,
+                snap_row,
+                row,
+                col,
+                block_cursor,
+                self.background.is_some(),
             );
-            let bg_effective = if active_match {
-                blend(cell_fg, cell_bg, 0.5)
-            } else if selected {
-                snap.palette.selection_bg.unwrap_or(cell_fg)
-            } else if block_cursor_here {
-                snap.palette.cursor.unwrap_or(cell_fg)
-            } else if matched {
-                cell_fg
-            } else {
-                cell_bg
-            };
-            let interaction_overlay = selected || matched || active_match || block_cursor_here;
-            let skip_default_bg =
-                self.background.is_some() && !interaction_overlay && cell_bg == snap.palette.bg;
-            if !skip_default_bg {
-                let bg_color = pack_color(&bg_effective, self.bg_alpha);
+            let cell_attrs = snap_row.attrs[col as usize];
+            if let Some(fill_bg) = painted.fill_bg {
+                let bg_color = pack_color(&fill_bg, self.bg_alpha);
                 let bi = geometry.bg_vertices.len() as u32;
                 geometry.bg_vertices.extend_from_slice(&[
                     BgVertex {
@@ -1497,7 +1439,7 @@ impl Renderer {
                 ul_style
             };
             if effective_ul != UnderlineStyle::None {
-                let ul_rgb = snap_row.underline_color[col as usize].unwrap_or(cell_fg);
+                let ul_rgb = snap_row.underline_color[col as usize].unwrap_or(painted.base_fg);
                 let ul_packed = pack_color(&ul_rgb, 255);
                 let thickness = (layout.cell_h * 0.06).max(1.0);
                 let uy = y + layout.cell_h - thickness;
@@ -1515,7 +1457,7 @@ impl Renderer {
             }
 
             if cell_attrs.contains(CellAttrs::OVERLINE) {
-                let ol_color = pack_color(&cell_fg, 255);
+                let ol_color = pack_color(&painted.base_fg, 255);
                 let thickness = (layout.cell_h * 0.06).max(1.0);
                 push_rect(
                     x,
@@ -1529,7 +1471,7 @@ impl Renderer {
             }
 
             if cell_attrs.contains(CellAttrs::STRIKETHROUGH) {
-                let st_color = pack_color(&cell_fg, 255);
+                let st_color = pack_color(&painted.base_fg, 255);
                 let thickness = (layout.cell_h * 0.06).max(1.0);
                 let sy = y + (layout.cell_h - thickness) * 0.5;
                 let bi = geometry.bg_vertices.len() as u32;
@@ -2056,12 +1998,17 @@ impl Renderer {
         let cell_h = font_system.cell_height as f32;
         let baseline = font_system.baseline_offset();
         let surface_w = self.surface_config.width as f32;
-
-        let active_bg = palette.bg;
-        let inactive_bg = blend(palette.bg, palette.fg, 0.5);
+        let plan = build_tab_bar_plan(
+            tabs,
+            palette,
+            controls.hovered,
+            controls.maximized,
+            surface_w,
+            cell_w,
+        );
 
         // Full-width bar background (inactive colour as the base).
-        let bar_bg = pack_color(&inactive_bg, 255);
+        let bar_bg = pack_color(&plan.base_bg, 255);
         let bi = bg_vertices.len() as u32;
         bg_vertices.extend_from_slice(&[
             BgVertex {
@@ -2083,147 +2030,87 @@ impl Renderer {
         ]);
         bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
 
-        // Reserve space for window control buttons on the right.
-        let tabs_available_w = surface_w - controls.region_width;
-
-        // Divide available width equally among tabs, capped to a
-        // reasonable maximum so a single tab doesn't span the screen.
-        let max_tab_w = (cell_w * MAX_TAB_WIDTH).min(surface_w);
-        let tab_w = if tabs.is_empty() {
-            0.0
-        } else {
-            (tabs_available_w / tabs.len() as f32).min(max_tab_w)
-        };
-
         let label_fg = pack_color(&palette.fg, 255);
 
-        for (i, tab) in tabs.iter().enumerate() {
-            let x0 = i as f32 * tab_w;
-
-            // Active tab background highlight.
-            if tab.active {
-                let color = pack_color(&active_bg, 255);
+        for tab in &plan.tabs {
+            if let Some(bg) = tab.bg {
+                let color = pack_color(&bg, 255);
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
                     BgVertex {
-                        pos: [x0, 0.0],
+                        pos: [tab.x, 0.0],
                         color,
                     },
                     BgVertex {
-                        pos: [x0 + tab_w, 0.0],
+                        pos: [tab.x + tab.width, 0.0],
                         color,
                     },
                     BgVertex {
-                        pos: [x0, cell_h],
+                        pos: [tab.x, cell_h],
                         color,
                     },
                     BgVertex {
-                        pos: [x0 + tab_w, cell_h],
+                        pos: [tab.x + tab.width, cell_h],
                         color,
                     },
                 ]);
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
             }
 
-            // Thin separator between tabs.
-            if i > 0 {
+            if let Some(separator) = tab.separator {
                 let sep_w = 3.0_f32;
-                let sep_color = pack_color(&blend(active_bg, inactive_bg, 0.5), self.bg_alpha);
+                let sep_color = pack_color(&separator, self.bg_alpha);
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
                     BgVertex {
-                        pos: [x0, 0.0],
+                        pos: [tab.x, 0.0],
                         color: sep_color,
                     },
                     BgVertex {
-                        pos: [x0 + sep_w, 0.0],
+                        pos: [tab.x + sep_w, 0.0],
                         color: sep_color,
                     },
                     BgVertex {
-                        pos: [x0, cell_h],
+                        pos: [tab.x, cell_h],
                         color: sep_color,
                     },
                     BgVertex {
-                        pos: [x0 + sep_w, cell_h],
+                        pos: [tab.x + sep_w, cell_h],
                         color: sep_color,
                     },
                 ]);
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
             }
 
-            // Label glyphs. Truncate to fit the tab width with a small
-            // margin on each side.
-            let margin = cell_w;
-            let max_label_chars = ((tab_w - margin * 2.0) / cell_w).max(1.0) as usize;
-            let label_chars = tab.label.graphemes(true).count();
-            if label_chars > max_label_chars {
-                // If the label is too long, truncate and add an ellipsis.
-                let ellipsis = "…";
-                let truncated_len = max_label_chars.saturating_sub(1);
-                let truncated_label: String = tab
-                    .label
-                    .graphemes(true)
-                    .take(truncated_len)
-                    .chain(std::iter::once(ellipsis))
-                    .collect();
-                self.shape_and_render_label(
-                    font_system,
-                    &truncated_label,
-                    x0 + margin,
-                    0.0,
-                    baseline,
-                    cell_w,
-                    label_fg,
-                    fg_vertices,
-                    fg_indices,
-                );
-            } else {
-                self.shape_and_render_label(
-                    font_system,
-                    tab.label,
-                    x0 + margin,
-                    0.0,
-                    baseline,
-                    cell_w,
-                    label_fg,
-                    fg_vertices,
-                    fg_indices,
-                );
-            }
-        }
-
-        // ---- Window control buttons ----
-        let btn_w = cell_w * BUTTON_CELLS;
-        let buttons_x = surface_w - controls.region_width;
-        let button_labels = [
-            "\u{1F5D5}", // 🗕 minimize
-            if controls.maximized {
-                "\u{1F5D7}"
-            } else {
-                "\u{1F5D6}"
-            }, // 🗗 restore / 🗖 maximize
-            "\u{1F5D9}", // × close
-        ];
-
-        for (i, label) in button_labels.iter().enumerate() {
-            let bx = buttons_x + i as f32 * btn_w;
-
-            // Hover highlight.
-            if controls.hovered == Some(i as u8) {
-                let hover_color = if i == BTN_CLOSE as usize {
-                    // Red highlight for close button.
-                    pack_color(&Srgb::new(200, 50, 50), 255)
-                } else {
-                    pack_color(&blend(inactive_bg, palette.fg, 0.3), 255)
-                };
-                push_rect(bx, 0.0, btn_w, cell_h, hover_color, bg_vertices, bg_indices);
-            }
-
-            // Center the glyph in the button region.
             self.shape_and_render_label(
                 font_system,
-                label,
-                bx + (btn_w - cell_w) / 2.0,
+                &tab.label,
+                tab.label_x,
+                0.0,
+                baseline,
+                cell_w,
+                label_fg,
+                fg_vertices,
+                fg_indices,
+            );
+        }
+
+        for button in &plan.buttons {
+            if let Some(bg) = button.bg {
+                push_rect(
+                    button.x,
+                    0.0,
+                    button.width,
+                    cell_h,
+                    pack_color(&bg, 255),
+                    bg_vertices,
+                    bg_indices,
+                );
+            }
+            self.shape_and_render_label(
+                font_system,
+                button.label,
+                button.x + (button.width - cell_w) / 2.0,
                 0.0,
                 baseline,
                 cell_w,
@@ -3083,21 +2970,15 @@ struct BarOverlay {
 }
 
 impl CursorRenderState {
-    /// True iff the cursor is a visible block at this cell — both sides of
-    /// the inversion (bg quad, fg glyph) consult this.
-    fn is_block_at(
-        self,
-        row: u32,
-        col: u32,
-    ) -> bool {
-        matches!(
-            self,
+    fn block_cursor(self) -> Option<(u32, u32)> {
+        match self {
             CursorRenderState::Visible {
-                row: r,
-                col: c,
+                row,
+                col,
                 shape: CursorShape::Block,
-            } if r == row && c == col,
-        )
+            } => Some((row, col)),
+            _ => None,
+        }
     }
 
     /// Build a thin overlay quad for underline / beam shapes when this row

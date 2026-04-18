@@ -19,19 +19,16 @@ use winit::window::Window;
 
 use crate::APP_START_TIME;
 use crate::InputEndpoint;
-use crate::renderer::BUTTON_CELLS;
-use crate::renderer::BUTTONS_REGION_CELLS;
 use crate::renderer::compute_gutter_width;
 use crate::renderer::r#impl::FAILURE;
-use crate::renderer::r#impl::MAX_TAB_WIDTH;
 use crate::renderer::r#impl::RUNNING;
 use crate::renderer::r#impl::RowSnapshot;
 use crate::renderer::r#impl::SUCCESS;
 use crate::renderer::r#impl::TermSnapshot;
-use crate::renderer::r#impl::blend;
 use crate::renderer::r#impl::collect_row_glyphs;
-use crate::renderer::r#impl::resolve_cell_colors;
 use crate::renderer::r#impl::snapshot_terminal;
+use crate::renderer::paint::build_tab_bar_plan;
+use crate::renderer::paint::resolve_painted_cell;
 
 type StartupGlyphKey = (usize, u16, u8, bool);
 
@@ -283,10 +280,17 @@ fn paint_tab_bar(
     bg: Srgb<u8>,
     fg: Srgb<u8>,
 ) {
-    let inactive_bg = blend(bg, fg, 0.5);
-    let buttons_region_w = cell_w as f32 * BUTTONS_REGION_CELLS;
-    let tabs_available_w = (width as f32 - buttons_region_w).max(0.0);
-    let max_tab_w = (cell_w as f32 * MAX_TAB_WIDTH).min(tabs_available_w);
+    let plan = build_tab_bar_plan(
+        &[crate::renderer::r#impl::TabInfo {
+            label: title,
+            active: true,
+        }],
+        &snap.palette,
+        None,
+        false,
+        width as f32,
+        cell_w as f32,
+    );
 
     fill_rect(
         buffer,
@@ -294,47 +298,84 @@ fn paint_tab_bar(
         height,
         0,
         0,
-        max_tab_w as i32,
+        width as i32,
         tab_bar_h,
-        pack_rgb(bg),
-    );
-    fill_rect(
-        buffer,
-        width,
-        height,
-        max_tab_w as i32,
-        0,
-        width as i32 - max_tab_w as i32,
-        tab_bar_h,
-        pack_rgb(inactive_bg),
+        pack_rgb(plan.base_bg),
     );
 
-    let margin = cell_w as f32;
-    let max_label_chars = ((max_tab_w - margin * 2.0) / cell_w as f32).max(1.0) as usize;
-    let label_chars = title.graphemes(true).count();
-    let title = if label_chars > max_label_chars {
-        let ellipsis = "…";
-        let truncated_len = max_label_chars.saturating_sub(1);
-        title
-            .graphemes(true)
-            .take(truncated_len)
-            .chain(std::iter::once(ellipsis))
-            .collect::<String>()
-    } else {
-        title.to_string()
-    };
+    for tab in &plan.tabs {
+        if let Some(tab_bg) = tab.bg {
+            fill_rect(
+                buffer,
+                width,
+                height,
+                tab.x.round() as i32,
+                0,
+                tab.width.round() as i32,
+                tab_bar_h,
+                pack_rgb(tab_bg),
+            );
+        }
+        if let Some(separator) = tab.separator {
+            fill_rect(
+                buffer,
+                width,
+                height,
+                tab.x.round() as i32,
+                0,
+                3,
+                tab_bar_h,
+                pack_rgb(separator),
+            );
+        }
+        let row = label_row(&tab.label, fg, bg, true);
+        paint_shaped_label(
+            font_system,
+            snap,
+            buffer,
+            width,
+            height,
+            &row,
+            tab.label_x,
+            0.0,
+        );
+    }
 
-    let title_len = title.graphemes(true).count();
+    for button in &plan.buttons {
+        if let Some(button_bg) = button.bg {
+            fill_rect(
+                buffer,
+                width,
+                height,
+                button.x.round() as i32,
+                0,
+                button.width.round() as i32,
+                tab_bar_h,
+                pack_rgb(button_bg),
+            );
+        }
+        let row = label_row(button.label, fg, plan.base_bg, false);
+        let x = button.x + (button.width - cell_w as f32) * 0.5;
+        paint_shaped_label(font_system, snap, buffer, width, height, &row, x, 0.0);
+    }
+}
 
-    let row = RowSnapshot {
+fn label_row(
+    text: &str,
+    fg: Srgb<u8>,
+    bg: Srgb<u8>,
+    prompt_start: bool,
+) -> RowSnapshot {
+    let len = text.graphemes(true).count();
+    RowSnapshot {
         line_attr: LineAttr::Normal,
-        fg: vec![fg; title_len],
-        bg: vec![bg; title_len],
-        attrs: vec![CellAttrs::default(); title_len],
-        selected: vec![false; title_len],
-        matched: vec![false; title_len],
-        active_match: vec![false; title_len],
-        cells: title
+        fg: vec![fg; len],
+        bg: vec![bg; len],
+        attrs: vec![CellAttrs::default(); len],
+        selected: vec![false; len],
+        matched: vec![false; len],
+        active_match: vec![false; len],
+        cells: text
             .graphemes(true)
             .map(|g| {
                 let mut builder = SmolStrBuilder::new();
@@ -343,43 +384,10 @@ fn paint_tab_bar(
             })
             .collect(),
         exit_status: None,
-        has_link: vec![false; title_len],
-        underline: vec![UnderlineStyle::None; title_len],
-        underline_color: vec![None; title_len],
-        prompt_start: true,
-    };
-
-    paint_shaped_label(font_system, snap, buffer, width, height, &row, margin, 0.0);
-
-    let btn_w = cell_w as f32 * BUTTON_CELLS;
-    let buttons_x = width as f32 - buttons_region_w;
-    let button_labels = ["\u{1F5D5}", "\u{1F5D6}", "\u{1F5D9}"];
-    for (i, label) in button_labels.iter().enumerate() {
-        let label_len = label.graphemes(true).count();
-        let row = RowSnapshot {
-            line_attr: LineAttr::Normal,
-            fg: vec![fg; label_len],
-            bg: vec![inactive_bg; label_len],
-            attrs: vec![CellAttrs::default(); label_len],
-            selected: vec![false; label_len],
-            matched: vec![false; label_len],
-            active_match: vec![false; label_len],
-            cells: label
-                .graphemes(true)
-                .map(|g| {
-                    let mut builder = SmolStrBuilder::new();
-                    builder.push_str(g);
-                    builder.finish()
-                })
-                .collect(),
-            exit_status: None,
-            has_link: vec![false; label_len],
-            underline: vec![UnderlineStyle::None; label_len],
-            underline_color: vec![None; label_len],
-            prompt_start: false,
-        };
-        let x = buttons_x + i as f32 * btn_w + (btn_w - cell_w as f32) * 0.5;
-        paint_shaped_label(font_system, snap, buffer, width, height, &row, x, 0.0);
+        has_link: vec![false; len],
+        underline: vec![UnderlineStyle::None; len],
+        underline_color: vec![None; len],
+        prompt_start,
     }
 }
 
@@ -451,27 +459,17 @@ fn paint_row_backgrounds(
 ) {
     for col in 0..row.attrs.len() {
         let x = gutter_w + col as i32 * cell_w;
-        let cell_attrs = row.attrs[col];
-        let selected = row.selected.get(col).copied().unwrap_or(false);
-        let matched = row.matched.get(col).copied().unwrap_or(false);
-        let active_match = row.active_match.get(col).copied().unwrap_or(false);
-        let block_cursor_here = block_cursor == Some((row_idx, col as u32));
-        let (cell_fg, cell_bg) =
-            resolve_cell_colors(&row.fg[col], &row.bg[col], cell_attrs, snap.screen_reverse);
-        let bg = if active_match {
-            blend(cell_fg, cell_bg, 0.5)
-        } else if selected {
-            snap.palette.selection_bg.unwrap_or(cell_fg)
-        } else if block_cursor_here {
-            snap.palette.cursor.unwrap_or(cell_fg)
-        } else if matched {
-            cell_fg
-        } else if has_background_image && cell_bg == snap.palette.bg {
-            continue;
-        } else {
-            cell_bg
-        };
-        fill_rect(buffer, width, height, x, y, cell_w, cell_h, pack_rgb(bg));
+        let painted = resolve_painted_cell(
+            snap,
+            row,
+            row_idx,
+            col as u32,
+            block_cursor,
+            has_background_image,
+        );
+        if let Some(bg) = painted.fill_bg {
+            fill_rect(buffer, width, height, x, y, cell_w, cell_h, pack_rgb(bg));
+        }
     }
 }
 

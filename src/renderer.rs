@@ -2,6 +2,7 @@ pub mod background;
 pub mod glyph_atlas;
 pub mod image_atlas;
 mod r#impl;
+pub(crate) mod paint;
 mod shelf;
 pub(crate) mod startup;
 
@@ -1021,7 +1022,6 @@ impl RenderHost {
         let controls = WindowControls {
             hovered: hovered_button,
             maximized: self.window.as_ref().is_some_and(|w| w.is_maximized()),
-            region_width: self.font_system.cell_width as f32 * BUTTONS_REGION_CELLS,
             tab_menu: tab_context_menu.as_ref().map(|m| (m.x, m.hovered_item)),
         };
 
