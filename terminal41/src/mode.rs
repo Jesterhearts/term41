@@ -20,10 +20,31 @@ pub const DECANM: u16 = 2;
 /// homes the cursor.
 pub const DECCOLM: u16 = 3;
 
+/// DECARM -- Auto-Repeat Mode (mode 8). Terminal-level auto-repeat is
+/// always active (handled by the OS/windowing system), so this is a
+/// tracked no-op for DECRQM compatibility. Default is on.
+pub const DECARM: u16 = 8;
+
+/// att610 -- Cursor blink control (mode 12). When set, the cursor blinks;
+/// when reset, it is steady. This is an xterm extension (not a DEC mode)
+/// that overrides the blink axis of the DECSCUSR style.
+pub const ATT610_BLINK: u16 = 12;
+
+/// DECNKM -- Numeric Keypad Mode (mode 66). When set, the numeric keypad
+/// sends application sequences (same effect as DECKPAM / ESC =); when
+/// reset, it sends normal characters (same as DECKPNM / ESC >).
+pub const DECNKM: u16 = 66;
+
 /// Allow DECCOLM (mode 40). Gates whether mode 3 (DECCOLM) is honoured.
 /// Default is off, matching xterm — prevents unsolicited 80/132 column
 /// toggling which is both disruptive and expensive (grid resize + clear).
 pub const ALLOW_DECCOLM: u16 = 40;
+
+/// DECSCNM -- Screen Mode (mode 5). When set, the screen displays in
+/// reverse video — default background becomes foreground and vice versa.
+/// Per-cell SGR 7 (REVERSE) stacks with this, so reversed cells appear
+/// normal under DECSCNM.
+pub const DECSCNM: u16 = 5;
 
 /// DECOM -- Origin Mode. When set, cursor addressing is relative to the
 /// scroll region; when reset, it is relative to the full screen.
@@ -84,6 +105,17 @@ pub const SAVE_CURSOR: u16 = 1048;
 /// cursor and switches to the alt screen; leaving restores and switches
 /// back.
 pub const ALT_SCREEN_SAVE: u16 = 1049;
+
+/// DECLRMM -- Left/Right Margin Mode (mode 69). When set, enables
+/// left and right margins set by DECSLRM (`CSI Pl ; Pr s`). Cursor
+/// movement, scrolling, and character insertion/deletion are bounded
+/// by these margins. Default is off.
+pub const DECLRMM: u16 = 69;
+
+/// DECNCSM -- No Clearing Screen on Column Mode change (mode 95). When
+/// set, switching DECCOLM (mode 3) does not clear the screen. Default
+/// is off (screen is cleared on DECCOLM change, per DEC spec).
+pub const DECNCSM: u16 = 95;
 
 /// Bracketed paste (mode 2004). Pasted text is wrapped in
 /// `CSI 200~`..`CSI 201~` so apps can distinguish it from typed input.

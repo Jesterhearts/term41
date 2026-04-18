@@ -56,6 +56,12 @@ pub struct Screen {
     pub scroll_top: u32,
     /// Bottom row of the scroll region (0-indexed, inclusive).
     pub scroll_bottom: u32,
+    /// Left column of the horizontal margin region (0-indexed, inclusive).
+    /// Only active when DECLRMM (mode 69) is set.
+    pub left_margin: u32,
+    /// Right column of the horizontal margin region (0-indexed, inclusive).
+    /// Only active when DECLRMM (mode 69) is set.
+    pub right_margin: u32,
     /// Viewport scroll-back offset. 0 = viewing the live terminal,
     /// positive = scrolled into history. Alt screens keep this at 0 since
     /// their grid has no scrollback.
@@ -106,6 +112,11 @@ pub struct Screen {
     /// arrows still use the CSI modifier form. Default is false (normal
     /// cursor keys).
     pub app_cursor_keys: bool,
+    /// DECKPAM / DECKPNM — when true (application keypad mode), the
+    /// numeric keypad sends SS3 sequences instead of their normal
+    /// characters. Set by ESC = (DECKPAM) or DECNKM (`?66 h`); cleared
+    /// by ESC > (DECKPNM) or DECNKM (`?66 l`).
+    pub app_keypad: bool,
 }
 
 impl Screen {
@@ -145,6 +156,8 @@ impl Screen {
             underline_color: None,
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
+            left_margin: 0,
+            right_margin: cols.saturating_sub(1),
             offset: 0,
             images: BTreeMap::new(),
             saved_cursor: None,
@@ -161,6 +174,7 @@ impl Screen {
             single_shift: None,
             autowrap: true,
             app_cursor_keys: false,
+            app_keypad: false,
         }
     }
 }
@@ -287,7 +301,10 @@ pub(super) fn set_private_mode(
             active.cursor.col = 0;
         }
         mode::DECAWM => active.autowrap = enable,
+        mode::DECNKM => active.app_keypad = enable,
         mode::DECTCEM => active.cursor_visible = enable,
+        // DECLRMM does not need action here — the `declrmm` bool lives
+        // on TerminalModes and is handled at the csi_dispatch level.
         mode::ALT_SCREEN => switch_screen(enable, active, stash, on_alt),
         mode::ALT_SCREEN_CLEAR => {
             // xterm clears the alt buffer when leaving via 1047l so stale

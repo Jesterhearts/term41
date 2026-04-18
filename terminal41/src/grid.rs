@@ -306,6 +306,92 @@ impl Grid {
         shift_in_region(images, abs_top, abs_bottom, n as i64);
     }
 
+    /// Scroll content up within a rectangular sub-region defined by rows
+    /// `top..=bottom` and columns `left..=right`. Each row copies the
+    /// column range from n rows below; the bottom n rows' column range is
+    /// cleared. Used by IL/DL/IND when DECLRMM is active.
+    pub(super) fn scroll_up_in_rect(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        bottom: u32,
+        left: u32,
+        right: u32,
+        n: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let abs_top = first_visible + top as usize;
+        let abs_bottom = first_visible + bottom as usize;
+        let l = left as usize;
+        let r = (right as usize + 1).min(self.rows[abs_top].cells.len());
+        let n = (n as usize).min(abs_bottom - abs_top + 1);
+
+        for row in abs_top..=(abs_bottom - n) {
+            let src = row + n;
+            let cells: Vec<_> = self.rows[src].cells[l..r].to_vec();
+            let fg: Vec<_> = self.rows[src].fg[l..r].to_vec();
+            let bg: Vec<_> = self.rows[src].bg[l..r].to_vec();
+            let attrs: Vec<_> = self.rows[src].attrs[l..r].to_vec();
+            let ul: Vec<_> = self.rows[src].underline[l..r].to_vec();
+            let ul_color: Vec<_> = self.rows[src].underline_color[l..r].to_vec();
+            let links: Vec<_> = self.rows[src].links[l..r].to_vec();
+
+            self.rows[row].cells[l..r].clone_from_slice(&cells);
+            self.rows[row].fg[l..r].copy_from_slice(&fg);
+            self.rows[row].bg[l..r].copy_from_slice(&bg);
+            self.rows[row].attrs[l..r].copy_from_slice(&attrs);
+            self.rows[row].underline[l..r].copy_from_slice(&ul);
+            self.rows[row].underline_color[l..r].copy_from_slice(&ul_color);
+            self.rows[row].links[l..r].clone_from_slice(&links);
+        }
+
+        for row in (abs_bottom - n + 1)..=abs_bottom {
+            self.rows[row].clear_range(l..r, self.default_fg, self.default_bg);
+        }
+    }
+
+    /// Scroll content down within a rectangular sub-region. Mirrors
+    /// [`scroll_up_in_rect`] but shifts content downward.
+    pub(super) fn scroll_down_in_rect(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        bottom: u32,
+        left: u32,
+        right: u32,
+        n: u32,
+    ) {
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let abs_top = first_visible + top as usize;
+        let abs_bottom = first_visible + bottom as usize;
+        let l = left as usize;
+        let r = (right as usize + 1).min(self.rows[abs_top].cells.len());
+        let n = (n as usize).min(abs_bottom - abs_top + 1);
+
+        for row in ((abs_top + n)..=abs_bottom).rev() {
+            let src = row - n;
+            let cells: Vec<_> = self.rows[src].cells[l..r].to_vec();
+            let fg: Vec<_> = self.rows[src].fg[l..r].to_vec();
+            let bg: Vec<_> = self.rows[src].bg[l..r].to_vec();
+            let attrs: Vec<_> = self.rows[src].attrs[l..r].to_vec();
+            let ul: Vec<_> = self.rows[src].underline[l..r].to_vec();
+            let ul_color: Vec<_> = self.rows[src].underline_color[l..r].to_vec();
+            let links: Vec<_> = self.rows[src].links[l..r].to_vec();
+
+            self.rows[row].cells[l..r].clone_from_slice(&cells);
+            self.rows[row].fg[l..r].copy_from_slice(&fg);
+            self.rows[row].bg[l..r].copy_from_slice(&bg);
+            self.rows[row].attrs[l..r].copy_from_slice(&attrs);
+            self.rows[row].underline[l..r].copy_from_slice(&ul);
+            self.rows[row].underline_color[l..r].copy_from_slice(&ul_color);
+            self.rows[row].links[l..r].clone_from_slice(&links);
+        }
+
+        for row in abs_top..(abs_top + n) {
+            self.rows[row].clear_range(l..r, self.default_fg, self.default_bg);
+        }
+    }
+
     pub fn active_row_index(
         &self,
         cursor: &Cursor,

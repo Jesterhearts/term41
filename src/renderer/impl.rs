@@ -95,9 +95,12 @@ fn resolve_cell_colors(
     fg: &Srgb<u8>,
     bg: &Srgb<u8>,
     attrs: CellAttrs,
+    screen_reverse: bool,
 ) -> (Srgb<u8>, Srgb<u8>) {
     let (mut fg, mut bg) = (*fg, *bg);
-    if attrs.contains(CellAttrs::REVERSE) {
+    // DECSCNM (screen reverse) XORs with per-cell SGR 7 (REVERSE):
+    // both off or both on → normal; one on → swap.
+    if attrs.contains(CellAttrs::REVERSE) != screen_reverse {
         std::mem::swap(&mut fg, &mut bg);
     }
     if attrs.contains(CellAttrs::DIM) {
@@ -268,6 +271,9 @@ pub struct TermSnapshot {
     /// Cursor position (row, col) if visible and not scrolled off.
     pub cursor: Option<(u32, u32)>,
     pub cursor_style: terminal41::CursorStyle,
+    /// DECSCNM — screen-wide reverse video. When true, default fg/bg are
+    /// swapped and per-cell REVERSE is XORed with this.
+    pub screen_reverse: bool,
 }
 
 /// Snapshot the terminal's visible state under the lock. The resulting
@@ -328,6 +334,7 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
         search,
         cursor,
         cursor_style: terminal.cursor_style,
+        screen_reverse: terminal.modes.screen_reverse,
     }
 }
 
@@ -1125,6 +1132,7 @@ impl Renderer {
                     &snap_row.fg[col as usize],
                     &snap_row.bg[col as usize],
                     cell_attrs,
+                    snap.screen_reverse,
                 );
                 let bg_effective = if active_match {
                     blend(cell_fg, cell_bg, 0.5)
@@ -1421,6 +1429,7 @@ impl Renderer {
                     &snap_row.fg[sg.col as usize],
                     &snap_row.bg[sg.col as usize],
                     cell_attrs,
+                    snap.screen_reverse,
                 );
                 let fg_effective = if active_match {
                     cell_fg

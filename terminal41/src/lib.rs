@@ -145,6 +145,20 @@ pub struct TerminalModes {
     /// LNM (ANSI mode 20) — Line Feed/New Line mode. When `true`, LF, VT,
     /// and FF perform an implicit CR before the line feed. Default is off.
     pub newline_mode: bool,
+    /// DECARM (`?8`) — auto-repeat. Always on at the OS level; tracked
+    /// here only so DECRQM can report it. Default is `true`.
+    pub decarm: bool,
+    /// DECLRMM (`?69`) — when `true`, left/right margins (set by DECSLRM)
+    /// are active and constrain cursor movement, scrolling, and
+    /// insertion/deletion. Default is `false`.
+    pub declrmm: bool,
+    /// DECNCSM (`?95`) — when `true`, DECCOLM switching does not clear
+    /// the screen. Default is `false`.
+    pub decncsm: bool,
+    /// DECSCNM (`?5`) — when `true`, the entire screen renders in reverse
+    /// video: the default bg becomes fg and vice versa. Per-cell SGR 7
+    /// (REVERSE) XORs with this, so reversed cells appear normal.
+    pub screen_reverse: bool,
     /// Mode 40 — when `true`, DECCOLM (mode 3) is honoured. Default is
     /// `false`, matching xterm. Without this gate a malicious escape
     /// sequence stream can repeatedly toggle 80/132 columns, triggering
@@ -169,6 +183,10 @@ impl TerminalModes {
             synchronized_update_since: None,
             insert_mode: false,
             newline_mode: false,
+            decarm: true,
+            declrmm: false,
+            decncsm: false,
+            screen_reverse: false,
             allow_deccolm: false,
             deccolm_saved_cols: None,
             vt52_mode: false,
@@ -1770,6 +1788,94 @@ impl Drop for TerminalThread {
 /// `DCS 1 + r <hex_name>=<hex_value> ST`; for unknown names reply
 /// `DCS 0 + r <hex_name> ST`.
 ///
+/// DECRQSS — Request Selection or Setting (`DCS $ q <selector> ST`).
+/// The selector identifies which setting to report. We reply with
+/// `DCS 1 $ r <value> ST` for recognised settings, or
+/// `DCS 0 $ r ST` for unrecognised ones.
+fn handle_decrqss(
+    selector: &[u8],
+    terminal: &mut Terminal,
+) {
+    use std::io::Write;
+    let out = &mut terminal.pending_output;
+
+    match selector {
+        // SGR — report current graphic rendition.
+        b"m" => {
+            let screen = &terminal.active;
+            let mut parts: Vec<String> = Vec::new();
+            let attrs = screen.attrs;
+            if attrs.contains(font41::attrs::CellAttrs::BOLD) {
+                parts.push("1".into());
+            }
+            if attrs.contains(font41::attrs::CellAttrs::DIM) {
+                parts.push("2".into());
+            }
+            if attrs.contains(font41::attrs::CellAttrs::ITALIC) {
+                parts.push("3".into());
+            }
+            if attrs.contains(font41::attrs::CellAttrs::REVERSE) {
+                parts.push("7".into());
+            }
+            if attrs.contains(font41::attrs::CellAttrs::HIDDEN) {
+                parts.push("8".into());
+            }
+            if attrs.contains(font41::attrs::CellAttrs::STRIKETHROUGH) {
+                parts.push("9".into());
+            }
+            if attrs.contains(font41::attrs::CellAttrs::OVERLINE) {
+                parts.push("53".into());
+            }
+            if parts.is_empty() {
+                parts.push("0".into());
+            }
+            let sgr = parts.join(";");
+            write!(out, "\x1bP1$r{sgr}m\x1b\\").expect("write to Vec");
+        }
+        // DECSTBM — report scroll region.
+        b"r" => {
+            let top = terminal.active.scroll_top + 1;
+            let bottom = terminal.active.scroll_bottom + 1;
+            write!(out, "\x1bP1$r{top};{bottom}r\x1b\\").expect("write to Vec");
+        }
+        // DECSLRM — report left/right margins.
+        b"s" => {
+            let left = terminal.active.left_margin + 1;
+            let right = terminal.active.right_margin + 1;
+            write!(out, "\x1bP1$r{left};{right}s\x1b\\").expect("write to Vec");
+        }
+        // DECSCUSR — report cursor style.
+        b" q" => {
+            let ps = match (terminal.cursor_style.shape, terminal.cursor_style.blink) {
+                (cursor::CursorShape::Block, true) => 1,
+                (cursor::CursorShape::Block, false) => 2,
+                (cursor::CursorShape::Underline, true) => 3,
+                (cursor::CursorShape::Underline, false) => 4,
+                (cursor::CursorShape::Beam, true) => 5,
+                (cursor::CursorShape::Beam, false) => 6,
+            };
+            write!(out, "\x1bP1$r{ps} q\x1b\\").expect("write to Vec");
+        }
+        // DECSCA — report character protection attribute.
+        b"\"q" => {
+            let ps = if terminal
+                .active
+                .attrs
+                .contains(font41::attrs::CellAttrs::PROTECTED)
+            {
+                1
+            } else {
+                0
+            };
+            write!(out, "\x1bP1$r{ps}\"q\x1b\\").expect("write to Vec");
+        }
+        // Unrecognised — invalid response.
+        _ => {
+            out.extend_from_slice(b"\x1bP0$r\x1b\\");
+        }
+    }
+}
+
 /// This lets tmux and neovim discover features like truecolor, styled
 /// underlines, and cursor shapes without relying on a terminfo entry.
 fn handle_xtgettcap(
@@ -1896,6 +2002,13 @@ pub fn run_terminal_thread(
                             // truecolor, cursor shapes, styled underlines.
                             let mut t = terminal.lock().unwrap();
                             handle_xtgettcap(&bytes, &mut t.pending_output);
+                        } else if act == 'q' && intermediates.as_slice() == b"$" {
+                            // DECRQSS — Request Selection or Setting.
+                            // The payload identifies the setting being queried;
+                            // we reply with `DCS 1 $ r <value> ST` for
+                            // recognised settings, `DCS 0 $ r ST` otherwise.
+                            let mut t = terminal.lock().unwrap();
+                            handle_decrqss(&bytes, &mut t);
                         } else if act == 'q' && intermediates.as_slice().is_empty() {
                             // Sixel parsing is CPU-heavy — done outside the
                             // lock so rendering isn't blocked.

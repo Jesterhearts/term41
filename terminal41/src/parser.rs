@@ -585,6 +585,20 @@ fn apply_private_mode(
         // The sense is inverted: the mode *being set* means ANSI is active,
         // so VT52 is off.
         ctx.modes.vt52_mode = !enable;
+    } else if mode == mode::DECSCNM {
+        ctx.modes.screen_reverse = enable;
+    } else if mode == mode::DECARM {
+        ctx.modes.decarm = enable;
+    } else if mode == mode::ATT610_BLINK {
+        ctx.cursor_style.blink = enable;
+    } else if mode == mode::DECNCSM {
+        ctx.modes.decncsm = enable;
+    } else if mode == mode::DECLRMM {
+        ctx.modes.declrmm = enable;
+        if !enable {
+            ctx.screen.left_margin = 0;
+            ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
+        }
     } else if mode == mode::BRACKETED_PASTE {
         ctx.modes.bracketed_paste = enable;
     } else if mode == mode::FOCUS_REPORTING {
@@ -628,6 +642,41 @@ fn query_private_mode(
                 2
             }
         }
+        mode::DECSCNM => {
+            if ctx.modes.screen_reverse {
+                1
+            } else {
+                2
+            }
+        }
+        mode::DECARM => {
+            if ctx.modes.decarm {
+                1
+            } else {
+                2
+            }
+        }
+        mode::ATT610_BLINK => {
+            if ctx.cursor_style.blink {
+                1
+            } else {
+                2
+            }
+        }
+        mode::DECLRMM => {
+            if ctx.modes.declrmm {
+                1
+            } else {
+                2
+            }
+        }
+        mode::DECNCSM => {
+            if ctx.modes.decncsm {
+                1
+            } else {
+                2
+            }
+        }
         mode::DECCKM => {
             if ctx.screen.app_cursor_keys {
                 1
@@ -658,6 +707,13 @@ fn query_private_mode(
         }
         mode::DECTCEM => {
             if ctx.screen.cursor_visible {
+                1
+            } else {
+                2
+            }
+        }
+        mode::DECNKM => {
+            if ctx.screen.app_keypad {
                 1
             } else {
                 2
@@ -852,6 +908,21 @@ pub(super) fn csi_dispatch(
             if p[0] == mode::DECANM {
                 // `h` = ANSI (vt52_mode off); `l` = VT52.
                 ctx.modes.vt52_mode = !enable;
+            } else if p[0] == mode::DECSCNM {
+                ctx.modes.screen_reverse = enable;
+            } else if p[0] == mode::DECARM {
+                ctx.modes.decarm = enable;
+            } else if p[0] == mode::ATT610_BLINK {
+                ctx.cursor_style.blink = enable;
+            } else if p[0] == mode::DECNCSM {
+                ctx.modes.decncsm = enable;
+            } else if p[0] == mode::DECLRMM {
+                ctx.modes.declrmm = enable;
+                if !enable {
+                    // Disabling DECLRMM resets margins to full width.
+                    ctx.screen.left_margin = 0;
+                    ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
+                }
             } else if p[0] == mode::BRACKETED_PASTE {
                 ctx.modes.bracketed_paste = enable;
             } else if p[0] == mode::FOCUS_REPORTING {
@@ -885,9 +956,14 @@ pub(super) fn csi_dispatch(
                     screen::resize_screen(s, old_cols, rows, new_cols, rows);
                 }
                 ctx.viewport.cols = new_cols;
-                screen::clear_visible(ctx.screen, ctx.viewport);
+                // DECNCSM (mode 95): when set, skip the screen clear.
+                if !ctx.modes.decncsm {
+                    screen::clear_visible(ctx.screen, ctx.viewport);
+                }
                 ctx.screen.scroll_top = 0;
                 ctx.screen.scroll_bottom = rows.saturating_sub(1);
+                ctx.screen.left_margin = 0;
+                ctx.screen.right_margin = (ctx.viewport.cols).saturating_sub(1);
                 ctx.screen.cursor = grid::Cursor::default();
             } else if !apply_mouse_mode(
                 p[0],
@@ -1063,6 +1139,8 @@ pub(super) fn csi_dispatch(
         screen.underline_color = None;
         screen.scroll_top = 0;
         screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+        screen.left_margin = 0;
+        screen.right_margin = ctx.viewport.cols.saturating_sub(1);
         screen.saved_cursor = None;
         screen.current_hyperlink = None;
         screen.cursor_visible = true;
@@ -1071,6 +1149,7 @@ pub(super) fn csi_dispatch(
         screen.origin_mode = false;
         screen.autowrap = true;
         screen.app_cursor_keys = false;
+        screen.app_keypad = false;
         screen.charset_g0_is_drawing = false;
         screen.charset_g1_is_drawing = false;
         screen.charset_g2_is_drawing = false;
@@ -1501,26 +1580,48 @@ pub(super) fn csi_dispatch(
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
             if cursor.row >= screen.scroll_top && cursor.row <= screen.scroll_bottom {
                 let top = cursor.row;
-                screen.grid.scroll_down_in_region(
-                    viewport,
-                    &mut screen.images,
-                    top,
-                    screen.scroll_bottom,
-                    n,
-                );
+                if ctx.modes.declrmm {
+                    screen.grid.scroll_down_in_rect(
+                        viewport,
+                        top,
+                        screen.scroll_bottom,
+                        screen.left_margin,
+                        screen.right_margin,
+                        n,
+                    );
+                } else {
+                    screen.grid.scroll_down_in_region(
+                        viewport,
+                        &mut screen.images,
+                        top,
+                        screen.scroll_bottom,
+                        n,
+                    );
+                }
             }
         }
         'M' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
             if cursor.row >= screen.scroll_top && cursor.row <= screen.scroll_bottom {
                 let top = cursor.row;
-                screen.grid.scroll_up_in_region(
-                    viewport,
-                    &mut screen.images,
-                    top,
-                    screen.scroll_bottom,
-                    n,
-                );
+                if ctx.modes.declrmm {
+                    screen.grid.scroll_up_in_rect(
+                        viewport,
+                        top,
+                        screen.scroll_bottom,
+                        screen.left_margin,
+                        screen.right_margin,
+                        n,
+                    );
+                } else {
+                    screen.grid.scroll_up_in_region(
+                        viewport,
+                        &mut screen.images,
+                        top,
+                        screen.scroll_bottom,
+                        n,
+                    );
+                }
             }
         }
         'P' => {
@@ -1576,13 +1677,19 @@ pub(super) fn csi_dispatch(
             screen.cursor.col = 0;
         }
         's' => {
-            // SCOSC — save cursor position. Shares the DECSC slot, so an
-            // app that mixes `CSI s` with `ESC 7` reads back whichever
-            // write came last. Scripts that overlay a live-updating region
-            // (progress bars, sixel plots) rely on this plus SCORC to
-            // anchor their output; without it every repaint stacks below
-            // the previous one.
-            screen::save_cursor_slot(screen);
+            // Disambiguation: when DECLRMM is active and parameters are
+            // present, CSI Pl ; Pr s is DECSLRM (Set Left/Right Margins).
+            // Otherwise it's SCOSC (save cursor position).
+            if ctx.modes.declrmm && !p.is_empty() {
+                let left = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
+                let right = p.get(1).copied().unwrap_or(viewport.cols as u16).max(1) as u32 - 1;
+                screen.left_margin = left.min(viewport.cols.saturating_sub(1));
+                screen.right_margin = right
+                    .min(viewport.cols.saturating_sub(1))
+                    .max(screen.left_margin);
+            } else {
+                screen::save_cursor_slot(screen);
+            }
         }
         'u' => {
             // SCORC — restore cursor position. The kitty keyboard `CSI u`
@@ -1772,6 +1879,8 @@ pub(super) fn esc_dispatch(
                 // scroll region or origin mode enabled.
                 ctx.screen.scroll_top = 0;
                 ctx.screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+                ctx.screen.left_margin = 0;
+                ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
                 ctx.screen.origin_mode = false;
                 ctx.screen.cursor.row = 0;
                 ctx.screen.cursor.col = 0;
@@ -1882,6 +1991,8 @@ pub(super) fn esc_dispatch(
                 s.underline_color = None;
                 s.scroll_top = 0;
                 s.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+                s.left_margin = 0;
+                s.right_margin = ctx.viewport.cols.saturating_sub(1);
                 s.offset = 0;
                 s.saved_cursor = None;
                 s.current_hyperlink = None;
@@ -1920,7 +2031,10 @@ pub(super) fn esc_dispatch(
                 ctx.screen.cursor.row -= 1;
             }
         }
-        b'=' | b'>' => {}
+        // DECKPAM (ESC =) — application keypad mode.
+        // DECKPNM (ESC >) — normal keypad mode.
+        b'=' => ctx.screen.app_keypad = true,
+        b'>' => ctx.screen.app_keypad = false,
         // SS2 — Single Shift G2. Next graphic character uses G2.
         b'N' => ctx.screen.single_shift = Some(2),
         // SS3 — Single Shift G3. Next graphic character uses G3.
@@ -2772,14 +2886,16 @@ mod tests {
     }
 
     #[test]
-    fn esc_keypad_modes_are_noop() {
+    fn esc_keypad_modes_set_app_keypad() {
         let (mut screen, mut viewport) = setup();
-        screen.cursor.row = 2;
-        screen.cursor.col = 3;
+        assert!(!screen.app_keypad);
         feed(b"\x1b=", &mut screen, &mut viewport);
+        assert!(screen.app_keypad);
         feed(b"\x1b>", &mut screen, &mut viewport);
-        assert_eq!(screen.cursor.row, 2);
-        assert_eq!(screen.cursor.col, 3);
+        assert!(!screen.app_keypad);
+        // Cursor must not be affected.
+        assert_eq!(screen.cursor.row, 0);
+        assert_eq!(screen.cursor.col, 0);
     }
 
     // -- REP (CSI Ps b) ---------------------------------------------------

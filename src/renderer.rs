@@ -617,10 +617,13 @@ impl RenderHost {
             }
         }
 
-        let app_cursor_keys = self
+        let (app_cursor_keys, app_keypad) = self
             .active_tab()
-            .map(|tab| tab.terminal.lock().unwrap().active.app_cursor_keys)
-            .unwrap_or(false);
+            .map(|tab| {
+                let t = tab.terminal.lock().unwrap();
+                (t.active.app_cursor_keys, t.active.app_keypad)
+            })
+            .unwrap_or((false, false));
 
         let bytes = match &key {
             Key::Character(c) => {
@@ -633,7 +636,7 @@ impl RenderHost {
                     Some(c.as_bytes().to_vec())
                 }
             }
-            Key::Named(named) => legacy_encode_named(*named, mods, app_cursor_keys),
+            Key::Named(named) => legacy_encode_named(*named, mods, app_cursor_keys, app_keypad),
             _ => None,
         };
 
@@ -2289,6 +2292,7 @@ fn legacy_encode_named(
     key: NamedKey,
     mods: ModifiersState,
     app_cursor_keys: bool,
+    app_keypad: bool,
 ) -> Option<Vec<u8>> {
     let mod_param = legacy_modifier_param(mods);
 
@@ -2306,6 +2310,13 @@ fn legacy_encode_named(
             return Some(bytes.to_vec());
         }
     }
+
+    // Note: DECKPAM (application keypad mode) would encode numpad keys as
+    // SS3 sequences, but winit's Key enum doesn't distinguish physical
+    // numpad keys from their main-keyboard equivalents, so we can't
+    // selectively encode them here. The app_keypad state is tracked for
+    // DECRQM queries and TUI library compatibility.
+    let _ = app_keypad;
 
     // Shift+Tab → CSI Z (backtab).
     if key == NamedKey::Tab && mods.shift_key() {
