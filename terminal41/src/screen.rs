@@ -191,12 +191,32 @@ pub(super) fn screen_viewport(
     let mut view = Viewport {
         rows: viewport.rows,
         cols: viewport.cols,
-        top: viewport.top,
+        top: screen
+            .grid
+            .rows
+            .len()
+            .saturating_sub(viewport.rows as usize),
     };
     if let Some(page) = screen.page_memory.as_ref() {
         view.top = page.active_page_start() + page.display_top as usize;
     }
     view
+}
+
+pub(super) fn active_row_index(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> usize {
+    if page_memory_active(screen) {
+        return viewport.top_index(screen.grid.rows.len()) + screen.cursor.row as usize;
+    }
+
+    screen
+        .grid
+        .rows
+        .len()
+        .saturating_sub(viewport.rows as usize)
+        + screen.cursor.row as usize
 }
 
 pub(super) fn page_count_for_lines(lines_per_page: u32) -> u32 {

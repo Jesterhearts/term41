@@ -271,7 +271,7 @@ fn mark_current_row(
     viewport: &Viewport,
     apply: impl FnOnce(&mut crate::row::Row),
 ) -> u64 {
-    let local = screen.grid.active_row_index(&screen.cursor, viewport);
+    let local = crate::screen::active_row_index(screen, viewport);
     apply(&mut screen.grid.rows[local]);
     (screen.grid.total_popped + local) as u64
 }
@@ -282,7 +282,7 @@ fn current_absolute_row(
     screen: &Screen,
     viewport: &Viewport,
 ) -> u64 {
-    let local = screen.grid.active_row_index(&screen.cursor, viewport);
+    let local = crate::screen::active_row_index(screen, viewport);
     (screen.grid.total_popped + local) as u64
 }
 

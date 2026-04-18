@@ -493,15 +493,7 @@ impl Terminal {
     /// the visible area.
     fn active_viewport(&self) -> Viewport {
         let mut view = screen::screen_viewport(&self.active, &self.viewport);
-        if !screen::page_memory_active(&self.active) {
-            view.top = self
-                .active
-                .grid
-                .rows
-                .len()
-                .saturating_sub(view.rows as usize)
-                .saturating_sub(self.active.offset as usize);
-        } else if self.active.offset > 0 {
+        if self.active.offset > 0 {
             view.top = view
                 .top_index(self.active.grid.rows.len())
                 .saturating_sub(self.active.offset as usize);
@@ -1757,10 +1749,7 @@ impl Terminal {
 
         let id = self.next_image_id;
         self.next_image_id += 1;
-        let row = self
-            .active
-            .grid
-            .active_row_index(&self.active.cursor, &self.viewport);
+        let row = screen::active_row_index(&self.active, &self.viewport);
         let image_rows = image.height.div_ceil(self.cell_height);
         crate::image::remove_overlapping(
             &mut self.active.images,
@@ -2356,7 +2345,7 @@ fn place_kitty_image(
     let id = *next_image_id;
     *next_image_id += 1;
 
-    let row = screen.grid.active_row_index(&screen.cursor, viewport);
+    let row = screen::active_row_index(screen, viewport);
 
     // Compute display size in pixels. `c=`/`r=` take precedence over the
     // image's native pixel dimensions and drive both cursor advancement
@@ -2737,7 +2726,7 @@ fn place_iterm_image(
     let id = *next_image_id;
     *next_image_id += 1;
 
-    let row = screen.grid.active_row_index(&screen.cursor, viewport);
+    let row = screen::active_row_index(screen, viewport);
     let image_rows = display_height.div_ceil(cell_height);
 
     crate::image::remove_overlapping(
@@ -2877,6 +2866,21 @@ mod tests {
         assert!(visible_text(&term).contains("hello"));
         assert_eq!(term.active.cursor.col, 5);
         assert_eq!(term.active.cursor.row, 0);
+    }
+
+    #[test]
+    fn visible_screen_tracks_live_bottom_after_scrollback_growth() {
+        let mut term = TestTerm::new(8, 2, 100, 16, 8);
+        term.process(b"111111112222222233333333");
+        let text = visible_text(&term);
+        assert!(
+            text.contains("22222222"),
+            "visible text should include the second wrapped row: {text:?}"
+        );
+        assert!(
+            text.contains("33333333"),
+            "visible text should include the live bottom row: {text:?}"
+        );
     }
 
     #[test]

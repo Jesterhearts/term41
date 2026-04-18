@@ -292,7 +292,7 @@ pub(super) fn put_ascii_run(
             }
         }
 
-        let r = screen.grid.active_row_index(&screen.cursor, viewport);
+        let r = screen::active_row_index(screen, viewport);
         let col = screen.cursor.col as usize;
         let remaining_cols = (viewport.cols - screen.cursor.col) as usize;
         let chunk_len = (run.len() - i).min(remaining_cols);
@@ -384,7 +384,7 @@ pub(super) fn put_char(
     let ul = screen.underline;
     let ul_color = screen.underline_color;
     let link = screen.current_hyperlink;
-    let r = screen.grid.active_row_index(&screen.cursor, viewport);
+    let r = screen::active_row_index(screen, viewport);
     let col = screen.cursor.col as usize;
 
     // Preserve the "a cell is a continuation iff its left neighbour is a wide
@@ -631,7 +631,7 @@ fn soft_wrap(
     viewport: &Viewport,
 ) {
     screen.cursor.col = 0;
-    let r = screen.grid.active_row_index(&screen.cursor, viewport);
+    let r = screen::active_row_index(screen, viewport);
     screen.grid.rows[r].wrapped = true;
     if screen.cursor.row == screen.scroll_bottom {
         if screen::page_can_scroll_down(screen, viewport) {
@@ -875,10 +875,10 @@ fn try_extend_prev_cell(
     s: &str,
 ) {
     let (prev_row, mut prev_col) = if screen.cursor.col > 0 && screen.cursor.col <= viewport.cols {
-        let row = screen.grid.active_row_index(&screen.cursor, viewport);
+        let row = screen::active_row_index(screen, viewport);
         (row, (screen.cursor.col - 1) as usize)
     } else if screen.cursor.col == 0 {
-        let row = screen.grid.active_row_index(&screen.cursor, viewport);
+        let row = screen::active_row_index(screen, viewport);
         if row == 0 || !screen.grid.rows[row].wrapped {
             return;
         }
