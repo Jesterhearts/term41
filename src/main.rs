@@ -108,6 +108,7 @@ struct Tab {
     id: TabId,
     terminal: Arc<Mutex<Terminal>>,
     pty: Pty,
+    window_sync_epoch: u64,
     /// Kept alive for its Drop impl which signals the thread to stop.
     _terminal_thread: TerminalThread,
 }
@@ -1616,6 +1617,7 @@ fn main() {
         id: TabId(0),
         terminal: terminal.clone(),
         pty,
+        window_sync_epoch: 0,
         _terminal_thread: terminal_thread,
     };
 

@@ -125,6 +125,15 @@ pub(crate) struct TabContextMenu {
     pub hovered_item: Option<usize>,
 }
 
+fn resize_tab_to_grid(
+    tab: &mut Tab,
+    cols: u32,
+    rows: u32,
+) {
+    tab.terminal.lock().unwrap().resize(cols, rows);
+    tab.pty.resize(cols as u16, rows as u16);
+}
+
 // ---------------------------------------------------------------------------
 // RenderEvent — window thread → render thread (via cueue ring buffer)
 // ---------------------------------------------------------------------------
@@ -174,6 +183,9 @@ pub struct RenderHost {
 
     /// Last known window size in physical pixels. Updated on Resized events.
     window_size: (u32, u32),
+    /// Monotonic counter for real window/grid changes. Tabs record the last
+    /// epoch they were resized to so activation can reconcile stale tabs.
+    window_resize_epoch: u64,
 
     /// Window handle, persisted after the first frame so IME requests
     /// (`set_ime_cursor_area`) can be issued from event handlers.
@@ -237,6 +249,7 @@ impl RenderHost {
             config,
             applied_title: None,
             window_size: (0, 0),
+            window_resize_epoch: 0,
             window: None,
             ime_cursor_area: None,
             clipboard: Clipboard::new(),
@@ -638,46 +651,48 @@ impl RenderHost {
     ) {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.resize(winit::dpi::PhysicalSize::new(width, height));
-            let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
-            let usable_width = width.saturating_sub(gutter_px) - RESIZE_BORDER as u32 * 2;
-            let tab_bar_px = if self.tab_bar_visible() {
-                self.font_system.cell_height
-            } else {
-                0
-            };
-            let usable_height = height.saturating_sub(tab_bar_px) - RESIZE_BORDER as u32 * 2;
-            let (cols, rows) = self
-                .font_system
-                .grid_dimensions(usable_width, usable_height);
+        }
+        if let Some((cols, rows)) = self.current_window_grid_size() {
+            self.window_resize_epoch += 1;
+            let epoch = self.window_resize_epoch;
             if let Some(tab) = self.active_tab_mut() {
-                tab.terminal.lock().unwrap().resize(cols, rows);
-                tab.pty.resize(cols as u16, rows as u16);
+                resize_tab_to_grid(tab, cols, rows);
+                tab.window_sync_epoch = epoch;
             }
         }
         self.sync_input_state();
     }
 
     fn recalculate_grid_size(&mut self) {
-        let Some(ref mut renderer) = self.renderer else {
+        let Some(_) = self.renderer.as_ref() else {
             return;
         };
+        if let Some((cols, rows)) = self.current_window_grid_size() {
+            self.window_resize_epoch += 1;
+            let epoch = self.window_resize_epoch;
+            if let Some(tab) = self.active_tab_mut() {
+                resize_tab_to_grid(tab, cols, rows);
+                tab.window_sync_epoch = epoch;
+            }
+        }
+        self.sync_input_state();
+    }
+
+    fn current_window_grid_size(&self) -> Option<(u32, u32)> {
+        let renderer = self.renderer.as_ref()?;
         let (width, height) = self.window_size;
         let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
-        let usable_width = width.saturating_sub(gutter_px);
+        let usable_width = width.saturating_sub(gutter_px) - RESIZE_BORDER as u32 * 2;
         let tab_bar_px = if self.tab_bar_visible() {
             self.font_system.cell_height
         } else {
             0
         };
-        let usable_height = height.saturating_sub(tab_bar_px);
-        let (cols, rows) = self
-            .font_system
-            .grid_dimensions(usable_width, usable_height);
-        if let Some(tab) = self.active_tab_mut() {
-            tab.terminal.lock().unwrap().resize(cols, rows);
-            tab.pty.resize(cols as u16, rows as u16);
-        }
-        self.sync_input_state();
+        let usable_height = height.saturating_sub(tab_bar_px) - RESIZE_BORDER as u32 * 2;
+        Some(
+            self.font_system
+                .grid_dimensions(usable_width, usable_height),
+        )
     }
 
     // -- Tab management -----------------------------------------------------
@@ -793,6 +808,7 @@ impl RenderHost {
             id,
             terminal,
             pty,
+            window_sync_epoch: self.window_resize_epoch,
             _terminal_thread: terminal_thread,
         });
         self.active_tab_id = id;
@@ -834,9 +850,7 @@ impl RenderHost {
             .unwrap_or(0);
         let n = self.tabs.len() as i32;
         let new_idx = ((idx as i32 + delta).rem_euclid(n)) as usize;
-        self.active_tab_id = self.tabs[new_idx].id;
-        self.sync_input_state();
-        self.sync_active_input_tab();
+        self.activate_tab_idx(new_idx);
     }
 
     fn handle_child_exited(
@@ -1128,11 +1142,33 @@ impl RenderHost {
         &mut self,
         idx: usize,
     ) {
-        if let Some(tab) = self.tabs.get(idx) {
-            self.active_tab_id = tab.id;
-            self.sync_input_state();
-            self.sync_active_input_tab();
+        self.activate_tab_idx(idx);
+    }
+
+    fn activate_tab_idx(
+        &mut self,
+        idx: usize,
+    ) {
+        let Some((cols, rows)) = self.current_window_grid_size() else {
+            if let Some(tab) = self.tabs.get(idx) {
+                self.active_tab_id = tab.id;
+                self.sync_input_state();
+                self.sync_active_input_tab();
+            }
+            return;
+        };
+
+        let epoch = self.window_resize_epoch;
+        let Some(tab) = self.tabs.get_mut(idx) else {
+            return;
+        };
+        if tab.window_sync_epoch < epoch {
+            resize_tab_to_grid(tab, cols, rows);
+            tab.window_sync_epoch = epoch;
         }
+        self.active_tab_id = tab.id;
+        self.sync_input_state();
+        self.sync_active_input_tab();
     }
 
     fn close_other_tabs(&mut self) {
