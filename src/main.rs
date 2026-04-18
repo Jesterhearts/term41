@@ -532,6 +532,7 @@ impl WindowHost {
 
     fn handle_mouse_input(
         &mut self,
+        event_loop: &ActiveEventLoop,
         pressed: bool,
         button: MouseButton,
     ) {
@@ -558,7 +559,7 @@ impl WindowHost {
             && let Some(btn) = self.window_button_at()
         {
             match btn {
-                WindowButton::Close => std::process::exit(0),
+                WindowButton::Close => event_loop.exit(),
                 WindowButton::Maximize => {
                     if let Some(w) = &self.window {
                         w.set_maximized(!w.is_maximized());
@@ -1315,7 +1316,8 @@ impl ApplicationHandler<AppEvent> for WindowHost {
     ) {
         let ev = match event {
             WindowEvent::CloseRequested => {
-                std::process::exit(0);
+                _event_loop.exit();
+                return;
             }
 
             WindowEvent::Resized(size) => {
@@ -1369,7 +1371,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                self.handle_mouse_input(state == ElementState::Pressed, button);
+                self.handle_mouse_input(_event_loop, state == ElementState::Pressed, button);
                 return;
             }
 
