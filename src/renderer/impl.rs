@@ -354,6 +354,35 @@ pub struct WindowControls {
 /// Button index for the close button (rightmost).
 const BTN_CLOSE: u8 = 2;
 
+struct FrameLayout {
+    cell_w: f32,
+    cell_h: f32,
+    baseline: f32,
+    gutter_px: f32,
+    tab_bar_h: f32,
+}
+
+struct PopupClip {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+}
+
+#[derive(Default)]
+struct ImageGeometry {
+    vertices: Vec<ImageVertex>,
+    indices: Vec<u32>,
+}
+
+#[derive(Default)]
+struct RenderGeometry {
+    bg_vertices: Vec<BgVertex>,
+    bg_indices: Vec<u32>,
+    fg_vertices: Vec<FgVertex>,
+    fg_indices: Vec<u32>,
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -996,488 +1025,626 @@ impl Renderer {
         gutter_popup: Option<&GutterPopup>,
         preedit: Option<&crate::renderer::PreeditState>,
     ) {
+        let layout = self.frame_layout(font_system, tabs);
+        let image_geometry = self.build_image_geometry(&terminal, &layout);
+        drop(terminal);
+        let geometry = self.build_render_geometry(
+            font_system,
+            snap,
+            tabs,
+            controls,
+            gutter_popup,
+            preedit,
+            &layout,
+        );
+        self.submit_render_passes(acquired, geometry, image_geometry);
+    }
+
+    fn frame_layout(
+        &self,
+        font_system: &FontSystem,
+        tabs: &[TabInfo],
+    ) -> FrameLayout {
         let cell_w = font_system.cell_width as f32;
         let cell_h = font_system.cell_height as f32;
-        let baseline = font_system.baseline_offset();
-        let gutter_px = self.gutter_width_px(font_system.cell_width) as f32;
-        // When tabs are shown, shift all terminal content down by one cell
-        // height to make room for the tab bar.
-        let tab_bar_h = if tabs.is_empty() { 0.0 } else { cell_h };
+        FrameLayout {
+            cell_w,
+            cell_h,
+            baseline: font_system.baseline_offset(),
+            gutter_px: self.gutter_width_px(font_system.cell_width) as f32,
+            tab_bar_h: if tabs.is_empty() { 0.0 } else { cell_h },
+        }
+    }
 
-        // ---- Phase 1: image quads (needs terminal borrow for pixel data) ----
-        let mut image_vertices: Vec<ImageVertex> = Vec::new();
-        let mut image_indices: Vec<u32> = Vec::new();
-        {
-            let now = std::time::Instant::now();
-            for vis in terminal.visible_images(now) {
-                let entry = match self.image_atlas.ensure_cached(
-                    &self.queue,
-                    vis.id,
-                    vis.frame_index,
-                    vis.image,
-                ) {
-                    Some(e) => e,
-                    None => continue,
-                };
+    fn build_image_geometry(
+        &mut self,
+        terminal: &Terminal,
+        layout: &FrameLayout,
+    ) -> ImageGeometry {
+        let mut geometry = ImageGeometry::default();
+        let now = std::time::Instant::now();
+        for vis in terminal.visible_images(now) {
+            let entry = match self.image_atlas.ensure_cached(
+                &self.queue,
+                vis.id,
+                vis.frame_index,
+                vis.image,
+            ) {
+                Some(e) => e,
+                None => continue,
+            };
 
-                let base_x = vis.screen_col as f32 * cell_w + gutter_px;
-                let base_y = vis.screen_row as f32 * cell_h + tab_bar_h;
-                let scale_x = if vis.image.width > 0 {
-                    vis.display_width as f32 / vis.image.width as f32
-                } else {
-                    1.0
-                };
-                let scale_y = if vis.image.height > 0 {
-                    vis.display_height as f32 / vis.image.height as f32
-                } else {
-                    1.0
-                };
+            let base_x = vis.screen_col as f32 * layout.cell_w + layout.gutter_px;
+            let base_y = vis.screen_row as f32 * layout.cell_h + layout.tab_bar_h;
+            let scale_x = if vis.image.width > 0 {
+                vis.display_width as f32 / vis.image.width as f32
+            } else {
+                1.0
+            };
+            let scale_y = if vis.image.height > 0 {
+                vis.display_height as f32 / vis.image.height as f32
+            } else {
+                1.0
+            };
 
-                for tile in &entry.tiles {
-                    let a = &tile.alloc;
-                    let x = base_x + tile.src_x as f32 * scale_x;
-                    let y = base_y + tile.src_y as f32 * scale_y;
-                    let w = a.width as f32 * scale_x;
-                    let h = a.height as f32 * scale_y;
-                    let u0 = a.x as f32 / IMAGE_ATLAS_SIZE as f32;
-                    let v0 = a.y as f32 / IMAGE_ATLAS_SIZE as f32;
-                    let u1 = (a.x + a.width) as f32 / IMAGE_ATLAS_SIZE as f32;
-                    let v1 = (a.y + a.height) as f32 / IMAGE_ATLAS_SIZE as f32;
-                    let layer = a.layer as f32;
-                    let ii = image_vertices.len() as u32;
-                    image_vertices.extend_from_slice(&[
-                        ImageVertex {
-                            pos: [x, y],
-                            uv_layer: [u0, v0, layer],
-                        },
-                        ImageVertex {
-                            pos: [x + w, y],
-                            uv_layer: [u1, v0, layer],
-                        },
-                        ImageVertex {
-                            pos: [x, y + h],
-                            uv_layer: [u0, v1, layer],
-                        },
-                        ImageVertex {
-                            pos: [x + w, y + h],
-                            uv_layer: [u1, v1, layer],
-                        },
-                    ]);
-                    image_indices.extend_from_slice(&[ii, ii + 1, ii + 2, ii + 2, ii + 1, ii + 3]);
-                }
+            for tile in &entry.tiles {
+                let a = &tile.alloc;
+                let x = base_x + tile.src_x as f32 * scale_x;
+                let y = base_y + tile.src_y as f32 * scale_y;
+                let w = a.width as f32 * scale_x;
+                let h = a.height as f32 * scale_y;
+                let u0 = a.x as f32 / IMAGE_ATLAS_SIZE as f32;
+                let v0 = a.y as f32 / IMAGE_ATLAS_SIZE as f32;
+                let u1 = (a.x + a.width) as f32 / IMAGE_ATLAS_SIZE as f32;
+                let v1 = (a.y + a.height) as f32 / IMAGE_ATLAS_SIZE as f32;
+                let layer = a.layer as f32;
+                let ii = geometry.vertices.len() as u32;
+                geometry.vertices.extend_from_slice(&[
+                    ImageVertex {
+                        pos: [x, y],
+                        uv_layer: [u0, v0, layer],
+                    },
+                    ImageVertex {
+                        pos: [x + w, y],
+                        uv_layer: [u1, v0, layer],
+                    },
+                    ImageVertex {
+                        pos: [x, y + h],
+                        uv_layer: [u0, v1, layer],
+                    },
+                    ImageVertex {
+                        pos: [x + w, y + h],
+                        uv_layer: [u1, v1, layer],
+                    },
+                ]);
+                geometry
+                    .indices
+                    .extend_from_slice(&[ii, ii + 1, ii + 2, ii + 2, ii + 1, ii + 3]);
             }
         }
+        geometry
+    }
 
-        // Terminal lock no longer needed — all remaining work uses the
-        // snapshot. Release it so the terminal thread can process PTY data
-        // while we shape glyphs and build vertices.
-        drop(terminal);
-
-        // ---- Phase 2: build text quads from snapshot (no lock) ----
-        let mut bg_vertices: Vec<BgVertex> = Vec::new();
-        let mut bg_indices: Vec<u32> = Vec::new();
-        let mut fg_vertices: Vec<FgVertex> = Vec::new();
-        let mut fg_indices: Vec<u32> = Vec::new();
-
+    fn build_render_geometry(
+        &mut self,
+        font_system: &mut FontSystem,
+        snap: &TermSnapshot,
+        tabs: &[TabInfo],
+        controls: &WindowControls,
+        gutter_popup: Option<&GutterPopup>,
+        preedit: Option<&crate::renderer::PreeditState>,
+        layout: &FrameLayout,
+    ) -> RenderGeometry {
+        let mut geometry = RenderGeometry::default();
         let cursor_state = self.cursor_state_from_snapshot(snap);
+        let popup_clip = self.popup_clip(gutter_popup, layout);
+        let blink_off = (self.started.elapsed().as_millis() / 500) & 1 == 1;
+        let rapid_blink_off = (self.started.elapsed().as_millis() / 250) & 1 == 1;
 
-        // Pre-compute the popup's pixel bounds so we can clip terminal
-        // text that would otherwise bleed through the opaque panel.
-        let popup_clip: Option<(f32, f32, f32, f32)> = gutter_popup.map(|p| {
-            let header = if p.duration_text.is_some() { 1 } else { 0 };
-            let total = (header + GUTTER_MENU_ITEMS.len()) as f32;
-            let pw = cell_w * POPUP_WIDTH_CELLS;
-            let ph = total * cell_h;
-            let px = gutter_px;
-            let surface_h = self.surface_config.height as f32;
-            let py = (p.screen_row as f32 * cell_h + tab_bar_h)
-                .min(surface_h - ph)
-                .max(tab_bar_h);
-            (px, py, px + pw, py + ph)
-        });
-
-        for (row, snap_row) in snap.rows.iter().enumerate() {
-            let row = row as u32;
+        for (row_idx, snap_row) in snap.rows.iter().enumerate() {
+            let row = row_idx as u32;
             if snap.search_active && row == snap.viewport_rows - 1 {
                 continue;
             }
-            let y = row as f32 * cell_h + tab_bar_h;
+            self.append_row_geometry(
+                font_system,
+                snap,
+                snap_row,
+                row,
+                cursor_state,
+                popup_clip.as_ref(),
+                blink_off,
+                rapid_blink_off,
+                layout,
+                &mut geometry,
+            );
+        }
 
-            let line_attr = snap_row.line_attr;
-            // Double-wide rows render each cell at 2× horizontal width, so only
-            // the left half of the column count holds visible content.
-            let is_double_wide = !matches!(line_attr, LineAttr::Normal);
-            let effective_cell_w = if is_double_wide { cell_w * 2.0 } else { cell_w };
-            let visible_cols = if is_double_wide {
-                snap.viewport_cols / 2
+        self.append_visual_bell_overlay(&mut geometry, snap, layout);
+
+        if layout.gutter_px > 0.0 {
+            render_gutter_markers(
+                snap,
+                layout.gutter_px,
+                layout.cell_h,
+                layout.tab_bar_h,
+                &mut geometry.bg_vertices,
+                &mut geometry.bg_indices,
+            );
+        }
+
+        self.render_tab_bar(
+            font_system,
+            tabs,
+            &snap.palette,
+            controls,
+            &mut geometry.bg_vertices,
+            &mut geometry.bg_indices,
+            &mut geometry.fg_vertices,
+            &mut geometry.fg_indices,
+        );
+        self.render_search_bar(
+            font_system,
+            snap,
+            layout.tab_bar_h,
+            &mut geometry.bg_vertices,
+            &mut geometry.bg_indices,
+            &mut geometry.fg_vertices,
+            &mut geometry.fg_indices,
+        );
+
+        if let Some(popup) = gutter_popup {
+            self.render_gutter_popup(
+                font_system,
+                popup,
+                layout.gutter_px,
+                layout.cell_w,
+                layout.cell_h,
+                layout.tab_bar_h,
+                &mut geometry.bg_vertices,
+                &mut geometry.bg_indices,
+                &mut geometry.fg_vertices,
+                &mut geometry.fg_indices,
+            );
+        }
+
+        if let Some(preedit) = preedit
+            && !snap.search_active
+        {
+            self.render_preedit(
+                font_system,
+                snap,
+                preedit,
+                layout.gutter_px,
+                layout.cell_w,
+                layout.cell_h,
+                layout.baseline,
+                layout.tab_bar_h,
+                &mut geometry.bg_vertices,
+                &mut geometry.bg_indices,
+                &mut geometry.fg_vertices,
+                &mut geometry.fg_indices,
+            );
+        }
+
+        geometry
+    }
+
+    fn popup_clip(
+        &self,
+        gutter_popup: Option<&GutterPopup>,
+        layout: &FrameLayout,
+    ) -> Option<PopupClip> {
+        gutter_popup.map(|popup| {
+            let header = if popup.duration_text.is_some() { 1 } else { 0 };
+            let total = (header + GUTTER_MENU_ITEMS.len()) as f32;
+            let width = layout.cell_w * POPUP_WIDTH_CELLS;
+            let height = total * layout.cell_h;
+            let left = layout.gutter_px;
+            let surface_h = self.surface_config.height as f32;
+            let top = (popup.screen_row as f32 * layout.cell_h + layout.tab_bar_h)
+                .min(surface_h - height)
+                .max(layout.tab_bar_h);
+            PopupClip {
+                left,
+                top,
+                right: left + width,
+                bottom: top + height,
+            }
+        })
+    }
+
+    fn append_row_geometry(
+        &mut self,
+        font_system: &mut FontSystem,
+        snap: &TermSnapshot,
+        snap_row: &RowSnapshot,
+        row: u32,
+        cursor_state: CursorRenderState,
+        popup_clip: Option<&PopupClip>,
+        blink_off: bool,
+        rapid_blink_off: bool,
+        layout: &FrameLayout,
+        geometry: &mut RenderGeometry,
+    ) {
+        let y = row as f32 * layout.cell_h + layout.tab_bar_h;
+        let line_attr = snap_row.line_attr;
+        let is_double_wide = !matches!(line_attr, LineAttr::Normal);
+        let effective_cell_w = if is_double_wide {
+            layout.cell_w * 2.0
+        } else {
+            layout.cell_w
+        };
+        let visible_cols = if is_double_wide {
+            snap.viewport_cols / 2
+        } else {
+            snap.viewport_cols
+        };
+
+        for col in 0..visible_cols {
+            let x = col as f32 * effective_cell_w + layout.gutter_px;
+            let selected = snap_row
+                .selected
+                .get(col as usize)
+                .copied()
+                .unwrap_or(false);
+            let matched = snap_row.matched.get(col as usize).copied().unwrap_or(false);
+            let active_match = snap_row
+                .active_match
+                .get(col as usize)
+                .copied()
+                .unwrap_or(false);
+            let block_cursor_here = cursor_state.is_block_at(row, col);
+            let cell_attrs = snap_row.attrs[col as usize];
+            let (cell_fg, cell_bg) = resolve_cell_colors(
+                &snap_row.fg[col as usize],
+                &snap_row.bg[col as usize],
+                cell_attrs,
+                snap.screen_reverse,
+            );
+            let bg_effective = if active_match {
+                blend(cell_fg, cell_bg, 0.5)
+            } else if selected {
+                snap.palette.selection_bg.unwrap_or(cell_fg)
+            } else if block_cursor_here {
+                snap.palette.cursor.unwrap_or(cell_fg)
+            } else if matched {
+                cell_fg
             } else {
-                snap.viewport_cols
+                cell_bg
             };
-            for col in 0..visible_cols {
-                let x = col as f32 * effective_cell_w + gutter_px;
-                let selected = snap_row
-                    .selected
-                    .get(col as usize)
-                    .copied()
-                    .unwrap_or(false);
-                let matched = snap_row.matched.get(col as usize).copied().unwrap_or(false);
-                let active_match = snap_row
-                    .active_match
-                    .get(col as usize)
-                    .copied()
-                    .unwrap_or(false);
-                let block_cursor_here = cursor_state.is_block_at(row, col);
-                let cell_attrs = snap_row.attrs[col as usize];
-                let (cell_fg, cell_bg) = resolve_cell_colors(
-                    &snap_row.fg[col as usize],
-                    &snap_row.bg[col as usize],
-                    cell_attrs,
-                    snap.screen_reverse,
-                );
-                let bg_effective = if active_match {
-                    blend(cell_fg, cell_bg, 0.5)
-                } else if selected {
-                    snap.palette.selection_bg.unwrap_or(cell_fg)
-                } else if block_cursor_here {
-                    snap.palette.cursor.unwrap_or(cell_fg)
-                } else if matched {
-                    cell_fg
-                } else {
-                    cell_bg
-                };
-                // When a background image is loaded, default-bg cells with
-                // no interaction overlay skip their bg quad so the image
-                // shows through. Cells with an explicit SGR bg (anything
-                // other than `default_bg()`) and any interaction overlay
-                // (selection / search match / block cursor) still paint.
-                // False positives — apps that explicitly set SGR bg to the
-                // exact default colour — are rare and degrade gracefully:
-                // the cell goes transparent, which is what a wallpaper
-                // user wanted anyway.
-                let interaction_overlay = selected || matched || active_match || block_cursor_here;
-                let skip_default_bg =
-                    self.background.is_some() && !interaction_overlay && cell_bg == snap.palette.bg;
-                if !skip_default_bg {
-                    let bg_color = pack_color(&bg_effective, self.bg_alpha);
-                    let bi = bg_vertices.len() as u32;
-                    bg_vertices.extend_from_slice(&[
-                        BgVertex {
-                            pos: [x, y],
-                            color: bg_color,
-                        },
-                        BgVertex {
-                            pos: [x + effective_cell_w, y],
-                            color: bg_color,
-                        },
-                        BgVertex {
-                            pos: [x, y + cell_h],
-                            color: bg_color,
-                        },
-                        BgVertex {
-                            pos: [x + effective_cell_w, y + cell_h],
-                            color: bg_color,
-                        },
-                    ]);
-                    bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
-                }
-
-                // Underline quads. Drawn for either of two sources:
-                //   * OSC 8 hyperlinks — so the user can see what's clickable.
-                //   * SGR underline (CSI 4m / 4:Nm) — styled text attribute.
-                // Sits in the bg pass so the glyph paints over any pixels the
-                // line would otherwise eat.
-                let ul_style = snap_row.underline[col as usize];
-                let has_link = snap_row.has_link[col as usize];
-                let effective_ul = if has_link && ul_style == UnderlineStyle::None {
-                    UnderlineStyle::Single
-                } else {
-                    ul_style
-                };
-                if effective_ul != UnderlineStyle::None {
-                    let ul_rgb = snap_row.underline_color[col as usize].unwrap_or(cell_fg);
-                    let ul_packed = pack_color(&ul_rgb, 255);
-                    let thickness = (cell_h * 0.06).max(1.0);
-                    let uy = y + cell_h - thickness;
-                    push_underline_quads(
-                        effective_ul,
-                        x,
-                        uy,
-                        effective_cell_w,
-                        thickness,
-                        cell_h,
-                        ul_packed,
-                        &mut bg_vertices,
-                        &mut bg_indices,
-                    );
-                }
-
-                // Overline: horizontal line at the top of the cell.
-                if cell_attrs.contains(CellAttrs::OVERLINE) {
-                    let ol_color = pack_color(&cell_fg, 255);
-                    let thickness = (cell_h * 0.06).max(1.0);
-                    push_rect(
-                        x,
-                        y,
-                        effective_cell_w,
-                        thickness,
-                        ol_color,
-                        &mut bg_vertices,
-                        &mut bg_indices,
-                    );
-                }
-
-                // Strikethrough: horizontal line through the vertical centre.
-                if cell_attrs.contains(CellAttrs::STRIKETHROUGH) {
-                    let st_color = pack_color(&cell_fg, 255);
-                    let thickness = (cell_h * 0.06).max(1.0);
-                    let sy = y + (cell_h - thickness) * 0.5;
-                    let bi = bg_vertices.len() as u32;
-                    bg_vertices.extend_from_slice(&[
-                        BgVertex {
-                            pos: [x, sy],
-                            color: st_color,
-                        },
-                        BgVertex {
-                            pos: [x + effective_cell_w, sy],
-                            color: st_color,
-                        },
-                        BgVertex {
-                            pos: [x, sy + thickness],
-                            color: st_color,
-                        },
-                        BgVertex {
-                            pos: [x + effective_cell_w, sy + thickness],
-                            color: st_color,
-                        },
-                    ]);
-                    bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
-                }
-            }
-
-            // Underline / beam cursor overlays sit in the bg pass so the
-            // glyph keeps its normal colour and the bar paints behind /
-            // beside the character rather than over it.
-            if let Some(overlay) = cursor_state.bar_overlay_at(row, &snap_row.fg, cell_w, cell_h) {
-                let ox = overlay.x + gutter_px;
-                let oy = overlay.y + tab_bar_h;
-                let bi = bg_vertices.len() as u32;
-                bg_vertices.extend_from_slice(&[
+            let interaction_overlay = selected || matched || active_match || block_cursor_here;
+            let skip_default_bg =
+                self.background.is_some() && !interaction_overlay && cell_bg == snap.palette.bg;
+            if !skip_default_bg {
+                let bg_color = pack_color(&bg_effective, self.bg_alpha);
+                let bi = geometry.bg_vertices.len() as u32;
+                geometry.bg_vertices.extend_from_slice(&[
                     BgVertex {
-                        pos: [ox, oy],
-                        color: overlay.color,
+                        pos: [x, y],
+                        color: bg_color,
                     },
                     BgVertex {
-                        pos: [ox + overlay.w, oy],
-                        color: overlay.color,
+                        pos: [x + effective_cell_w, y],
+                        color: bg_color,
                     },
                     BgVertex {
-                        pos: [ox, oy + overlay.h],
-                        color: overlay.color,
+                        pos: [x, y + layout.cell_h],
+                        color: bg_color,
                     },
                     BgVertex {
-                        pos: [ox + overlay.w, oy + overlay.h],
-                        color: overlay.color,
+                        pos: [x + effective_cell_w, y + layout.cell_h],
+                        color: bg_color,
                     },
                 ]);
-                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+                geometry.bg_indices.extend_from_slice(&[
+                    bi,
+                    bi + 1,
+                    bi + 2,
+                    bi + 2,
+                    bi + 1,
+                    bi + 3,
+                ]);
             }
 
-            // Shape the entire row for foreground glyphs — borrows the cell
-            // strings and their attribute bitmasks directly so each cell can
-            // pick its bold/italic variant of the primary family.
-            let shaped = font_system.shape_row(&snap_row.cells, &snap_row.attrs);
-
-            // Blink: every 500 ms the glyph quad is suppressed while the bg
-            // quad (already emitted) remains, so the cursor and background
-            // are still visible. The bg_animated path keeps the render thread
-            // running at 125 fps, so no extra wake-up is needed.
-            let blink_off = (self.started.elapsed().as_millis() / 500) & 1 == 1;
-            let rapid_blink_off = (self.started.elapsed().as_millis() / 250) & 1 == 1;
-
-            for sg in &shaped {
-                // Double-wide rows only use the left half of the columns.
-                if sg.col as u32 >= visible_cols {
-                    continue;
-                }
-
-                // Skip glyphs that fall behind the popup panel so
-                // terminal text doesn't bleed through the overlay.
-                if let Some((cl, ct, cr, cb)) = popup_clip {
-                    let cx = sg.col as f32 * effective_cell_w + gutter_px;
-                    if cx < cr && cx + effective_cell_w > cl && y < cb && y + cell_h > ct {
-                        continue;
-                    }
-                }
-
-                let cell_attrs = snap_row.attrs[sg.col as usize];
-                let wants_bold = cell_attrs.contains(CellAttrs::BOLD);
-                let wants_italic = cell_attrs.contains(CellAttrs::ITALIC);
-                // Synth flags: true when the cell asks for a style the face
-                // the shaper actually used doesn't natively cover. The atlas
-                // only acts on `synth_bold` for colour fonts; italic
-                // synthesis is a vertex-level shear below.
-                let synth_bold = wants_bold && !font_system.font_is_bold(sg.font_index);
-                let synth_italic = wants_italic && !font_system.font_is_italic(sg.font_index);
-
-                let slot = match self.glyph_atlas.ensure_cached(
-                    &self.queue,
-                    font_system,
-                    sg.font_index,
-                    sg.glyph_id,
-                    sg.cells_wide,
-                    synth_bold,
-                ) {
-                    Some(e) => e,
-                    None => continue,
-                };
-
-                if slot.is_empty() {
-                    continue;
-                }
-
-                // Blink off-phase: suppress the glyph quad but keep the bg
-                // quad already emitted so selection/cursor overlays remain.
-                if cell_attrs.contains(CellAttrs::BLINK) && blink_off {
-                    continue;
-                }
-
-                if cell_attrs.contains(CellAttrs::RAPID_BLINK) && rapid_blink_off {
-                    continue;
-                }
-
-                let sx = slot.x();
-                let sy = slot.y();
-                let sw = slot.width();
-                let sh = slot.height();
-
-                // Double-wide: scale glyph placement and width by 2×.
-                let scale_x = if is_double_wide { 2.0_f32 } else { 1.0 };
-                let gx = sg.col as f32 * effective_cell_w
-                    + slot.bearing_x as f32 * scale_x
-                    + sg.x_offset * scale_x
-                    + gutter_px;
-                let gx = gx.floor();
-                let gw = sw as f32 * scale_x;
-                let gw = gw.ceil();
-
-                // Double-height: each cell of the pair shows exactly half the
-                // glyph's UV range, stretched to fill the entire cell height.
-                // The virtual 2× glyph is anchored at the top of the pair
-                // (y_origin) and occupies 2×cell_h pixels. DoubleHeightTop clips
-                // to [y_origin, y_origin+cell_h] (top half) and DoubleHeightBottom
-                // to [y_origin+cell_h, y_origin+2×cell_h] (bottom half). Each
-                // half fills its cell fully, giving a clean 2× visual.
-                let is_double_height = matches!(
-                    line_attr,
-                    LineAttr::DoubleHeightTop | LineAttr::DoubleHeightBottom
+            let ul_style = snap_row.underline[col as usize];
+            let has_link = snap_row.has_link[col as usize];
+            let effective_ul = if has_link && ul_style == UnderlineStyle::None {
+                UnderlineStyle::Single
+            } else {
+                ul_style
+            };
+            if effective_ul != UnderlineStyle::None {
+                let ul_rgb = snap_row.underline_color[col as usize].unwrap_or(cell_fg);
+                let ul_packed = pack_color(&ul_rgb, 255);
+                let thickness = (layout.cell_h * 0.06).max(1.0);
+                let uy = y + layout.cell_h - thickness;
+                push_underline_quads(
+                    effective_ul,
+                    x,
+                    uy,
+                    effective_cell_w,
+                    thickness,
+                    layout.cell_h,
+                    ul_packed,
+                    &mut geometry.bg_vertices,
+                    &mut geometry.bg_indices,
                 );
-                let (gy, gh, uv_y_top, uv_y_bot) = if is_double_height {
-                    // Top of the virtual 2× glyph — always the top of the pair.
-                    let y_origin = if matches!(line_attr, LineAttr::DoubleHeightTop) {
-                        y
-                    } else {
-                        y - cell_h
-                    };
-                    // Span the full 2-cell height; clip to the current row.
-                    let gy_v = y_origin + (baseline - slot.bearing_y as f32 - sg.y_offset) * 2.0;
-                    let gh_v = 2.0 * sh as f32;
-                    let vis_top = gy_v.max(y);
-                    let vis_bot = (gy_v + gh_v).min(y + cell_h);
-                    if vis_bot <= vis_top {
-                        continue; // entirely outside this cell row
-                    }
-                    let uv_top = sy as f32 + sh as f32 * (vis_top - gy_v) / gh_v;
-                    let uv_bot = sy as f32 + sh as f32 * (vis_bot - gy_v) / gh_v;
-                    (vis_top, vis_bot - vis_top, uv_top, uv_bot)
-                } else {
-                    let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
-                    (gy, sh as f32, sy as f32, (sy + sh) as f32)
-                };
-                let gy = gy.floor();
-                let gh = gh.ceil();
+            }
 
-                // Fake italic by shearing the glyph quad around the cell
-                // baseline: vertices above the baseline shift right, below
-                // shift left. The baseline pins so glyph rows stay aligned
-                // with neighbouring regular text. The shear factor is the
-                // tangent of ~12°, a common italic angle.
-                let baseline_y = y + baseline;
-                let shear = if synth_italic { 0.2126_f32 } else { 0.0 };
-                let shear_at = |vy: f32| -> f32 { shear * (baseline_y - vy) };
-
-                // Match the bg-pass logic: selection / non-active match /
-                // block cursor fully invert the text, the active match
-                // keeps the normal fg so it reads naturally against the
-                // softened bg.
-                let selected = snap_row
-                    .selected
-                    .get(sg.col as usize)
-                    .copied()
-                    .unwrap_or(false);
-                let matched = snap_row
-                    .matched
-                    .get(sg.col as usize)
-                    .copied()
-                    .unwrap_or(false);
-                let active_match = snap_row
-                    .active_match
-                    .get(sg.col as usize)
-                    .copied()
-                    .unwrap_or(false);
-                let block_cursor_here = cursor_state.is_block_at(row, sg.col as u32);
-                let (cell_fg, cell_bg) = resolve_cell_colors(
-                    &snap_row.fg[sg.col as usize],
-                    &snap_row.bg[sg.col as usize],
-                    cell_attrs,
-                    snap.screen_reverse,
+            if cell_attrs.contains(CellAttrs::OVERLINE) {
+                let ol_color = pack_color(&cell_fg, 255);
+                let thickness = (layout.cell_h * 0.06).max(1.0);
+                push_rect(
+                    x,
+                    y,
+                    effective_cell_w,
+                    thickness,
+                    ol_color,
+                    &mut geometry.bg_vertices,
+                    &mut geometry.bg_indices,
                 );
-                let fg_effective = if active_match {
-                    cell_fg
-                } else if selected {
-                    snap.palette.selection_fg.unwrap_or(cell_bg)
-                } else if matched || block_cursor_here {
-                    cell_bg
-                } else {
-                    cell_fg
-                };
-                let fg_color = pack_color(&fg_effective, 255);
-                let flags: u32 = if slot.is_color { 1 } else { 0 };
-                let fi = fg_vertices.len() as u32;
-                fg_vertices.extend_from_slice(&[
-                    FgVertex {
-                        pos: [gx + shear_at(gy), gy],
-                        uv: [sx as f32, uv_y_top],
-                        color: fg_color,
-                        flags,
+            }
+
+            if cell_attrs.contains(CellAttrs::STRIKETHROUGH) {
+                let st_color = pack_color(&cell_fg, 255);
+                let thickness = (layout.cell_h * 0.06).max(1.0);
+                let sy = y + (layout.cell_h - thickness) * 0.5;
+                let bi = geometry.bg_vertices.len() as u32;
+                geometry.bg_vertices.extend_from_slice(&[
+                    BgVertex {
+                        pos: [x, sy],
+                        color: st_color,
                     },
-                    FgVertex {
-                        pos: [gx + gw + shear_at(gy), gy],
-                        uv: [(sx + sw) as f32, uv_y_top],
-                        color: fg_color,
-                        flags,
+                    BgVertex {
+                        pos: [x + effective_cell_w, sy],
+                        color: st_color,
                     },
-                    FgVertex {
-                        pos: [gx + shear_at(gy + gh), gy + gh],
-                        uv: [sx as f32, uv_y_bot],
-                        color: fg_color,
-                        flags,
+                    BgVertex {
+                        pos: [x, sy + thickness],
+                        color: st_color,
                     },
-                    FgVertex {
-                        pos: [gx + gw + shear_at(gy + gh), gy + gh],
-                        uv: [(sx + sw) as f32, uv_y_bot],
-                        color: fg_color,
-                        flags,
+                    BgVertex {
+                        pos: [x + effective_cell_w, sy + thickness],
+                        color: st_color,
                     },
                 ]);
-                fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+                geometry.bg_indices.extend_from_slice(&[
+                    bi,
+                    bi + 1,
+                    bi + 2,
+                    bi + 2,
+                    bi + 1,
+                    bi + 3,
+                ]);
             }
         }
 
-        // ---- Visual bell flash overlay ----
-        // Drawn after the row content as a semi-transparent white quad
-        // covering the whole window. Fades out linearly across
-        // BELL_FLASH_DURATION; once the fade is done we clear the timer
-        // so subsequent frames do nothing until the next BEL.
+        if let Some(overlay) =
+            cursor_state.bar_overlay_at(row, &snap_row.fg, layout.cell_w, layout.cell_h)
+        {
+            let ox = overlay.x + layout.gutter_px;
+            let oy = overlay.y + layout.tab_bar_h;
+            let bi = geometry.bg_vertices.len() as u32;
+            geometry.bg_vertices.extend_from_slice(&[
+                BgVertex {
+                    pos: [ox, oy],
+                    color: overlay.color,
+                },
+                BgVertex {
+                    pos: [ox + overlay.w, oy],
+                    color: overlay.color,
+                },
+                BgVertex {
+                    pos: [ox, oy + overlay.h],
+                    color: overlay.color,
+                },
+                BgVertex {
+                    pos: [ox + overlay.w, oy + overlay.h],
+                    color: overlay.color,
+                },
+            ]);
+            geometry
+                .bg_indices
+                .extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+        }
+
+        self.append_row_glyphs(
+            font_system,
+            snap,
+            snap_row,
+            row,
+            y,
+            line_attr,
+            effective_cell_w,
+            visible_cols,
+            cursor_state,
+            popup_clip,
+            blink_off,
+            rapid_blink_off,
+            layout,
+            geometry,
+        );
+    }
+
+    #[allow(clippy::too_many_arguments)]
+    fn append_row_glyphs(
+        &mut self,
+        font_system: &mut FontSystem,
+        snap: &TermSnapshot,
+        snap_row: &RowSnapshot,
+        row: u32,
+        y: f32,
+        line_attr: LineAttr,
+        effective_cell_w: f32,
+        visible_cols: u32,
+        cursor_state: CursorRenderState,
+        popup_clip: Option<&PopupClip>,
+        blink_off: bool,
+        rapid_blink_off: bool,
+        layout: &FrameLayout,
+        geometry: &mut RenderGeometry,
+    ) {
+        let shaped = font_system.shape_row(&snap_row.cells, &snap_row.attrs);
+        let is_double_wide = !matches!(line_attr, LineAttr::Normal);
+
+        for sg in &shaped {
+            if sg.col as u32 >= visible_cols {
+                continue;
+            }
+            if let Some(clip) = popup_clip {
+                let cx = sg.col as f32 * effective_cell_w + layout.gutter_px;
+                if cx < clip.right
+                    && cx + effective_cell_w > clip.left
+                    && y < clip.bottom
+                    && y + layout.cell_h > clip.top
+                {
+                    continue;
+                }
+            }
+
+            let cell_attrs = snap_row.attrs[sg.col as usize];
+            let wants_bold = cell_attrs.contains(CellAttrs::BOLD);
+            let wants_italic = cell_attrs.contains(CellAttrs::ITALIC);
+            let synth_bold = wants_bold && !font_system.font_is_bold(sg.font_index);
+            let synth_italic = wants_italic && !font_system.font_is_italic(sg.font_index);
+
+            let slot = match self.glyph_atlas.ensure_cached(
+                &self.queue,
+                font_system,
+                sg.font_index,
+                sg.glyph_id,
+                sg.cells_wide,
+                synth_bold,
+            ) {
+                Some(e) => e,
+                None => continue,
+            };
+            if slot.is_empty() {
+                continue;
+            }
+            if cell_attrs.contains(CellAttrs::BLINK) && blink_off {
+                continue;
+            }
+            if cell_attrs.contains(CellAttrs::RAPID_BLINK) && rapid_blink_off {
+                continue;
+            }
+
+            let sx = slot.x();
+            let sy = slot.y();
+            let sw = slot.width();
+            let sh = slot.height();
+            let scale_x = if is_double_wide { 2.0_f32 } else { 1.0 };
+            let gx = sg.col as f32 * effective_cell_w
+                + slot.bearing_x as f32 * scale_x
+                + sg.x_offset * scale_x
+                + layout.gutter_px;
+            let gx = gx.floor();
+            let gw = (sw as f32 * scale_x).ceil();
+
+            let is_double_height = matches!(
+                line_attr,
+                LineAttr::DoubleHeightTop | LineAttr::DoubleHeightBottom
+            );
+            let (gy, gh, uv_y_top, uv_y_bot) = if is_double_height {
+                let y_origin = if matches!(line_attr, LineAttr::DoubleHeightTop) {
+                    y
+                } else {
+                    y - layout.cell_h
+                };
+                let gy_v = y_origin + (layout.baseline - slot.bearing_y as f32 - sg.y_offset) * 2.0;
+                let gh_v = 2.0 * sh as f32;
+                let vis_top = gy_v.max(y);
+                let vis_bot = (gy_v + gh_v).min(y + layout.cell_h);
+                if vis_bot <= vis_top {
+                    continue;
+                }
+                let uv_top = sy as f32 + sh as f32 * (vis_top - gy_v) / gh_v;
+                let uv_bot = sy as f32 + sh as f32 * (vis_bot - gy_v) / gh_v;
+                (vis_top, vis_bot - vis_top, uv_top, uv_bot)
+            } else {
+                let gy = y + layout.baseline - slot.bearing_y as f32 - sg.y_offset;
+                (gy, sh as f32, sy as f32, (sy + sh) as f32)
+            };
+            let gy = gy.floor();
+            let gh = gh.ceil();
+
+            let baseline_y = y + layout.baseline;
+            let shear = if synth_italic { 0.2126_f32 } else { 0.0 };
+            let shear_at = |vy: f32| -> f32 { shear * (baseline_y - vy) };
+
+            let selected = snap_row
+                .selected
+                .get(sg.col as usize)
+                .copied()
+                .unwrap_or(false);
+            let matched = snap_row
+                .matched
+                .get(sg.col as usize)
+                .copied()
+                .unwrap_or(false);
+            let active_match = snap_row
+                .active_match
+                .get(sg.col as usize)
+                .copied()
+                .unwrap_or(false);
+            let block_cursor_here = cursor_state.is_block_at(row, sg.col as u32);
+            let (cell_fg, cell_bg) = resolve_cell_colors(
+                &snap_row.fg[sg.col as usize],
+                &snap_row.bg[sg.col as usize],
+                cell_attrs,
+                snap.screen_reverse,
+            );
+            let fg_effective = if active_match {
+                cell_fg
+            } else if selected {
+                snap.palette.selection_fg.unwrap_or(cell_bg)
+            } else if matched || block_cursor_here {
+                cell_bg
+            } else {
+                cell_fg
+            };
+            let fg_color = pack_color(&fg_effective, 255);
+            let flags: u32 = if slot.is_color { 1 } else { 0 };
+            let fi = geometry.fg_vertices.len() as u32;
+            geometry.fg_vertices.extend_from_slice(&[
+                FgVertex {
+                    pos: [gx + shear_at(gy), gy],
+                    uv: [sx as f32, uv_y_top],
+                    color: fg_color,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw + shear_at(gy), gy],
+                    uv: [(sx + sw) as f32, uv_y_top],
+                    color: fg_color,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + shear_at(gy + gh), gy + gh],
+                    uv: [sx as f32, uv_y_bot],
+                    color: fg_color,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw + shear_at(gy + gh), gy + gh],
+                    uv: [(sx + sw) as f32, uv_y_bot],
+                    color: fg_color,
+                    flags,
+                },
+            ]);
+            geometry
+                .fg_indices
+                .extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+        }
+    }
+
+    fn append_visual_bell_overlay(
+        &mut self,
+        geometry: &mut RenderGeometry,
+        _snap: &TermSnapshot,
+        _layout: &FrameLayout,
+    ) {
         if let Some(start) = self.bell_started {
             let elapsed = start.elapsed();
             if elapsed >= BELL_FLASH_DURATION {
@@ -1488,8 +1655,8 @@ impl Renderer {
                 let surface_w = self.surface_config.width as f32;
                 let surface_h = self.surface_config.height as f32;
                 let color = u32::from_be_bytes([255, 255, 255, alpha]);
-                let bi = bg_vertices.len() as u32;
-                bg_vertices.extend_from_slice(&[
+                let bi = geometry.bg_vertices.len() as u32;
+                geometry.bg_vertices.extend_from_slice(&[
                     BgVertex {
                         pos: [0.0, 0.0],
                         color,
@@ -1507,110 +1674,41 @@ impl Renderer {
                         color,
                     },
                 ]);
-                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
+                geometry.bg_indices.extend_from_slice(&[
+                    bi,
+                    bi + 1,
+                    bi + 2,
+                    bi + 2,
+                    bi + 1,
+                    bi + 3,
+                ]);
             }
         }
+    }
 
-        // ---- Shell-integration gutter markers ----
-        // Painted before the search bar so the bar overlays the gutter on
-        // its own row (the search bar is a full-width overlay and doesn't
-        // care about cell columns underneath it).
-        if gutter_px > 0.0 {
-            render_gutter_markers(
-                snap,
-                gutter_px,
-                cell_h,
-                tab_bar_h,
-                &mut bg_vertices,
-                &mut bg_indices,
-            );
-        }
-
-        // ---- Search bar overlay ----
-        // Drawn last in the glyph pass so it paints over the bottom row of
-        // whatever the terminal was showing. Only fires while the search
-        // bar is open; when closed, this path is a cheap early return.
-        // ---- Tab bar ----
-        self.render_tab_bar(
-            font_system,
-            tabs,
-            &snap.palette,
-            controls,
-            &mut bg_vertices,
-            &mut bg_indices,
-            &mut fg_vertices,
-            &mut fg_indices,
-        );
-
-        self.render_search_bar(
-            font_system,
-            snap,
-            tab_bar_h,
-            &mut bg_vertices,
-            &mut bg_indices,
-            &mut fg_vertices,
-            &mut fg_indices,
-        );
-
-        // ---- Gutter popup overlay ----
-        if let Some(popup) = gutter_popup {
-            self.render_gutter_popup(
-                font_system,
-                popup,
-                gutter_px,
-                cell_w,
-                cell_h,
-                tab_bar_h,
-                &mut bg_vertices,
-                &mut bg_indices,
-                &mut fg_vertices,
-                &mut fg_indices,
-            );
-        }
-
-        // ---- IME preedit overlay ----
-        // Suppressed while the search bar is open — the search bar is its
-        // own text-input UI that captures IME input into the query, not the
-        // terminal grid. Letting the preedit overlay draw at the cursor
-        // too would duplicate the feedback and confuse the user.
-        if let Some(preedit) = preedit
-            && !snap.search_active
-        {
-            self.render_preedit(
-                font_system,
-                snap,
-                preedit,
-                gutter_px,
-                cell_w,
-                cell_h,
-                baseline,
-                tab_bar_h,
-                &mut bg_vertices,
-                &mut bg_indices,
-                &mut fg_vertices,
-                &mut fg_indices,
-            );
-        }
-
+    fn submit_render_passes(
+        &mut self,
+        acquired: (wgpu::SurfaceTexture, wgpu::TextureView),
+        geometry: RenderGeometry,
+        image_geometry: ImageGeometry,
+    ) {
         let (frame, view) = acquired;
-
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
-        // ---- BG pass ----
         let bg_vbuf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("bg_verts"),
-                contents: bytemuck::cast_slice(&bg_vertices),
+                contents: bytemuck::cast_slice(&geometry.bg_vertices),
                 usage: wgpu::BufferUsages::VERTEX,
             });
         let bg_ibuf = self
             .device
             .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                 label: Some("bg_idx"),
-                contents: bytemuck::cast_slice(&bg_indices),
+                contents: bytemuck::cast_slice(&geometry.bg_indices),
                 usage: wgpu::BufferUsages::INDEX,
             });
 
@@ -1634,10 +1732,6 @@ impl Renderer {
                 ..Default::default()
             });
 
-            // Background image first, so cell quads — drawn next with
-            // `blend: None` — overwrite it where they paint, leaving the
-            // image visible only through cells that opted out (default-bg
-            // cells with no interaction overlay).
             if let Some(background) = &self.background {
                 pass.set_pipeline(&self.bg_image_pipeline);
                 pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
@@ -1652,24 +1746,23 @@ impl Renderer {
                 pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
                 pass.set_vertex_buffer(0, bg_vbuf.slice(..));
                 pass.set_index_buffer(bg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-                pass.draw_indexed(0..bg_indices.len() as u32, 0, 0..1);
+                pass.draw_indexed(0..geometry.bg_indices.len() as u32, 0, 0..1);
             }
         }
 
-        // ---- FG pass ----
-        if !fg_indices.is_empty() {
+        if !geometry.fg_indices.is_empty() {
             let fg_vbuf = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("fg_verts"),
-                    contents: bytemuck::cast_slice(&fg_vertices),
+                    contents: bytemuck::cast_slice(&geometry.fg_vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
             let fg_ibuf = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("fg_idx"),
-                    contents: bytemuck::cast_slice(&fg_indices),
+                    contents: bytemuck::cast_slice(&geometry.fg_indices),
                     usage: wgpu::BufferUsages::INDEX,
                 });
 
@@ -1692,23 +1785,22 @@ impl Renderer {
             pass.set_bind_group(1, self.glyph_atlas.bind_group(), &[]);
             pass.set_vertex_buffer(0, fg_vbuf.slice(..));
             pass.set_index_buffer(fg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..fg_indices.len() as u32, 0, 0..1);
+            pass.draw_indexed(0..geometry.fg_indices.len() as u32, 0, 0..1);
         }
 
-        // ---- Image pass ----
-        if !image_indices.is_empty() {
+        if !image_geometry.indices.is_empty() {
             let img_vbuf = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("img_verts"),
-                    contents: bytemuck::cast_slice(&image_vertices),
+                    contents: bytemuck::cast_slice(&image_geometry.vertices),
                     usage: wgpu::BufferUsages::VERTEX,
                 });
             let img_ibuf = self
                 .device
                 .create_buffer_init(&wgpu::util::BufferInitDescriptor {
                     label: Some("img_idx"),
-                    contents: bytemuck::cast_slice(&image_indices),
+                    contents: bytemuck::cast_slice(&image_geometry.indices),
                     usage: wgpu::BufferUsages::INDEX,
                 });
 
@@ -1731,7 +1823,7 @@ impl Renderer {
             pass.set_bind_group(1, self.image_atlas.bind_group(), &[]);
             pass.set_vertex_buffer(0, img_vbuf.slice(..));
             pass.set_index_buffer(img_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..image_indices.len() as u32, 0, 0..1);
+            pass.draw_indexed(0..image_geometry.indices.len() as u32, 0, 0..1);
         }
 
         self.queue.submit(Some(encoder.finish()));
