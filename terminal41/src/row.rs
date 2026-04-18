@@ -321,11 +321,16 @@ impl Row {
         self.links[dst_start..dst_start + copy_len].copy_from_slice(&snap.links[..copy_len]);
     }
 
+    pub(super) fn has_drawn_cell_at(
+        &self,
+        col: usize,
+    ) -> bool {
+        col < self.content_len() as usize
+    }
+
     /// Apply SGR attribute parameters to every cell in [left, right_excl).
-    /// Used by DECCARA. Only the subset of SGR params that DECCARA recognises
-    /// (bold, underline, blink, reverse, protected) are handled; the rest are
-    /// ignored. Underline here means "turn on single underline"; clearing is
-    /// done via param 24.
+    /// Used by DECCARA. VT420 recognizes only bold, underline, blink, and
+    /// reverse-image toggles here; the rest are ignored.
     pub(super) fn apply_attrs_in_range(
         &mut self,
         left: usize,
@@ -337,23 +342,30 @@ impl Row {
             return;
         }
         for c in left..right_excl {
-            for &p in sgr_params {
-                match p {
-                    0 => {
-                        self.attrs[c] = CellAttrs::empty();
-                        self.underline[c] = UnderlineStyle::None;
-                    }
-                    1 => self.attrs[c] |= CellAttrs::BOLD,
-                    4 => self.underline[c] = UnderlineStyle::Single,
-                    5 => self.attrs[c] |= CellAttrs::BLINK,
-                    6 => self.attrs[c] |= CellAttrs::RAPID_BLINK,
-                    7 => self.attrs[c] |= CellAttrs::REVERSE,
-                    22 => self.attrs[c] &= !CellAttrs::BOLD,
-                    24 => self.underline[c] = UnderlineStyle::None,
-                    25 => self.attrs[c] &= !(CellAttrs::BLINK | CellAttrs::RAPID_BLINK),
-                    27 => self.attrs[c] &= !CellAttrs::REVERSE,
-                    _ => {}
+            self.apply_attrs_at(c, sgr_params);
+        }
+    }
+
+    pub(super) fn apply_attrs_at(
+        &mut self,
+        col: usize,
+        sgr_params: &[u16],
+    ) {
+        for &p in sgr_params {
+            match p {
+                0 => {
+                    self.attrs[col].remove(CellAttrs::BOLD | CellAttrs::BLINK | CellAttrs::REVERSE);
+                    self.underline[col] = UnderlineStyle::None;
                 }
+                1 => self.attrs[col].insert(CellAttrs::BOLD),
+                4 => self.underline[col] = UnderlineStyle::Single,
+                5 => self.attrs[col].insert(CellAttrs::BLINK),
+                7 => self.attrs[col].insert(CellAttrs::REVERSE),
+                22 => self.attrs[col].remove(CellAttrs::BOLD),
+                24 => self.underline[col] = UnderlineStyle::None,
+                25 => self.attrs[col].remove(CellAttrs::BLINK),
+                27 => self.attrs[col].remove(CellAttrs::REVERSE),
+                _ => {}
             }
         }
     }
@@ -371,11 +383,20 @@ impl Row {
         if left >= right_excl {
             return;
         }
+        for c in left..right_excl {
+            self.toggle_attrs_at(c, sgr_params);
+        }
+    }
+
+    pub(super) fn toggle_attrs_at(
+        &mut self,
+        col: usize,
+        sgr_params: &[u16],
+    ) {
         let mut flags = CellAttrs::empty();
         let mut toggle_ul = false;
         if sgr_params.is_empty() || sgr_params.contains(&0) {
-            flags |=
-                CellAttrs::BOLD | CellAttrs::REVERSE | CellAttrs::BLINK | CellAttrs::RAPID_BLINK;
+            flags |= CellAttrs::BOLD | CellAttrs::REVERSE | CellAttrs::BLINK;
             toggle_ul = true;
         }
         for &p in sgr_params {
@@ -383,7 +404,6 @@ impl Row {
                 1 => flags |= CellAttrs::BOLD,
                 4 => toggle_ul = true,
                 5 => flags |= CellAttrs::BLINK,
-                6 => flags |= CellAttrs::RAPID_BLINK,
                 7 => flags |= CellAttrs::REVERSE,
                 _ => {}
             }
@@ -391,15 +411,13 @@ impl Row {
         if flags.is_empty() && !toggle_ul {
             return;
         }
-        for c in left..right_excl {
-            self.attrs[c] ^= flags;
-            if toggle_ul {
-                self.underline[c] = if self.underline[c] != UnderlineStyle::None {
-                    UnderlineStyle::None
-                } else {
-                    UnderlineStyle::Single
-                };
-            }
+        self.attrs[col] ^= flags;
+        if toggle_ul {
+            self.underline[col] = if self.underline[col] != UnderlineStyle::None {
+                UnderlineStyle::None
+            } else {
+                UnderlineStyle::Single
+            };
         }
     }
 }

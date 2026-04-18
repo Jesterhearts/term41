@@ -18,6 +18,13 @@ pub struct Cursor {
     pub row: u32,
 }
 
+#[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
+pub enum AttrChangeExtent {
+    #[default]
+    Stream,
+    Rectangle,
+}
+
 /// Dimensions of the rendered terminal window, shared by both screens.
 /// Per-screen state (scroll region, scrollback offset) lives on
 /// [`super::Screen`].
@@ -686,6 +693,29 @@ impl Grid {
         }
     }
 
+    /// Selective erase rectangular area (DECSERA, `CSI $ {`). Same as
+    /// [`erase_rect`] but leaves `PROTECTED` cells untouched.
+    pub(super) fn erase_rect_selective(
+        &mut self,
+        viewport: &Viewport,
+        top: u32,
+        left: u32,
+        bottom: u32,
+        right: u32,
+    ) {
+        let first_visible = viewport.top_index(self.rows.len());
+        let left = left as usize;
+        let right_excl = (right as usize + 1).min(viewport.cols as usize);
+        for r in top..=bottom {
+            let abs = first_visible + r as usize;
+            self.rows[abs].clear_range_selective(
+                left..right_excl,
+                self.default_fg,
+                self.default_bg,
+            );
+        }
+    }
+
     /// Fill a rectangular region with `ch` using the provided SGR attributes
     /// (DECFRA, `CSI $ x`). Only characters 32–126 and 160–255 are valid;
     /// other code points are a no-op. Coordinates are 0-based, viewport-
@@ -779,13 +809,36 @@ impl Grid {
         bottom: u32,
         right: u32,
         sgr_params: &[u16],
+        extent: AttrChangeExtent,
     ) {
         let first_visible = viewport.top_index(self.rows.len());
-        let left = left as usize;
-        let right_excl = (right as usize + 1).min(viewport.cols as usize);
-        for r in top..=bottom {
-            let abs = first_visible + r as usize;
-            self.rows[abs].apply_attrs_in_range(left, right_excl, sgr_params);
+        match extent {
+            AttrChangeExtent::Rectangle => {
+                let left = left as usize;
+                let right_excl = (right as usize + 1).min(viewport.cols as usize);
+                for r in top..=bottom {
+                    let abs = first_visible + r as usize;
+                    self.rows[abs].apply_attrs_in_range(left, right_excl, sgr_params);
+                }
+            }
+            AttrChangeExtent::Stream => {
+                let cols = viewport.cols as usize;
+                for r in top..=bottom {
+                    let abs = first_visible + r as usize;
+                    let row = &mut self.rows[abs];
+                    let start = if r == top { left as usize } else { 0 };
+                    let end_excl = if r == bottom {
+                        (right as usize + 1).min(cols)
+                    } else {
+                        cols
+                    };
+                    for c in start..end_excl {
+                        if row.has_drawn_cell_at(c) {
+                            row.apply_attrs_at(c, sgr_params);
+                        }
+                    }
+                }
+            }
         }
     }
 
@@ -799,13 +852,36 @@ impl Grid {
         bottom: u32,
         right: u32,
         sgr_params: &[u16],
+        extent: AttrChangeExtent,
     ) {
         let first_visible = viewport.top_index(self.rows.len());
-        let left = left as usize;
-        let right_excl = (right as usize + 1).min(viewport.cols as usize);
-        for r in top..=bottom {
-            let abs = first_visible + r as usize;
-            self.rows[abs].toggle_attrs_in_range(left, right_excl, sgr_params);
+        match extent {
+            AttrChangeExtent::Rectangle => {
+                let left = left as usize;
+                let right_excl = (right as usize + 1).min(viewport.cols as usize);
+                for r in top..=bottom {
+                    let abs = first_visible + r as usize;
+                    self.rows[abs].toggle_attrs_in_range(left, right_excl, sgr_params);
+                }
+            }
+            AttrChangeExtent::Stream => {
+                let cols = viewport.cols as usize;
+                for r in top..=bottom {
+                    let abs = first_visible + r as usize;
+                    let row = &mut self.rows[abs];
+                    let start = if r == top { left as usize } else { 0 };
+                    let end_excl = if r == bottom {
+                        (right as usize + 1).min(cols)
+                    } else {
+                        cols
+                    };
+                    for c in start..end_excl {
+                        if row.has_drawn_cell_at(c) {
+                            row.toggle_attrs_at(c, sgr_params);
+                        }
+                    }
+                }
+            }
         }
     }
 

@@ -8,6 +8,7 @@ use smol_str::SmolStr;
 
 use crate::charset::CharsetState;
 use crate::charset::UserPreferredSupplementalSet;
+use crate::grid::AttrChangeExtent;
 use crate::grid::Cursor;
 use crate::grid::Grid;
 use crate::grid::Viewport;
@@ -124,6 +125,9 @@ pub struct Screen {
     /// arrows still use the CSI modifier form. Default is false (normal
     /// cursor keys).
     pub app_cursor_keys: bool,
+    /// DECSACE — whether DECCARA/DECRARA operate on a stream of character
+    /// positions or on the full rectangular area.
+    pub attr_change_extent: AttrChangeExtent,
     /// DECKPAM / DECKPNM — when true (application keypad mode), the
     /// numeric keypad sends SS3 sequences instead of their normal
     /// characters. Set by ESC = (DECKPAM) or DECNKM (`?66 h`); cleared
@@ -178,6 +182,7 @@ impl Screen {
             charset: CharsetState::new(),
             autowrap: true,
             app_cursor_keys: false,
+            attr_change_extent: AttrChangeExtent::Stream,
             app_keypad: false,
             page_memory: None,
         }

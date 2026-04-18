@@ -175,6 +175,7 @@ fn apply_hard_reset(
         s.upss = charset::UserPreferredSupplementalSet::DecSupplemental;
         s.autowrap = true;
         s.app_cursor_keys = false;
+        s.attr_change_extent = grid::AttrChangeExtent::Stream;
         s.app_keypad = false;
         s.charset = charset::CharsetState::new();
     }
@@ -1348,6 +1349,7 @@ pub(super) fn csi_dispatch(
         screen.upss = charset::UserPreferredSupplementalSet::DecSupplemental;
         screen.autowrap = true;
         screen.app_cursor_keys = false;
+        screen.attr_change_extent = grid::AttrChangeExtent::Stream;
         screen.app_keypad = false;
         screen.charset = charset::CharsetState::new();
         let conformance_level = ctx.modes.conformance_level;
@@ -1531,6 +1533,46 @@ pub(super) fn csi_dispatch(
             ctx.screen.cursor.col = ctx.screen.cursor.col.min(cols.saturating_sub(1));
             return;
         }
+        if matches!(action, 'r' | 't')
+            && ctx.screen.attr_change_extent == grid::AttrChangeExtent::Stream
+        {
+            let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
+            let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+            let rows = view.rows;
+            let cols = view.cols;
+            let start_row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
+            let start_col = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
+            let end_row = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
+                .min(rows.saturating_sub(1));
+            let end_col = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
+                .min(cols.saturating_sub(1));
+            if start_row > end_row || (start_row == end_row && start_col > end_col) {
+                return;
+            }
+            let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+            match action {
+                'r' => ctx.screen.grid.change_attrs_rect(
+                    &view,
+                    start_row,
+                    start_col,
+                    end_row,
+                    end_col,
+                    &sgr,
+                    ctx.screen.attr_change_extent,
+                ),
+                't' => ctx.screen.grid.reverse_attrs_rect(
+                    &view,
+                    start_row,
+                    start_col,
+                    end_row,
+                    end_col,
+                    &sgr,
+                    ctx.screen.attr_change_extent,
+                ),
+                _ => unreachable!(),
+            }
+            return;
+        }
         let view = screen::screen_viewport(ctx.screen, ctx.viewport);
         let rows = view.rows;
         let cols = view.cols;
@@ -1555,6 +1597,16 @@ pub(super) fn csi_dispatch(
                 ctx.screen
                     .grid
                     .erase_rect(&view, rect_top, rect_left, rect_bottom, rect_right);
+            }
+            // DECSERA — Selective Erase Rectangular Area.
+            '{' => {
+                ctx.screen.grid.erase_rect_selective(
+                    &view,
+                    rect_top,
+                    rect_left,
+                    rect_bottom,
+                    rect_right,
+                );
             }
             // DECFRA — Fill Rectangular Area with character. Uses current SGR.
             'x' => {
@@ -1609,22 +1661,9 @@ pub(super) fn csi_dispatch(
                     &dst_view,
                 );
             }
-            // DECRARA — Reverse Attributes in Rectangular Area.
-            // Params: top, left, bottom, right, [SGR attrs...]
-            'r' => {
-                let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                ctx.screen.grid.reverse_attrs_rect(
-                    &view,
-                    rect_top,
-                    rect_left,
-                    rect_bottom,
-                    rect_right,
-                    &sgr,
-                );
-            }
             // DECCARA — Change Attributes in Rectangular Area.
             // Params: top, left, bottom, right, [SGR attrs...]
-            't' => {
+            'r' => {
                 let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
                 ctx.screen.grid.change_attrs_rect(
                     &view,
@@ -1633,10 +1672,39 @@ pub(super) fn csi_dispatch(
                     rect_bottom,
                     rect_right,
                     &sgr,
+                    ctx.screen.attr_change_extent,
+                );
+            }
+            // DECRARA — Reverse Attributes in Rectangular Area.
+            // Params: top, left, bottom, right, [SGR attrs...]
+            't' => {
+                let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+                ctx.screen.grid.reverse_attrs_rect(
+                    &view,
+                    rect_top,
+                    rect_left,
+                    rect_bottom,
+                    rect_right,
+                    &sgr,
+                    ctx.screen.attr_change_extent,
                 );
             }
             _ => {}
         }
+        return;
+    }
+
+    if intermediates == b"*" && action == 'x' {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        ctx.screen.attr_change_extent = match ps {
+            2 => grid::AttrChangeExtent::Rectangle,
+            0 | 1 => grid::AttrChangeExtent::Stream,
+            _ => ctx.screen.attr_change_extent,
+        };
         return;
     }
 
@@ -3608,6 +3676,43 @@ mod tests {
             "Z",
             "source page should remain unchanged"
         );
+    }
+
+    #[test]
+    fn decsera_skips_protected_cells() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[1\"qA\x1b[0\"qB", &mut screen, &mut viewport);
+        feed(b"\x1b[1;1;1;2${", &mut screen, &mut viewport);
+        let row = &screen.grid.rows[screen::active_row_index(&screen, &viewport)];
+        assert_eq!(row.cells[0].as_str(), "A");
+        assert_eq!(row.cells[1].as_str(), " ");
+    }
+
+    #[test]
+    fn deccara_and_decrara_use_vt420_opcodes() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"X", &mut screen, &mut viewport);
+        feed(b"\x1b[1;1;1;1;1$r", &mut screen, &mut viewport);
+        let row = &screen.grid.rows[screen::active_row_index(&screen, &viewport)];
+        assert!(row.attrs[0].contains(CellAttrs::BOLD));
+
+        feed(b"\x1b[1;1;1;1;1$t", &mut screen, &mut viewport);
+        let row = &screen.grid.rows[screen::active_row_index(&screen, &viewport)];
+        assert!(!row.attrs[0].contains(CellAttrs::BOLD));
+    }
+
+    #[test]
+    fn decsace_switches_between_stream_and_rectangle_extent() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[1;2HA\x1b[3;2HB", &mut screen, &mut viewport);
+
+        feed(b"\x1b[1;2;3;2;1$r", &mut screen, &mut viewport);
+        assert!(screen.grid.rows[0].attrs[1].contains(CellAttrs::BOLD));
+        assert!(!screen.grid.rows[1].attrs[1].contains(CellAttrs::BOLD));
+        assert!(screen.grid.rows[2].attrs[1].contains(CellAttrs::BOLD));
+
+        feed(b"\x1b[2*x\x1b[1;2;3;2;1$r", &mut screen, &mut viewport);
+        assert!(screen.grid.rows[1].attrs[1].contains(CellAttrs::BOLD));
     }
 
     #[test]
