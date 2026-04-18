@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 
 mod color;
+mod conformance;
 mod cursor;
 mod grid;
 mod hyperlink;
@@ -34,6 +35,8 @@ use pty_pipe41::PtyReader;
 use vtepp::Action;
 
 pub use self::color::ColorPalette;
+pub use self::conformance::C1Mode;
+pub use self::conformance::ConformanceLevel;
 pub use self::cursor::CursorShape;
 pub use self::cursor::CursorStyle;
 pub use self::grid::Viewport;
@@ -167,6 +170,10 @@ pub struct TerminalModes {
     /// Saved column count from before DECCOLM switched to 132 columns.
     /// `None` when in normal (80-column) mode.
     pub deccolm_saved_cols: Option<u32>,
+    /// Current DEC operating level selected by DECSCL.
+    pub conformance_level: ConformanceLevel,
+    /// How terminal-generated C1 controls are transmitted to the host.
+    pub c1_mode: C1Mode,
     /// DECANM (`?2`) — when `true` the terminal operates in VT52 compatibility
     /// mode. Set via `CSI ? 2 l`, cleared by `CSI ? 2 h` or RIS. VT52 mode
     /// uses a completely different (non-CSI) escape sequence vocabulary.
@@ -189,6 +196,8 @@ impl TerminalModes {
             screen_reverse: false,
             allow_deccolm: false,
             deccolm_saved_cols: None,
+            conformance_level: ConformanceLevel::Level4,
+            c1_mode: C1Mode::SevenBit,
             vt52_mode: false,
         }
     }
@@ -448,8 +457,11 @@ impl Terminal {
             return;
         }
         // Per xterm: CSI I on focus gain, CSI O on focus loss.
-        let payload: &[u8] = if focused { b"\x1b[I" } else { b"\x1b[O" };
-        self.pending_output.extend_from_slice(payload);
+        conformance::write_csi(
+            &mut self.pending_output,
+            self.modes.c1_mode,
+            format_args!("{}", if focused { 'I' } else { 'O' }),
+        );
     }
 
     /// Translate a viewport-relative screen row to an absolute row index
@@ -970,11 +982,19 @@ impl Terminal {
     ) {
         const PASTE_END: &str = "\x1b[201~";
         if self.modes.bracketed_paste {
-            self.pending_output.extend_from_slice(b"\x1b[200~");
+            conformance::write_csi(
+                &mut self.pending_output,
+                self.modes.c1_mode,
+                format_args!("200~"),
+            );
             for chunk in text.split(PASTE_END) {
                 self.pending_output.extend_from_slice(chunk.as_bytes());
             }
-            self.pending_output.extend_from_slice(b"\x1b[201~");
+            conformance::write_csi(
+                &mut self.pending_output,
+                self.modes.c1_mode,
+                format_args!("201~"),
+            );
         } else {
             for chunk in text.split(PASTE_END) {
                 self.pending_output.extend_from_slice(chunk.as_bytes());
@@ -1024,6 +1044,7 @@ impl Terminal {
             return false;
         }
         encode_mouse_event(
+            self.modes.c1_mode,
             self.modes.mouse_encoding,
             kind,
             button,
@@ -1572,6 +1593,9 @@ impl Terminal {
                     title_stack: &mut self.title_stack,
                     current_title: &mut self.current_title,
                     saved_modes: &mut self.saved_private_modes,
+                    current_prompt_row: &mut self.current_prompt_row,
+                    bell_pending: &mut self.bell_pending,
+                    vt52_cursor_addr: &mut self.vt52_cursor_addr,
                 };
                 csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
             }
@@ -1619,6 +1643,7 @@ impl Terminal {
                     let mut ctx = OscContext {
                         clipboard: &mut self.clipboard,
                         pending_output: &mut self.pending_output,
+                        c1_mode: self.modes.c1_mode,
                         current_directory: &mut self.current_directory,
                         hyperlinks: &mut self.hyperlinks,
                         active_screen: &mut self.active,
@@ -1643,6 +1668,7 @@ impl Terminal {
                     &mut self.next_image_id,
                     self.cell_height,
                     self.cell_width,
+                    self.modes.c1_mode,
                     &mut self.pending_output,
                 );
             }
@@ -1796,8 +1822,8 @@ fn handle_decrqss(
     selector: &[u8],
     terminal: &mut Terminal,
 ) {
-    use std::io::Write;
     let out = &mut terminal.pending_output;
+    let c1_mode = terminal.modes.c1_mode;
 
     match selector {
         // SGR — report current graphic rendition.
@@ -1830,19 +1856,32 @@ fn handle_decrqss(
                 parts.push("0".into());
             }
             let sgr = parts.join(";");
-            write!(out, "\x1bP1$r{sgr}m\x1b\\").expect("write to Vec");
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{sgr}m"));
         }
         // DECSTBM — report scroll region.
         b"r" => {
             let top = terminal.active.scroll_top + 1;
             let bottom = terminal.active.scroll_bottom + 1;
-            write!(out, "\x1bP1$r{top};{bottom}r\x1b\\").expect("write to Vec");
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{top};{bottom}r"));
         }
         // DECSLRM — report left/right margins.
         b"s" => {
             let left = terminal.active.left_margin + 1;
             let right = terminal.active.right_margin + 1;
-            write!(out, "\x1bP1$r{left};{right}s\x1b\\").expect("write to Vec");
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{left};{right}s"));
+        }
+        // DECSCL — report operating level / C1 transmission mode.
+        b"\"p" => {
+            let level = terminal.modes.conformance_level.da1_code();
+            if terminal.modes.conformance_level == ConformanceLevel::Level1 {
+                conformance::write_dcs(out, c1_mode, format_args!("1$r{level}\"p"));
+            } else {
+                conformance::write_dcs(
+                    out,
+                    c1_mode,
+                    format_args!("1$r{level};{}\"p", terminal.modes.c1_mode.decscl_param()),
+                );
+            }
         }
         // DECSCUSR — report cursor style.
         b" q" => {
@@ -1854,7 +1893,7 @@ fn handle_decrqss(
                 (cursor::CursorShape::Beam, true) => 5,
                 (cursor::CursorShape::Beam, false) => 6,
             };
-            write!(out, "\x1bP1$r{ps} q\x1b\\").expect("write to Vec");
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps} q"));
         }
         // DECSCA — report character protection attribute.
         b"\"q" => {
@@ -1867,11 +1906,11 @@ fn handle_decrqss(
             } else {
                 0
             };
-            write!(out, "\x1bP1$r{ps}\"q\x1b\\").expect("write to Vec");
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}\"q"));
         }
         // Unrecognised — invalid response.
         _ => {
-            out.extend_from_slice(b"\x1bP0$r\x1b\\");
+            conformance::write_dcs(out, c1_mode, format_args!("0$r"));
         }
     }
 }
@@ -1880,10 +1919,9 @@ fn handle_decrqss(
 /// underlines, and cursor shapes without relying on a terminfo entry.
 fn handle_xtgettcap(
     payload: &[u8],
+    c1_mode: C1Mode,
     output: &mut Vec<u8>,
 ) {
-    use std::io::Write;
-
     for cap_hex in payload.split(|&b| b == b';') {
         if cap_hex.is_empty() {
             continue;
@@ -1892,15 +1930,17 @@ fn handle_xtgettcap(
         let cap_str = std::str::from_utf8(&cap_name).unwrap_or("");
         if let Some(value) = xtgettcap_value(cap_str) {
             let value_hex = hex_encode(value.as_bytes());
-            write!(output, "\x1bP1+r").expect("write to Vec is infallible");
+            conformance::push_dcs_prefix(output, c1_mode);
+            output.extend_from_slice(b"1+r");
             output.extend_from_slice(cap_hex);
             output.push(b'=');
             output.extend_from_slice(value_hex.as_bytes());
-            output.extend_from_slice(b"\x1b\\");
+            conformance::push_st(output, c1_mode);
         } else {
-            write!(output, "\x1bP0+r").expect("write to Vec is infallible");
+            conformance::push_dcs_prefix(output, c1_mode);
+            output.extend_from_slice(b"0+r");
             output.extend_from_slice(cap_hex);
-            output.extend_from_slice(b"\x1b\\");
+            conformance::push_st(output, c1_mode);
         }
     }
 }
@@ -2001,7 +2041,8 @@ pub fn run_terminal_thread(
                             // neovim use this to discover features like
                             // truecolor, cursor shapes, styled underlines.
                             let mut t = terminal.lock().unwrap();
-                            handle_xtgettcap(&bytes, &mut t.pending_output);
+                            let c1_mode = t.modes.c1_mode;
+                            handle_xtgettcap(&bytes, c1_mode, &mut t.pending_output);
                         } else if act == 'q' && intermediates.as_slice() == b"$" {
                             // DECRQSS — Request Selection or Setting.
                             // The payload identifies the setting being queried;
@@ -2051,6 +2092,7 @@ fn handle_kitty_graphics(
     next_image_id: &mut u64,
     cell_height: u32,
     cell_width: u32,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     // APC payload must start with 'G'.
@@ -2067,7 +2109,7 @@ fn handle_kitty_graphics(
     };
 
     match cmd.action {
-        b'q' => handle_kitty_query(&cmd, store, pending_output),
+        b'q' => handle_kitty_query(&cmd, store, c1_mode, pending_output),
         b'T' => handle_kitty_transmit_display(
             &cmd,
             store,
@@ -2076,9 +2118,10 @@ fn handle_kitty_graphics(
             next_image_id,
             cell_height,
             cell_width,
+            c1_mode,
             pending_output,
         ),
-        b't' => handle_kitty_transmit(&cmd, store, pending_output),
+        b't' => handle_kitty_transmit(&cmd, store, c1_mode, pending_output),
         b'p' => handle_kitty_place(
             &cmd,
             store,
@@ -2087,6 +2130,7 @@ fn handle_kitty_graphics(
             next_image_id,
             cell_height,
             cell_width,
+            c1_mode,
             pending_output,
         ),
         b'd' => handle_kitty_delete(&cmd, screen, store, cell_height),
@@ -2194,6 +2238,7 @@ fn send_kitty_response(
     image_id: u32,
     ok: bool,
     message: &str,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     // q=1 suppresses OK responses, q=2 suppresses all.
@@ -2203,33 +2248,40 @@ fn send_kitty_response(
     if cmd.quiet >= 1 && ok {
         return;
     }
-    pending_output.extend_from_slice(&image41::kitty::format_response(image_id, ok, message));
+    let status = if ok { "OK" } else { message };
+    conformance::write_apc(
+        pending_output,
+        c1_mode,
+        format_args!("Gi={image_id};{status}"),
+    );
 }
 
 fn handle_kitty_query(
     cmd: &image41::kitty::KittyCommand,
     store: &mut image41::kitty::KittyImageStore,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     let id = store.resolve_id(cmd);
     // Query just tests if the protocol is supported. Respond OK without
     // storing anything.
-    send_kitty_response(cmd, id, true, "", pending_output);
+    send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
 }
 
 fn handle_kitty_transmit(
     cmd: &image41::kitty::KittyCommand,
     store: &mut image41::kitty::KittyImageStore,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     let id = store.resolve_id(cmd);
     match decode_kitty_image(cmd) {
         Some(image) => {
             store.store(id, image);
-            send_kitty_response(cmd, id, true, "", pending_output);
+            send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
         }
         None => {
-            send_kitty_response(cmd, id, false, "EINVAL", pending_output);
+            send_kitty_response(cmd, id, false, "EINVAL", c1_mode, pending_output);
         }
     }
 }
@@ -2242,6 +2294,7 @@ fn handle_kitty_transmit_display(
     next_image_id: &mut u64,
     cell_height: u32,
     cell_width: u32,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     let id = store.resolve_id(cmd);
@@ -2258,10 +2311,10 @@ fn handle_kitty_transmit_display(
                 cell_height,
                 cell_width,
             );
-            send_kitty_response(cmd, id, true, "", pending_output);
+            send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
         }
         None => {
-            send_kitty_response(cmd, id, false, "EINVAL", pending_output);
+            send_kitty_response(cmd, id, false, "EINVAL", c1_mode, pending_output);
         }
     }
 }
@@ -2274,6 +2327,7 @@ fn handle_kitty_place(
     next_image_id: &mut u64,
     cell_height: u32,
     cell_width: u32,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     let id = store.resolve_id(cmd);
@@ -2289,10 +2343,10 @@ fn handle_kitty_place(
                 cell_height,
                 cell_width,
             );
-            send_kitty_response(cmd, id, true, "", pending_output);
+            send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
         }
         None => {
-            send_kitty_response(cmd, id, false, "ENOENT", pending_output);
+            send_kitty_response(cmd, id, false, "ENOENT", c1_mode, pending_output);
         }
     }
 }
@@ -2739,6 +2793,21 @@ mod tests {
     }
 
     #[test]
+    fn mouse_report_uses_8bit_csi_after_s8c1t() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?1000h\x1b[?1006h\x1b G");
+        let emitted = term.mouse_report(
+            MouseEventKind::Press,
+            MouseButton::Left,
+            4,
+            9,
+            MouseModifiers::default(),
+        );
+        assert!(emitted);
+        assert_eq!(term.take_pending_output(), b"\x9b<0;5;10M");
+    }
+
+    #[test]
     fn mouse_report_returns_false_when_tracking_off() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         let emitted = term.mouse_report(
@@ -2768,6 +2837,14 @@ mod tests {
         assert!(term.modes.bracketed_paste);
         term.paste("hello\n");
         assert_eq!(term.take_pending_output(), b"\x1b[200~hello\n\x1b[201~");
+    }
+
+    #[test]
+    fn paste_wraps_with_8bit_csi_after_s8c1t() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?2004h\x1b G");
+        term.paste("hello\n");
+        assert_eq!(term.take_pending_output(), b"\x9b200~hello\n\x9b201~");
     }
 
     #[test]
@@ -3267,6 +3344,15 @@ mod tests {
     }
 
     #[test]
+    fn focus_change_uses_8bit_csi_after_s8c1t() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[?1004h\x1b G");
+        term.report_focus_change(true);
+        term.report_focus_change(false);
+        assert_eq!(term.take_pending_output(), b"\x9bI\x9bO");
+    }
+
+    #[test]
     fn decrst_1004_disables_focus_reporting() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[?1004h\x1b[?1004l");
@@ -3578,6 +3664,38 @@ mod tests {
     fn da2_replies_as_vt420_compatible() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[>c");
+        assert_eq!(term.take_pending_output(), b"\x1b[>41;0;0c");
+    }
+
+    #[test]
+    fn decscl_level1_changes_da1_prefix_and_resets_screen() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"hello\x1b[?1004h\x1b[61\"p");
+        assert_eq!(term.modes.conformance_level, ConformanceLevel::Level1);
+        assert_eq!(term.modes.c1_mode, C1Mode::SevenBit);
+        assert!(!term.modes.focus_reporting);
+        term.process(b"\x1b[c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?61;7;21;22;28;29c");
+        for r in term.active.grid.rows.iter().rev().take(3) {
+            assert_eq!(r.content_len(), 0);
+        }
+    }
+
+    #[test]
+    fn decscl_with_8bit_controls_switches_reply_encoding() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[64;2\"p\x1b[>c");
+        assert_eq!(term.modes.conformance_level, ConformanceLevel::Level4);
+        assert_eq!(term.modes.c1_mode, C1Mode::EightBit);
+        assert_eq!(term.take_pending_output(), b"\x9b>41;0;0c");
+    }
+
+    #[test]
+    fn s8c1t_is_ignored_in_level1_mode() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[61\"p\x1b G\x1b[>c");
+        assert_eq!(term.modes.conformance_level, ConformanceLevel::Level1);
+        assert_eq!(term.modes.c1_mode, C1Mode::SevenBit);
         assert_eq!(term.take_pending_output(), b"\x1b[>41;0;0c");
     }
 

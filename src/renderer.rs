@@ -19,6 +19,7 @@ use clip41::Clipboard;
 use clip41::ClipboardKind;
 use font41::FontSystem;
 use pty_pipe41::Pty;
+use terminal41::C1Mode;
 use terminal41::KittyFlags;
 use terminal41::KittyKeys;
 use terminal41::MouseButton as TermMouseButton;
@@ -584,8 +585,11 @@ impl RenderHost {
         }
 
         if let Some(tab) = self.active_tab() {
-            let kitty_flags = tab.terminal.lock().unwrap().kitty_keyboard.current();
-            if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags) {
+            let t = tab.terminal.lock().unwrap();
+            let kitty_flags = t.kitty_keyboard.current();
+            let c1_mode = t.modes.c1_mode;
+            drop(t);
+            if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags, c1_mode) {
                 if let Some(tab) = self.active_tab_mut() {
                     tab.terminal.lock().unwrap().reset_viewport();
                     let _ = tab.pty.write(&bytes);
@@ -617,13 +621,17 @@ impl RenderHost {
             }
         }
 
-        let (app_cursor_keys, app_keypad) = self
+        let (app_cursor_keys, app_keypad, c1_mode) = self
             .active_tab()
             .map(|tab| {
                 let t = tab.terminal.lock().unwrap();
-                (t.active.app_cursor_keys, t.active.app_keypad)
+                (
+                    t.active.app_cursor_keys,
+                    t.active.app_keypad,
+                    t.modes.c1_mode,
+                )
             })
-            .unwrap_or((false, false));
+            .unwrap_or((false, false, C1Mode::SevenBit));
 
         let bytes = match &key {
             Key::Character(c) => {
@@ -636,7 +644,9 @@ impl RenderHost {
                     Some(c.as_bytes().to_vec())
                 }
             }
-            Key::Named(named) => legacy_encode_named(*named, mods, app_cursor_keys, app_keypad),
+            Key::Named(named) => {
+                legacy_encode_named(*named, mods, app_cursor_keys, app_keypad, c1_mode)
+            }
             _ => None,
         };
 
@@ -701,9 +711,12 @@ impl RenderHost {
         let Some(tab) = self.active_tab_mut() else {
             return;
         };
-        let flags = tab.terminal.lock().unwrap().kitty_keyboard.current();
+        let t = tab.terminal.lock().unwrap();
+        let flags = t.kitty_keyboard.current();
+        let c1_mode = t.modes.c1_mode;
+        drop(t);
         let bytes = if flags.contains(KittyFlags::REPORT_ASSOCIATED_TEXT) {
-            kitty_encode_ime_commit(text)
+            kitty_encode_ime_commit(text, c1_mode)
         } else {
             text.as_bytes().to_vec()
         };
@@ -2149,10 +2162,40 @@ fn kitty_modifier_bits(mods: ModifiersState) -> u8 {
     b
 }
 
+fn encode_csi_bytes(
+    args: std::fmt::Arguments<'_>,
+    c1_mode: C1Mode,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    if c1_mode == C1Mode::EightBit {
+        out.push(0x9B);
+    } else {
+        out.extend_from_slice(b"\x1b[");
+    }
+    use std::io::Write as _;
+    out.write_fmt(args).expect("write to Vec is infallible");
+    out
+}
+
+fn encode_ss3_bytes(
+    final_byte: char,
+    c1_mode: C1Mode,
+) -> Vec<u8> {
+    let mut out = Vec::new();
+    if c1_mode == C1Mode::EightBit {
+        out.push(0x8F);
+    } else {
+        out.extend_from_slice(b"\x1bO");
+    }
+    out.push(final_byte as u8);
+    out
+}
+
 fn kitty_encode_input(
     key: &Key,
     mods: ModifiersState,
     flags: KittyFlags,
+    c1_mode: C1Mode,
 ) -> Option<Vec<u8>> {
     if !flags.contains(KittyFlags::DISAMBIGUATE_ESCAPE_CODES) {
         return None;
@@ -2175,9 +2218,9 @@ fn kitty_encode_input(
             let lower = s.to_lowercase();
             let cp = lower.chars().next()? as u32;
             let text = report_text.then_some(s.as_str());
-            Some(format_csi_u(cp, mod_param, text))
+            Some(format_csi_u(cp, mod_param, text, c1_mode))
         }
-        Key::Named(named) => kitty_encode_named(*named, mod_bits, mod_param, report_text),
+        Key::Named(named) => kitty_encode_named(*named, mod_bits, mod_param, report_text, c1_mode),
         _ => None,
     }
 }
@@ -2191,23 +2234,32 @@ fn format_csi_u(
     cp: u32,
     mod_param: u8,
     text: Option<&str>,
+    c1_mode: C1Mode,
 ) -> Vec<u8> {
+    let mut out = encode_csi_bytes(format_args!(""), c1_mode);
     match text {
         Some(t) if !t.is_empty() => {
-            let mut out = format!("\x1b[{cp};{mod_param};");
+            use std::io::Write as _;
+            out.write_fmt(format_args!("{cp};{mod_param};"))
+                .expect("write to Vec is infallible");
             let mut first = true;
             for ch in t.chars() {
                 if !first {
-                    out.push(':');
+                    out.push(b':');
                 }
                 first = false;
-                use std::fmt::Write as _;
-                let _ = write!(out, "{}", ch as u32);
+                out.write_fmt(format_args!("{}", ch as u32))
+                    .expect("write to Vec is infallible");
             }
-            out.push('u');
-            out.into_bytes()
+            out.push(b'u');
+            out
         }
-        _ => format!("\x1b[{cp};{mod_param}u").into_bytes(),
+        _ => {
+            use std::io::Write as _;
+            out.write_fmt(format_args!("{cp};{mod_param}u"))
+                .expect("write to Vec is infallible");
+            out
+        }
     }
 }
 
@@ -2217,8 +2269,11 @@ fn format_csi_u(
 /// single input block instead of N individual keystrokes. Callers should
 /// only route through here when `REPORT_ASSOCIATED_TEXT` is set; without it,
 /// the bytes go straight to the PTY unchanged.
-pub(crate) fn kitty_encode_ime_commit(text: &str) -> Vec<u8> {
-    format_csi_u(0, 0, Some(text))
+pub(crate) fn kitty_encode_ime_commit(
+    text: &str,
+    c1_mode: C1Mode,
+) -> Vec<u8> {
+    format_csi_u(0, 0, Some(text), c1_mode)
 }
 
 fn kitty_encode_named(
@@ -2226,6 +2281,7 @@ fn kitty_encode_named(
     mod_bits: u8,
     mod_param: u8,
     report_text: bool,
+    c1_mode: C1Mode,
 ) -> Option<Vec<u8>> {
     let direct_code = match named {
         NamedKey::Enter => Some(13u32),
@@ -2251,7 +2307,7 @@ fn kitty_encode_named(
         } else {
             None
         };
-        return Some(format_csi_u(cp, mod_param, text));
+        return Some(format_csi_u(cp, mod_param, text, c1_mode));
     }
 
     if mod_bits == 0 {
@@ -2268,7 +2324,10 @@ fn kitty_encode_named(
         _ => None,
     };
     if let Some(action) = arrow_action {
-        return Some(format!("\x1b[1;{mod_param}{action}").into_bytes());
+        return Some(encode_csi_bytes(
+            format_args!("1;{mod_param}{action}"),
+            c1_mode,
+        ));
     }
 
     let tilde_code = match named {
@@ -2279,7 +2338,10 @@ fn kitty_encode_named(
         _ => None,
     };
     if let Some(code) = tilde_code {
-        return Some(format!("\x1b[{code};{mod_param}~").into_bytes());
+        return Some(encode_csi_bytes(
+            format_args!("{code};{mod_param}~"),
+            c1_mode,
+        ));
     }
 
     None
@@ -2295,6 +2357,7 @@ fn legacy_encode_named(
     mods: ModifiersState,
     app_cursor_keys: bool,
     app_keypad: bool,
+    c1_mode: C1Mode,
 ) -> Option<Vec<u8>> {
     let mod_param = legacy_modifier_param(mods);
 
@@ -2322,7 +2385,7 @@ fn legacy_encode_named(
 
     // Shift+Tab → CSI Z (backtab).
     if key == NamedKey::Tab && mods.shift_key() {
-        return Some(b"\x1b[Z".to_vec());
+        return Some(encode_csi_bytes(format_args!("Z"), c1_mode));
     }
 
     // Arrow-style keys: CSI [1;mod] X
@@ -2339,11 +2402,11 @@ fn legacy_encode_named(
     };
     if let Some(ch) = arrow_final {
         return if mod_param > 0 {
-            Some(format!("\x1b[1;{mod_param}{ch}").into_bytes())
+            Some(encode_csi_bytes(format_args!("1;{mod_param}{ch}"), c1_mode))
         } else if app_cursor_keys {
-            Some(format!("\x1bO{ch}").into_bytes())
+            Some(encode_ss3_bytes(ch, c1_mode))
         } else {
-            Some(format!("\x1b[{ch}").into_bytes())
+            Some(encode_csi_bytes(format_args!("{ch}"), c1_mode))
         };
     }
 
@@ -2357,9 +2420,12 @@ fn legacy_encode_named(
     };
     if let Some(code) = tilde_code {
         return if mod_param > 0 {
-            Some(format!("\x1b[{code};{mod_param}~").into_bytes())
+            Some(encode_csi_bytes(
+                format_args!("{code};{mod_param}~"),
+                c1_mode,
+            ))
         } else {
-            Some(format!("\x1b[{code}~").into_bytes())
+            Some(encode_csi_bytes(format_args!("{code}~"), c1_mode))
         };
     }
 
@@ -2373,9 +2439,9 @@ fn legacy_encode_named(
     };
     if let Some(ch) = f1_4_final {
         return if mod_param > 0 {
-            Some(format!("\x1b[1;{mod_param}{ch}").into_bytes())
+            Some(encode_csi_bytes(format_args!("1;{mod_param}{ch}"), c1_mode))
         } else {
-            Some(format!("\x1bO{ch}").into_bytes())
+            Some(encode_ss3_bytes(ch, c1_mode))
         };
     }
 
@@ -2393,9 +2459,12 @@ fn legacy_encode_named(
     };
     if let Some(code) = fkey_code {
         return if mod_param > 0 {
-            Some(format!("\x1b[{code};{mod_param}~").into_bytes())
+            Some(encode_csi_bytes(
+                format_args!("{code};{mod_param}~"),
+                c1_mode,
+            ))
         } else {
-            Some(format!("\x1b[{code}~").into_bytes())
+            Some(encode_csi_bytes(format_args!("{code}~"), c1_mode))
         };
     }
 
@@ -2517,6 +2586,7 @@ mod kitty_encode_tests {
             &char_key("a"),
             ModifiersState::CONTROL,
             KittyFlags::DISAMBIGUATE_ESCAPE_CODES,
+            C1Mode::SevenBit,
         )
         .expect("encoded");
         assert_eq!(bytes, b"\x1b[97;5u");
@@ -2528,6 +2598,7 @@ mod kitty_encode_tests {
             &char_key("a"),
             ModifiersState::CONTROL,
             KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_ASSOCIATED_TEXT,
+            C1Mode::SevenBit,
         )
         .expect("encoded");
         // text param is the codepoint of the produced char ("a" = 97)
@@ -2546,6 +2617,7 @@ mod kitty_encode_tests {
             KittyFlags::DISAMBIGUATE_ESCAPE_CODES
                 | KittyFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
                 | KittyFlags::REPORT_ASSOCIATED_TEXT,
+            C1Mode::SevenBit,
         )
         .expect("encoded");
         assert_eq!(bytes, b"\x1b[97;2;65u");
@@ -2560,6 +2632,7 @@ mod kitty_encode_tests {
                 &char_key("a"),
                 ModifiersState::empty(),
                 KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_ASSOCIATED_TEXT,
+                C1Mode::SevenBit,
             )
             .is_none()
         );
@@ -2571,6 +2644,7 @@ mod kitty_encode_tests {
             &Key::Named(NamedKey::Enter),
             ModifiersState::CONTROL,
             KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_ASSOCIATED_TEXT,
+            C1Mode::SevenBit,
         )
         .expect("encoded");
         // Enter's associated text is "\r" (13).
@@ -2584,6 +2658,7 @@ mod kitty_encode_tests {
             &Key::Named(NamedKey::Escape),
             ModifiersState::CONTROL,
             KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_ASSOCIATED_TEXT,
+            C1Mode::SevenBit,
         )
         .expect("encoded");
         assert_eq!(bytes, b"\x1b[27;5u");
@@ -2594,14 +2669,39 @@ mod kitty_encode_tests {
         // Spec sentinel: key code 0 + modifier param 0 means "not a physical
         // key". Codepoints join with ':'. 啊 = U+554A (0x554A = 21834),
         // 不 = U+4E0D (0x4E0D = 19981).
-        let bytes = kitty_encode_ime_commit("啊不");
+        let bytes = kitty_encode_ime_commit("啊不", C1Mode::SevenBit);
         assert_eq!(bytes, b"\x1b[0;0;21834:19981u");
     }
 
     #[test]
     fn ime_commit_single_codepoint() {
-        let bytes = kitty_encode_ime_commit("é");
+        let bytes = kitty_encode_ime_commit("é", C1Mode::SevenBit);
         // é = U+00E9 = 233
         assert_eq!(bytes, b"\x1b[0;0;233u");
+    }
+
+    #[test]
+    fn kitty_encode_uses_8bit_csi_when_requested() {
+        let bytes = kitty_encode_input(
+            &char_key("a"),
+            ModifiersState::CONTROL,
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES,
+            C1Mode::EightBit,
+        )
+        .expect("encoded");
+        assert_eq!(bytes, b"\x9b97;5u");
+    }
+
+    #[test]
+    fn legacy_app_cursor_keys_use_8bit_ss3_when_requested() {
+        let bytes = legacy_encode_named(
+            NamedKey::ArrowUp,
+            ModifiersState::empty(),
+            true,
+            false,
+            C1Mode::EightBit,
+        )
+        .expect("encoded");
+        assert_eq!(bytes, b"\x8fA");
     }
 }

@@ -1,4 +1,3 @@
-use std::io::Write;
 use std::sync::LazyLock;
 use std::time::Instant;
 
@@ -9,9 +8,12 @@ use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use vtepp::Params;
 
+use crate::C1Mode;
+use crate::ConformanceLevel;
 use crate::TerminalModes;
 use crate::color;
 use crate::color::apply_sgr;
+use crate::conformance;
 use crate::cursor::CursorStyle;
 use crate::grid;
 use crate::grid::Viewport;
@@ -43,6 +45,9 @@ pub(super) struct CsiContext<'a> {
     pub title_stack: &'a mut Vec<Option<String>>,
     pub current_title: &'a mut Option<String>,
     pub saved_modes: &'a mut std::collections::HashMap<u16, bool>,
+    pub current_prompt_row: &'a mut Option<u64>,
+    pub bell_pending: &'a mut bool,
+    pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
 }
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that ESC handlers
@@ -115,6 +120,61 @@ const WINOP_REPORT_TEXT_SIZE: u16 = 18;
 // TBC (Tab Clear) parameter values.
 const TBC_CURRENT: u16 = 0;
 const TBC_ALL: u16 = 3;
+
+fn can_negotiate_c1(modes: &TerminalModes) -> bool {
+    !modes.vt52_mode && modes.conformance_level.supports_c1_negotiation()
+}
+
+fn apply_hard_reset(
+    ctx: &mut EscContext<'_>,
+    conformance_level: ConformanceLevel,
+    c1_mode: C1Mode,
+) {
+    if *ctx.on_alt_screen {
+        std::mem::swap(ctx.screen, ctx.stash);
+        *ctx.on_alt_screen = false;
+    }
+    screen::clear_visible(ctx.screen, ctx.viewport);
+    screen::clear_visible(ctx.stash, ctx.viewport);
+    for s in [&mut *ctx.screen, &mut *ctx.stash] {
+        s.cursor = grid::Cursor::default();
+        s.fg = ctx.palette.fg;
+        s.bg = ctx.palette.bg;
+        s.attrs = CellAttrs::default();
+        s.underline = UnderlineStyle::None;
+        s.underline_color = None;
+        s.scroll_top = 0;
+        s.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+        s.left_margin = 0;
+        s.right_margin = ctx.viewport.cols.saturating_sub(1);
+        s.offset = 0;
+        s.saved_cursor = None;
+        s.current_hyperlink = None;
+        s.cursor_visible = true;
+        s.last_char = None;
+        s.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
+        s.origin_mode = false;
+        s.autowrap = true;
+        s.app_cursor_keys = false;
+        s.charset_g0_is_drawing = false;
+        s.charset_g1_is_drawing = false;
+        s.charset_g2_is_drawing = false;
+        s.charset_g3_is_drawing = false;
+        s.charset_gl_is_g0 = true;
+        s.single_shift = None;
+    }
+    *ctx.modes = TerminalModes::new();
+    ctx.modes.conformance_level = conformance_level;
+    ctx.modes.c1_mode = c1_mode;
+    *ctx.kitty_keyboard = KittyKeyboardState::new();
+    *ctx.cursor_style = CursorStyle::default();
+    *ctx.current_title = None;
+    ctx.title_stack.clear();
+    ctx.saved_modes.clear();
+    *ctx.current_prompt_row = None;
+    *ctx.bell_pending = false;
+    *ctx.vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+}
 
 /// Forward-scan tab stops from `start_col + 1`. Returns the column of the
 /// next set tab stop, or `cols - 1` if none is found.
@@ -1041,8 +1101,45 @@ pub(super) fn csi_dispatch(
             intermediates[0],
             params,
             ctx.kitty_keyboard,
+            ctx.modes.c1_mode,
             ctx.pending_output,
         );
+        return;
+    }
+
+    if action == 'p' && intermediates == b"\"" {
+        let ps1 = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        let Some(level) = ConformanceLevel::from_decscl(ps1) else {
+            return;
+        };
+        let ps2 = params.iter().nth(1).and_then(|g| g.first().copied());
+        let c1_mode = if level.supports_c1_negotiation() {
+            C1Mode::from_decscl(ps2)
+        } else {
+            C1Mode::SevenBit
+        };
+        let mut esc_ctx = EscContext {
+            screen: ctx.screen,
+            stash: ctx.stash,
+            viewport: ctx.viewport,
+            on_alt_screen: ctx.on_alt_screen,
+            modes: ctx.modes,
+            kitty_keyboard: ctx.kitty_keyboard,
+            cursor_style: ctx.cursor_style,
+            current_title: ctx.current_title,
+            title_stack: ctx.title_stack,
+            saved_modes: ctx.saved_modes,
+            current_prompt_row: ctx.current_prompt_row,
+            bell_pending: ctx.bell_pending,
+            palette: ctx.palette,
+            pending_output: ctx.pending_output,
+            vt52_cursor_addr: ctx.vt52_cursor_addr,
+        };
+        apply_hard_reset(&mut esc_ctx, level, c1_mode);
         return;
     }
 
@@ -1078,12 +1175,11 @@ pub(super) fn csi_dispatch(
     if action == 'q' && intermediates == b">" {
         // XTVERSION (xterm name/version query). Apps use the reply to gate
         // behavior on known-good terminals.
-        write!(
+        conformance::write_dcs(
             ctx.pending_output,
-            "\x1bP>|term41 {}\x1b\\",
-            env!("CARGO_PKG_VERSION"),
-        )
-        .expect("write to Vec is infallible");
+            ctx.modes.c1_mode,
+            format_args!(">|term41 {}", env!("CARGO_PKG_VERSION")),
+        );
         return;
     }
 
@@ -1113,20 +1209,35 @@ pub(super) fn csi_dispatch(
             }
         };
         if private {
-            write!(ctx.pending_output, "\x1b[?{ps};{pm}$y").expect("write to Vec is infallible");
+            conformance::write_csi(
+                ctx.pending_output,
+                ctx.modes.c1_mode,
+                format_args!("?{ps};{pm}$y"),
+            );
         } else {
-            write!(ctx.pending_output, "\x1b[{ps};{pm}$y").expect("write to Vec is infallible");
+            conformance::write_csi(
+                ctx.pending_output,
+                ctx.modes.c1_mode,
+                format_args!("{ps};{pm}$y"),
+            );
         }
         return;
     }
 
     if action == 'c' && intermediates == b">" {
         // DA2 (Secondary Device Attributes).
-        ctx.pending_output.extend_from_slice(b"\x1b[>41;0;0c");
+        conformance::write_csi(
+            ctx.pending_output,
+            ctx.modes.c1_mode,
+            format_args!(">41;0;0c"),
+        );
         return;
     }
 
     if action == 'p' && intermediates == b"!" {
+        if ctx.modes.vt52_mode || !ctx.modes.conformance_level.supports_c1_negotiation() {
+            return;
+        }
         // DECSTR (Soft Terminal Reset). Resets modes, colors, attributes,
         // scroll region, and cursor style back to defaults without clearing
         // the screen or scrollback. tmux and neovim use this for a
@@ -1156,9 +1267,11 @@ pub(super) fn csi_dispatch(
         screen.charset_g3_is_drawing = false;
         screen.charset_gl_is_g0 = true;
         screen.single_shift = None;
-        // DECSTR resets all terminal-level modes including DECANM
-        // (vt52_mode), returning the terminal to ANSI mode.
+        let conformance_level = ctx.modes.conformance_level;
+        let c1_mode = ctx.modes.c1_mode;
         *ctx.modes = TerminalModes::new();
+        ctx.modes.conformance_level = conformance_level;
+        ctx.modes.c1_mode = c1_mode;
         *ctx.kitty_keyboard = KittyKeyboardState::new();
         *ctx.cursor_style = CursorStyle::default();
         return;
@@ -1166,8 +1279,14 @@ pub(super) fn csi_dispatch(
 
     // DA3 (Tertiary Device Attributes, CSI = c).
     if action == 'c' && intermediates == b"=" {
-        ctx.pending_output
-            .extend_from_slice(b"\x1bP!|000000000\x1b\\");
+        if ctx.modes.vt52_mode || !ctx.modes.conformance_level.supports_c1_negotiation() {
+            return;
+        }
+        conformance::write_dcs(
+            ctx.pending_output,
+            ctx.modes.c1_mode,
+            format_args!("!|000000000"),
+        );
         return;
     }
 
@@ -1182,7 +1301,11 @@ pub(super) fn csi_dispatch(
         if ps == DSR_CPR {
             let row = ctx.screen.cursor.row + 1;
             let col = ctx.screen.cursor.col + 1;
-            write!(ctx.pending_output, "\x1b[?{row};{col};1R").expect("write to Vec is infallible");
+            conformance::write_csi(
+                ctx.pending_output,
+                ctx.modes.c1_mode,
+                format_args!("?{row};{col};1R"),
+            );
         }
         return;
     }
@@ -1371,14 +1494,19 @@ pub(super) fn csi_dispatch(
     // DA1 needs pending_output, which lives on ctx rather than on the screen.
     // Handle it before borrowing ctx.screen for the screen-only match below.
     if action == 'c' {
-        // DA1 (Primary Device Attributes). Reply as a VT420 (64) with:
+        // DA1 (Primary Device Attributes). Prefix the reply with the active
+        // DECSCL operating level and advertise the subset this emulator
+        // actually implements.
         //   7  = printer port (placeholder — signals DECDLD readiness)
         //  21  = horizontal scrolling
         //  22  = ANSI color
         //  28  = rectangular area operations
         //  29  = ANSI text locator
-        ctx.pending_output
-            .extend_from_slice(b"\x1b[?64;7;21;22;28;29c");
+        conformance::write_csi(
+            ctx.pending_output,
+            ctx.modes.c1_mode,
+            format_args!("?{};7;21;22;28;29c", ctx.modes.conformance_level.da1_code()),
+        );
         return;
     }
 
@@ -1393,14 +1521,17 @@ pub(super) fn csi_dispatch(
             .unwrap_or(0);
         match ps {
             DSR_OK => {
-                ctx.pending_output.extend_from_slice(b"\x1b[0n");
+                conformance::write_csi(ctx.pending_output, ctx.modes.c1_mode, format_args!("0n"));
             }
             DSR_CPR => {
                 // Report is 1-based.
                 let row = ctx.screen.cursor.row + 1;
                 let col = ctx.screen.cursor.col + 1;
-                write!(ctx.pending_output, "\x1b[{row};{col}R")
-                    .expect("write to Vec is infallible");
+                conformance::write_csi(
+                    ctx.pending_output,
+                    ctx.modes.c1_mode,
+                    format_args!("{row};{col}R"),
+                );
             }
             _ => {}
         }
@@ -1435,25 +1566,27 @@ pub(super) fn csi_dispatch(
                 // Report window size in pixels: CSI 4 ; height ; width t.
                 let h = ctx.viewport.rows * ctx.cell_height;
                 let w = ctx.viewport.cols * ctx.cell_width;
-                write!(ctx.pending_output, "\x1b[4;{h};{w}t").expect("write to Vec is infallible");
+                conformance::write_csi(
+                    ctx.pending_output,
+                    ctx.modes.c1_mode,
+                    format_args!("4;{h};{w}t"),
+                );
             }
             WINOP_REPORT_CELL_SIZE => {
                 // Report cell size in pixels: CSI 6 ; height ; width t.
-                write!(
+                conformance::write_csi(
                     ctx.pending_output,
-                    "\x1b[6;{};{}t",
-                    ctx.cell_height, ctx.cell_width
-                )
-                .expect("write to Vec is infallible");
+                    ctx.modes.c1_mode,
+                    format_args!("6;{};{}t", ctx.cell_height, ctx.cell_width),
+                );
             }
             WINOP_REPORT_TEXT_SIZE => {
                 // Report terminal size in cells: CSI 8 ; rows ; cols t.
-                write!(
+                conformance::write_csi(
                     ctx.pending_output,
-                    "\x1b[8;{};{}t",
-                    ctx.viewport.rows, ctx.viewport.cols
-                )
-                .expect("write to Vec is infallible");
+                    ctx.modes.c1_mode,
+                    format_args!("8;{};{}t", ctx.viewport.rows, ctx.viewport.cols),
+                );
             }
             _ => {}
         }
@@ -1839,6 +1972,21 @@ pub(super) fn esc_dispatch(
     }
 
     if let Some(&inter) = intermediates.first()
+        && inter == b' '
+    {
+        match byte {
+            b'F' if can_negotiate_c1(ctx.modes) => {
+                ctx.modes.c1_mode = C1Mode::SevenBit;
+            }
+            b'G' if can_negotiate_c1(ctx.modes) => {
+                ctx.modes.c1_mode = C1Mode::EightBit;
+            }
+            _ => {}
+        }
+        return;
+    }
+
+    if let Some(&inter) = intermediates.first()
         && SCS_INTERMEDIATES.contains(&inter)
     {
         let is_drawing = byte == b'0';
@@ -1977,51 +2125,7 @@ pub(super) fn esc_dispatch(
             // back to power-on defaults — every mode the app might have
             // flipped, plus the visible screen. Scrollback is preserved: a
             // misbehaving app's reset shouldn't take the user's history.
-            //
-            // Return to primary first so subsequent resets land on the screen
-            // the user will actually see, and so a crashed alt-screen TUI
-            // doesn't strand us there.
-            if *ctx.on_alt_screen {
-                std::mem::swap(ctx.screen, ctx.stash);
-                *ctx.on_alt_screen = false;
-            }
-            screen::clear_visible(ctx.screen, ctx.viewport);
-            screen::clear_visible(ctx.stash, ctx.viewport);
-            for s in [&mut *ctx.screen, &mut *ctx.stash] {
-                s.cursor = grid::Cursor::default();
-                s.fg = ctx.palette.fg;
-                s.bg = ctx.palette.bg;
-                s.attrs = CellAttrs::default();
-                s.underline = UnderlineStyle::None;
-                s.underline_color = None;
-                s.scroll_top = 0;
-                s.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
-                s.left_margin = 0;
-                s.right_margin = ctx.viewport.cols.saturating_sub(1);
-                s.offset = 0;
-                s.saved_cursor = None;
-                s.current_hyperlink = None;
-                s.cursor_visible = true;
-                s.last_char = None;
-                s.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
-                s.origin_mode = false;
-                s.autowrap = true;
-                s.app_cursor_keys = false;
-                s.charset_g0_is_drawing = false;
-                s.charset_g1_is_drawing = false;
-                s.charset_g2_is_drawing = false;
-                s.charset_g3_is_drawing = false;
-                s.charset_gl_is_g0 = true;
-                s.single_shift = None;
-            }
-            *ctx.modes = TerminalModes::new();
-            *ctx.kitty_keyboard = KittyKeyboardState::new();
-            *ctx.cursor_style = CursorStyle::default();
-            *ctx.current_title = None;
-            ctx.title_stack.clear();
-            ctx.saved_modes.clear();
-            *ctx.current_prompt_row = None;
-            *ctx.bell_pending = false;
+            apply_hard_reset(ctx, ConformanceLevel::Level4, C1Mode::SevenBit);
         }
         b'M' => {
             if ctx.screen.cursor.row == ctx.screen.scroll_top {
@@ -2209,6 +2313,9 @@ mod tests {
                         title_stack: &mut title_stack,
                         current_title: &mut current_title,
                         saved_modes: &mut saved_modes,
+                        current_prompt_row: &mut current_prompt_row,
+                        bell_pending: &mut bell_pending,
+                        vt52_cursor_addr: &mut vt52_cursor_addr,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -3087,6 +3194,9 @@ mod tests {
                         title_stack: &mut title_stack,
                         current_title: &mut current_title,
                         saved_modes: &mut saved_modes,
+                        current_prompt_row: &mut current_prompt_row,
+                        bell_pending: &mut bell_pending,
+                        vt52_cursor_addr: &mut vt52_cursor_addr,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }

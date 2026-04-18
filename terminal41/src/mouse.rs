@@ -1,3 +1,5 @@
+use crate::C1Mode;
+use crate::conformance;
 use crate::mode;
 
 /// DEC mouse-tracking mode currently requested by the foreground app.
@@ -195,6 +197,7 @@ fn push_utf8_coord(
 
 /// Encode a mouse event using the active protocol and push it into `out`.
 pub(super) fn encode_mouse_event(
+    c1_mode: C1Mode,
     encoding: MouseEncoding,
     kind: MouseEventKind,
     button: MouseButton,
@@ -210,22 +213,29 @@ pub(super) fn encode_mouse_event(
     match encoding {
         MouseEncoding::Sgr => {
             let release = matches!(kind, MouseEventKind::Release);
-            let _ = write!(out, "\x1b[<{cb};{col_1based};{row_1based}");
+            conformance::push_csi_prefix(out, c1_mode);
+            let _ = write!(out, "<{cb};{col_1based};{row_1based}");
             out.push(if release { b'm' } else { b'M' });
         }
         MouseEncoding::Urxvt => {
             // URXVT adds 32 to Cb just like legacy — the `32` is the xterm
             // legacy bias, not the motion bit, so we apply it here.
-            let _ = write!(out, "\x1b[{};{};{}M", cb + 32, col_1based, row_1based);
+            conformance::write_csi(
+                out,
+                c1_mode,
+                format_args!("{};{};{}M", cb + 32, col_1based, row_1based),
+            );
         }
         MouseEncoding::Default => {
-            out.extend_from_slice(b"\x1b[M");
+            conformance::push_csi_prefix(out, c1_mode);
+            out.push(b'M');
             out.push((cb + 32).min(255) as u8);
             push_legacy_coord(out, col_1based);
             push_legacy_coord(out, row_1based);
         }
         MouseEncoding::Utf8 => {
-            out.extend_from_slice(b"\x1b[M");
+            conformance::push_csi_prefix(out, c1_mode);
+            out.push(b'M');
             push_utf8_coord(out, cb as u32);
             push_utf8_coord(out, col_1based);
             push_utf8_coord(out, row_1based);
@@ -246,7 +256,16 @@ mod tests {
         mods: MouseModifiers,
     ) -> Vec<u8> {
         let mut out = Vec::new();
-        encode_mouse_event(encoding, kind, button, col, row, mods, &mut out);
+        encode_mouse_event(
+            C1Mode::SevenBit,
+            encoding,
+            kind,
+            button,
+            col,
+            row,
+            mods,
+            &mut out,
+        );
         out
     }
 

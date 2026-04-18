@@ -8,8 +8,10 @@ use clip41::Clipboard;
 use clip41::ClipboardKind;
 use percent_encoding::percent_decode;
 
+use crate::C1Mode;
 use crate::CommandMeta;
 use crate::color;
+use crate::conformance;
 use crate::grid::Viewport;
 use crate::hyperlink::HyperlinkId;
 use crate::hyperlink::HyperlinkRegistry;
@@ -44,6 +46,7 @@ const OSC_ITERM2: u16 = 1337;
 pub(super) struct OscContext<'a> {
     pub clipboard: &'a mut Clipboard,
     pub pending_output: &'a mut Vec<u8>,
+    pub c1_mode: C1Mode,
     pub current_directory: &'a mut Option<PathBuf>,
     pub hyperlinks: &'a mut HyperlinkRegistry,
     pub active_screen: &'a mut Screen,
@@ -138,15 +141,23 @@ pub(super) fn handle_osc(
             ctx.hyperlinks,
             &mut ctx.active_screen.current_hyperlink,
         ),
-        Some(OSC_PALETTE_COLOR) => handle_osc_4(rest, ctx.palette, ctx.pending_output),
-        Some(OSC_FG_COLOR) => {
-            handle_osc_color_query(rest, OSC_FG_COLOR as u8, ctx.palette.fg, ctx.pending_output)
-        }
-        Some(OSC_BG_COLOR) => {
-            handle_osc_color_query(rest, OSC_BG_COLOR as u8, ctx.palette.bg, ctx.pending_output)
-        }
+        Some(OSC_PALETTE_COLOR) => handle_osc_4(rest, ctx.palette, ctx.c1_mode, ctx.pending_output),
+        Some(OSC_FG_COLOR) => handle_osc_color_query(
+            rest,
+            OSC_FG_COLOR as u8,
+            ctx.palette.fg,
+            ctx.c1_mode,
+            ctx.pending_output,
+        ),
+        Some(OSC_BG_COLOR) => handle_osc_color_query(
+            rest,
+            OSC_BG_COLOR as u8,
+            ctx.palette.bg,
+            ctx.c1_mode,
+            ctx.pending_output,
+        ),
         Some(OSC_CURSOR_COLOR) => handle_osc_cursor_color_query(rest, ctx),
-        Some(OSC_CLIPBOARD) => handle_osc_52(rest, ctx.clipboard, ctx.pending_output),
+        Some(OSC_CLIPBOARD) => handle_osc_52(rest, ctx.clipboard, ctx.c1_mode, ctx.pending_output),
         // Reset palette/fg/bg/cursor color. Accepted but currently no-op —
         // the palette is immutable at this level.
         Some(OSC_RESET_PALETTE | OSC_RESET_FG | OSC_RESET_BG | OSC_RESET_CURSOR_COLOR) => {}
@@ -161,13 +172,11 @@ pub(super) fn handle_osc(
         // etc.) are routed separately in terminal.rs. ReportCellSize gets a
         // reply; other non-image commands are silently accepted as no-ops.
         Some(OSC_ITERM2) if rest.starts_with(b"ReportCellSize") => {
-            use std::io::Write;
-            write!(
+            conformance::write_osc(
                 ctx.pending_output,
-                "\x1b]1337;ReportCellSize={};{}\x1b\\",
-                ctx.cell_height, ctx.cell_width
-            )
-            .expect("write to Vec is infallible");
+                ctx.c1_mode,
+                format_args!("1337;ReportCellSize={};{}", ctx.cell_height, ctx.cell_width),
+            );
         }
         Some(OSC_ITERM2) => {}
         _ => {}
@@ -338,17 +347,14 @@ fn handle_osc_color_query(
     rest: &[u8],
     cmd: u8,
     current: palette::Srgb<u8>,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     if rest != b"?" {
         return;
     }
     let reply = rgb_reply(current.red, current.green, current.blue);
-    pending_output.extend_from_slice(b"\x1b]");
-    pending_output.extend_from_slice(cmd.to_string().as_bytes());
-    pending_output.push(b';');
-    pending_output.extend_from_slice(reply.as_bytes());
-    pending_output.extend_from_slice(b"\x1b\\");
+    conformance::write_osc(pending_output, c1_mode, format_args!("{cmd};{reply}"));
 }
 
 /// OSC 12 — cursor color query. If the payload is `?` the terminal replies
@@ -363,9 +369,7 @@ fn handle_osc_cursor_color_query(
     }
     let c = ctx.palette.cursor.unwrap_or(ctx.palette.fg);
     let reply = rgb_reply(c.red, c.green, c.blue);
-    ctx.pending_output.extend_from_slice(b"\x1b]12;");
-    ctx.pending_output.extend_from_slice(reply.as_bytes());
-    ctx.pending_output.extend_from_slice(b"\x1b\\");
+    conformance::write_osc(ctx.pending_output, ctx.c1_mode, format_args!("12;{reply}"));
 }
 
 /// OSC 4;N;? — query the Nth entry of the 256-color palette. The response
@@ -374,6 +378,7 @@ fn handle_osc_cursor_color_query(
 fn handle_osc_4(
     rest: &[u8],
     palette: &color::ColorPalette,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     // Payload format: N;? (index, semicolon, question mark).
@@ -389,11 +394,7 @@ fn handle_osc_4(
     };
     let c = color::palette_color(palette, idx);
     let reply = rgb_reply(c.red, c.green, c.blue);
-    pending_output.extend_from_slice(b"\x1b]4;");
-    pending_output.extend_from_slice(idx_str.as_bytes());
-    pending_output.push(b';');
-    pending_output.extend_from_slice(reply.as_bytes());
-    pending_output.extend_from_slice(b"\x1b\\");
+    conformance::write_osc(pending_output, c1_mode, format_args!("4;{idx_str};{reply}"));
 }
 
 /// Implements OSC 52 clipboard read/write as used by vim, tmux, etc.
@@ -404,6 +405,7 @@ fn handle_osc_4(
 fn handle_osc_52(
     rest: &[u8],
     clipboard: &mut Clipboard,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     let (pc, pd) = split_osc(rest);
@@ -418,11 +420,12 @@ fn handle_osc_52(
         };
         let encoded = BASE64.encode(text.as_bytes());
         let pc_resp: &[u8] = if pc.is_empty() { b"c" } else { pc };
-        pending_output.extend_from_slice(b"\x1b]52;");
+        conformance::push_osc_prefix(pending_output, c1_mode);
+        pending_output.extend_from_slice(b"52;");
         pending_output.extend_from_slice(pc_resp);
         pending_output.push(b';');
         pending_output.extend_from_slice(encoded.as_bytes());
-        pending_output.extend_from_slice(b"\x1b\\");
+        conformance::push_st(pending_output, c1_mode);
         return;
     }
 
@@ -572,6 +575,7 @@ mod tests {
             let mut ctx = OscContext {
                 clipboard: &mut self.clipboard,
                 pending_output: &mut self.pending,
+                c1_mode: C1Mode::SevenBit,
                 current_directory: &mut self.cwd,
                 hyperlinks: &mut self.registry,
                 active_screen: &mut self.screen,

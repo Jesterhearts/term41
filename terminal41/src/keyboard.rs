@@ -9,9 +9,10 @@
 //!
 //! Spec: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
 
-use std::io::Write;
-
 use vtepp::Params;
+
+use crate::C1Mode;
+use crate::conformance;
 
 /// Cap on stack depth. Apps push/pop in pairs around things like inner shells
 /// and TUI panes; a single misbehaving program could otherwise grow this
@@ -198,6 +199,7 @@ pub(super) fn handle_kitty_keyboard(
     intermediate: u8,
     params: &Params,
     state: &mut KittyKeyboardState,
+    c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
     let first = params.iter().next().and_then(|g| g.first().copied());
@@ -223,7 +225,7 @@ pub(super) fn handle_kitty_keyboard(
             // Query: respond with `CSI ? flags u`. Use write! into the Vec so
             // we only allocate once and skip the formatter detour.
             let flags = state.current().bits();
-            let _ = write!(pending_output, "\x1b[?{flags}u");
+            conformance::write_csi(pending_output, c1_mode, format_args!("?{flags}u"));
         }
         _ => {}
     }
@@ -257,7 +259,7 @@ mod dispatch_tests {
         let mut state = KittyKeyboardState::new();
         let mut out = Vec::new();
         let (intr, params) = parse_csi(b"\x1b[>1u");
-        handle_kitty_keyboard(intr, &params, &mut state, &mut out);
+        handle_kitty_keyboard(intr, &params, &mut state, C1Mode::SevenBit, &mut out);
         assert_eq!(state.current(), KittyFlags::DISAMBIGUATE_ESCAPE_CODES);
     }
 
@@ -267,7 +269,7 @@ mod dispatch_tests {
         let mut out = Vec::new();
         state.push(KittyFlags::DISAMBIGUATE_ESCAPE_CODES);
         let (intr, params) = parse_csi(b"\x1b[<u");
-        handle_kitty_keyboard(intr, &params, &mut state, &mut out);
+        handle_kitty_keyboard(intr, &params, &mut state, C1Mode::SevenBit, &mut out);
         assert!(state.current().is_empty());
     }
 
@@ -277,7 +279,7 @@ mod dispatch_tests {
         state.push(KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_EVENT_TYPES);
         let mut out = Vec::new();
         let (intr, params) = parse_csi(b"\x1b[?u");
-        handle_kitty_keyboard(intr, &params, &mut state, &mut out);
+        handle_kitty_keyboard(intr, &params, &mut state, C1Mode::SevenBit, &mut out);
         assert_eq!(out, b"\x1b[?3u");
     }
 
@@ -287,7 +289,7 @@ mod dispatch_tests {
         state.push(KittyFlags::DISAMBIGUATE_ESCAPE_CODES);
         let mut out = Vec::new();
         let (intr, params) = parse_csi(b"\x1b[=2;2u");
-        handle_kitty_keyboard(intr, &params, &mut state, &mut out);
+        handle_kitty_keyboard(intr, &params, &mut state, C1Mode::SevenBit, &mut out);
         assert_eq!(
             state.current(),
             KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_EVENT_TYPES
