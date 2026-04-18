@@ -6,3 +6,4 @@ edition = "2024"
 [dependencies]
 pulp     = "0.22.2"
 smol_str = { workspace = true }
+vte-mode41 = { workspace = true }

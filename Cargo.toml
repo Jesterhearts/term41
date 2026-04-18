@@ -12,6 +12,7 @@ members = [
   "image41",
   "pty-pipe41",
   "terminal41",
+  "vte-mode41",
   "vtepp",
 ]
 
@@ -37,6 +38,7 @@ smol_str             = "0.3.6"
 unicode-segmentation = "1.13.2"
 unicode-width        = "0.2.2"
 vtepp                = { path = "vtepp" }
+vte-mode41           = { path = "vte-mode41" }
 
 [[bench]]
 harness = false

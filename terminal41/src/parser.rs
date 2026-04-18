@@ -12,6 +12,7 @@ use vtepp::Params;
 use crate::C1Mode;
 use crate::ConformanceLevel;
 use crate::TerminalModes;
+use crate::TextMode;
 use crate::charset;
 use crate::charset::CharacterSet;
 use crate::charset::GraphicSetSlot;
@@ -453,6 +454,27 @@ pub(super) fn put_printable(
     }
 
     put_char(screen, viewport, s, insert_mode);
+}
+
+pub(super) fn put_8bit_byte(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    byte: u8,
+    insert_mode: bool,
+) {
+    let ch = if charset::gr_charset_requires_translation(&screen.charset, screen.nrc_mode) {
+        let charset = screen.charset.gr_charset();
+        charset::translate_gr_byte(byte, charset, screen.nrc_mode, screen.upss).unwrap_or_else(
+            || {
+                let ch = char::from_u32(byte as u32).expect("0xA0..=0xFF is valid Unicode scalar");
+                SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4]))
+            },
+        )
+    } else {
+        let ch = char::from_u32(byte as u32).expect("0xA0..=0xFF is valid Unicode scalar");
+        SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4]))
+    };
+    put_char(screen, viewport, ch, insert_mode);
 }
 
 /// Process a [`vtepp::Action::PrintText`] run: a validated UTF-8 `&str`
@@ -2001,6 +2023,13 @@ pub(super) fn esc_dispatch(
         return;
     }
 
+    if intermediates == b"%"
+        && let Some(mode) = TextMode::from_docs_final(byte)
+    {
+        ctx.modes.text_mode = mode;
+        return;
+    }
+
     if let Some((slot, charset)) = charset::parse_designation(intermediates, byte) {
         ctx.screen.charset.designate(slot, charset);
         return;
@@ -2303,6 +2332,7 @@ mod tests {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
                 Action::PrintText(run) => put_text_run(screen, viewport, run, modes.insert_mode),
                 Action::Print(s) => put_printable(screen, viewport, s, modes.insert_mode),
+                Action::Print8Bit(byte) => put_8bit_byte(screen, viewport, byte, modes.insert_mode),
                 Action::Execute(b) => {
                     execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)
                 }
@@ -3184,6 +3214,7 @@ mod tests {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
                 Action::PrintText(run) => put_text_run(screen, viewport, run, modes.insert_mode),
                 Action::Print(s) => put_printable(screen, viewport, s, modes.insert_mode),
+                Action::Print8Bit(byte) => put_8bit_byte(screen, viewport, byte, modes.insert_mode),
                 Action::Execute(b) => {
                     execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)
                 }
@@ -3665,6 +3696,15 @@ mod tests {
     }
 
     #[test]
+    fn docs_8bit_mode_routes_raw_high_bytes_through_gr() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b%@\x1b)>\x1b~\xe1A", &mut screen, &mut viewport); // raw 0xE1 -> 0x61 in GR
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{03B1}");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "A");
+    }
+
+    #[test]
     fn scs_gr_translation_applies_to_split_utf8_codepoint() {
         let (mut screen, mut viewport) = setup();
         let pal = color::ColorPalette::default();
@@ -3698,6 +3738,9 @@ mod tests {
                         put_text_run(&mut screen, &viewport, run, modes.insert_mode)
                     }
                     Action::Print(s) => put_printable(&mut screen, &viewport, s, modes.insert_mode),
+                    Action::Print8Bit(byte) => {
+                        put_8bit_byte(&mut screen, &viewport, byte, modes.insert_mode)
+                    }
                     Action::Execute(b) => execute(
                         &mut screen,
                         &viewport,

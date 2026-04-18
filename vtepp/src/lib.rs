@@ -11,6 +11,7 @@
 use pulp::Simd;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
+use vte_mode41::TextMode;
 
 const MAX_PARAMS: usize = 16;
 const MAX_INTERMEDIATES: usize = 4;
@@ -121,6 +122,10 @@ pub enum Action<'d> {
     /// accumulation happens downstream where the previous cell's contents are
     /// known.
     Print(SmolStr),
+    /// A single raw 8-bit graphic byte (0xA0..=0xFF) that could not be
+    /// validated as UTF-8 text. This preserves the original byte for
+    /// charset-engine consumers instead of dropping it or replacing it.
+    Print8Bit(u8),
     /// A C0 or C1 control character.
     Execute(u8),
     /// A complete CSI (Control Sequence Introducer) sequence.
@@ -173,6 +178,7 @@ pub enum Action<'d> {
 enum RawAction {
     /// A multi-byte UTF-8 codepoint reassembled in `utf8_buf`.
     Print(SmolStr),
+    Print8Bit(u8),
     Execute(u8),
     CsiDispatch {
         params: Params,
@@ -339,6 +345,7 @@ enum State {
 pub struct Parser {
     arch: pulp::Arch,
     state: State,
+    text_mode: TextMode,
 
     // Parameter builder.
     param_values: [u16; MAX_PARAMS],
@@ -354,6 +361,11 @@ pub struct Parser {
 
     // Buffered Execute byte deferred until after an exit action is emitted.
     pending_execute: Option<u8>,
+
+    // Buffered byte to be reprocessed after aborting an in-flight UTF-8
+    // sequence. Keeps control flow in the main iterator loop rather than
+    // recursing through `process_byte`.
+    pending_byte: Option<u8>,
 
     // UTF-8 decoder.
     utf8_buf: [u8; 4],
@@ -380,6 +392,7 @@ impl Parser {
         Self {
             arch: pulp::Arch::new(),
             state: State::Ground,
+            text_mode: TextMode::Utf8,
             param_values: [0; MAX_PARAMS],
             param_len: 0,
             param_group_starts: [0; MAX_PARAMS],
@@ -389,6 +402,7 @@ impl Parser {
             intermediates: [0; MAX_INTERMEDIATES],
             intermediate_count: 0,
             pending_execute: None,
+            pending_byte: None,
             utf8_buf: [0; 4],
             utf8_len: 0,
             utf8_needed: 0,
@@ -412,6 +426,10 @@ impl Parser {
         }
     }
 
+    pub fn text_mode(&self) -> TextMode {
+        self.text_mode
+    }
+
     // -- snapshots ----------------------------------------------------------
 
     fn snapshot_params(&self) -> Params {
@@ -432,6 +450,40 @@ impl Parser {
         Intermediates {
             bytes: self.intermediates,
             len: self.intermediate_count,
+        }
+    }
+
+    fn esc_dispatch(
+        &mut self,
+        byte: u8,
+    ) -> RawAction {
+        let intermediates = self.snapshot_intermediates();
+        if intermediates.as_slice() == b"%"
+            && let Some(mode) = TextMode::from_docs_final(byte)
+        {
+            self.text_mode = mode;
+        } else if intermediates.as_slice().is_empty() && byte == b'c' {
+            self.text_mode = TextMode::Utf8;
+        }
+        RawAction::EscDispatch {
+            intermediates,
+            byte,
+        }
+    }
+
+    fn csi_dispatch(
+        &mut self,
+        action: char,
+    ) -> RawAction {
+        let params = self.snapshot_params();
+        let intermediates = self.snapshot_intermediates();
+        if intermediates.as_slice() == b"!" && action == 'p' {
+            self.text_mode = TextMode::Utf8;
+        }
+        RawAction::CsiDispatch {
+            params,
+            intermediates,
+            action,
         }
     }
 
@@ -528,7 +580,12 @@ impl Parser {
                 return self.utf8(byte);
             }
             // Not a continuation byte — abort the sequence and reprocess.
+            let lead = self.utf8_buf[0];
+            self.pending_byte = Some(byte);
+            self.utf8_len = 0;
+            self.utf8_needed = 0;
             self.state = State::Ground;
+            return Some(RawAction::Print8Bit(lead));
         }
 
         // 7-bit anywhere transitions. CAN/SUB/ESC are 7-bit controls that
@@ -656,8 +713,12 @@ impl Parser {
                 let s = unsafe { std::str::from_utf8_unchecked(&buf) };
                 Some(RawAction::Print(SmolStr::new_inline(s)))
             }
+            0xA0..=0xBF | 0xC0..=0xC1 | 0xF5..=0xFF => Some(RawAction::Print8Bit(byte)),
             0x7F => None,
             0xC2..=0xDF => {
+                if self.text_mode == TextMode::EightBit {
+                    return Some(RawAction::Print8Bit(byte));
+                }
                 self.utf8_buf[0] = byte;
                 self.utf8_len = 1;
                 self.utf8_needed = 2;
@@ -665,6 +726,9 @@ impl Parser {
                 None
             }
             0xE0..=0xEF => {
+                if self.text_mode == TextMode::EightBit {
+                    return Some(RawAction::Print8Bit(byte));
+                }
                 self.utf8_buf[0] = byte;
                 self.utf8_len = 1;
                 self.utf8_needed = 3;
@@ -672,6 +736,9 @@ impl Parser {
                 None
             }
             0xF0..=0xF4 => {
+                if self.text_mode == TextMode::EightBit {
+                    return Some(RawAction::Print8Bit(byte));
+                }
                 self.utf8_buf[0] = byte;
                 self.utf8_len = 1;
                 self.utf8_needed = 4;
@@ -698,7 +765,7 @@ impl Parser {
                     builder.push_str(s);
                     Some(RawAction::Print(builder.finish()))
                 }
-                None => Some(RawAction::Print(SmolStr::new_inline("\u{FFFD}"))),
+                None => Some(RawAction::Print8Bit(self.utf8_buf[0])),
             }
         } else {
             None
@@ -718,10 +785,7 @@ impl Parser {
             }
             0x30..=0x4F | 0x51..=0x57 | 0x59 | 0x5A | 0x5C | 0x60..=0x7E => {
                 self.state = State::Ground;
-                Some(RawAction::EscDispatch {
-                    intermediates: self.snapshot_intermediates(),
-                    byte,
-                })
+                Some(self.esc_dispatch(byte))
             }
             0x50 => {
                 self.clear_params();
@@ -762,10 +826,7 @@ impl Parser {
             }
             0x30..=0x7E => {
                 self.state = State::Ground;
-                Some(RawAction::EscDispatch {
-                    intermediates: self.snapshot_intermediates(),
-                    byte,
-                })
+                Some(self.esc_dispatch(byte))
             }
             0x7F => None,
             _ => None,
@@ -806,11 +867,7 @@ impl Parser {
             }
             0x40..=0x7E => {
                 self.state = State::Ground;
-                Some(RawAction::CsiDispatch {
-                    params: self.snapshot_params(),
-                    intermediates: self.snapshot_intermediates(),
-                    action: byte as char,
-                })
+                Some(self.csi_dispatch(byte as char))
             }
             0x7F => None,
             _ => None,
@@ -847,11 +904,7 @@ impl Parser {
             }
             0x40..=0x7E => {
                 self.state = State::Ground;
-                Some(RawAction::CsiDispatch {
-                    params: self.snapshot_params(),
-                    intermediates: self.snapshot_intermediates(),
-                    action: byte as char,
-                })
+                Some(self.csi_dispatch(byte as char))
             }
             0x7F => None,
             _ => None,
@@ -874,11 +927,7 @@ impl Parser {
             }
             0x40..=0x7E => {
                 self.state = State::Ground;
-                Some(RawAction::CsiDispatch {
-                    params: self.snapshot_params(),
-                    intermediates: self.snapshot_intermediates(),
-                    action: byte as char,
-                })
+                Some(self.csi_dispatch(byte as char))
             }
             0x7F => None,
             _ => None,
@@ -1122,6 +1171,7 @@ impl<'a> Iterator for ParseIter<'a> {
             // invalid UTF-8) from valid continuation bytes for free.
             if self.parser.state == State::Ground
                 && self.pos < self.data.len()
+                && self.parser.text_mode == TextMode::Utf8
                 && matches!(self.data[self.pos], 0xC2..=0xFF)
             {
                 let candidate_len = self.parser.arch.dispatch(ScanText(&self.data[self.pos..]));
@@ -1179,11 +1229,16 @@ impl<'a> Iterator for ParseIter<'a> {
                 }
             }
 
-            if self.pos >= self.data.len() {
-                return None;
-            }
-            let byte = self.data[self.pos];
-            self.pos += 1;
+            let byte = if let Some(byte) = self.parser.pending_byte.take() {
+                byte
+            } else {
+                if self.pos >= self.data.len() {
+                    return None;
+                }
+                let byte = self.data[self.pos];
+                self.pos += 1;
+                byte
+            };
             if let Some(raw) = self.parser.process_byte(byte) {
                 return Some(self.convert_raw(raw));
             }
@@ -1198,6 +1253,7 @@ impl<'a> ParseIter<'a> {
     ) -> Action<'a> {
         match raw {
             RawAction::Print(s) => Action::Print(s),
+            RawAction::Print8Bit(b) => Action::Print8Bit(b),
             RawAction::Execute(b) => Action::Execute(b),
             RawAction::CsiDispatch {
                 params,
@@ -1255,6 +1311,7 @@ mod tests {
         PrintAscii(Vec<u8>),
         PrintText(String),
         Print(String),
+        Print8Bit(u8),
         Execute(u8),
         Csi(Vec<u8>, char),
         Esc(Vec<u8>, u8),
@@ -1273,6 +1330,7 @@ mod tests {
                 Action::PrintAscii(b) => Owned::PrintAscii(b.to_vec()),
                 Action::PrintText(s) => Owned::PrintText(s.to_owned()),
                 Action::Print(s) => Owned::Print(s.to_string()),
+                Action::Print8Bit(b) => Owned::Print8Bit(b),
                 Action::Execute(b) => Owned::Execute(b),
                 Action::CsiDispatch {
                     intermediates,
@@ -1495,6 +1553,54 @@ mod tests {
             })
             .collect();
         assert_eq!(second, vec![b"world".to_vec()]);
+    }
+
+    #[test]
+    fn invalid_utf8_lead_surfaces_raw_8bit_byte() {
+        let out = collect(b"\xe1A");
+        assert_eq!(
+            out,
+            vec![Owned::Print8Bit(0xE1), Owned::Print("A".to_owned())]
+        );
+    }
+
+    #[test]
+    fn raw_8bit_graphic_bytes_in_ground_are_not_dropped() {
+        let out = collect(b"\xa1\xa2");
+        assert_eq!(out, vec![Owned::Print8Bit(0xA1), Owned::Print8Bit(0xA2)]);
+    }
+
+    #[test]
+    fn valid_utf8_still_beats_raw_8bit_fallback() {
+        let out = collect("áA".as_bytes());
+        assert_eq!(out, vec![Owned::PrintText("áA".to_owned())]);
+    }
+
+    #[test]
+    fn docs_switch_to_8bit_mode_surfaces_raw_high_bytes() {
+        let out = collect(b"\x1b%@\xe1A");
+        assert_eq!(
+            out,
+            vec![
+                Owned::Esc(b"%".to_vec(), b'@'),
+                Owned::Print8Bit(0xE1),
+                Owned::PrintAscii(b"A".to_vec()),
+            ]
+        );
+    }
+
+    #[test]
+    fn docs_switch_back_to_utf8_mode_restores_text_batching() {
+        let out = collect(b"\x1b%@\xe1\x1b%G\xc3\xa1");
+        assert_eq!(
+            out,
+            vec![
+                Owned::Esc(b"%".to_vec(), b'@'),
+                Owned::Print8Bit(0xE1),
+                Owned::Esc(b"%".to_vec(), b'G'),
+                Owned::PrintText("á".to_owned()),
+            ]
+        );
     }
 
     #[test]

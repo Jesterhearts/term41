@@ -33,6 +33,7 @@ use clip41::Clipboard;
 use clip41::ClipboardKind;
 use pty_pipe41::MAX_READ_CHUNK;
 use pty_pipe41::PtyReader;
+pub use vte_mode41::TextMode;
 use vtepp::Action;
 
 pub use self::color::ColorPalette;
@@ -61,6 +62,7 @@ use self::parser::EscContext;
 use self::parser::csi_dispatch;
 use self::parser::esc_dispatch;
 use self::parser::execute;
+use self::parser::put_8bit_byte;
 use self::parser::put_ascii_run;
 use self::parser::put_printable;
 use self::parser::put_text_run;
@@ -179,6 +181,8 @@ pub struct TerminalModes {
     pub conformance_level: ConformanceLevel,
     /// How terminal-generated C1 controls are transmitted to the host.
     pub c1_mode: C1Mode,
+    /// How high bytes in ground-state text are interpreted.
+    pub text_mode: TextMode,
     /// DECANM (`?2`) — when `true` the terminal operates in VT52 compatibility
     /// mode. Set via `CSI ? 2 l`, cleared by `CSI ? 2 h` or RIS. VT52 mode
     /// uses a completely different (non-CSI) escape sequence vocabulary.
@@ -204,6 +208,7 @@ impl TerminalModes {
             deccolm_saved_cols: None,
             conformance_level: ConformanceLevel::Level4,
             c1_mode: C1Mode::SevenBit,
+            text_mode: TextMode::Utf8,
             vt52_mode: false,
         }
     }
@@ -1570,6 +1575,12 @@ impl Terminal {
             Action::Print(c) => {
                 put_printable(&mut self.active, &self.viewport, c, self.modes.insert_mode)
             }
+            Action::Print8Bit(byte) => put_8bit_byte(
+                &mut self.active,
+                &self.viewport,
+                byte,
+                self.modes.insert_mode,
+            ),
             Action::Execute(byte) => {
                 execute(
                     &mut self.active,

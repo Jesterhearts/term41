@@ -250,7 +250,19 @@ pub fn translate_gr_codepoint(
     if !(0xA0..=0xFF).contains(&cp) {
         return None;
     }
-    translate_ascii_byte((cp as u8) - 0x80, charset, nrc_mode, upss)
+    translate_gr_byte(cp as u8, charset, nrc_mode, upss)
+}
+
+pub fn translate_gr_byte(
+    byte: u8,
+    charset: CharacterSet,
+    nrc_mode: bool,
+    upss: UserPreferredSupplementalSet,
+) -> Option<SmolStr> {
+    if !(0xA0..=0xFF).contains(&byte) {
+        return None;
+    }
+    translate_ascii_byte(byte - 0x80, charset, nrc_mode, upss)
 }
 
 pub fn parse_upss_assignment(

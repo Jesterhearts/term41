@@ -17,3 +17,4 @@ smol_str             = { workspace = true }
 unicode-segmentation = "1.13.2"
 unicode-width        = { workspace = true }
 vtepp                = { workspace = true }
+vte-mode41           = { workspace = true }

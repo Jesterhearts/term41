@@ -1,0 +1,7 @@
+[package]
+name    = "vte-mode41"
+version = "0.1.0"
+edition = "2024"
+
+[lib]
+name = "vte_mode41"
