@@ -267,8 +267,7 @@ mod tests {
     /// 1×1 red PNG (8-bit RGBA), base64-encoded. Built by hand to keep the
     /// test fixture self-contained — any corruption would make `decode_png`
     /// return `None`, which is exactly what we're checking against.
-    const RED_PIXEL_PNG_B64: &str =
-        "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/\
+    const RED_PIXEL_PNG_B64: &str = "iVBORw0KGgoAAAANSUhEUgAAAAEAAAABCAYAAAAfFcSJAAAADUlEQVR4nGP4z8DwHwAFAAH/\
          iZk9HQAAAABJRU5ErkJggg==";
 
     #[test]
