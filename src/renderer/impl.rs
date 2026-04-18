@@ -381,6 +381,10 @@ struct RenderGeometry {
     bg_indices: Vec<u32>,
     fg_vertices: Vec<FgVertex>,
     fg_indices: Vec<u32>,
+    overlay_bg_vertices: Vec<BgVertex>,
+    overlay_bg_indices: Vec<u32>,
+    overlay_fg_vertices: Vec<FgVertex>,
+    overlay_fg_indices: Vec<u32>,
 }
 
 pub struct Renderer {
@@ -1182,6 +1186,10 @@ impl Renderer {
             &mut geometry.bg_indices,
             &mut geometry.fg_vertices,
             &mut geometry.fg_indices,
+            &mut geometry.overlay_bg_vertices,
+            &mut geometry.overlay_bg_indices,
+            &mut geometry.overlay_fg_vertices,
+            &mut geometry.overlay_fg_indices,
         );
         self.render_search_bar(
             font_system,
@@ -1826,6 +1834,81 @@ impl Renderer {
             pass.draw_indexed(0..image_geometry.indices.len() as u32, 0, 0..1);
         }
 
+        if !geometry.overlay_bg_indices.is_empty() {
+            let overlay_bg_vbuf =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay_bg_verts"),
+                        contents: bytemuck::cast_slice(&geometry.overlay_bg_vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            let overlay_bg_ibuf =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay_bg_idx"),
+                        contents: bytemuck::cast_slice(&geometry.overlay_bg_indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("overlay_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.bg_pipeline);
+            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+            pass.set_vertex_buffer(0, overlay_bg_vbuf.slice(..));
+            pass.set_index_buffer(overlay_bg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..geometry.overlay_bg_indices.len() as u32, 0, 0..1);
+        }
+
+        if !geometry.overlay_fg_indices.is_empty() {
+            let overlay_fg_vbuf =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay_fg_verts"),
+                        contents: bytemuck::cast_slice(&geometry.overlay_fg_vertices),
+                        usage: wgpu::BufferUsages::VERTEX,
+                    });
+            let overlay_fg_ibuf =
+                self.device
+                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                        label: Some("overlay_fg_idx"),
+                        contents: bytemuck::cast_slice(&geometry.overlay_fg_indices),
+                        usage: wgpu::BufferUsages::INDEX,
+                    });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("overlay_fg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.fg_pipeline);
+            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+            pass.set_bind_group(1, self.glyph_atlas.bind_group(), &[]);
+            pass.set_vertex_buffer(0, overlay_fg_vbuf.slice(..));
+            pass.set_index_buffer(overlay_fg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..geometry.overlay_fg_indices.len() as u32, 0, 0..1);
+        }
+
         self.queue.submit(Some(encoder.finish()));
         frame.present();
     }
@@ -1859,6 +1942,10 @@ impl Renderer {
         bg_indices: &mut Vec<u32>,
         fg_vertices: &mut Vec<FgVertex>,
         fg_indices: &mut Vec<u32>,
+        overlay_bg_vertices: &mut Vec<BgVertex>,
+        overlay_bg_indices: &mut Vec<u32>,
+        overlay_fg_vertices: &mut Vec<FgVertex>,
+        overlay_fg_indices: &mut Vec<u32>,
     ) {
         let cell_w = font_system.cell_width as f32;
         let cell_h = font_system.cell_height as f32;
@@ -2051,19 +2138,35 @@ impl Renderer {
 
             // Panel background.
             let panel_bg = pack_color(&Srgb::new(30, 30, 38), 255);
-            push_rect(mx, my, menu_w, menu_h, panel_bg, bg_vertices, bg_indices);
+            push_rect(
+                mx,
+                my,
+                menu_w,
+                menu_h,
+                panel_bg,
+                overlay_bg_vertices,
+                overlay_bg_indices,
+            );
 
             // Border lines (top and bottom).
             let border_color = pack_color(&Srgb::new(80, 80, 100), 255);
-            push_rect(mx, my, menu_w, 1.0, border_color, bg_vertices, bg_indices);
+            push_rect(
+                mx,
+                my,
+                menu_w,
+                1.0,
+                border_color,
+                overlay_bg_vertices,
+                overlay_bg_indices,
+            );
             push_rect(
                 mx,
                 my + menu_h - 1.0,
                 menu_w,
                 1.0,
                 border_color,
-                bg_vertices,
-                bg_indices,
+                overlay_bg_vertices,
+                overlay_bg_indices,
             );
 
             let normal_fg = pack_color(&Srgb::new(220, 220, 220), 255);
@@ -2074,7 +2177,15 @@ impl Renderer {
                 let iy = my + i as f32 * cell_h;
 
                 if hovered_idx == Some(i) {
-                    push_rect(mx, iy, menu_w, cell_h, hover_bg, bg_vertices, bg_indices);
+                    push_rect(
+                        mx,
+                        iy,
+                        menu_w,
+                        cell_h,
+                        hover_bg,
+                        overlay_bg_vertices,
+                        overlay_bg_indices,
+                    );
                 }
 
                 self.shape_and_render_label(
@@ -2085,8 +2196,8 @@ impl Renderer {
                     baseline,
                     cell_w,
                     normal_fg,
-                    fg_vertices,
-                    fg_indices,
+                    overlay_fg_vertices,
+                    overlay_fg_indices,
                 );
             }
         }
