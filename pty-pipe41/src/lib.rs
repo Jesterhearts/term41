@@ -22,7 +22,10 @@ use portable_pty::native_pty_system;
 extern crate log;
 
 pub const MAX_READ_CHUNK: usize = 128 * 1024;
-pub const MAX_BUFFER: usize = MAX_READ_CHUNK * 8 * 32; // 32 MB
+// Keep PTY read-ahead modest so interactive control input (Ctrl+C, etc.)
+// doesn't end up visually stuck behind tens of megabytes of already-buffered
+// output during huge bursts like `cat bigfile`.
+pub const MAX_BUFFER: usize = MAX_READ_CHUNK * 8; // 1 MB
 
 /// Read half of a PTY connection. Owns the cueue ring-buffer consumer and the
 /// coalesce flag shared with the pump thread. Lives on the terminal thread so

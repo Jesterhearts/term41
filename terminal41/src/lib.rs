@@ -2042,6 +2042,8 @@ pub fn run_terminal_thread(
         // unpark us yet).
         pty_reader.clear_pending();
         let mut did_work = false;
+        let mut hit_budget = false;
+        let batch_start = std::time::Instant::now();
         loop {
             let n = pty_reader.read(&mut buf);
             if n == 0 {
@@ -2104,6 +2106,10 @@ pub fn run_terminal_thread(
                     }
                 }
             }
+            if terminal_batch_budget_exhausted(batch_start) {
+                hit_budget = true;
+                break;
+            }
         }
 
         if did_work && let Some(t) = render_thread.get() {
@@ -2117,11 +2123,22 @@ pub fn run_terminal_thread(
             break;
         }
 
+        if hit_budget {
+            thread::yield_now();
+            continue;
+        }
+
         thread::park();
         if stop.load(Ordering::Acquire) {
             break;
         }
     }
+}
+
+const TERMINAL_BATCH_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
+
+fn terminal_batch_budget_exhausted(batch_start: std::time::Instant) -> bool {
+    batch_start.elapsed() >= TERMINAL_BATCH_TIME_BUDGET
 }
 
 // ---------------------------------------------------------------------------
@@ -3838,5 +3855,11 @@ mod tests {
         term.process(b"\x1b[?3l"); // back to 80
         assert_eq!(term.viewport.cols, 80);
         assert_eq!(term.active.cursor.row, 0);
+    }
+
+    #[test]
+    fn terminal_batch_budget_trips_on_time_limit() {
+        let start = std::time::Instant::now() - TERMINAL_BATCH_TIME_BUDGET;
+        assert!(terminal_batch_budget_exhausted(start));
     }
 }

@@ -242,7 +242,7 @@ impl WindowHost {
             return;
         };
         target.terminal.lock().unwrap().report_focus_change(focused);
-        self.flush_target_output(&target);
+        self.flush_target_output(target);
         self.notify_interaction_changed();
     }
 
@@ -351,7 +351,7 @@ impl WindowHost {
             .search_active()
         {
             let target = &self.input_endpoints[&active_tab_id];
-            self.handle_search_key(&target, &key);
+            self.handle_search_key(target, &key);
             self.notify_interaction_changed();
             return;
         }
@@ -507,7 +507,7 @@ impl WindowHost {
                 cell.1,
                 self.mouse_modifiers(),
             );
-            self.flush_target_output(&target);
+            self.flush_target_output(target);
             self.notify_interaction_changed();
             return;
         }
@@ -674,7 +674,7 @@ impl WindowHost {
                 row,
                 self.mouse_modifiers(),
             );
-            self.flush_target_output(&target);
+            self.flush_target_output(target);
             self.notify_interaction_changed();
             return;
         }
@@ -739,7 +739,7 @@ impl WindowHost {
                         terminal.paste_from_clipboard(ClipboardKind::Clipboard);
                     }
                     drop(terminal);
-                    self.flush_target_output(&target);
+                    self.flush_target_output(target);
                 }
                 self.notify_interaction_changed();
             }
@@ -812,7 +812,7 @@ impl WindowHost {
                 }
             }
             drop(terminal);
-            self.flush_target_output(&target);
+            self.flush_target_output(target);
             self.notify_interaction_changed();
             return;
         }
@@ -898,7 +898,7 @@ impl WindowHost {
                     terminal.paste(&format!("{cmd}\r"));
                 }
                 drop(terminal);
-                self.flush_target_output(&target);
+                self.flush_target_output(target);
             }
             1 => {
                 let mut terminal = target.terminal.lock().unwrap();
@@ -1269,13 +1269,12 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             scale_factor,
             self.startup_gutter,
         );
-        if let Some(tab_id) = self.active_input_tab {
-            if let Some(target) = self.input_endpoints.get(&tab_id) {
-                if let Some(presenter) = self.startup_presenter.as_mut() {
-                    presenter.present(&window, target);
-                    window.request_redraw();
-                }
-            }
+        if let Some(tab_id) = self.active_input_tab
+            && let Some(target) = self.input_endpoints.get(&tab_id)
+            && let Some(presenter) = self.startup_presenter.as_mut()
+        {
+            presenter.present(&window, target);
+            window.request_redraw();
         }
 
         // Opt into IME events. `ImePurpose::Terminal` is a hint some
@@ -1317,15 +1316,13 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::RedrawRequested => {
-                if let Some(tab_id) = self.active_input_tab {
-                    if let Some(window) = self.window.as_ref() {
-                        if let Some(target) = self.input_endpoints.get(&tab_id) {
-                            if let Some(presenter) = self.startup_presenter.as_mut() {
-                                presenter.present(window, target);
-                                return;
-                            }
-                        }
-                    }
+                if let Some(tab_id) = self.active_input_tab
+                    && let Some(window) = self.window.as_ref()
+                    && let Some(target) = self.input_endpoints.get(&tab_id)
+                    && let Some(presenter) = self.startup_presenter.as_mut()
+                {
+                    presenter.present(window, target);
+                    return;
                 }
                 return;
             }
