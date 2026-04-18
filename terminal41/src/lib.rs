@@ -415,6 +415,17 @@ impl Terminal {
         self.cursor_style = style;
     }
 
+    pub fn set_palette(
+        &mut self,
+        palette: ColorPalette,
+    ) {
+        let old_palette = self.palette.clone();
+        self.palette = palette.clone();
+        for screen in [&mut self.active, &mut self.stash] {
+            apply_screen_palette(screen, &old_palette, &palette);
+        }
+    }
+
     /// Update the scrollback budget on the primary screen and immediately
     /// trim any history that exceeds the new cap. Trimming on update (not
     /// lazily on next push) makes the live-reload path feel responsive —
@@ -2225,6 +2236,41 @@ fn terminal_batch_budget_exhausted(batch_start: std::time::Instant) -> bool {
     batch_start.elapsed() >= TERMINAL_BATCH_TIME_BUDGET
 }
 
+fn apply_screen_palette(
+    screen: &mut Screen,
+    old_palette: &ColorPalette,
+    new_palette: &ColorPalette,
+) {
+    remap_screen_default_colors(screen, old_palette, new_palette);
+    screen.grid.default_fg = new_palette.fg;
+    screen.grid.default_bg = new_palette.bg;
+    if screen.fg == old_palette.fg {
+        screen.fg = new_palette.fg;
+    }
+    if screen.bg == old_palette.bg {
+        screen.bg = new_palette.bg;
+    }
+}
+
+fn remap_screen_default_colors(
+    screen: &mut Screen,
+    old_palette: &ColorPalette,
+    new_palette: &ColorPalette,
+) {
+    for row in &mut screen.grid.rows {
+        for fg in &mut row.fg {
+            if *fg == old_palette.fg {
+                *fg = new_palette.fg;
+            }
+        }
+        for bg in &mut row.bg {
+            if *bg == old_palette.bg {
+                *bg = new_palette.bg;
+            }
+        }
+    }
+}
+
 // ---------------------------------------------------------------------------
 // Kitty graphics protocol handler
 // ---------------------------------------------------------------------------
@@ -2729,6 +2775,7 @@ fn place_iterm_image(
 
 #[cfg(test)]
 mod tests {
+    use palette::Srgb;
     use vtepp::Parser;
 
     use super::*;
@@ -3574,6 +3621,41 @@ mod tests {
             term.active.grid.rows.len(),
             max_expected,
         );
+    }
+
+    #[test]
+    fn set_palette_updates_grid_defaults_and_existing_default_cells() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"ab");
+        let old = term.palette.clone();
+        let mut new = old.clone();
+        new.fg = Srgb::new(10, 20, 30);
+        new.bg = Srgb::new(40, 50, 60);
+
+        term.set_palette(new.clone());
+
+        assert_eq!(term.palette.fg, new.fg);
+        assert_eq!(term.palette.bg, new.bg);
+        assert_eq!(term.active.grid.default_fg, new.fg);
+        assert_eq!(term.active.grid.default_bg, new.bg);
+        assert_eq!(term.active.grid.rows[0].fg[0], new.fg);
+        assert_eq!(term.active.grid.rows[0].bg[0], new.bg);
+        assert_eq!(term.active.fg, new.fg);
+        assert_eq!(term.active.bg, new.bg);
+    }
+
+    #[test]
+    fn set_palette_preserves_non_default_foreground_colors() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[31mx");
+        let old_fg = term.active.grid.rows[0].fg[0];
+        let mut new = term.palette.clone();
+        new.fg = Srgb::new(10, 20, 30);
+        new.bg = Srgb::new(40, 50, 60);
+
+        term.set_palette(new);
+
+        assert_eq!(term.active.grid.rows[0].fg[0], old_fg);
     }
 
     // ---- OSC 133 shell integration + prompt navigation ----

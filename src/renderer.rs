@@ -876,7 +876,7 @@ impl RenderHost {
             let mut terminal = tab.terminal.lock().unwrap();
             terminal.set_default_cursor_style(cfg.cursor_style);
             terminal.set_scrollback_limit(cfg.scrollback_lines);
-            terminal.palette = cfg.palette.clone();
+            terminal.set_palette(cfg.palette.clone());
         }
         self.config.keybindings = cfg.keybindings;
         self.sync_input_state();
