@@ -19,6 +19,8 @@ use winit::window::Window;
 
 use crate::APP_START_TIME;
 use crate::InputEndpoint;
+use crate::renderer::BUTTON_CELLS;
+use crate::renderer::BUTTONS_REGION_CELLS;
 use crate::renderer::compute_gutter_width;
 use crate::renderer::r#impl::FAILURE;
 use crate::renderer::r#impl::MAX_TAB_WIDTH;
@@ -282,7 +284,9 @@ fn paint_tab_bar(
     fg: Srgb<u8>,
 ) {
     let inactive_bg = blend(bg, fg, 0.5);
-    let max_tab_w = (cell_w as f32 * MAX_TAB_WIDTH).min(width as f32);
+    let buttons_region_w = cell_w as f32 * BUTTONS_REGION_CELLS;
+    let tabs_available_w = (width as f32 - buttons_region_w).max(0.0);
+    let max_tab_w = (cell_w as f32 * MAX_TAB_WIDTH).min(tabs_available_w);
 
     fill_rect(
         buffer,
@@ -345,12 +349,56 @@ fn paint_tab_bar(
         prompt_start: true,
     };
 
+    paint_shaped_label(font_system, snap, buffer, width, height, &row, margin, 0.0);
+
+    let btn_w = cell_w as f32 * BUTTON_CELLS;
+    let buttons_x = width as f32 - buttons_region_w;
+    let button_labels = ["\u{1F5D5}", "\u{1F5D6}", "\u{1F5D9}"];
+    for (i, label) in button_labels.iter().enumerate() {
+        let label_len = label.graphemes(true).count();
+        let row = RowSnapshot {
+            line_attr: LineAttr::Normal,
+            fg: vec![fg; label_len],
+            bg: vec![inactive_bg; label_len],
+            attrs: vec![CellAttrs::default(); label_len],
+            selected: vec![false; label_len],
+            matched: vec![false; label_len],
+            active_match: vec![false; label_len],
+            cells: label
+                .graphemes(true)
+                .map(|g| {
+                    let mut builder = SmolStrBuilder::new();
+                    builder.push_str(g);
+                    builder.finish()
+                })
+                .collect(),
+            exit_status: None,
+            has_link: vec![false; label_len],
+            underline: vec![UnderlineStyle::None; label_len],
+            underline_color: vec![None; label_len],
+            prompt_start: false,
+        };
+        let x = buttons_x + i as f32 * btn_w + (btn_w - cell_w as f32) * 0.5;
+        paint_shaped_label(font_system, snap, buffer, width, height, &row, x, 0.0);
+    }
+}
+
+fn paint_shaped_label(
+    font_system: &mut FontSystem,
+    snap: &TermSnapshot,
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    row: &RowSnapshot,
+    x: f32,
+    y: f32,
+) {
     let glyphs = collect_row_glyphs(
         font_system,
         snap,
-        &row,
+        row,
         u32::MAX,
-        title_len as u32,
+        row.cells.len() as u32,
         None,
         false,
         false,
@@ -370,8 +418,11 @@ fn paint_tab_bar(
             continue;
         }
 
-        let gx = (1 + glyph.col) as f32 * cell_w as f32 + raster.bearing_x as f32 + glyph.x_offset;
-        let gy = baseline - raster.bearing_y as f32 - glyph.y_offset;
+        let gx = x
+            + glyph.col as f32 * font_system.cell_width as f32
+            + raster.bearing_x as f32
+            + glyph.x_offset;
+        let gy = y + baseline - raster.bearing_y as f32 - glyph.y_offset;
         blit_glyph(
             buffer,
             width,

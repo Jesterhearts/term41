@@ -92,10 +92,10 @@ pub(crate) struct GutterPopup {
 const RESIZE_BORDER: f32 = 5.0;
 
 /// Number of cell-widths reserved for each window control button.
-const BUTTON_CELLS: f32 = 3.0;
+pub(crate) const BUTTON_CELLS: f32 = 3.0;
 
 /// Total width of the window-control button region in cell-width units.
-const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
+pub(crate) const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
 
 // ---------------------------------------------------------------------------
 // Tab context menu — right-click on a tab in the tab bar
