@@ -20,6 +20,11 @@ pub const DECANM: u16 = 2;
 /// homes the cursor.
 pub const DECCOLM: u16 = 3;
 
+/// Allow DECCOLM (mode 40). Gates whether mode 3 (DECCOLM) is honoured.
+/// Default is off, matching xterm — prevents unsolicited 80/132 column
+/// toggling which is both disruptive and expensive (grid resize + clear).
+pub const ALLOW_DECCOLM: u16 = 40;
+
 /// DECOM -- Origin Mode. When set, cursor addressing is relative to the
 /// scroll region; when reset, it is relative to the full screen.
 pub const DECOM: u16 = 6;

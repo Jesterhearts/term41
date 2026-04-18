@@ -591,6 +591,8 @@ fn apply_private_mode(
         ctx.modes.focus_reporting = enable;
     } else if mode == mode::SYNCHRONIZED_UPDATE {
         ctx.modes.synchronized_update_since = enable.then(Instant::now);
+    } else if mode == mode::ALLOW_DECCOLM {
+        ctx.modes.allow_deccolm = enable;
     } else if mode == mode::DECCOLM {
         // DECCOLM restore is tricky (resizes the grid). Skip for save/restore —
         // xterm itself ignores DECCOLM in XTSAVE/XTRESTORE.
@@ -642,6 +644,13 @@ fn query_private_mode(
         }
         mode::DECAWM => {
             if ctx.screen.autowrap {
+                1
+            } else {
+                2
+            }
+        }
+        mode::ALLOW_DECCOLM => {
+            if ctx.modes.allow_deccolm {
                 1
             } else {
                 2
@@ -852,7 +861,12 @@ pub(super) fn csi_dispatch(
                 // nested BSU matches the contour spec's "keep the window open"
                 // rule for apps that chain updates.
                 ctx.modes.synchronized_update_since = enable.then(Instant::now);
+            } else if p[0] == mode::ALLOW_DECCOLM {
+                ctx.modes.allow_deccolm = enable;
             } else if p[0] == mode::DECCOLM {
+                if !ctx.modes.allow_deccolm {
+                    continue;
+                }
                 // 80/132 column mode. Resize the grid, clear the screen,
                 // reset margins, and home the cursor per DEC spec. This
                 // lets vttest's 132-column pass work.

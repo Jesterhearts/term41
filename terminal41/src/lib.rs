@@ -145,6 +145,11 @@ pub struct TerminalModes {
     /// LNM (ANSI mode 20) — Line Feed/New Line mode. When `true`, LF, VT,
     /// and FF perform an implicit CR before the line feed. Default is off.
     pub newline_mode: bool,
+    /// Mode 40 — when `true`, DECCOLM (mode 3) is honoured. Default is
+    /// `false`, matching xterm. Without this gate a malicious escape
+    /// sequence stream can repeatedly toggle 80/132 columns, triggering
+    /// expensive grid resizes.
+    pub allow_deccolm: bool,
     /// Saved column count from before DECCOLM switched to 132 columns.
     /// `None` when in normal (80-column) mode.
     pub deccolm_saved_cols: Option<u32>,
@@ -164,6 +169,7 @@ impl TerminalModes {
             synchronized_update_since: None,
             insert_mode: false,
             newline_mode: false,
+            allow_deccolm: false,
             deccolm_saved_cols: None,
             vt52_mode: false,
         }
@@ -3523,12 +3529,20 @@ mod tests {
     }
 
     #[test]
+    fn deccolm_ignored_without_mode_40() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?3h");
+        // DECCOLM is gated by mode 40 — without it, the resize is ignored.
+        assert_eq!(term.viewport.cols, 80);
+    }
+
+    #[test]
     fn deccolm_set_resizes_to_132_and_clears() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"hello");
         assert_eq!(term.viewport.cols, 80);
-        // DECCOLM set: resize to 132, clear screen, reset margins, home.
-        term.process(b"\x1b[?3h");
+        // Enable mode 40 (allow DECCOLM), then set DECCOLM.
+        term.process(b"\x1b[?40h\x1b[?3h");
         assert_eq!(term.viewport.cols, 132);
         assert_eq!(term.active.cursor.row, 0);
         assert_eq!(term.active.cursor.col, 0);
@@ -3541,6 +3555,8 @@ mod tests {
     #[test]
     fn deccolm_reset_restores_original_width() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        // Enable mode 40 first.
+        term.process(b"\x1b[?40h");
         term.process(b"\x1b[?3h"); // 132 cols
         assert_eq!(term.viewport.cols, 132);
         term.process(b"\x1b[?3l"); // back to 80
