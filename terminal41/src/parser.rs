@@ -17,6 +17,7 @@ use crate::grid;
 use crate::grid::Viewport;
 use crate::keyboard::KittyKeyboardState;
 use crate::keyboard::handle_kitty_keyboard;
+use crate::mode;
 use crate::mouse::MouseTracking;
 use crate::mouse::apply_mouse_mode;
 use crate::row::LineAttr;
@@ -95,6 +96,25 @@ fn blank_cell() -> SmolStr {
 const NUL: u8 = 0x00;
 const BEL: u8 = 0x07;
 const BS: u8 = 0x08;
+const VT: u8 = 0x0B;
+const FF: u8 = 0x0C;
+const SO: u8 = 0x0E;
+const SI: u8 = 0x0F;
+
+// DSR (Device Status Report) parameter values.
+const DSR_OK: u16 = 5;
+const DSR_CPR: u16 = 6;
+
+// CSI Ps t — window manipulation parameter values.
+const WINOP_TITLE_PUSH: u16 = 22;
+const WINOP_TITLE_POP: u16 = 23;
+const WINOP_REPORT_PIXELS: u16 = 14;
+const WINOP_REPORT_CELL_SIZE: u16 = 16;
+const WINOP_REPORT_TEXT_SIZE: u16 = 18;
+
+// TBC (Tab Clear) parameter values.
+const TBC_CURRENT: u16 = 0;
+const TBC_ALL: u16 = 3;
 
 /// Forward-scan tab stops from `start_col + 1`. Returns the column of the
 /// next set tab stop, or `cols - 1` if none is found.
@@ -560,20 +580,20 @@ fn apply_private_mode(
     enable: bool,
     ctx: &mut CsiContext<'_>,
 ) {
-    if mode == 2 {
-        // DECANM — ANSI/VT52 mode. `h` (enable) = ANSI mode; `l` (disable) =
-        // VT52 compatibility mode. The sense is inverted: the mode *being set*
-        // means ANSI is active, so VT52 is off.
+    if mode == mode::DECANM {
+        // `h` (enable) = ANSI mode; `l` (disable) = VT52 compatibility mode.
+        // The sense is inverted: the mode *being set* means ANSI is active,
+        // so VT52 is off.
         ctx.modes.vt52_mode = !enable;
-    } else if mode == 2004 {
+    } else if mode == mode::BRACKETED_PASTE {
         ctx.modes.bracketed_paste = enable;
-    } else if mode == 1004 {
+    } else if mode == mode::FOCUS_REPORTING {
         ctx.modes.focus_reporting = enable;
-    } else if mode == 2026 {
+    } else if mode == mode::SYNCHRONIZED_UPDATE {
         ctx.modes.synchronized_update_since = enable.then(Instant::now);
-    } else if mode == 3 {
+    } else if mode == mode::DECCOLM {
         // DECCOLM restore is tricky (resizes the grid). Skip for save/restore —
-        // xterm itself ignores mode 3 in XTSAVE/XTRESTORE.
+        // xterm itself ignores DECCOLM in XTSAVE/XTRESTORE.
     } else if !apply_mouse_mode(
         mode,
         enable,
@@ -599,85 +619,76 @@ fn query_private_mode(
     ctx: &CsiContext<'_>,
 ) -> u8 {
     match ps {
-        // DECANM — ANSI/VT52 mode. Set (1) means ANSI mode is active.
-        2 => {
+        mode::DECANM => {
             if !ctx.modes.vt52_mode {
                 1
             } else {
                 2
             }
         }
-        // DECCKM — application cursor keys.
-        1 => {
+        mode::DECCKM => {
             if ctx.screen.app_cursor_keys {
                 1
             } else {
                 2
             }
         }
-        // DECOM — origin mode.
-        6 => {
+        mode::DECOM => {
             if ctx.screen.origin_mode {
                 1
             } else {
                 2
             }
         }
-        // DECAWM — auto-wrap mode.
-        7 => {
+        mode::DECAWM => {
             if ctx.screen.autowrap {
                 1
             } else {
                 2
             }
         }
-        // DECTCEM — cursor visible.
-        25 => {
+        mode::DECTCEM => {
             if ctx.screen.cursor_visible {
                 1
             } else {
                 2
             }
         }
-        // Alt-screen family.
-        47 | 1047 | 1049 => {
+        mode::ALT_SCREEN | mode::ALT_SCREEN_CLEAR | mode::ALT_SCREEN_SAVE => {
             if *ctx.on_alt_screen {
                 1
             } else {
                 2
             }
         }
-        // Mouse tracking modes. Report "set" if that specific mode is active.
-        9 => match_tracking(ctx.modes.mouse_tracking, MouseTracking::X10),
-        1000 => match_tracking(ctx.modes.mouse_tracking, MouseTracking::Normal),
-        1002 => match_tracking(ctx.modes.mouse_tracking, MouseTracking::ButtonEvent),
-        1003 => match_tracking(ctx.modes.mouse_tracking, MouseTracking::AnyEvent),
-        // Focus reporting.
-        1004 => {
+        mode::X10_MOUSE => match_tracking(ctx.modes.mouse_tracking, MouseTracking::X10),
+        mode::NORMAL_MOUSE => match_tracking(ctx.modes.mouse_tracking, MouseTracking::Normal),
+        mode::BUTTON_EVENT_MOUSE => {
+            match_tracking(ctx.modes.mouse_tracking, MouseTracking::ButtonEvent)
+        }
+        mode::ANY_EVENT_MOUSE => match_tracking(ctx.modes.mouse_tracking, MouseTracking::AnyEvent),
+        mode::FOCUS_REPORTING => {
             if ctx.modes.focus_reporting {
                 1
             } else {
                 2
             }
         }
-        // DECSC/DECRC cursor save (we always support it; "set" = saved).
-        1048 => {
+        mode::SAVE_CURSOR => {
             if ctx.screen.saved_cursor.is_some() {
                 1
             } else {
                 2
             }
         }
-        // Bracketed paste.
-        2004 => {
+        mode::BRACKETED_PASTE => {
             if ctx.modes.bracketed_paste {
                 1
             } else {
                 2
             }
         }
-        // Synchronized update.
-        2026 => {
+        mode::SYNCHRONIZED_UPDATE => {
             if ctx.modes.synchronized_update_since.is_some() {
                 1
             } else {
@@ -764,7 +775,7 @@ pub(super) fn execute(
         // LF, VT, FF all perform the same index-down operation. VT and FF
         // are defined as equivalent to LF by ECMA-48; vttest's "control
         // characters inside ESC sequences" test relies on VT working.
-        b'\n' | 0x0B | 0x0C => {
+        b'\n' | VT | FF => {
             // LNM (mode 20): when enabled, LF/VT/FF imply CR.
             if newline_mode {
                 screen.cursor.col = 0;
@@ -794,12 +805,12 @@ pub(super) fn execute(
         b'\t' => {
             screen.cursor.col = next_tab_stop(&screen.tab_stops, screen.cursor.col, viewport.cols);
         }
-        0x0E => {
-            // SO — Shift Out: invoke G1 into GL.
+        SO => {
+            // Shift Out: invoke G1 into GL.
             screen.charset_gl_is_g0 = false;
         }
-        0x0F => {
-            // SI — Shift In: invoke G0 into GL (default).
+        SI => {
+            // Shift In: invoke G0 into GL (default).
             screen.charset_gl_is_g0 = true;
         }
         BEL => {
@@ -829,22 +840,22 @@ pub(super) fn csi_dispatch(
     if intermediates == b"?" && matches!(action, 'h' | 'l') {
         let enable = action == 'h';
         for p in params.iter() {
-            if p[0] == 2 {
-                // DECANM — ANSI/VT52 mode. `h` = ANSI (vt52_mode off); `l` = VT52.
+            if p[0] == mode::DECANM {
+                // `h` = ANSI (vt52_mode off); `l` = VT52.
                 ctx.modes.vt52_mode = !enable;
-            } else if p[0] == 2004 {
+            } else if p[0] == mode::BRACKETED_PASTE {
                 ctx.modes.bracketed_paste = enable;
-            } else if p[0] == 1004 {
+            } else if p[0] == mode::FOCUS_REPORTING {
                 ctx.modes.focus_reporting = enable;
-            } else if p[0] == 2026 {
+            } else if p[0] == mode::SYNCHRONIZED_UPDATE {
                 // BSU refreshes the deadline; ESU clears it. Refreshing on a
                 // nested BSU matches the contour spec's "keep the window open"
                 // rule for apps that chain updates.
                 ctx.modes.synchronized_update_since = enable.then(Instant::now);
-            } else if p[0] == 3 {
-                // DECCOLM — 80/132 column mode. Resize the grid, clear
-                // the screen, reset margins, and home the cursor per DEC
-                // spec. This lets vttest's 132-column pass work.
+            } else if p[0] == mode::DECCOLM {
+                // 80/132 column mode. Resize the grid, clear the screen,
+                // reset margins, and home the cursor per DEC spec. This
+                // lets vttest's 132-column pass work.
                 let new_cols = if enable {
                     ctx.modes.deccolm_saved_cols = Some(ctx.viewport.cols);
                     132
@@ -953,7 +964,7 @@ pub(super) fn csi_dispatch(
             query_private_mode(ps, ctx)
         } else {
             match ps {
-                4 => {
+                mode::IRM => {
                     if ctx.modes.insert_mode {
                         1
                     } else {
@@ -1027,7 +1038,7 @@ pub(super) fn csi_dispatch(
             .next()
             .and_then(|g| g.first().copied())
             .unwrap_or(0);
-        if ps == 6 {
+        if ps == DSR_CPR {
             let row = ctx.screen.cursor.row + 1;
             let col = ctx.screen.cursor.col + 1;
             write!(ctx.pending_output, "\x1b[?{row};{col};1R").expect("write to Vec is infallible");
@@ -1235,10 +1246,10 @@ pub(super) fn csi_dispatch(
             .and_then(|g| g.first().copied())
             .unwrap_or(0);
         match ps {
-            5 => {
+            DSR_OK => {
                 ctx.pending_output.extend_from_slice(b"\x1b[0n");
             }
-            6 => {
+            DSR_CPR => {
                 // Report is 1-based.
                 let row = ctx.screen.cursor.row + 1;
                 let col = ctx.screen.cursor.col + 1;
@@ -1260,28 +1271,27 @@ pub(super) fn csi_dispatch(
             .and_then(|g| g.first().copied())
             .unwrap_or(0);
         match ps {
-            // Title stack push. Second param (0 or 2) selects icon vs
-            // window title; we only track one title so both are equivalent.
-            22 => {
+            WINOP_TITLE_PUSH => {
+                // Second param (0 or 2) selects icon vs window title;
+                // we only track one title so both are equivalent.
                 if ctx.title_stack.len() < 16 {
                     ctx.title_stack.push(ctx.current_title.clone());
                 }
                 return;
             }
-            // Title stack pop.
-            23 => {
+            WINOP_TITLE_POP => {
                 if let Some(title) = ctx.title_stack.pop() {
                     *ctx.current_title = title;
                 }
                 return;
             }
-            14 => {
+            WINOP_REPORT_PIXELS => {
                 // Report window size in pixels: CSI 4 ; height ; width t.
                 let h = ctx.viewport.rows * ctx.cell_height;
                 let w = ctx.viewport.cols * ctx.cell_width;
                 write!(ctx.pending_output, "\x1b[4;{h};{w}t").expect("write to Vec is infallible");
             }
-            16 => {
+            WINOP_REPORT_CELL_SIZE => {
                 // Report cell size in pixels: CSI 6 ; height ; width t.
                 write!(
                     ctx.pending_output,
@@ -1290,7 +1300,7 @@ pub(super) fn csi_dispatch(
                 )
                 .expect("write to Vec is infallible");
             }
-            18 => {
+            WINOP_REPORT_TEXT_SIZE => {
                 // Report terminal size in cells: CSI 8 ; rows ; cols t.
                 write!(
                     ctx.pending_output,
@@ -1533,17 +1543,17 @@ pub(super) fn csi_dispatch(
                 cursor.col = prev_tab_stop(&screen.tab_stops, cursor.col);
             }
         }
-        // TBC — Tab Clear. Ps=0: clear at cursor. Ps=3: clear all.
+        // TBC — Tab Clear.
         'g' => {
             let ps = p.first().copied().unwrap_or(0);
             match ps {
-                0 => {
+                TBC_CURRENT => {
                     let col = cursor.col as usize;
                     if col < screen.tab_stops.len() {
                         screen.tab_stops[col] = false;
                     }
                 }
-                3 => screen.tab_stops.fill(false),
+                TBC_ALL => screen.tab_stops.fill(false),
                 _ => {}
             }
         }
@@ -1551,10 +1561,10 @@ pub(super) fn csi_dispatch(
             // ANSI (non-private) mode set/reset. Private modes (with `?`
             // intermediate) are handled above.
             let enable = action == 'h';
-            for &mode in &p {
-                match mode {
-                    4 => ctx.modes.insert_mode = enable,
-                    20 => ctx.modes.newline_mode = enable,
+            for &m in &p {
+                match m {
+                    mode::IRM => ctx.modes.insert_mode = enable,
+                    mode::LNM => ctx.modes.newline_mode = enable,
                     _ => {}
                 }
             }

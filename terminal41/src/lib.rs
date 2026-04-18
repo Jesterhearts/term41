@@ -6,6 +6,7 @@ mod grid;
 mod hyperlink;
 mod image;
 mod keyboard;
+mod mode;
 mod mouse;
 mod osc;
 mod parser;

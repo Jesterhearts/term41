@@ -30,6 +30,44 @@ const SGR_EXT_INDEXED: u16 = 5;
 /// SGR 38/48 subtype: direct RGB color (`;2;R;G;B`).
 const SGR_EXT_RGB: u16 = 2;
 
+// -- SGR attribute selectors (CSI Ps m) ---------------------------------------
+
+const SGR_RESET: u16 = 0;
+const SGR_BOLD: u16 = 1;
+const SGR_DIM: u16 = 2;
+const SGR_ITALIC: u16 = 3;
+const SGR_UNDERLINE: u16 = 4;
+const SGR_BLINK: u16 = 5;
+const SGR_RAPID_BLINK: u16 = 6;
+const SGR_REVERSE: u16 = 7;
+const SGR_HIDDEN: u16 = 8;
+const SGR_STRIKETHROUGH: u16 = 9;
+const SGR_DOUBLE_UNDERLINE: u16 = 21;
+/// SGR 22 resets both bold and faint per ECMA-48.
+const SGR_RESET_INTENSITY: u16 = 22;
+const SGR_RESET_ITALIC: u16 = 23;
+const SGR_RESET_UNDERLINE: u16 = 24;
+const SGR_RESET_BLINK: u16 = 25;
+const SGR_RESET_REVERSE: u16 = 27;
+const SGR_RESET_HIDDEN: u16 = 28;
+const SGR_RESET_STRIKETHROUGH: u16 = 29;
+const SGR_FG_START: u16 = 30;
+const SGR_FG_END: u16 = 37;
+const SGR_FG_EXTENDED: u16 = 38;
+const SGR_FG_DEFAULT: u16 = 39;
+const SGR_BG_START: u16 = 40;
+const SGR_BG_END: u16 = 47;
+const SGR_BG_EXTENDED: u16 = 48;
+const SGR_BG_DEFAULT: u16 = 49;
+const SGR_OVERLINE: u16 = 53;
+const SGR_RESET_OVERLINE: u16 = 55;
+const SGR_UNDERLINE_COLOR: u16 = 58;
+const SGR_RESET_UNDERLINE_COLOR: u16 = 59;
+const SGR_BRIGHT_FG_START: u16 = 90;
+const SGR_BRIGHT_FG_END: u16 = 97;
+const SGR_BRIGHT_BG_START: u16 = 100;
+const SGR_BRIGHT_BG_END: u16 = 107;
+
 pub const fn default_fg() -> Srgb<u8> {
     Srgb::new(204, 204, 204)
 }
@@ -160,55 +198,57 @@ pub(super) fn apply_sgr(
     while i < groups.len() {
         let g = groups[i];
         match g[0] {
-            0 => reset_all(fg, bg, attrs, underline, underline_color, palette),
-            1 => attrs.insert(CellAttrs::BOLD),
-            2 => attrs.insert(CellAttrs::DIM),
-            3 => attrs.insert(CellAttrs::ITALIC),
-            4 => {
+            SGR_RESET => reset_all(fg, bg, attrs, underline, underline_color, palette),
+            SGR_BOLD => attrs.insert(CellAttrs::BOLD),
+            SGR_DIM => attrs.insert(CellAttrs::DIM),
+            SGR_ITALIC => attrs.insert(CellAttrs::ITALIC),
+            SGR_UNDERLINE => {
                 // Sub-parameter determines style: bare `4` or `4:1` = single,
                 // `4:0` = none, `4:2` = double, `4:3` = curly, etc.
                 let sub = g.get(1).copied().unwrap_or(1);
                 *underline = UnderlineStyle::from_sgr(sub);
             }
-            // SGR 5/6 = blink on (slow/rapid treated alike), SGR 25 = blink off.
-            5 => attrs.insert(CellAttrs::BLINK),
-            6 => attrs.insert(CellAttrs::RAPID_BLINK),
-            7 => attrs.insert(CellAttrs::REVERSE),
-            8 => attrs.insert(CellAttrs::HIDDEN),
-            9 => attrs.insert(CellAttrs::STRIKETHROUGH),
-            21 => *underline = UnderlineStyle::Double,
-            // SGR 22 resets both bold and faint per ECMA-48.
-            22 => attrs.remove(CellAttrs::BOLD | CellAttrs::DIM),
-            23 => attrs.remove(CellAttrs::ITALIC),
-            24 => *underline = UnderlineStyle::None,
-            25 => attrs.remove(CellAttrs::BLINK | CellAttrs::RAPID_BLINK),
-            27 => attrs.remove(CellAttrs::REVERSE),
-            28 => attrs.remove(CellAttrs::HIDDEN),
-            29 => attrs.remove(CellAttrs::STRIKETHROUGH),
-            53 => attrs.insert(CellAttrs::OVERLINE),
-            55 => attrs.remove(CellAttrs::OVERLINE),
-            30..=37 => *fg = palette_color(palette, (g[0] - 30) as u8),
-            38 => {
+            SGR_BLINK => attrs.insert(CellAttrs::BLINK),
+            SGR_RAPID_BLINK => attrs.insert(CellAttrs::RAPID_BLINK),
+            SGR_REVERSE => attrs.insert(CellAttrs::REVERSE),
+            SGR_HIDDEN => attrs.insert(CellAttrs::HIDDEN),
+            SGR_STRIKETHROUGH => attrs.insert(CellAttrs::STRIKETHROUGH),
+            SGR_DOUBLE_UNDERLINE => *underline = UnderlineStyle::Double,
+            SGR_RESET_INTENSITY => attrs.remove(CellAttrs::BOLD | CellAttrs::DIM),
+            SGR_RESET_ITALIC => attrs.remove(CellAttrs::ITALIC),
+            SGR_RESET_UNDERLINE => *underline = UnderlineStyle::None,
+            SGR_RESET_BLINK => attrs.remove(CellAttrs::BLINK | CellAttrs::RAPID_BLINK),
+            SGR_RESET_REVERSE => attrs.remove(CellAttrs::REVERSE),
+            SGR_RESET_HIDDEN => attrs.remove(CellAttrs::HIDDEN),
+            SGR_RESET_STRIKETHROUGH => attrs.remove(CellAttrs::STRIKETHROUGH),
+            SGR_OVERLINE => attrs.insert(CellAttrs::OVERLINE),
+            SGR_RESET_OVERLINE => attrs.remove(CellAttrs::OVERLINE),
+            SGR_FG_START..=SGR_FG_END => *fg = palette_color(palette, (g[0] - SGR_FG_START) as u8),
+            SGR_FG_EXTENDED => {
                 if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
                     *fg = color;
                 }
             }
-            39 => *fg = palette.fg,
-            40..=47 => *bg = palette_color(palette, (g[0] - 40) as u8),
-            48 => {
+            SGR_FG_DEFAULT => *fg = palette.fg,
+            SGR_BG_START..=SGR_BG_END => *bg = palette_color(palette, (g[0] - SGR_BG_START) as u8),
+            SGR_BG_EXTENDED => {
                 if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
                     *bg = color;
                 }
             }
-            49 => *bg = palette.bg,
-            58 => {
+            SGR_BG_DEFAULT => *bg = palette.bg,
+            SGR_UNDERLINE_COLOR => {
                 if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
                     *underline_color = Some(color);
                 }
             }
-            59 => *underline_color = None,
-            90..=97 => *fg = palette_color(palette, (g[0] - 90) as u8 + BRIGHT_OFFSET),
-            100..=107 => *bg = palette_color(palette, (g[0] - 100) as u8 + BRIGHT_OFFSET),
+            SGR_RESET_UNDERLINE_COLOR => *underline_color = None,
+            SGR_BRIGHT_FG_START..=SGR_BRIGHT_FG_END => {
+                *fg = palette_color(palette, (g[0] - SGR_BRIGHT_FG_START) as u8 + BRIGHT_OFFSET)
+            }
+            SGR_BRIGHT_BG_START..=SGR_BRIGHT_BG_END => {
+                *bg = palette_color(palette, (g[0] - SGR_BRIGHT_BG_START) as u8 + BRIGHT_OFFSET)
+            }
             _ => {}
         }
         i += 1;

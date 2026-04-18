@@ -1,3 +1,5 @@
+use crate::mode;
+
 /// DEC mouse-tracking mode currently requested by the foreground app.
 ///
 /// Layered in the order the spec describes — each higher variant is a
@@ -77,10 +79,10 @@ pub(super) fn apply_mouse_mode(
     encoding: &mut MouseEncoding,
 ) -> bool {
     let tracking_target = match mode {
-        9 => Some(MouseTracking::X10),
-        1000 => Some(MouseTracking::Normal),
-        1002 => Some(MouseTracking::ButtonEvent),
-        1003 => Some(MouseTracking::AnyEvent),
+        mode::X10_MOUSE => Some(MouseTracking::X10),
+        mode::NORMAL_MOUSE => Some(MouseTracking::Normal),
+        mode::BUTTON_EVENT_MOUSE => Some(MouseTracking::ButtonEvent),
+        mode::ANY_EVENT_MOUSE => Some(MouseTracking::AnyEvent),
         _ => None,
     };
     if let Some(target) = tracking_target {
@@ -89,9 +91,9 @@ pub(super) fn apply_mouse_mode(
     }
 
     let encoding_target = match mode {
-        1005 => Some(MouseEncoding::Utf8),
-        1006 => Some(MouseEncoding::Sgr),
-        1015 => Some(MouseEncoding::Urxvt),
+        mode::UTF8_MOUSE => Some(MouseEncoding::Utf8),
+        mode::SGR_MOUSE => Some(MouseEncoding::Sgr),
+        mode::URXVT_MOUSE => Some(MouseEncoding::Urxvt),
         _ => None,
     };
     if let Some(target) = encoding_target {

@@ -9,6 +9,15 @@
 
 use serde::Deserialize;
 
+// DECSCUSR parameter values (CSI Ps SP q).
+const DECSCUSR_DEFAULT: u16 = 0;
+const DECSCUSR_BLINKING_BLOCK: u16 = 1;
+const DECSCUSR_STEADY_BLOCK: u16 = 2;
+const DECSCUSR_BLINKING_UNDERLINE: u16 = 3;
+const DECSCUSR_STEADY_UNDERLINE: u16 = 4;
+const DECSCUSR_BLINKING_BEAM: u16 = 5;
+const DECSCUSR_STEADY_BEAM: u16 = 6;
+
 /// Geometry of the cursor overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
@@ -52,27 +61,27 @@ impl CursorStyle {
         ps: u16,
     ) {
         let style = match ps {
-            0 | 1 => Self {
+            DECSCUSR_DEFAULT | DECSCUSR_BLINKING_BLOCK => Self {
                 shape: CursorShape::Block,
                 blink: true,
             },
-            2 => Self {
+            DECSCUSR_STEADY_BLOCK => Self {
                 shape: CursorShape::Block,
                 blink: false,
             },
-            3 => Self {
+            DECSCUSR_BLINKING_UNDERLINE => Self {
                 shape: CursorShape::Underline,
                 blink: true,
             },
-            4 => Self {
+            DECSCUSR_STEADY_UNDERLINE => Self {
                 shape: CursorShape::Underline,
                 blink: false,
             },
-            5 => Self {
+            DECSCUSR_BLINKING_BEAM => Self {
                 shape: CursorShape::Beam,
                 blink: true,
             },
-            6 => Self {
+            DECSCUSR_STEADY_BEAM => Self {
                 shape: CursorShape::Beam,
                 blink: false,
             },

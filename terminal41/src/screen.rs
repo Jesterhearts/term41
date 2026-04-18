@@ -14,6 +14,7 @@ use crate::image::PlacedImage;
 use crate::image::anchor_images;
 use crate::image::clear_in_range;
 use crate::image::restore_images;
+use crate::mode;
 use crate::row::Row;
 
 /// Snapshot of cursor position and active colors, used by DECSC/DECRC
@@ -276,20 +277,19 @@ pub(super) fn set_private_mode(
     on_alt: &mut bool,
 ) {
     match mode {
-        // DECCKM — application cursor keys.
-        1 => active.app_cursor_keys = enable,
-        // DECCOLM (mode 3) is handled in csi_dispatch where mutable
-        // viewport access is available for the resize.
-        6 => {
+        mode::DECCKM => active.app_cursor_keys = enable,
+        // DECCOLM is handled in csi_dispatch where mutable viewport
+        // access is available for the resize.
+        mode::DECOM => {
             active.origin_mode = enable;
             // Entering/leaving origin mode homes the cursor per DEC spec.
             active.cursor.row = if enable { active.scroll_top } else { 0 };
             active.cursor.col = 0;
         }
-        7 => active.autowrap = enable,
-        25 => active.cursor_visible = enable,
-        47 => switch_screen(enable, active, stash, on_alt),
-        1047 => {
+        mode::DECAWM => active.autowrap = enable,
+        mode::DECTCEM => active.cursor_visible = enable,
+        mode::ALT_SCREEN => switch_screen(enable, active, stash, on_alt),
+        mode::ALT_SCREEN_CLEAR => {
             // xterm clears the alt buffer when leaving via 1047l so stale
             // content isn't re-shown the next time it's entered.
             if !enable && *on_alt {
@@ -297,14 +297,14 @@ pub(super) fn set_private_mode(
             }
             switch_screen(enable, active, stash, on_alt);
         }
-        1048 => {
+        mode::SAVE_CURSOR => {
             if enable {
                 save_cursor_slot(active);
             } else {
                 restore_cursor_slot(active, viewport);
             }
         }
-        1049 => {
+        mode::ALT_SCREEN_SAVE => {
             if enable {
                 // Save into primary's DECSC slot before swapping, so the
                 // slot rides with primary into the stash and is there for

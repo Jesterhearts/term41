@@ -15,6 +15,24 @@ use crate::hyperlink::HyperlinkId;
 use crate::hyperlink::HyperlinkRegistry;
 use crate::screen::Screen;
 
+// -- OSC command numbers ------------------------------------------------------
+
+const OSC_SET_ICON_AND_TITLE: u16 = 0;
+const OSC_SET_TITLE: u16 = 2;
+const OSC_PALETTE_COLOR: u16 = 4;
+const OSC_SET_DIRECTORY: u16 = 7;
+const OSC_HYPERLINK: u16 = 8;
+const OSC_FG_COLOR: u16 = 10;
+const OSC_BG_COLOR: u16 = 11;
+const OSC_CURSOR_COLOR: u16 = 12;
+const OSC_CLIPBOARD: u16 = 52;
+const OSC_RESET_PALETTE: u16 = 104;
+const OSC_RESET_FG: u16 = 110;
+const OSC_RESET_BG: u16 = 111;
+const OSC_RESET_CURSOR_COLOR: u16 = 112;
+const OSC_SHELL_INTEGRATION: u16 = 133;
+const OSC_ITERM2: u16 = 1337;
+
 /// Bundles the bits of [`Terminal`](super::Terminal) state that OSC handlers
 /// are allowed to read or mutate. Passing a single context keeps the call
 /// signature stable as new OSC commands (8 hyperlinks, 7 cwd, 0/2 title, 4
@@ -99,33 +117,40 @@ pub(super) fn handle_osc(
     payload: &[u8],
     ctx: &mut OscContext<'_>,
 ) {
-    let (cmd, rest) = split_osc(payload);
+    let (cmd_bytes, rest) = split_osc(payload);
+
+    // Parse the numeric command prefix. Non-numeric or empty prefixes
+    // produce None and fall through to the default (silently dropped).
+    let cmd: Option<u16> = std::str::from_utf8(cmd_bytes)
+        .ok()
+        .and_then(|s| s.parse().ok());
+
     match cmd {
         // OSC 0 sets icon name + window title; OSC 2 sets just the window
         // title. We don't have a separate icon-name surface, so both feed
         // the same field. OSC 1 (icon name only) is intentionally ignored.
-        b"0" | b"2" => handle_osc_title(rest, ctx.current_title),
-        b"7" => handle_osc_7(rest, ctx.current_directory),
-        b"8" => handle_osc_8(
+        Some(OSC_SET_ICON_AND_TITLE) | Some(OSC_SET_TITLE) => {
+            handle_osc_title(rest, ctx.current_title)
+        }
+        Some(OSC_SET_DIRECTORY) => handle_osc_7(rest, ctx.current_directory),
+        Some(OSC_HYPERLINK) => handle_osc_8(
             rest,
             ctx.hyperlinks,
             &mut ctx.active_screen.current_hyperlink,
         ),
-        // OSC 4;N;? — query the Nth palette color.
-        b"4" => handle_osc_4(rest, ctx.palette, ctx.pending_output),
-        // OSC 10 ? — query foreground color.
-        b"10" => handle_osc_color_query(rest, 10, ctx.palette.fg, ctx.pending_output),
-        // OSC 11 ? — query background color.
-        b"11" => handle_osc_color_query(rest, 11, ctx.palette.bg, ctx.pending_output),
-        // OSC 12 ? — query cursor color.
-        b"12" => handle_osc_cursor_color_query(rest, ctx),
-        b"52" => handle_osc_52(rest, ctx.clipboard, ctx.pending_output),
-        // OSC 104 — reset palette color(s). OSC 110/111/112 — reset default
-        // fg/bg/cursor color. Accepted but currently no-op — the palette is
-        // immutable at this level. A full implementation would require mutable
-        // palette access through OscContext.
-        b"104" | b"110" | b"111" | b"112" => {}
-        b"133" => handle_osc_133(
+        Some(OSC_PALETTE_COLOR) => handle_osc_4(rest, ctx.palette, ctx.pending_output),
+        Some(OSC_FG_COLOR) => {
+            handle_osc_color_query(rest, OSC_FG_COLOR as u8, ctx.palette.fg, ctx.pending_output)
+        }
+        Some(OSC_BG_COLOR) => {
+            handle_osc_color_query(rest, OSC_BG_COLOR as u8, ctx.palette.bg, ctx.pending_output)
+        }
+        Some(OSC_CURSOR_COLOR) => handle_osc_cursor_color_query(rest, ctx),
+        Some(OSC_CLIPBOARD) => handle_osc_52(rest, ctx.clipboard, ctx.pending_output),
+        // Reset palette/fg/bg/cursor color. Accepted but currently no-op —
+        // the palette is immutable at this level.
+        Some(OSC_RESET_PALETTE | OSC_RESET_FG | OSC_RESET_BG | OSC_RESET_CURSOR_COLOR) => {}
+        Some(OSC_SHELL_INTEGRATION) => handle_osc_133(
             rest,
             ctx.active_screen,
             ctx.viewport,
@@ -135,9 +160,8 @@ pub(super) fn handle_osc(
         // iTerm2 proprietary commands. Image commands (File=, MultipartFile=,
         // etc.) are routed separately in terminal.rs. ReportCellSize gets a
         // reply; other non-image commands are silently accepted as no-ops.
-        b"1337" if rest.starts_with(b"ReportCellSize") => {
+        Some(OSC_ITERM2) if rest.starts_with(b"ReportCellSize") => {
             use std::io::Write;
-            // Reply format: OSC 1337 ; ReportCellSize=<height>;<width> ST
             write!(
                 ctx.pending_output,
                 "\x1b]1337;ReportCellSize={};{}\x1b\\",
@@ -145,7 +169,7 @@ pub(super) fn handle_osc(
             )
             .expect("write to Vec is infallible");
         }
-        b"1337" => {}
+        Some(OSC_ITERM2) => {}
         _ => {}
     }
 }
