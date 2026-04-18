@@ -400,6 +400,61 @@ pub(super) fn put_char(
     screen.cursor.col += width as u32;
 }
 
+fn translated_codepoint(
+    screen: &mut Screen,
+    ch: char,
+) -> Option<SmolStr> {
+    let cp = ch as u32;
+    if (0x20..=0x7E).contains(&cp) {
+        if let Some(charset) = screen.charset.take_single_shift_charset() {
+            let b = cp as u8;
+            return Some(
+                charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
+                    .unwrap_or_else(|| ASCII_CELLS[(b - 0x20) as usize].clone()),
+            );
+        }
+        if charset::gl_charset_requires_translation(&screen.charset, screen.nrc_mode) {
+            let charset = screen.charset.gl_charset();
+            let b = cp as u8;
+            return Some(
+                charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
+                    .unwrap_or_else(|| ASCII_CELLS[(b - 0x20) as usize].clone()),
+            );
+        }
+        return None;
+    }
+
+    if (0xA0..=0xFF).contains(&cp)
+        && charset::gr_charset_requires_translation(&screen.charset, screen.nrc_mode)
+    {
+        let charset = screen.charset.gr_charset();
+        return Some(
+            charset::translate_gr_codepoint(ch, charset, screen.nrc_mode, screen.upss)
+                .unwrap_or_else(|| SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4]))),
+        );
+    }
+
+    None
+}
+
+pub(super) fn put_printable(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    s: SmolStr,
+    insert_mode: bool,
+) {
+    let mut chars = s.chars();
+    if let Some(ch) = chars.next()
+        && chars.next().is_none()
+        && let Some(mapped) = translated_codepoint(screen, ch)
+    {
+        put_char(screen, viewport, mapped, insert_mode);
+        return;
+    }
+
+    put_char(screen, viewport, s, insert_mode);
+}
+
 /// Process a [`vtepp::Action::PrintText`] run: a validated UTF-8 `&str`
 /// that may contain a mix of printable ASCII (0x20..=0x7E) and multi-byte
 /// UTF-8 codepoints.
@@ -440,23 +495,16 @@ pub(super) fn put_text_run(
 
     let bytes = run.as_bytes();
 
-    if charset::gl_charset_requires_translation(&screen.charset, screen.nrc_mode) {
-        let charset = screen.charset.gl_charset();
+    if charset::gl_charset_requires_translation(&screen.charset, screen.nrc_mode)
+        || charset::gr_charset_requires_translation(&screen.charset, screen.nrc_mode)
+    {
         for ch in run.chars() {
-            let cp = ch as u32;
-            if (0x20..=0x7E).contains(&cp) {
-                let b = cp as u8;
-                let s = charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
-                    .unwrap_or_else(|| ASCII_CELLS[(b - 0x20) as usize].clone());
-                put_char(screen, viewport, s, insert_mode);
-            } else {
-                put_char(
-                    screen,
-                    viewport,
-                    SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4])),
-                    insert_mode,
-                );
-            }
+            put_printable(
+                screen,
+                viewport,
+                SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4])),
+                insert_mode,
+            );
         }
         return;
     }
@@ -2254,7 +2302,7 @@ mod tests {
             match action {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
                 Action::PrintText(run) => put_text_run(screen, viewport, run, modes.insert_mode),
-                Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
+                Action::Print(s) => put_printable(screen, viewport, s, modes.insert_mode),
                 Action::Execute(b) => {
                     execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)
                 }
@@ -3135,7 +3183,7 @@ mod tests {
             match action {
                 Action::PrintAscii(run) => put_ascii_run(screen, viewport, run, modes.insert_mode),
                 Action::PrintText(run) => put_text_run(screen, viewport, run, modes.insert_mode),
-                Action::Print(s) => put_char(screen, viewport, s, modes.insert_mode),
+                Action::Print(s) => put_printable(screen, viewport, s, modes.insert_mode),
                 Action::Execute(b) => {
                     execute(screen, viewport, b, &mut bell_pending, modes.newline_mode)
                 }
@@ -3594,6 +3642,125 @@ mod tests {
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{00A1}");
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "!");
+    }
+
+    #[test]
+    fn scs_ls1r_maps_g1_into_gr_for_utf8_text() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b)>\x1b~", &mut screen, &mut viewport); // G1 = DEC Technical, GR = G1
+        feed("á".as_bytes(), &mut screen, &mut viewport); // U+00E1 -> 0x61 in GR
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{03B1}");
+        assert_eq!(screen.charset.gr_slot(), GraphicSetSlot::G1);
+    }
+
+    #[test]
+    fn scs_ls2r_maps_g2_into_gr_for_utf8_text() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b.%5\x1b}", &mut screen, &mut viewport); // G2 = DEC Supplemental, GR = G2
+        feed("¨".as_bytes(), &mut screen, &mut viewport); // U+00A8 -> DEC MCS currency sign
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{00A4}");
+        assert_eq!(screen.charset.gr_slot(), GraphicSetSlot::G2);
+    }
+
+    #[test]
+    fn scs_gr_translation_applies_to_split_utf8_codepoint() {
+        let (mut screen, mut viewport) = setup();
+        let pal = color::ColorPalette::default();
+        let mut parser = Parser::new();
+        let mut stash = Screen::new(
+            viewport.cols,
+            viewport.rows,
+            0,
+            color::default_fg(),
+            color::default_bg(),
+        );
+        let mut on_alt_screen = false;
+        let mut modes = TerminalModes::new();
+        let mut kitty_keyboard = KittyKeyboardState::new();
+        let mut pending_output = Vec::new();
+        let mut cursor_style = CursorStyle::default();
+        let mut bell_pending = false;
+        let mut current_title = None;
+        let mut title_stack = Vec::new();
+        let mut saved_modes = std::collections::HashMap::new();
+        let mut current_prompt_row = None;
+        let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+
+        for chunk in [b"\x1b)>\x1b~\xc3".as_slice(), b"\xa1".as_slice()] {
+            for action in parser.parse(chunk) {
+                match action {
+                    Action::PrintAscii(run) => {
+                        put_ascii_run(&mut screen, &viewport, run, modes.insert_mode)
+                    }
+                    Action::PrintText(run) => {
+                        put_text_run(&mut screen, &viewport, run, modes.insert_mode)
+                    }
+                    Action::Print(s) => put_printable(&mut screen, &viewport, s, modes.insert_mode),
+                    Action::Execute(b) => execute(
+                        &mut screen,
+                        &viewport,
+                        b,
+                        &mut bell_pending,
+                        modes.newline_mode,
+                    ),
+                    Action::CsiDispatch {
+                        params,
+                        intermediates,
+                        action,
+                    } => {
+                        let mut ctx = CsiContext {
+                            screen: &mut screen,
+                            stash: &mut stash,
+                            viewport: &mut viewport,
+                            on_alt_screen: &mut on_alt_screen,
+                            modes: &mut modes,
+                            kitty_keyboard: &mut kitty_keyboard,
+                            pending_output: &mut pending_output,
+                            cursor_style: &mut cursor_style,
+                            cell_width: 8,
+                            cell_height: 16,
+                            palette: &pal,
+                            title_stack: &mut title_stack,
+                            current_title: &mut current_title,
+                            saved_modes: &mut saved_modes,
+                            current_prompt_row: &mut current_prompt_row,
+                            bell_pending: &mut bell_pending,
+                            vt52_cursor_addr: &mut vt52_cursor_addr,
+                        };
+                        csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
+                    }
+                    Action::EscDispatch {
+                        intermediates,
+                        byte,
+                    } => {
+                        let mut ctx = EscContext {
+                            screen: &mut screen,
+                            stash: &mut stash,
+                            viewport: &mut viewport,
+                            on_alt_screen: &mut on_alt_screen,
+                            modes: &mut modes,
+                            kitty_keyboard: &mut kitty_keyboard,
+                            cursor_style: &mut cursor_style,
+                            current_title: &mut current_title,
+                            title_stack: &mut title_stack,
+                            saved_modes: &mut saved_modes,
+                            current_prompt_row: &mut current_prompt_row,
+                            bell_pending: &mut bell_pending,
+                            palette: &pal,
+                            pending_output: &mut pending_output,
+                            vt52_cursor_addr: &mut vt52_cursor_addr,
+                        };
+                        esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{03B1}");
     }
 
     #[test]

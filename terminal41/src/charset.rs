@@ -191,6 +191,13 @@ pub fn gl_charset_requires_translation(
     charset_requires_translation(state.gl_charset(), nrc_mode)
 }
 
+pub fn gr_charset_requires_translation(
+    state: &CharsetState,
+    nrc_mode: bool,
+) -> bool {
+    charset_requires_translation(state.gr_charset(), nrc_mode)
+}
+
 pub fn charset_requires_translation(
     charset: CharacterSet,
     nrc_mode: bool,
@@ -231,6 +238,19 @@ pub fn translate_ascii_byte(
             translate_nrc_byte(byte, set)
         }
     }
+}
+
+pub fn translate_gr_codepoint(
+    ch: char,
+    charset: CharacterSet,
+    nrc_mode: bool,
+    upss: UserPreferredSupplementalSet,
+) -> Option<SmolStr> {
+    let cp = ch as u32;
+    if !(0xA0..=0xFF).contains(&cp) {
+        return None;
+    }
+    translate_ascii_byte((cp as u8) - 0x80, charset, nrc_mode, upss)
 }
 
 pub fn parse_upss_assignment(

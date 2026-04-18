@@ -62,7 +62,7 @@ use self::parser::csi_dispatch;
 use self::parser::esc_dispatch;
 use self::parser::execute;
 use self::parser::put_ascii_run;
-use self::parser::put_char;
+use self::parser::put_printable;
 use self::parser::put_text_run;
 pub use self::row::LineAttr;
 pub use self::row::Row;
@@ -1568,7 +1568,7 @@ impl Terminal {
                 self.modes.insert_mode,
             ),
             Action::Print(c) => {
-                put_char(&mut self.active, &self.viewport, c, self.modes.insert_mode)
+                put_printable(&mut self.active, &self.viewport, c, self.modes.insert_mode)
             }
             Action::Execute(byte) => {
                 execute(
