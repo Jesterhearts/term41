@@ -2,3 +2,5 @@
 perf.data
 *.old
 /.claude
+.codex
+*.swp

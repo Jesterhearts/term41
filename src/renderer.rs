@@ -884,7 +884,10 @@ impl RenderHost {
         }
 
         // ---- CSD: titlebar drag (empty tab bar area) ----
-        if pressed && button == MouseButton::Left {
+        if pressed
+            && button == MouseButton::Left
+            && (self.is_in_titlebar_drag_region() || self.is_in_tab_bar())
+        {
             if self.is_in_titlebar_drag_region() {
                 // Double-click toggles maximize.
                 let now = Instant::now();
@@ -904,7 +907,6 @@ impl RenderHost {
                 self.close_gutter_popup();
                 self.tab_context_menu = None;
                 self.handle_tab_bar_click();
-                return;
             }
             return;
         }
