@@ -115,6 +115,80 @@ impl Grid {
         }
     }
 
+    /// DECSED — Selective Erase in Display. Same semantics as
+    /// [`erase_in_display`] but cells with the `PROTECTED` attribute are
+    /// left untouched. Mode 3 (erase scrollback) is not selective — it
+    /// always clears the entire scrollback.
+    pub fn erase_in_display_selective(
+        &mut self,
+        cursor: &Cursor,
+        viewport: &Viewport,
+        images: &mut BTreeMap<u64, PlacedImage>,
+        mode: u16,
+    ) {
+        let active = self.active_row_index(cursor, viewport);
+        let first_visible = self.rows.len() - viewport.rows as usize;
+        let col = cursor.col as usize;
+
+        match mode {
+            0 => {
+                let cols = self.rows[active].cells.len();
+                self.rows[active].clear_range_selective(
+                    col..cols,
+                    self.default_fg,
+                    self.default_bg,
+                );
+                for r in (active + 1)..self.rows.len() {
+                    self.rows[r].clear_selective(self.default_fg, self.default_bg);
+                }
+            }
+            1 => {
+                for r in first_visible..active {
+                    self.rows[r].clear_selective(self.default_fg, self.default_bg);
+                }
+                self.rows[active].clear_range_selective(
+                    0..col + 1,
+                    self.default_fg,
+                    self.default_bg,
+                );
+            }
+            2 => {
+                for r in first_visible..self.rows.len() {
+                    self.rows[r].clear_selective(self.default_fg, self.default_bg);
+                }
+                clear_in_range(images, first_visible, self.rows.len());
+            }
+            _ => {}
+        }
+    }
+
+    /// DECSEL — Selective Erase in Line. Same semantics as
+    /// [`erase_in_line`] but cells with the `PROTECTED` attribute are
+    /// left untouched.
+    pub fn erase_in_line_selective(
+        &mut self,
+        cursor: &Cursor,
+        viewport: &Viewport,
+        mode: u16,
+    ) {
+        let active = self.active_row_index(cursor, viewport);
+        let cols = self.rows[active].cells.len();
+        let col = cursor.col as usize;
+
+        match mode {
+            0 => {
+                self.rows[active].clear_range_selective(col..cols, self.default_fg, self.default_bg)
+            }
+            1 => self.rows[active].clear_range_selective(
+                0..col + 1,
+                self.default_fg,
+                self.default_bg,
+            ),
+            2 => self.rows[active].clear_selective(self.default_fg, self.default_bg),
+            _ => {}
+        }
+    }
+
     pub fn erase_in_line(
         &mut self,
         cursor: &Cursor,

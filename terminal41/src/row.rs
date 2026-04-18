@@ -186,6 +186,37 @@ impl Row {
         self.links[range].fill(None);
     }
 
+    /// Selective clear: erase only cells whose `PROTECTED` bit is *not* set.
+    /// Used by DECSED (`CSI ? J`) and DECSEL (`CSI ? K`).
+    pub(super) fn clear_range_selective(
+        &mut self,
+        range: std::ops::Range<usize>,
+        fg: Srgb<u8>,
+        bg: Srgb<u8>,
+    ) {
+        for i in range {
+            if !self.attrs[i].contains(CellAttrs::PROTECTED) {
+                self.cells[i] = blank_cell();
+                self.fg[i] = fg;
+                self.bg[i] = bg;
+                self.attrs[i] = CellAttrs::default();
+                self.underline[i] = UnderlineStyle::None;
+                self.underline_color[i] = None;
+                self.links[i] = None;
+            }
+        }
+    }
+
+    /// Selective full-row clear: like [`clear`] but skips protected cells
+    /// and preserves semantic marks (since partial content may survive).
+    pub(super) fn clear_selective(
+        &mut self,
+        fg: Srgb<u8>,
+        bg: Srgb<u8>,
+    ) {
+        self.clear_range_selective(0..self.cells.len(), fg, bg);
+    }
+
     pub(super) fn copy_within<R>(
         &mut self,
         src: R,

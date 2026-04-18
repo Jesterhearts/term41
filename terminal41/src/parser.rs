@@ -929,6 +929,37 @@ pub(super) fn csi_dispatch(
         return;
     }
 
+    // DECSED — Selective Erase in Display (CSI ? Ps J). Like ED but
+    // cells with the PROTECTED attribute (set via DECSCA) are left intact.
+    if action == 'J' && intermediates == b"?" {
+        let mode = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        ctx.screen.grid.erase_in_display_selective(
+            &ctx.screen.cursor,
+            ctx.viewport,
+            &mut ctx.screen.images,
+            mode,
+        );
+        return;
+    }
+
+    // DECSEL — Selective Erase in Line (CSI ? Ps K). Like EL but
+    // cells with the PROTECTED attribute are left intact.
+    if action == 'K' && intermediates == b"?" {
+        let mode = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        ctx.screen
+            .grid
+            .erase_in_line_selective(&ctx.screen.cursor, ctx.viewport, mode);
+        return;
+    }
+
     if action == 'u' && matches!(intermediates, b">" | b"<" | b"=" | b"?") {
         handle_kitty_keyboard(
             intermediates[0],
@@ -948,6 +979,23 @@ pub(super) fn csi_dispatch(
             .and_then(|g| g.first().copied())
             .unwrap_or(0);
         ctx.cursor_style.apply_decscusr(ps);
+        return;
+    }
+
+    // DECSCA — Select Character Protection Attribute (CSI Ps " q).
+    // Ps=1 marks subsequent characters as protected; Ps=0 or Ps=2 clears
+    // protection. Protected cells are immune to DECSED and DECSEL.
+    if action == 'q' && intermediates == b"\"" {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        match ps {
+            1 => ctx.screen.attrs.insert(CellAttrs::PROTECTED),
+            0 | 2 => ctx.screen.attrs.remove(CellAttrs::PROTECTED),
+            _ => {}
+        }
         return;
     }
 

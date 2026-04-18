@@ -14,6 +14,10 @@ bitflags::bitflags! {
         const HIDDEN        = 0b0000_0100_0000;
         const BLINK         = 0b0000_1000_0000;
         const RAPID_BLINK   = 0b0001_0000_0000;
+        /// DECSCA character protection. Protected cells are skipped by
+        /// DECSED (`CSI ? J`) and DECSEL (`CSI ? K`). Set via
+        /// `CSI 1 " q`, cleared by `CSI 0 " q` or `CSI 2 " q`.
+        const PROTECTED     = 0b0010_0000_0000;
     }
 }
 
