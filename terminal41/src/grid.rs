@@ -21,10 +21,21 @@ pub struct Cursor {
 /// Dimensions of the rendered terminal window, shared by both screens.
 /// Per-screen state (scroll region, scrollback offset) lives on
 /// [`super::Screen`].
-#[derive(Debug, Default)]
+#[derive(Debug, Default, Clone, Copy)]
 pub struct Viewport {
     pub rows: u32,
     pub cols: u32,
+    /// Local-row index of the top visible row inside the backing grid.
+    pub top: usize,
+}
+
+impl Viewport {
+    pub fn top_index(
+        &self,
+        total_rows: usize,
+    ) -> usize {
+        self.top.min(total_rows.saturating_sub(self.rows as usize))
+    }
 }
 
 #[derive(Debug)]
@@ -76,7 +87,7 @@ impl Grid {
         mode: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let col = cursor.col as usize;
 
         match mode {
@@ -127,7 +138,7 @@ impl Grid {
         mode: u16,
     ) {
         let active = self.active_row_index(cursor, viewport);
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let col = cursor.col as usize;
 
         match mode {
@@ -266,7 +277,7 @@ impl Grid {
         bottom: u32,
         n: u32,
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let abs_top = first_visible + top as usize;
         let abs_bottom = first_visible + bottom as usize;
         let n = (n as usize).min(abs_bottom - abs_top + 1);
@@ -292,7 +303,7 @@ impl Grid {
         bottom: u32,
         n: u32,
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let abs_top = first_visible + top as usize;
         let abs_bottom = first_visible + bottom as usize;
         let n = (n as usize).min(abs_bottom - abs_top + 1);
@@ -397,7 +408,7 @@ impl Grid {
         cursor: &Cursor,
         viewport: &Viewport,
     ) -> usize {
-        self.rows.len() - viewport.rows as usize + cursor.row as usize
+        viewport.top_index(self.rows.len()) + cursor.row as usize
     }
 
     pub(super) fn reflow(
@@ -568,7 +579,7 @@ impl Grid {
         bottom: u32,
         n: u32,
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let cols = viewport.cols as usize;
         let n = (n as usize).min(cols);
         if n == 0 {
@@ -590,7 +601,7 @@ impl Grid {
         bottom: u32,
         n: u32,
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let cols = viewport.cols as usize;
         let n = (n as usize).min(cols);
         if n == 0 {
@@ -615,7 +626,7 @@ impl Grid {
         bottom: u32,
         n: u32,
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let cols = viewport.cols as usize;
         let col = cursor_col as usize;
         let n = (n as usize).min(cols - col);
@@ -641,7 +652,7 @@ impl Grid {
         bottom: u32,
         n: u32,
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let cols = viewport.cols as usize;
         let col = cursor_col as usize;
         let n = (n as usize).min(cols - col);
@@ -666,7 +677,7 @@ impl Grid {
         bottom: u32,
         right: u32,
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let left = left as usize;
         let right_excl = (right as usize + 1).min(viewport.cols as usize);
         for r in top..=bottom {
@@ -694,7 +705,7 @@ impl Grid {
         underline: UnderlineStyle,
         underline_color: Option<Srgb<u8>>,
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let left = left as usize;
         let right_excl = (right as usize + 1).min(viewport.cols as usize);
         for r in top..=bottom {
@@ -727,7 +738,7 @@ impl Grid {
         dst_top: u32,
         dst_left: u32,
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let rows = viewport.rows as usize;
         let cols = viewport.cols as usize;
 
@@ -765,7 +776,7 @@ impl Grid {
         right: u32,
         sgr_params: &[u16],
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let left = left as usize;
         let right_excl = (right as usize + 1).min(viewport.cols as usize);
         for r in top..=bottom {
@@ -785,7 +796,7 @@ impl Grid {
         right: u32,
         sgr_params: &[u16],
     ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
+        let first_visible = viewport.top_index(self.rows.len());
         let left = left as usize;
         let right_excl = (right as usize + 1).min(viewport.cols as usize);
         for r in top..=bottom {
@@ -1216,7 +1227,7 @@ mod tests {
         rows: u32,
         cols: u32,
     ) -> Viewport {
-        Viewport { rows, cols }
+        Viewport { rows, cols, top: 0 }
     }
 
     /// Build a grid with `scrollback` history rows + `visible` visible rows.
@@ -1226,7 +1237,8 @@ mod tests {
         visible: u32,
         labels: &[char],
     ) -> (Grid, Viewport) {
-        let vp = make_viewport(visible, width);
+        let mut vp = make_viewport(visible, width);
+        vp.top = labels.len().saturating_sub(visible as usize);
         let mut rows = VecDeque::new();
         for &ch in labels {
             let mut row = Row::new(width, default_fg(), default_bg());

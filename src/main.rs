@@ -90,6 +90,11 @@ enum AppEvent {
     RequestUserAttention,
     RequestStartupRedraw,
     ReleaseStartupSurface,
+    RequestTerminalResize {
+        tab_id: TabId,
+        cols: u32,
+        rows: u32,
+    },
     RegisterInputEndpoint {
         tab_id: TabId,
         terminal: Arc<Mutex<Terminal>>,
@@ -185,6 +190,37 @@ impl WindowHost {
 
     fn keybindings(&self) -> Keybindings {
         self.input_state.lock().unwrap().keybindings.clone()
+    }
+
+    fn request_window_grid_size(
+        &self,
+        cols: u32,
+        rows: u32,
+    ) {
+        let Some(window) = &self.window else {
+            return;
+        };
+        let (_, _, gutter_width, _) = self.layout_snapshot();
+        let width = cols
+            .saturating_mul(self.cell_width)
+            .saturating_add(gutter_width)
+            .saturating_add((RESIZE_BORDER as u32) * 2);
+        let height = rows
+            .saturating_mul(self.cell_height)
+            .saturating_add(self.cell_height)
+            .saturating_add((RESIZE_BORDER as u32) * 2);
+        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+    }
+
+    fn request_window_size_for_tab(
+        &self,
+        tab_id: TabId,
+    ) {
+        let Some(endpoint) = self.input_endpoints.get(&tab_id) else {
+            return;
+        };
+        let terminal = endpoint.terminal.lock().unwrap();
+        self.request_window_grid_size(terminal.viewport.cols, terminal.viewport.rows);
     }
 
     fn update_preedit(
@@ -1207,6 +1243,11 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 }
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
+            AppEvent::RequestTerminalResize { tab_id, cols, rows } => {
+                if self.active_input_tab == Some(tab_id) {
+                    self.request_window_grid_size(cols, rows);
+                }
+            }
             AppEvent::RegisterInputEndpoint {
                 tab_id,
                 terminal,
@@ -1225,6 +1266,9 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
             AppEvent::SetActiveInputTab(tab_id) => {
                 self.active_input_tab = tab_id;
+                if let Some(tab_id) = tab_id {
+                    self.request_window_size_for_tab(tab_id);
+                }
             }
         }
     }
@@ -1540,6 +1584,16 @@ fn main() {
         render_thread_handle.clone(),
         Some(Arc::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
+        })),
+        Some(Arc::new({
+            let proxy = proxy.clone();
+            move |cols, rows| {
+                let _ = proxy.send_event(AppEvent::RequestTerminalResize {
+                    tab_id: TabId(0),
+                    cols,
+                    rows,
+                });
+            }
         })),
     );
 

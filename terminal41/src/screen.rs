@@ -33,6 +33,28 @@ pub struct SavedCursor {
     pub charset: CharsetState,
 }
 
+#[derive(Debug, Clone)]
+pub struct PageMemory {
+    /// Total number of lines in each logical page.
+    pub lines_per_page: u32,
+    /// Local row index of each page's first row inside `grid.rows`.
+    pub page_starts: Vec<usize>,
+    /// Currently displayed page.
+    pub active_page: u32,
+    /// Top visible line within the active page.
+    pub display_top: u32,
+}
+
+impl PageMemory {
+    pub fn page_count(&self) -> u32 {
+        self.page_starts.len() as u32
+    }
+
+    pub fn active_page_start(&self) -> usize {
+        self.page_starts[self.active_page as usize]
+    }
+}
+
 /// State for a single screen buffer (primary or alt). The terminal holds
 /// two of these — an `active` and a `stash` — and swaps between them with
 /// a single [`std::mem::swap`] on the alt-screen mode transitions.
@@ -107,6 +129,10 @@ pub struct Screen {
     /// characters. Set by ESC = (DECKPAM) or DECNKM (`?66 h`); cleared
     /// by ESC > (DECKPNM) or DECNKM (`?66 l`).
     pub app_keypad: bool,
+    /// VT420 page-memory state. `None` keeps the legacy "visible rows are
+    /// the live tail of the grid" behavior. When present, the visible
+    /// screen is an explicit slice of rows within page memory.
+    pub page_memory: Option<PageMemory>,
 }
 
 impl Screen {
@@ -153,8 +179,139 @@ impl Screen {
             autowrap: true,
             app_cursor_keys: false,
             app_keypad: false,
+            page_memory: None,
         }
     }
+}
+
+pub(super) fn screen_viewport(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> Viewport {
+    let mut view = Viewport {
+        rows: viewport.rows,
+        cols: viewport.cols,
+        top: viewport.top,
+    };
+    if let Some(page) = screen.page_memory.as_ref() {
+        view.top = page.active_page_start() + page.display_top as usize;
+    }
+    view
+}
+
+pub(super) fn page_count_for_lines(lines_per_page: u32) -> u32 {
+    144 / lines_per_page.max(1)
+}
+
+pub(super) fn page_memory_active(screen: &Screen) -> bool {
+    screen.page_memory.is_some()
+}
+
+pub(super) fn activate_page_memory(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    lines_per_page: u32,
+) {
+    let lines_per_page = lines_per_page.max(viewport.rows).max(1);
+    if screen.page_memory.is_some() {
+        resize_page_memory(screen, viewport, lines_per_page);
+        if let Some(page) = screen.page_memory.as_mut() {
+            page.display_top = page
+                .display_top
+                .min(lines_per_page.saturating_sub(viewport.rows));
+        }
+        return;
+    }
+
+    let view = screen_viewport(screen, viewport);
+    let page_count = page_count_for_lines(lines_per_page) as usize;
+    let page0_start = view.top_index(screen.grid.rows.len());
+    let required_tail_rows = page_count * lines_per_page as usize;
+    let current_tail_rows = screen.grid.rows.len().saturating_sub(page0_start);
+    if current_tail_rows < required_tail_rows {
+        let missing = required_tail_rows - current_tail_rows;
+        for _ in 0..missing {
+            screen.grid.rows.push_back(Row::new(
+                viewport.cols,
+                screen.grid.default_fg,
+                screen.grid.default_bg,
+            ));
+        }
+    }
+    let page_starts = (0..page_count)
+        .map(|idx| page0_start + idx * lines_per_page as usize)
+        .collect();
+    screen.page_memory = Some(PageMemory {
+        lines_per_page,
+        page_starts,
+        active_page: 0,
+        display_top: 0,
+    });
+}
+
+pub(super) fn resize_page_memory(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    lines_per_page: u32,
+) {
+    let lines_per_page = lines_per_page.max(viewport.rows).max(1);
+    let Some(page) = screen.page_memory.as_mut() else {
+        activate_page_memory(screen, viewport, lines_per_page);
+        return;
+    };
+
+    let page_count = page_count_for_lines(lines_per_page) as usize;
+    let active_page = page.active_page.min(page_count.saturating_sub(1) as u32);
+    let display_top = page
+        .display_top
+        .min(lines_per_page.saturating_sub(viewport.rows));
+    let page0_start = page.page_starts.first().copied().unwrap_or(0);
+    let required_tail_rows = page_count * lines_per_page as usize;
+    let current_tail_rows = screen.grid.rows.len().saturating_sub(page0_start);
+    if current_tail_rows < required_tail_rows {
+        let missing = required_tail_rows - current_tail_rows;
+        for _ in 0..missing {
+            screen.grid.rows.push_back(Row::new(
+                viewport.cols,
+                screen.grid.default_fg,
+                screen.grid.default_bg,
+            ));
+        }
+    } else if current_tail_rows > required_tail_rows {
+        screen.grid.rows.truncate(page0_start + required_tail_rows);
+    }
+    page.lines_per_page = lines_per_page;
+    page.page_starts = (0..page_count)
+        .map(|idx| page0_start + idx * lines_per_page as usize)
+        .collect();
+    page.active_page = active_page;
+    page.display_top = display_top;
+}
+
+pub(super) fn page_rows(screen: &Screen) -> Option<u32> {
+    screen.page_memory.as_ref().map(|page| page.lines_per_page)
+}
+
+pub(super) fn page_can_scroll_down(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> bool {
+    screen
+        .page_memory
+        .as_ref()
+        .is_some_and(|page| page.display_top + viewport.rows < page.lines_per_page)
+}
+
+pub(super) fn scroll_page_down(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    lines: u32,
+) {
+    let Some(page) = screen.page_memory.as_mut() else {
+        return;
+    };
+    let max_top = page.lines_per_page.saturating_sub(viewport.rows);
+    page.display_top = (page.display_top + lines).min(max_top);
 }
 
 /// Create the default tab-stop pattern: a stop every 8 columns
@@ -407,6 +564,7 @@ pub(super) fn resize_screen(
     let scrollback = screen.grid.scrollback_len(&Viewport {
         rows: new_rows,
         cols: new_cols,
+        top: 0,
     });
     screen.offset = screen.offset.min(scrollback);
 }

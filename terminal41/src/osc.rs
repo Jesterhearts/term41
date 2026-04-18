@@ -556,7 +556,7 @@ mod tests {
                 cwd: None,
                 registry: HyperlinkRegistry::new(),
                 screen: Screen::new(cols, rows, 100, color::default_fg(), color::default_bg()),
-                viewport: Viewport { rows, cols },
+                viewport: Viewport { rows, cols, top: 0 },
                 title: None,
                 prompt_row: None,
                 command_metas: HashMap::new(),

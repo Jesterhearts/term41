@@ -90,7 +90,7 @@ pub(crate) struct GutterPopup {
 // ---------------------------------------------------------------------------
 
 /// Width of the resize hit-test border in physical pixels.
-const RESIZE_BORDER: f32 = 5.0;
+pub(crate) const RESIZE_BORDER: f32 = 5.0;
 
 /// Number of cell-widths reserved for each window control button.
 pub(crate) const BUTTON_CELLS: f32 = 3.0;
@@ -649,7 +649,7 @@ impl RenderHost {
             let (cols, rows) = self
                 .font_system
                 .grid_dimensions(usable_width, usable_height);
-            for tab in &mut self.tabs {
+            if let Some(tab) = self.active_tab_mut() {
                 tab.terminal.lock().unwrap().resize(cols, rows);
                 tab.pty.resize(cols as u16, rows as u16);
             }
@@ -673,7 +673,7 @@ impl RenderHost {
         let (cols, rows) = self
             .font_system
             .grid_dimensions(usable_width, usable_height);
-        for tab in &mut self.tabs {
+        if let Some(tab) = self.active_tab_mut() {
             tab.terminal.lock().unwrap().resize(cols, rows);
             tab.pty.resize(cols as u16, rows as u16);
         }
@@ -772,6 +772,16 @@ impl RenderHost {
             pty_reader,
             self.render_thread_handle.clone(),
             None,
+            Some(Arc::new({
+                let proxy = self.proxy.clone();
+                move |cols, rows| {
+                    let _ = proxy.send_event(AppEvent::RequestTerminalResize {
+                        tab_id: id,
+                        cols,
+                        rows,
+                    });
+                }
+            })),
         );
         let _ = self.proxy.send_event(AppEvent::RegisterInputEndpoint {
             tab_id: id,

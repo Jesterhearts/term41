@@ -43,6 +43,7 @@ pub(super) struct CsiContext<'a> {
     pub modes: &'a mut TerminalModes,
     pub kitty_keyboard: &'a mut KittyKeyboardState,
     pub pending_output: &'a mut Vec<u8>,
+    pub pending_resize: &'a mut Option<(u32, u32)>,
     pub cursor_style: &'a mut CursorStyle,
     pub cell_width: u32,
     pub cell_height: u32,
@@ -125,6 +126,17 @@ const WINOP_REPORT_TEXT_SIZE: u16 = 18;
 // TBC (Tab Clear) parameter values.
 const TBC_CURRENT: u16 = 0;
 const TBC_ALL: u16 = 3;
+
+const VALID_SCREEN_LINE_COUNTS: &[u16] = &[24, 25, 36, 48];
+const VALID_PAGE_LINE_COUNTS: &[u16] = &[24, 25, 36, 48, 72, 144];
+
+fn valid_screen_lines(ps: u16) -> Option<u32> {
+    VALID_SCREEN_LINE_COUNTS.contains(&ps).then_some(ps as u32)
+}
+
+fn valid_page_lines(ps: u16) -> Option<u32> {
+    VALID_PAGE_LINE_COUNTS.contains(&ps).then_some(ps as u32)
+}
 
 fn can_negotiate_c1(modes: &TerminalModes) -> bool {
     !modes.vt52_mode && modes.conformance_level.supports_c1_negotiation()
@@ -622,7 +634,9 @@ fn soft_wrap(
     let r = screen.grid.active_row_index(&screen.cursor, viewport);
     screen.grid.rows[r].wrapped = true;
     if screen.cursor.row == screen.scroll_bottom {
-        if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
+        if screen::page_can_scroll_down(screen, viewport) {
+            screen::scroll_page_down(screen, viewport, 1);
+        } else if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
             screen.grid.push_visible_row(viewport);
         } else {
             screen.grid.scroll_up_in_region(
@@ -983,6 +997,39 @@ pub(super) fn csi_dispatch(
 
     // -- Sequences that carry intermediates ----------------------------------
 
+    if intermediates == b"*" && action == '|' {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(24);
+        if let Some(rows) = valid_screen_lines(ps) {
+            let page_rows = screen::page_rows(ctx.screen).unwrap_or(rows.max(ctx.viewport.rows));
+            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                screen::activate_page_memory(
+                    screen,
+                    &Viewport {
+                        rows,
+                        cols: ctx.viewport.cols,
+                        top: 0,
+                    },
+                    page_rows,
+                );
+            }
+            let old_cols = ctx.viewport.cols;
+            let old_rows = ctx.viewport.rows;
+            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                screen::resize_screen(screen, old_cols, old_rows, old_cols, rows);
+            }
+            ctx.viewport.rows = rows;
+            *ctx.pending_resize = Some((ctx.viewport.cols, rows));
+            ctx.screen.scroll_top = 0;
+            ctx.screen.scroll_bottom = rows.saturating_sub(1);
+            ctx.screen.cursor.row = ctx.screen.cursor.row.min(rows.saturating_sub(1));
+        }
+        return;
+    }
+
     if intermediates == b"?" && matches!(action, 'h' | 'l') {
         let enable = action == 'h';
         for p in params.iter() {
@@ -1045,7 +1092,8 @@ pub(super) fn csi_dispatch(
                 ctx.viewport.cols = new_cols;
                 // DECNCSM (mode 95): when set, skip the screen clear.
                 if !ctx.modes.decncsm {
-                    screen::clear_visible(ctx.screen, ctx.viewport);
+                    let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+                    screen::clear_visible(ctx.screen, &view);
                 }
                 ctx.screen.scroll_top = 0;
                 ctx.screen.scroll_bottom = rows.saturating_sub(1);
@@ -1095,6 +1143,7 @@ pub(super) fn csi_dispatch(
     // DECSED — Selective Erase in Display (CSI ? Ps J). Like ED but
     // cells with the PROTECTED attribute (set via DECSCA) are left intact.
     if action == 'J' && intermediates == b"?" {
+        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
         let mode = params
             .iter()
             .next()
@@ -1102,7 +1151,7 @@ pub(super) fn csi_dispatch(
             .unwrap_or(0);
         ctx.screen.grid.erase_in_display_selective(
             &ctx.screen.cursor,
-            ctx.viewport,
+            &view,
             &mut ctx.screen.images,
             mode,
         );
@@ -1112,6 +1161,7 @@ pub(super) fn csi_dispatch(
     // DECSEL — Selective Erase in Line (CSI ? Ps K). Like EL but
     // cells with the PROTECTED attribute are left intact.
     if action == 'K' && intermediates == b"?" {
+        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
         let mode = params
             .iter()
             .next()
@@ -1119,7 +1169,7 @@ pub(super) fn csi_dispatch(
             .unwrap_or(0);
         ctx.screen
             .grid
-            .erase_in_line_selective(&ctx.screen.cursor, ctx.viewport, mode);
+            .erase_in_line_selective(&ctx.screen.cursor, &view, mode);
         return;
     }
 
@@ -1323,6 +1373,31 @@ pub(super) fn csi_dispatch(
         return;
     }
 
+    // DECRQPSR — Request Presentation State Report.
+    if action == 'w' && intermediates == b"$" {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        if ps == 2 {
+            let stops = ctx
+                .screen
+                .tab_stops
+                .iter()
+                .enumerate()
+                .filter_map(|(idx, &set)| set.then_some((idx + 1).to_string()))
+                .collect::<Vec<_>>()
+                .join(";");
+            conformance::write_dcs(
+                ctx.pending_output,
+                ctx.modes.c1_mode,
+                format_args!("2$u{stops}"),
+            );
+        }
+        return;
+    }
+
     // DECXCPR — Extended Cursor Position Report (CSI ? 6 n). Reports the
     // cursor row, column, and page (always 1) as CSI ? row ; col ; 1 R.
     if action == 'n' && intermediates == b"?" {
@@ -1334,10 +1409,16 @@ pub(super) fn csi_dispatch(
         if ps == DSR_CPR {
             let row = ctx.screen.cursor.row + 1;
             let col = ctx.screen.cursor.col + 1;
+            let page = ctx
+                .screen
+                .page_memory
+                .as_ref()
+                .map(|page| page.active_page + 1)
+                .unwrap_or(1);
             conformance::write_csi(
                 ctx.pending_output,
                 ctx.modes.c1_mode,
-                format_args!("?{row};{col};1R"),
+                format_args!("?{row};{col};{page}R"),
             );
         }
         return;
@@ -1346,42 +1427,39 @@ pub(super) fn csi_dispatch(
     // SL — Scroll Left (CSI Ps SP @). Shifts every row in the scroll region
     // left by Ps columns; vacated columns on the right are cleared.
     if action == '@' && intermediates == b" " {
+        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
         let n = params
             .iter()
             .next()
             .and_then(|g| g.first().copied())
             .unwrap_or(1)
             .max(1) as u32;
-        ctx.screen.grid.scroll_left(
-            ctx.viewport,
-            ctx.screen.scroll_top,
-            ctx.screen.scroll_bottom,
-            n,
-        );
+        ctx.screen
+            .grid
+            .scroll_left(&view, ctx.screen.scroll_top, ctx.screen.scroll_bottom, n);
         return;
     }
 
     // SR — Scroll Right (CSI Ps SP A). Shifts every row in the scroll region
     // right by Ps columns; vacated columns on the left are cleared.
     if action == 'A' && intermediates == b" " {
+        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
         let n = params
             .iter()
             .next()
             .and_then(|g| g.first().copied())
             .unwrap_or(1)
             .max(1) as u32;
-        ctx.screen.grid.scroll_right(
-            ctx.viewport,
-            ctx.screen.scroll_top,
-            ctx.screen.scroll_bottom,
-            n,
-        );
+        ctx.screen
+            .grid
+            .scroll_right(&view, ctx.screen.scroll_top, ctx.screen.scroll_bottom, n);
         return;
     }
 
     // DECIC — Insert Column (CSI Ps ' }). Inserts Ps blank columns at the
     // cursor column in every row of the scroll region.
     if action == '}' && intermediates == b"'" {
+        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
         let n = params
             .iter()
             .next()
@@ -1389,7 +1467,7 @@ pub(super) fn csi_dispatch(
             .unwrap_or(1)
             .max(1) as u32;
         ctx.screen.grid.insert_cols(
-            ctx.viewport,
+            &view,
             ctx.screen.cursor.col,
             ctx.screen.scroll_top,
             ctx.screen.scroll_bottom,
@@ -1401,6 +1479,7 @@ pub(super) fn csi_dispatch(
     // DECDC — Delete Column (CSI Ps ' ~). Deletes Ps columns at the cursor
     // column in every row of the scroll region.
     if action == '~' && intermediates == b"'" {
+        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
         let n = params
             .iter()
             .next()
@@ -1408,7 +1487,7 @@ pub(super) fn csi_dispatch(
             .unwrap_or(1)
             .max(1) as u32;
         ctx.screen.grid.delete_cols(
-            ctx.viewport,
+            &view,
             ctx.screen.cursor.col,
             ctx.screen.scroll_top,
             ctx.screen.scroll_bottom,
@@ -1420,8 +1499,41 @@ pub(super) fn csi_dispatch(
     // DEC rectangular-area operations (CSI $ <action>).
     // Params are 1-based; converted to 0-based before calling grid methods.
     if intermediates == b"$" {
-        let rows = ctx.viewport.rows;
-        let cols = ctx.viewport.cols;
+        if action == '|' {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(80);
+            let Some(cols) = matches!(ps, 80 | 132).then_some(ps as u32) else {
+                return;
+            };
+            let old_cols = ctx.viewport.cols;
+            let old_rows = ctx.viewport.rows;
+            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                screen::resize_screen(screen, old_cols, old_rows, cols, old_rows);
+                if screen::page_memory_active(screen) {
+                    let page_rows = screen::page_rows(screen).unwrap_or(old_rows);
+                    screen::resize_page_memory(
+                        screen,
+                        &Viewport {
+                            rows: old_rows,
+                            cols,
+                            top: 0,
+                        },
+                        page_rows,
+                    );
+                }
+            }
+            ctx.viewport.cols = cols;
+            *ctx.pending_resize = Some((cols, ctx.viewport.rows));
+            ctx.screen.right_margin = cols.saturating_sub(1);
+            ctx.screen.cursor.col = ctx.screen.cursor.col.min(cols.saturating_sub(1));
+            return;
+        }
+        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+        let rows = view.rows;
+        let cols = view.cols;
         let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
 
         // Clamp and convert 1-based DEC rect params to 0-based.
@@ -1440,13 +1552,9 @@ pub(super) fn csi_dispatch(
         match action {
             // DECERA — Erase Rectangular Area. Fills with spaces, default colors.
             'z' => {
-                ctx.screen.grid.erase_rect(
-                    ctx.viewport,
-                    rect_top,
-                    rect_left,
-                    rect_bottom,
-                    rect_right,
-                );
+                ctx.screen
+                    .grid
+                    .erase_rect(&view, rect_top, rect_left, rect_bottom, rect_right);
             }
             // DECFRA — Fill Rectangular Area with character. Uses current SGR.
             'x' => {
@@ -1457,7 +1565,7 @@ pub(super) fn csi_dispatch(
                     let mut buf = [0u8; 4];
                     let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
                     ctx.screen.grid.fill_rect(
-                        ctx.viewport,
+                        &view,
                         rect_top,
                         rect_left,
                         rect_bottom,
@@ -1478,7 +1586,7 @@ pub(super) fn csi_dispatch(
                 let dst_top = p.get(5).copied().unwrap_or(1).max(1) as u32 - 1;
                 let dst_left = p.get(6).copied().unwrap_or(1).max(1) as u32 - 1;
                 ctx.screen.grid.copy_rect(
-                    ctx.viewport,
+                    &view,
                     rect_top,
                     rect_left,
                     rect_bottom,
@@ -1492,7 +1600,7 @@ pub(super) fn csi_dispatch(
             'r' => {
                 let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
                 ctx.screen.grid.reverse_attrs_rect(
-                    ctx.viewport,
+                    &view,
                     rect_top,
                     rect_left,
                     rect_bottom,
@@ -1505,7 +1613,7 @@ pub(super) fn csi_dispatch(
             't' => {
                 let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
                 ctx.screen.grid.change_attrs_rect(
-                    ctx.viewport,
+                    &view,
                     rect_top,
                     rect_left,
                     rect_bottom,
@@ -1580,6 +1688,32 @@ pub(super) fn csi_dispatch(
             .next()
             .and_then(|g| g.first().copied())
             .unwrap_or(0);
+        if params.iter().count() <= 1
+            && let Some(lines_per_page) = valid_page_lines(ps)
+        {
+            let rows = ctx.viewport.rows.min(lines_per_page);
+            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                screen::activate_page_memory(
+                    screen,
+                    &Viewport {
+                        rows,
+                        cols: ctx.viewport.cols,
+                        top: 0,
+                    },
+                    lines_per_page,
+                );
+            }
+            if rows != ctx.viewport.rows {
+                let old_cols = ctx.viewport.cols;
+                let old_rows = ctx.viewport.rows;
+                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                    screen::resize_screen(screen, old_cols, old_rows, old_cols, rows);
+                }
+                ctx.viewport.rows = rows;
+                *ctx.pending_resize = Some((ctx.viewport.cols, rows));
+            }
+            return;
+        }
         match ps {
             WINOP_TITLE_PUSH => {
                 // Second param (0 or 2) selects icon vs window title;
@@ -1638,15 +1772,43 @@ pub(super) fn csi_dispatch(
             .max(1);
         if let Some(ch) = ctx.screen.last_char.clone() {
             let insert = ctx.modes.insert_mode;
+            let view = screen::screen_viewport(ctx.screen, ctx.viewport);
             for _ in 0..n {
-                put_char(ctx.screen, ctx.viewport, ch.clone(), insert);
+                put_char(ctx.screen, &view, ch.clone(), insert);
+            }
+        }
+        return;
+    }
+
+    if intermediates == b" " && matches!(action, 'P' | 'Q' | 'R') {
+        let n = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(1)
+            .max(1) as u32;
+        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+        screen::activate_page_memory(ctx.screen, &view, view.rows);
+        if let Some(page) = ctx.screen.page_memory.as_mut() {
+            match action {
+                'P' => {
+                    page.active_page =
+                        (n.saturating_sub(1)).min(page.page_count().saturating_sub(1))
+                }
+                'Q' => {
+                    page.active_page =
+                        (page.active_page + n).min(page.page_count().saturating_sub(1))
+                }
+                'R' => page.active_page = page.active_page.saturating_sub(n),
+                _ => {}
             }
         }
         return;
     }
 
     let screen = &mut *ctx.screen;
-    let viewport = &*ctx.viewport;
+    let viewport = screen::screen_viewport(screen, ctx.viewport);
+    let viewport = &viewport;
     let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
     let cursor = &mut screen.cursor;
 
@@ -1809,7 +1971,9 @@ pub(super) fn csi_dispatch(
         }
         'S' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
+            if screen::page_can_scroll_down(screen, viewport) {
+                screen::scroll_page_down(screen, viewport, n);
+            } else if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
                 for _ in 0..n {
                     screen.grid.push_visible_row(viewport);
                 }
@@ -1869,6 +2033,26 @@ pub(super) fn csi_dispatch(
             // unambiguously the restore form.
             screen::restore_cursor_slot(screen, viewport);
         }
+        'U' => {
+            let n = p.first().copied().unwrap_or(1).max(1) as u32;
+            screen::activate_page_memory(screen, viewport, viewport.rows);
+            if let Some(page) = screen.page_memory.as_mut() {
+                page.active_page = (page.active_page + n).min(page.page_count().saturating_sub(1));
+                page.display_top = 0;
+            }
+            screen.cursor.row = 0;
+            screen.cursor.col = 0;
+        }
+        'V' => {
+            let n = p.first().copied().unwrap_or(1).max(1) as u32;
+            screen::activate_page_memory(screen, viewport, viewport.rows);
+            if let Some(page) = screen.page_memory.as_mut() {
+                page.active_page = page.active_page.saturating_sub(n);
+                page.display_top = 0;
+            }
+            screen.cursor.row = 0;
+            screen.cursor.col = 0;
+        }
         // CHT — Cursor Forward Tabulation. Advance Ps tab stops.
         'I' => {
             let n = p.first().copied().unwrap_or(1).max(1);
@@ -1918,6 +2102,9 @@ pub(super) fn esc_dispatch(
     intermediates: &[u8],
     byte: u8,
 ) {
+    let viewport = screen::screen_viewport(ctx.screen, ctx.viewport);
+    let viewport = &viewport;
+
     // VT52 mode — completely different ESC vocabulary, no CSI or parameters.
     // The `/` intermediate (ESC / Z identify response) shares the intermediate
     // byte space with ANSI SCS, so we must gate on vt52_mode *first*.
@@ -2108,23 +2295,27 @@ pub(super) fn esc_dispatch(
 
     match byte {
         b'7' => screen::save_cursor_slot(ctx.screen),
-        b'8' => screen::restore_cursor_slot(ctx.screen, ctx.viewport),
+        b'8' => screen::restore_cursor_slot(ctx.screen, viewport),
         // IND — Index. Move the cursor down one line; if at the bottom of
         // the scroll region, scroll the region up.
         b'D' => {
             if ctx.screen.cursor.row == ctx.screen.scroll_bottom {
-                if ctx.screen.scroll_top == 0 && ctx.screen.scroll_bottom == ctx.viewport.rows - 1 {
-                    ctx.screen.grid.push_visible_row(ctx.viewport);
+                if ctx.screen.scroll_top == 0 && ctx.screen.scroll_bottom == viewport.rows - 1 {
+                    if screen::page_can_scroll_down(ctx.screen, viewport) {
+                        screen::scroll_page_down(ctx.screen, viewport, 1);
+                    } else {
+                        ctx.screen.grid.push_visible_row(viewport);
+                    }
                 } else {
                     ctx.screen.grid.scroll_up_in_region(
-                        ctx.viewport,
+                        viewport,
                         &mut ctx.screen.images,
                         ctx.screen.scroll_top,
                         ctx.screen.scroll_bottom,
                         1,
                     );
                 }
-            } else if ctx.screen.cursor.row < ctx.viewport.rows - 1 {
+            } else if ctx.screen.cursor.row < viewport.rows - 1 {
                 ctx.screen.cursor.row += 1;
             }
         }
@@ -2133,18 +2324,22 @@ pub(super) fn esc_dispatch(
         b'E' => {
             ctx.screen.cursor.col = 0;
             if ctx.screen.cursor.row == ctx.screen.scroll_bottom {
-                if ctx.screen.scroll_top == 0 && ctx.screen.scroll_bottom == ctx.viewport.rows - 1 {
-                    ctx.screen.grid.push_visible_row(ctx.viewport);
+                if ctx.screen.scroll_top == 0 && ctx.screen.scroll_bottom == viewport.rows - 1 {
+                    if screen::page_can_scroll_down(ctx.screen, viewport) {
+                        screen::scroll_page_down(ctx.screen, viewport, 1);
+                    } else {
+                        ctx.screen.grid.push_visible_row(viewport);
+                    }
                 } else {
                     ctx.screen.grid.scroll_up_in_region(
-                        ctx.viewport,
+                        viewport,
                         &mut ctx.screen.images,
                         ctx.screen.scroll_top,
                         ctx.screen.scroll_bottom,
                         1,
                     );
                 }
-            } else if ctx.screen.cursor.row < ctx.viewport.rows - 1 {
+            } else if ctx.screen.cursor.row < viewport.rows - 1 {
                 ctx.screen.cursor.row += 1;
             }
         }
@@ -2165,7 +2360,7 @@ pub(super) fn esc_dispatch(
         b'M' => {
             if ctx.screen.cursor.row == ctx.screen.scroll_top {
                 ctx.screen.grid.scroll_down_in_region(
-                    ctx.viewport,
+                    viewport,
                     &mut ctx.screen.images,
                     ctx.screen.scroll_top,
                     ctx.screen.scroll_bottom,
@@ -2247,6 +2442,7 @@ mod tests {
         let viewport = Viewport {
             rows: TEST_ROWS,
             cols: TEST_COLS,
+            top: 0,
         };
         (screen, viewport)
     }
@@ -2272,6 +2468,7 @@ mod tests {
         let mut modes = TerminalModes::new();
         let mut kitty_keyboard = KittyKeyboardState::new();
         let mut pending_output = Vec::new();
+        let mut pending_resize = None;
         let mut cursor_style = CursorStyle::default();
         let mut bell_pending = false;
         let mut current_title = None;
@@ -2349,6 +2546,7 @@ mod tests {
                         modes: &mut modes,
                         kitty_keyboard: &mut kitty_keyboard,
                         pending_output: &mut pending_output,
+                        pending_resize: &mut pending_resize,
                         cursor_style: &mut cursor_style,
                         cell_width: 8,
                         cell_height: 16,
@@ -3154,6 +3352,7 @@ mod tests {
         let mut modes = TerminalModes::new();
         let mut kitty_keyboard = KittyKeyboardState::new();
         let mut pending_output = Vec::new();
+        let mut pending_resize = None;
         let mut cursor_style = CursorStyle::default();
         let mut bell_pending = false;
         let mut current_title = None;
@@ -3231,6 +3430,7 @@ mod tests {
                         modes: &mut modes,
                         kitty_keyboard: &mut kitty_keyboard,
                         pending_output: &mut pending_output,
+                        pending_resize: &mut pending_resize,
                         cursor_style: &mut cursor_style,
                         cell_width: 8,
                         cell_height: 16,
@@ -3287,6 +3487,57 @@ mod tests {
         screen.cursor_visible = false;
         let out = feed_with_output(b"\x1b[?25$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[?25;2$y");
+    }
+
+    #[test]
+    fn decsnls_resizes_visible_rows_and_activates_page_memory() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[36*|", &mut screen, &mut viewport);
+        assert_eq!(viewport.rows, 36);
+        assert_eq!(
+            screen.page_memory.as_ref().map(|page| page.lines_per_page),
+            Some(36)
+        );
+    }
+
+    #[test]
+    fn decslpp_extends_page_length_without_resizing_screen() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[72t", &mut screen, &mut viewport);
+        assert_eq!(viewport.rows, TEST_ROWS);
+        assert_eq!(
+            screen.page_memory.as_ref().map(|page| page.lines_per_page),
+            Some(72)
+        );
+    }
+
+    #[test]
+    fn decscpp_resizes_columns() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[132$|", &mut screen, &mut viewport);
+        assert_eq!(viewport.cols, 132);
+        assert_eq!(screen.right_margin, 131);
+    }
+
+    #[test]
+    fn decrqpsr_reports_tab_stops() {
+        let (mut screen, mut viewport) = setup();
+        screen.cursor.col = 3;
+        feed(b"\x1bH", &mut screen, &mut viewport);
+        let out = feed_with_output(b"\x1b[2$w", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1bP2$u4;9\x1b\\");
+    }
+
+    #[test]
+    fn np_switches_page_and_homes_cursor() {
+        let (mut screen, mut viewport) = setup();
+        screen.cursor.row = 5;
+        screen.cursor.col = 7;
+        feed(b"\x1b[2U", &mut screen, &mut viewport);
+        let page = screen.page_memory.as_ref().unwrap();
+        assert_eq!(page.active_page, 2);
+        assert_eq!(screen.cursor.row, 0);
+        assert_eq!(screen.cursor.col, 0);
     }
 
     #[test]
@@ -3364,6 +3615,7 @@ mod tests {
         let mut viewport = Viewport {
             rows: TEST_ROWS,
             cols: screen_cols,
+            top: 0,
         };
         // Default stops at 8, 16. CSI 2 I from col 0 should jump to 16.
         feed(b"\x1b[2I", &mut screen, &mut viewport);
@@ -3383,6 +3635,7 @@ mod tests {
         let mut viewport = Viewport {
             rows: TEST_ROWS,
             cols: screen_cols,
+            top: 0,
         };
         // Park at col 20, then CSI 2 Z (back 2 stops) should land at 8.
         screen.cursor.col = 20;
@@ -3720,6 +3973,7 @@ mod tests {
         let mut modes = TerminalModes::new();
         let mut kitty_keyboard = KittyKeyboardState::new();
         let mut pending_output = Vec::new();
+        let mut pending_resize = None;
         let mut cursor_style = CursorStyle::default();
         let mut bell_pending = false;
         let mut current_title = None;
@@ -3761,6 +4015,7 @@ mod tests {
                             modes: &mut modes,
                             kitty_keyboard: &mut kitty_keyboard,
                             pending_output: &mut pending_output,
+                            pending_resize: &mut pending_resize,
                             cursor_style: &mut cursor_style,
                             cell_width: 8,
                             cell_height: 16,

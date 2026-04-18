@@ -241,6 +241,7 @@ pub struct Terminal {
     /// the PTY — responses to queries like OSC 52 `?` reads. Drained by the
     /// event loop after each [`process`](Self::process) call.
     pending_output: Vec<u8>,
+    pending_host_resize: Option<(u32, u32)>,
 
     /// Terminal-level modes toggled by escape sequences (DECSET/DECRST,
     /// mode 2004, mode 2026, etc.) and reset together by RIS.
@@ -358,12 +359,13 @@ impl Terminal {
             // first ?1049h / ?47h arrives we simply swap `active` and
             // `stash` — no lazy construction needed.
             stash: Screen::new(cols, rows, 0, palette.fg, palette.bg),
-            viewport: Viewport { rows, cols },
+            viewport: Viewport { rows, cols, top: 0 },
             on_alt_screen: false,
             cell_height,
             next_image_id: 0,
             clipboard: Clipboard::new(),
             pending_output: Vec::new(),
+            pending_host_resize: None,
             modes: TerminalModes::new(),
             selection: None,
             search: SearchState::new(),
@@ -478,12 +480,31 @@ impl Terminal {
     /// Translate a viewport-relative screen row to an absolute row index
     /// (stable under scrollback trimming). `screen_row` is 0 at the top of
     /// the visible area.
+    fn active_viewport(&self) -> Viewport {
+        let mut view = screen::screen_viewport(&self.active, &self.viewport);
+        if !screen::page_memory_active(&self.active) {
+            view.top = self
+                .active
+                .grid
+                .rows
+                .len()
+                .saturating_sub(view.rows as usize)
+                .saturating_sub(self.active.offset as usize);
+        } else if self.active.offset > 0 {
+            view.top = view
+                .top_index(self.active.grid.rows.len())
+                .saturating_sub(self.active.offset as usize);
+        }
+        view
+    }
+
     fn screen_row_to_absolute(
         &self,
         screen_row: u32,
     ) -> u64 {
-        let base =
-            self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
+        let base = self
+            .active_viewport()
+            .top_index(self.active.grid.rows.len());
         (self.active.grid.total_popped + base + screen_row as usize) as u64
     }
 
@@ -1073,8 +1094,9 @@ impl Terminal {
         &self,
         screen_row: u32,
     ) -> &Row {
-        let base =
-            self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
+        let base = self
+            .active_viewport()
+            .top_index(self.active.grid.rows.len());
         &self.active.grid.rows[base + screen_row as usize]
     }
 
@@ -1099,6 +1121,9 @@ impl Terminal {
         &mut self,
         lines: u32,
     ) -> u32 {
+        if screen::page_memory_active(&self.active) {
+            return 0;
+        }
         let max = self.active.grid.scrollback_len(&self.viewport);
         let delta = lines.min(max.saturating_sub(self.active.offset));
         self.active.offset += delta;
@@ -1159,6 +1184,9 @@ impl Terminal {
         &mut self,
         target_abs: u64,
     ) {
+        if screen::page_memory_active(&self.active) {
+            return;
+        }
         let popped = self.active.grid.total_popped as u64;
         let Some(target_local) = target_abs.checked_sub(popped) else {
             return;
@@ -1185,8 +1213,9 @@ impl Terminal {
         &self,
         screen_row: u32,
     ) -> Option<u64> {
-        let base =
-            self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
+        let base = self
+            .active_viewport()
+            .top_index(self.active.grid.rows.len());
         let start = base + screen_row as usize;
         let popped = self.active.grid.total_popped as u64;
         for i in (0..=start).rev() {
@@ -1404,6 +1433,9 @@ impl Terminal {
         &mut self,
         lines: u32,
     ) -> u32 {
+        if screen::page_memory_active(&self.active) {
+            return 0;
+        }
         let delta = lines.min(self.active.offset);
         self.active.offset -= delta;
         delta
@@ -1411,6 +1443,9 @@ impl Terminal {
 
     /// Reset viewport to the bottom (live terminal).
     pub fn reset_viewport(&mut self) {
+        if screen::page_memory_active(&self.active) {
+            return;
+        }
         self.active.offset = 0;
     }
 
@@ -1427,9 +1462,9 @@ impl Terminal {
         &self,
         now: Instant,
     ) -> impl Iterator<Item = VisibleImage<'_>> {
-        let viewport_top =
-            self.active.grid.rows.len() - self.viewport.rows as usize - self.active.offset as usize;
-        let viewport_bottom = viewport_top + self.viewport.rows as usize;
+        let view = self.active_viewport();
+        let viewport_top = view.top_index(self.active.grid.rows.len());
+        let viewport_bottom = viewport_top + view.rows as usize;
         let cell_height = self.cell_height;
 
         self.active.images.values().filter_map(move |img| {
@@ -1464,10 +1499,19 @@ impl Terminal {
         // resize doesn't land the cursor outside its own grid.
         for screen in [&mut self.active, &mut self.stash] {
             resize_screen(screen, old_cols, old_rows, cols, rows);
+            if screen::page_memory_active(screen) {
+                if let Some(page_rows) = screen::page_rows(screen) {
+                    screen::resize_page_memory(screen, &Viewport { rows, cols, top: 0 }, page_rows);
+                }
+            }
         }
 
         self.viewport.cols = cols;
         self.viewport.rows = rows;
+    }
+
+    pub fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
+        self.pending_host_resize.take()
     }
 
     /// Apply a single parsed VTE action to the terminal state. Called by the
@@ -1510,9 +1554,10 @@ impl Terminal {
                         self.vt52_cursor_addr = Vt52CursorAddr::Idle;
                         // Any bytes after the two position bytes are normal text.
                         if run.len() > 2 {
+                            let view = screen::screen_viewport(&self.active, &self.viewport);
                             put_ascii_run(
                                 &mut self.active,
-                                &self.viewport,
+                                &view,
                                 &run[2..],
                                 self.modes.insert_mode,
                             );
@@ -1533,12 +1578,8 @@ impl Terminal {
                     if let Action::PrintAscii(run) = &action
                         && run.len() > 1
                     {
-                        put_ascii_run(
-                            &mut self.active,
-                            &self.viewport,
-                            &run[1..],
-                            self.modes.insert_mode,
-                        );
+                        let view = screen::screen_viewport(&self.active, &self.viewport);
+                        put_ascii_run(&mut self.active, &view, &run[1..], self.modes.insert_mode);
                     }
                     self.track_scroll(popped_before);
                     return;
@@ -1560,31 +1601,27 @@ impl Terminal {
         }
 
         match action {
-            Action::PrintAscii(run) => put_ascii_run(
-                &mut self.active,
-                &self.viewport,
-                run,
-                self.modes.insert_mode,
-            ),
-            Action::PrintText(run) => put_text_run(
-                &mut self.active,
-                &self.viewport,
-                run,
-                self.modes.insert_mode,
-            ),
-            Action::Print(c) => {
-                put_printable(&mut self.active, &self.viewport, c, self.modes.insert_mode)
+            Action::PrintAscii(run) => {
+                let view = screen::screen_viewport(&self.active, &self.viewport);
+                put_ascii_run(&mut self.active, &view, run, self.modes.insert_mode)
             }
-            Action::Print8Bit(byte) => put_8bit_byte(
-                &mut self.active,
-                &self.viewport,
-                byte,
-                self.modes.insert_mode,
-            ),
+            Action::PrintText(run) => {
+                let view = screen::screen_viewport(&self.active, &self.viewport);
+                put_text_run(&mut self.active, &view, run, self.modes.insert_mode)
+            }
+            Action::Print(c) => {
+                let view = screen::screen_viewport(&self.active, &self.viewport);
+                put_printable(&mut self.active, &view, c, self.modes.insert_mode)
+            }
+            Action::Print8Bit(byte) => {
+                let view = screen::screen_viewport(&self.active, &self.viewport);
+                put_8bit_byte(&mut self.active, &view, byte, self.modes.insert_mode)
+            }
             Action::Execute(byte) => {
+                let view = screen::screen_viewport(&self.active, &self.viewport);
                 execute(
                     &mut self.active,
-                    &self.viewport,
+                    &view,
                     byte,
                     &mut self.bell_pending,
                     self.modes.newline_mode,
@@ -1603,6 +1640,7 @@ impl Terminal {
                     modes: &mut self.modes,
                     kitty_keyboard: &mut self.kitty_keyboard,
                     pending_output: &mut self.pending_output,
+                    pending_resize: &mut self.pending_host_resize,
                     cursor_style: &mut self.cursor_style,
                     cell_width: self.cell_width,
                     cell_height: self.cell_height,
@@ -1801,6 +1839,7 @@ impl TerminalThread {
         pty_reader: PtyReader,
         render_thread: Arc<OnceLock<Thread>>,
         startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
+        host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
     ) {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_ = stop.clone();
@@ -1812,7 +1851,14 @@ impl TerminalThread {
                 handle_
                     .set(thread::current())
                     .expect("set terminal thread handle");
-                run_terminal_thread(terminal, pty_reader, stop_, render_thread, startup_redraw);
+                run_terminal_thread(
+                    terminal,
+                    pty_reader,
+                    stop_,
+                    render_thread,
+                    startup_redraw,
+                    host_resize,
+                );
             })
             .expect("spawn terminal thread");
     }
@@ -1887,6 +1933,27 @@ fn handle_decrqss(
             let left = terminal.active.left_margin + 1;
             let right = terminal.active.right_margin + 1;
             conformance::write_dcs(out, c1_mode, format_args!("1$r{left};{right}s"));
+        }
+        // DECSLPP — report lines per page.
+        b"t" => {
+            let lines = screen::page_rows(&terminal.active).unwrap_or(terminal.viewport.rows);
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{lines}t"));
+        }
+        // DECSCPP — report columns per page.
+        b"$|" => {
+            conformance::write_dcs(
+                out,
+                c1_mode,
+                format_args!("1$r{}$|", terminal.viewport.cols),
+            );
+        }
+        // DECSNLS — report visible lines per screen.
+        b"*|" => {
+            conformance::write_dcs(
+                out,
+                c1_mode,
+                format_args!("1$r{}*|", terminal.viewport.rows),
+            );
         }
         // DECSCL — report operating level / C1 transmission mode.
         b"\"p" => {
@@ -2039,6 +2106,7 @@ pub fn run_terminal_thread(
     stop: Arc<AtomicBool>,
     render_thread: Arc<OnceLock<Thread>>,
     startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
+    host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
 ) {
     let mut parser = vtepp::Parser::new();
     let mut hook_bytes: Vec<Vec<u8>> = vec![];
@@ -2115,6 +2183,11 @@ pub fn run_terminal_thread(
                     action => {
                         terminal.lock().unwrap().apply(action);
                     }
+                }
+                if let Some(request_resize) = host_resize.as_ref()
+                    && let Some((cols, rows)) = terminal.lock().unwrap().take_pending_host_resize()
+                {
+                    request_resize(cols, rows);
                 }
             }
             if terminal_batch_budget_exhausted(batch_start) {
@@ -2473,6 +2546,7 @@ fn handle_kitty_delete(
                 &Viewport {
                     rows: screen.grid.rows.len() as u32,
                     cols: 0,
+                    top: 0,
                 },
             );
             let cursor_col = screen.cursor.col;
@@ -3778,6 +3852,27 @@ mod tests {
         term.process(b"\x1b[>0q");
         let expected = format!("\x1bP>|term41 {}\x1b\\", env!("CARGO_PKG_VERSION"));
         assert_eq!(term.take_pending_output(), expected.as_bytes());
+    }
+
+    #[test]
+    fn decrqss_reports_page_geometry_settings() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[36*|\x1b[72t\x1b[132$|");
+        handle_decrqss(b"t", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r72t\x1b\\");
+        handle_decrqss(b"*|", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r36*|\x1b\\");
+        handle_decrqss(b"$|", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r132$|\x1b\\");
+    }
+
+    #[test]
+    fn page_geometry_commands_queue_host_resize() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[36*|");
+        assert_eq!(term.take_pending_host_resize(), Some((80, 36)));
+        term.process(b"\x1b[132$|");
+        assert_eq!(term.take_pending_host_resize(), Some((132, 36)));
     }
 
     // ---- RIS (ESC c) ----
