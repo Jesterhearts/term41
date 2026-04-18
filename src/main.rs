@@ -37,12 +37,20 @@ use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoop;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
+use winit::keyboard::ModifiersState;
+use winit::keyboard::NamedKey;
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::Window;
 use winit::window::WindowId;
 
+use crate::keybindings::Action;
+use crate::keybindings::Keybindings;
 use crate::renderer::RenderEvent;
 use crate::renderer::compute_gutter_width;
+use crate::renderer::ctrl_byte;
+use crate::renderer::kitty_encode_ime_commit;
+use crate::renderer::kitty_encode_input;
+use crate::renderer::legacy_encode_named;
 
 #[macro_use]
 extern crate log;
@@ -85,18 +93,32 @@ struct Tab {
     _terminal_thread: TerminalThread,
 }
 
+#[derive(Clone)]
+pub(crate) struct ActiveInputTarget {
+    terminal: Arc<Mutex<Terminal>>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+}
+
+pub(crate) struct InputState {
+    active: Option<ActiveInputTarget>,
+    keybindings: Keybindings,
+}
+
 struct WindowHost {
     window: Option<Arc<Window>>,
     startup_presenter: Option<StartupPresenter>,
     startup_release_tx: Option<mpsc::SyncSender<()>>,
     startup_terminal: Arc<Mutex<Terminal>>,
     startup_writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    input_state: Arc<Mutex<InputState>>,
     event_tx: cueue::Writer<RenderEvent>,
     /// One-shot channel to deliver the window + display handle to the render
     /// thread after `resumed()` creates the window. Taken (set to `None`)
     /// after the first send.
     window_tx: Option<mpsc::SyncSender<(Arc<Window>, OwnedDisplayHandle)>>,
     render_thread: Thread,
+    modifiers: ModifiersState,
+    ime_preedit_active: bool,
     opacity: f32,
     cell_width: u32,
     cell_height: u32,
@@ -113,6 +135,234 @@ impl WindowHost {
         ev: RenderEvent,
     ) {
         let _ = self.event_tx.push(ev);
+        self.render_thread.unpark();
+    }
+
+    fn active_input_target(&self) -> Option<ActiveInputTarget> {
+        self.input_state.lock().unwrap().active.clone()
+    }
+
+    fn keybindings(&self) -> Keybindings {
+        self.input_state.lock().unwrap().keybindings.clone()
+    }
+
+    fn flush_target_output(
+        &self,
+        target: &ActiveInputTarget,
+    ) {
+        let pending = target.terminal.lock().unwrap().take_pending_output();
+        if pending.is_empty() {
+            return;
+        }
+        let _ = target.writer.lock().unwrap().write_all(&pending);
+        target.terminal.lock().unwrap().reset_viewport();
+    }
+
+    fn handle_focus_event(
+        &mut self,
+        focused: bool,
+    ) {
+        let Some(target) = self.active_input_target() else {
+            return;
+        };
+        target.terminal.lock().unwrap().report_focus_change(focused);
+        self.flush_target_output(&target);
+        self.render_thread.unpark();
+    }
+
+    fn handle_search_key(
+        &self,
+        target: &ActiveInputTarget,
+        key: &Key,
+    ) {
+        let shift = self.modifiers.shift_key();
+        let mut terminal = target.terminal.lock().unwrap();
+        match key {
+            Key::Named(NamedKey::Escape) => terminal.close_search(),
+            Key::Named(NamedKey::Backspace) => terminal.search_backspace(),
+            Key::Named(NamedKey::Enter) => {
+                if shift {
+                    terminal.search_prev();
+                } else {
+                    terminal.search_next();
+                }
+            }
+            Key::Named(NamedKey::Space) => terminal.search_append(" "),
+            Key::Character(s) => terminal.search_append(s),
+            _ => {}
+        }
+    }
+
+    fn run_local_action(
+        &mut self,
+        action: Action,
+        target: &ActiveInputTarget,
+    ) -> bool {
+        match action {
+            Action::ScrollPageUp => {
+                let mut terminal = target.terminal.lock().unwrap();
+                let rows = terminal.viewport.rows;
+                terminal.scroll_viewport_up(rows);
+                true
+            }
+            Action::ScrollPageDown => {
+                let mut terminal = target.terminal.lock().unwrap();
+                let rows = terminal.viewport.rows;
+                terminal.scroll_viewport_down(rows);
+                true
+            }
+            Action::Copy => {
+                let mut terminal = target.terminal.lock().unwrap();
+                if terminal.has_selection() {
+                    terminal.copy_selection(clip41::ClipboardKind::Clipboard);
+                }
+                true
+            }
+            Action::Paste => {
+                target
+                    .terminal
+                    .lock()
+                    .unwrap()
+                    .paste_from_clipboard(clip41::ClipboardKind::Clipboard);
+                self.flush_target_output(target);
+                true
+            }
+            Action::OpenSearch => {
+                target.terminal.lock().unwrap().open_search();
+                true
+            }
+            Action::ScrollPrevPrompt => {
+                target.terminal.lock().unwrap().scroll_to_prev_prompt();
+                true
+            }
+            Action::ScrollNextPrompt => {
+                target.terminal.lock().unwrap().scroll_to_next_prompt();
+                true
+            }
+            Action::OpenNewWindow => {
+                let cwd = target.terminal.lock().unwrap().current_directory.clone();
+                spawn_new_window(cwd);
+                true
+            }
+            Action::NewTab
+            | Action::CloseTab
+            | Action::NextTab
+            | Action::PrevTab
+            | Action::PasteAsBackground
+            | Action::ClearPastedBackground => false,
+        }
+    }
+
+    fn handle_key_event(
+        &mut self,
+        key: Key,
+    ) {
+        if self.ime_preedit_active && matches!(key, Key::Character(_)) {
+            return;
+        }
+
+        let Some(target) = self.active_input_target() else {
+            return;
+        };
+
+        if target.terminal.lock().unwrap().search_active() {
+            self.handle_search_key(&target, &key);
+            self.render_thread.unpark();
+            return;
+        }
+
+        if let Some(action) = self.keybindings().lookup(&key, self.modifiers) {
+            if self.run_local_action(action, &target) {
+                self.render_thread.unpark();
+            } else {
+                self.send(RenderEvent::Action(action));
+            }
+            return;
+        }
+
+        let (kitty_flags, c1_mode) = {
+            let terminal = target.terminal.lock().unwrap();
+            (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
+        };
+        if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags, c1_mode) {
+            target.terminal.lock().unwrap().reset_viewport();
+            let _ = target.writer.lock().unwrap().write_all(&bytes);
+            self.render_thread.unpark();
+            return;
+        }
+
+        if self.modifiers.control_key() {
+            let byte = match &key {
+                Key::Character(c) => ctrl_byte(c),
+                Key::Named(NamedKey::Space) => Some(0x00),
+                _ => None,
+            };
+
+            if let Some(byte) = byte {
+                target.terminal.lock().unwrap().reset_viewport();
+                if self.modifiers.alt_key() {
+                    let _ = target.writer.lock().unwrap().write_all(&[0x1b, byte]);
+                } else {
+                    let _ = target.writer.lock().unwrap().write_all(&[byte]);
+                }
+                self.render_thread.unpark();
+                return;
+            }
+        }
+
+        let (app_cursor_keys, app_keypad, c1_mode) = {
+            let terminal = target.terminal.lock().unwrap();
+            (
+                terminal.active.app_cursor_keys,
+                terminal.active.app_keypad,
+                terminal.modes.c1_mode,
+            )
+        };
+
+        let bytes = match &key {
+            Key::Character(c) => {
+                if self.modifiers.alt_key() {
+                    let mut v = vec![0x1b];
+                    v.extend_from_slice(c.as_bytes());
+                    Some(v)
+                } else {
+                    Some(c.as_bytes().to_vec())
+                }
+            }
+            Key::Named(named) => {
+                legacy_encode_named(*named, self.modifiers, app_cursor_keys, app_keypad, c1_mode)
+            }
+            _ => None,
+        };
+
+        if let Some(bytes) = bytes {
+            target.terminal.lock().unwrap().reset_viewport();
+            let _ = target.writer.lock().unwrap().write_all(&bytes);
+            self.render_thread.unpark();
+        }
+    }
+
+    fn handle_ime_commit(
+        &mut self,
+        text: &str,
+    ) {
+        if text.is_empty() {
+            return;
+        }
+        let Some(target) = self.active_input_target() else {
+            return;
+        };
+        let (flags, c1_mode) = {
+            let terminal = target.terminal.lock().unwrap();
+            (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
+        };
+        let bytes = if flags.contains(terminal41::KittyFlags::REPORT_ASSOCIATED_TEXT) {
+            kitty_encode_ime_commit(text, c1_mode)
+        } else {
+            text.as_bytes().to_vec()
+        };
+        target.terminal.lock().unwrap().reset_viewport();
+        let _ = target.writer.lock().unwrap().write_all(&bytes);
         self.render_thread.unpark();
     }
 }
@@ -253,25 +503,30 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 return;
             }
 
-            WindowEvent::Focused(f) => RenderEvent::Focused(f),
+            WindowEvent::Focused(f) => {
+                self.handle_focus_event(f);
+                return;
+            }
 
             WindowEvent::KeyboardInput { event, .. } => {
                 if event.state != ElementState::Pressed {
                     return;
                 }
                 match &event.logical_key {
-                    Key::Character(_) | Key::Named(_) => {
-                        RenderEvent::KeyInput(event.logical_key.clone())
-                    }
+                    Key::Character(_) | Key::Named(_) => self.handle_key_event(event.logical_key),
                     _ => return,
                 }
+                return;
             }
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
                 RenderEvent::ScaleFactorChanged { scale_factor }
             }
 
-            WindowEvent::ModifiersChanged(mods) => RenderEvent::ModifiersChanged(mods.state()),
+            WindowEvent::ModifiersChanged(mods) => {
+                self.modifiers = mods.state();
+                RenderEvent::ModifiersChanged(self.modifiers)
+            }
 
             WindowEvent::CursorMoved { position, .. } => RenderEvent::CursorMoved {
                 x: position.x,
@@ -293,9 +548,23 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
             WindowEvent::Ime(ime) => match ime {
                 Ime::Enabled => RenderEvent::ImeEnabled(true),
-                Ime::Disabled => RenderEvent::ImeEnabled(false),
-                Ime::Preedit(text, cursor) => RenderEvent::ImePreedit { text, cursor },
-                Ime::Commit(text) => RenderEvent::ImeCommit(text),
+                Ime::Disabled => {
+                    self.ime_preedit_active = false;
+                    RenderEvent::ImeEnabled(false)
+                }
+                Ime::Preedit(text, cursor) => {
+                    self.ime_preedit_active = !text.is_empty();
+                    RenderEvent::ImePreedit { text, cursor }
+                }
+                Ime::Commit(text) => {
+                    self.handle_ime_commit(&text);
+                    self.ime_preedit_active = false;
+                    self.send(RenderEvent::ImePreedit {
+                        text: String::new(),
+                        cursor: None,
+                    });
+                    return;
+                }
             },
 
             _ => return,
@@ -378,6 +647,7 @@ fn main() {
     let startup_supersampling = config.font_supersampling;
     let startup_dpi_scale = config.dpi_scale;
     let startup_gutter = config.gutter;
+    let startup_keybindings = config.keybindings.clone();
 
     // Channels.
     let (event_tx, event_rx) =
@@ -434,6 +704,13 @@ fn main() {
     );
 
     let pty_writer = pty.writer();
+    let input_state = Arc::new(Mutex::new(InputState {
+        active: Some(ActiveInputTarget {
+            terminal: terminal.clone(),
+            writer: pty_writer.clone(),
+        }),
+        keybindings: startup_keybindings,
+    }));
     let tab = Tab {
         id: TabId(0),
         terminal: terminal.clone(),
@@ -448,6 +725,7 @@ fn main() {
     let render_thread_handle_ = render_thread_handle.clone();
     // Spawn the render thread.
     let config_reload_ = config_reload.clone();
+    let input_state_for_render = input_state.clone();
     thread::Builder::new()
         .name("renderer".into())
         .spawn(move || {
@@ -465,6 +743,7 @@ fn main() {
                 tab,
                 config,
                 config_path,
+                input_state_for_render,
             );
             host.run(window_rx, startup_release_rx);
         })
@@ -485,9 +764,12 @@ fn main() {
         startup_release_tx: Some(startup_release_tx),
         startup_terminal: terminal,
         startup_writer: pty_writer,
+        input_state,
         event_tx,
         window_tx: Some(window_tx),
         render_thread,
+        modifiers: ModifiersState::default(),
+        ime_preedit_active: false,
         opacity,
         cell_width,
         cell_height,

@@ -38,9 +38,11 @@ use winit::keyboard::NamedKey;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
+use crate::ActiveInputTarget;
 use crate::AppEvent;
 use crate::INITIAL_COLS;
 use crate::INITIAL_ROWS;
+use crate::InputState;
 use crate::MULTI_CLICK_WINDOW;
 use crate::MouseButtonState;
 use crate::Tab;
@@ -198,12 +200,8 @@ pub enum RenderEvent {
         width: u32,
         height: u32,
     },
-    Focused(bool),
-    /// Key press — carries the full `Key` value from winit so the render
-    /// thread can match keybindings and encode PTY input without any
-    /// SmolStr version wrangling.
-    KeyInput(Key),
     ModifiersChanged(ModifiersState),
+    Action(Action),
     CursorMoved {
         x: f64,
         y: f64,
@@ -234,9 +232,6 @@ pub enum RenderEvent {
         text: String,
         cursor: Option<(usize, usize)>,
     },
-    /// IME commit — finalized text to insert into the terminal. Delivered
-    /// after an empty `ImePreedit` in winit's event stream.
-    ImeCommit(String),
     /// IME was enabled or disabled by the compositor. Used to reset any
     /// stale preedit state on disable and let the render thread start
     /// issuing `set_ime_cursor_area` calls on enable.
@@ -301,6 +296,7 @@ pub struct RenderHost {
     /// by `PasteAsBackground` to read image data from the system
     /// clipboard regardless of which tab is active.
     clipboard: Clipboard,
+    input_state: Arc<Mutex<InputState>>,
 
     should_exit: bool,
 }
@@ -330,6 +326,7 @@ impl RenderHost {
         tab: Tab,
         config: Config,
         config_path: Option<PathBuf>,
+        input_state: Arc<Mutex<InputState>>,
     ) -> Self {
         Self {
             renderer: None,
@@ -362,6 +359,7 @@ impl RenderHost {
             preedit: None,
             ime_cursor_area: None,
             clipboard: Clipboard::new(),
+            input_state,
             should_exit: false,
         }
     }
@@ -520,17 +518,11 @@ impl RenderHost {
                 self.window_size = (*width, *height);
                 self.handle_resize(*width, *height);
             }
-            RenderEvent::Focused(focused) => {
-                if let Some(tab) = self.active_tab() {
-                    tab.terminal.lock().unwrap().report_focus_change(*focused);
-                }
-                self.flush_pending();
-            }
-            RenderEvent::KeyInput(key) => {
-                self.handle_key_input(key.clone());
-            }
             RenderEvent::ModifiersChanged(mods) => {
                 self.modifiers = *mods;
+            }
+            RenderEvent::Action(action) => {
+                self.run_action(*action);
             }
             RenderEvent::CursorMoved { x, y } => {
                 self.handle_cursor_moved(*x, *y);
@@ -547,153 +539,10 @@ impl RenderHost {
             RenderEvent::ImePreedit { text, cursor } => {
                 self.handle_ime_preedit(text.clone(), *cursor);
             }
-            RenderEvent::ImeCommit(text) => {
-                self.handle_ime_commit(text);
-            }
             RenderEvent::ImeEnabled(enabled) => {
                 if !*enabled {
                     self.preedit = None;
                 }
-            }
-        }
-    }
-
-    // -- Keyboard -----------------------------------------------------------
-
-    fn handle_key_input(
-        &mut self,
-        key: Key,
-    ) {
-        // While an IME preedit is active, drop plain text keys. Most
-        // platforms route the same keystroke through the IME path and will
-        // deliver a Commit; forwarding the Character too would double-insert.
-        // X11/XIM isn't fully consistent on this, so this guard keeps us
-        // correct on every backend. Named keys (arrows, etc.) and
-        // modifier-bearing chords still flow through — the IME doesn't
-        // absorb those.
-        if self.preedit.as_ref().is_some_and(|p| !p.text.is_empty())
-            && matches!(key, Key::Character(_))
-        {
-            return;
-        }
-
-        // Dismiss gutter popup on any keypress.
-        if self.gutter_popup.is_some() {
-            self.close_gutter_popup();
-            // Escape is consumed; other keys fall through to their normal
-            // action so the user isn't forced to press twice.
-            if matches!(key, Key::Named(NamedKey::Escape)) {
-                return;
-            }
-        }
-
-        // Search-bar routing runs ahead of keybindings and PTY encoding.
-        if let Some(tab) = self.active_tab()
-            && tab.terminal.lock().unwrap().search_active()
-        {
-            self.handle_search_key(&key);
-            return;
-        }
-
-        if let Some(action) = self.config.keybindings.lookup(&key, self.modifiers) {
-            self.run_action(action);
-            return;
-        }
-
-        if let Some(tab) = self.active_tab() {
-            let t = tab.terminal.lock().unwrap();
-            let kitty_flags = t.kitty_keyboard.current();
-            let c1_mode = t.modes.c1_mode;
-            drop(t);
-            if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags, c1_mode) {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.lock().unwrap().reset_viewport();
-                    let _ = tab.pty.write(&bytes);
-                }
-                return;
-            }
-        }
-
-        let mods = self.modifiers;
-
-        if mods.control_key() {
-            let byte = match &key {
-                Key::Character(c) => ctrl_byte(c),
-                Key::Named(NamedKey::Space) => Some(0x00),
-                _ => None,
-            };
-
-            if let Some(byte) = byte {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.lock().unwrap().reset_viewport();
-                    // Alt+Ctrl+key: prefix the control byte with ESC.
-                    if mods.alt_key() {
-                        let _ = tab.pty.write(&[0x1b, byte]);
-                    } else {
-                        let _ = tab.pty.write(&[byte]);
-                    }
-                }
-                return;
-            }
-        }
-
-        let (app_cursor_keys, app_keypad, c1_mode) = self
-            .active_tab()
-            .map(|tab| {
-                let t = tab.terminal.lock().unwrap();
-                (
-                    t.active.app_cursor_keys,
-                    t.active.app_keypad,
-                    t.modes.c1_mode,
-                )
-            })
-            .unwrap_or((false, false, C1Mode::SevenBit));
-
-        let bytes = match &key {
-            Key::Character(c) => {
-                if mods.alt_key() {
-                    // Alt+key sends ESC prefix + character bytes.
-                    let mut v = vec![0x1b];
-                    v.extend_from_slice(c.as_bytes());
-                    Some(v)
-                } else {
-                    Some(c.as_bytes().to_vec())
-                }
-            }
-            Key::Named(named) => {
-                legacy_encode_named(*named, mods, app_cursor_keys, app_keypad, c1_mode)
-            }
-            _ => None,
-        };
-
-        if let Some(bytes) = bytes
-            && let Some(tab) = self.active_tab_mut()
-        {
-            tab.terminal.lock().unwrap().reset_viewport();
-            let _ = tab.pty.write(&bytes);
-        }
-    }
-
-    fn handle_search_key(
-        &mut self,
-        key: &Key,
-    ) {
-        let shift = self.modifiers.shift_key();
-        if let Some(tab) = self.active_tab() {
-            let mut terminal = tab.terminal.lock().unwrap();
-            match key {
-                Key::Named(NamedKey::Escape) => terminal.close_search(),
-                Key::Named(NamedKey::Backspace) => terminal.search_backspace(),
-                Key::Named(NamedKey::Enter) => {
-                    if shift {
-                        terminal.search_prev();
-                    } else {
-                        terminal.search_next();
-                    }
-                }
-                Key::Named(NamedKey::Space) => terminal.search_append(" "),
-                Key::Character(s) => terminal.search_append(s),
-                _ => {}
             }
         }
     }
@@ -710,39 +559,6 @@ impl RenderHost {
         } else {
             self.preedit = Some(PreeditState { text, cursor });
         }
-        self.update_ime_cursor_area();
-    }
-
-    fn handle_ime_commit(
-        &mut self,
-        text: &str,
-    ) {
-        if text.is_empty() {
-            return;
-        }
-        // Kitty's REPORT_ASSOCIATED_TEXT turns the commit into a distinct
-        // event (key code 0) so editors can tell it apart from per-keystroke
-        // input. Without the flag, fall back to raw UTF-8 — that's what
-        // every non-kitty-aware app expects and how shells read typed text.
-        let Some(tab) = self.active_tab_mut() else {
-            return;
-        };
-        let t = tab.terminal.lock().unwrap();
-        let flags = t.kitty_keyboard.current();
-        let c1_mode = t.modes.c1_mode;
-        drop(t);
-        let bytes = if flags.contains(KittyFlags::REPORT_ASSOCIATED_TEXT) {
-            kitty_encode_ime_commit(text, c1_mode)
-        } else {
-            text.as_bytes().to_vec()
-        };
-        tab.terminal.lock().unwrap().reset_viewport();
-        let _ = tab.pty.write(&bytes);
-
-        // A commit ends the composition; winit sends an empty preedit
-        // before this too, but explicitly clearing here guards against
-        // platforms that skip that synthetic event.
-        self.preedit = None;
         self.update_ime_cursor_area();
     }
 
@@ -1502,6 +1318,7 @@ impl RenderHost {
             _terminal_thread: terminal_thread,
         });
         self.active_tab_id = id;
+        self.sync_input_state();
     }
 
     fn close_active_tab(&mut self) {
@@ -1511,12 +1328,14 @@ impl RenderHost {
         };
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
+            self.sync_input_state();
             self.should_exit = true;
             return;
         }
         let new_idx = idx.min(self.tabs.len() - 1);
         self.active_tab_id = self.tabs[new_idx].id;
         self.recalculate_grid_size();
+        self.sync_input_state();
     }
 
     fn switch_tab(
@@ -1534,6 +1353,7 @@ impl RenderHost {
         let n = self.tabs.len() as i32;
         let new_idx = ((idx as i32 + delta).rem_euclid(n)) as usize;
         self.active_tab_id = self.tabs[new_idx].id;
+        self.sync_input_state();
     }
 
     fn handle_child_exited(
@@ -1546,6 +1366,7 @@ impl RenderHost {
         let was_active = self.active_tab_id == tab_id;
         self.tabs.remove(idx);
         if self.tabs.is_empty() {
+            self.sync_input_state();
             self.should_exit = true;
             return;
         }
@@ -1554,6 +1375,7 @@ impl RenderHost {
             self.active_tab_id = self.tabs[new_idx].id;
         }
         self.recalculate_grid_size();
+        self.sync_input_state();
     }
 
     fn handle_tab_bar_click(&mut self) {
@@ -1561,6 +1383,7 @@ impl RenderHost {
             && let Some(tab) = self.tabs.get(idx)
         {
             self.active_tab_id = tab.id;
+            self.sync_input_state();
         }
     }
 
@@ -1579,6 +1402,7 @@ impl RenderHost {
             terminal.palette = cfg.palette.clone();
         }
         self.config.keybindings = cfg.keybindings;
+        self.sync_input_state();
         self.config.bell = cfg.bell;
         self.config.palette = cfg.palette.clone();
 
@@ -1942,8 +1766,19 @@ impl RenderHost {
                 let keep = self.active_tab_id;
                 self.tabs.retain(|t| t.id == keep);
                 self.recalculate_grid_size();
+                self.sync_input_state();
             }
         }
+    }
+
+    fn sync_input_state(&mut self) {
+        let active = self.active_tab().map(|tab| ActiveInputTarget {
+            terminal: tab.terminal.clone(),
+            writer: tab.pty.writer(),
+        });
+        let mut input_state = self.input_state.lock().unwrap();
+        input_state.active = active;
+        input_state.keybindings = self.config.keybindings.clone();
     }
 
     fn mouse_modifiers(&self) -> MouseModifiers {
@@ -2148,7 +1983,7 @@ fn format_duration(d: Duration) -> String {
     }
 }
 
-fn ctrl_byte(c: &str) -> Option<u8> {
+pub(crate) fn ctrl_byte(c: &str) -> Option<u8> {
     match c.as_bytes() {
         [b @ b'a'..=b'z'] => Some(b - b'a' + 1),
         [b @ b'A'..=b'Z'] => Some(b - b'A' + 1),
@@ -2208,7 +2043,7 @@ fn encode_ss3_bytes(
     out
 }
 
-fn kitty_encode_input(
+pub(crate) fn kitty_encode_input(
     key: &Key,
     mods: ModifiersState,
     flags: KittyFlags,
@@ -2369,7 +2204,7 @@ fn kitty_encode_named(
 /// modified keys use the `CSI 1;mod X` (arrows/Home/End) or
 /// `CSI code;mod ~` (F-keys/Ins/Del/PgUp/PgDn) format where
 /// mod = 1 + Shift(1) + Alt(2) + Ctrl(4).
-fn legacy_encode_named(
+pub(crate) fn legacy_encode_named(
     key: NamedKey,
     mods: ModifiersState,
     app_cursor_keys: bool,
