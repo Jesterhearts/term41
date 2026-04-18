@@ -789,6 +789,12 @@ impl RenderHost {
             None,
             Some(Arc::new({
                 let proxy = self.proxy.clone();
+                move || {
+                    let _ = proxy.send_event(AppEvent::FlushTerminalOutput(id));
+                }
+            })),
+            Some(Arc::new({
+                let proxy = self.proxy.clone();
                 move |cols, rows| {
                     let _ = proxy.send_event(AppEvent::RequestTerminalResize {
                         tab_id: id,

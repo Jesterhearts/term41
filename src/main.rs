@@ -90,6 +90,7 @@ enum AppEvent {
     RequestUserAttention,
     RequestStartupRedraw,
     ReleaseStartupSurface,
+    FlushTerminalOutput(TabId),
     RequestTerminalResize {
         tab_id: TabId,
         cols: u32,
@@ -272,6 +273,20 @@ impl WindowHost {
         }
         let _ = target.writer.borrow_mut().write(&pending);
         target.terminal.lock().unwrap().reset_viewport();
+    }
+
+    fn flush_tab_output(
+        &self,
+        tab_id: TabId,
+    ) {
+        let Some(target) = self.input_endpoints.get(&tab_id) else {
+            return;
+        };
+        let pending = target.terminal.lock().unwrap().take_pending_output();
+        if pending.is_empty() {
+            return;
+        }
+        let _ = target.writer.borrow_mut().write(&pending);
     }
 
     fn handle_focus_event(
@@ -1244,6 +1259,9 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 }
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
+            AppEvent::FlushTerminalOutput(tab_id) => {
+                self.flush_tab_output(tab_id);
+            }
             AppEvent::RequestTerminalResize { tab_id, cols, rows } => {
                 if self.active_input_tab == Some(tab_id) {
                     self.request_window_grid_size(cols, rows);
@@ -1585,6 +1603,12 @@ fn main() {
         render_thread_handle.clone(),
         Some(Arc::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
+        })),
+        Some(Arc::new({
+            let proxy = proxy.clone();
+            move || {
+                let _ = proxy.send_event(AppEvent::FlushTerminalOutput(TabId(0)));
+            }
         })),
         Some(Arc::new({
             let proxy = proxy.clone();

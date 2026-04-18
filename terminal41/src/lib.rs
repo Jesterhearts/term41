@@ -1839,6 +1839,7 @@ impl TerminalThread {
         pty_reader: PtyReader,
         render_thread: Arc<OnceLock<Thread>>,
         startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
+        output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
         host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
     ) {
         let stop = Arc::new(AtomicBool::new(false));
@@ -1857,6 +1858,7 @@ impl TerminalThread {
                     stop_,
                     render_thread,
                     startup_redraw,
+                    output_ready,
                     host_resize,
                 );
             })
@@ -2106,6 +2108,7 @@ pub fn run_terminal_thread(
     stop: Arc<AtomicBool>,
     render_thread: Arc<OnceLock<Thread>>,
     startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
+    output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
     host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
 ) {
     let mut parser = vtepp::Parser::new();
@@ -2201,6 +2204,9 @@ pub fn run_terminal_thread(
         }
         if did_work && let Some(request_redraw) = startup_redraw.as_ref() {
             request_redraw();
+        }
+        if did_work && let Some(notify_output) = output_ready.as_ref() {
+            notify_output();
         }
 
         if stop.load(Ordering::Acquire) {
