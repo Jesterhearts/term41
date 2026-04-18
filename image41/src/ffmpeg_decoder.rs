@@ -570,7 +570,8 @@ mod tests {
     /// Handcrafted 2-frame 2×1 GIF: red frame then blue frame, each with a
     /// 100 ms delay. Keeps the decoder end-to-end exercised without shipping
     /// a binary test fixture.
-    const TWO_FRAME_GIF_B64: &str = "R0lGODlhAgABAIAAAP8AAAAA/yH/\
+    const TWO_FRAME_GIF_B64: &str =
+        "R0lGODlhAgABAIAAAP8AAAAA/yH/\
          C05FVFNDQVBFMi4wAwEAAAAh+QQACgAAACwAAAAAAgABAAACAgQBACH5BAAKAAAALAAAAAACAAEAAAICTAEAOw==";
 
     #[test]

@@ -4,6 +4,7 @@ use std::time::Instant;
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
 use smol_str::SmolStr;
+use smol_str::SmolStrBuilder;
 use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthStr;
 use vtepp::Params;
@@ -479,12 +480,10 @@ pub(super) fn put_text_run(
         // UTF-8 codepoint — input is validated, so just compute the length
         // from the lead byte and slice directly.
         let len = utf8_char_len(bytes[i]);
-        put_char(
-            screen,
-            viewport,
-            SmolStr::new_inline(&run[i..i + len]),
-            insert_mode,
-        );
+        let mut builder = SmolStrBuilder::new();
+        builder.push_str(&run[i..i + len]);
+
+        put_char(screen, viewport, builder.finish(), insert_mode);
         i += len;
     }
 }
@@ -823,14 +822,15 @@ fn try_extend_prev_cell(
     // readline; `is_wide_anchor_at` looks at the grid state (continuation
     // cell to the right) rather than re-measuring this text, so the next
     // write won't misidentify the cell as a wide anchor and blank it.
-    let mut combined = String::with_capacity(prev.len() + s.len());
+    let mut combined = SmolStrBuilder::new();
     combined.push_str(prev);
     combined.push_str(s);
+    let combined = combined.finish();
     if combined.graphemes(true).count() != 1 {
         return;
     }
 
-    screen.grid.rows[prev_row].cells[prev_col] = SmolStr::new(&combined);
+    screen.grid.rows[prev_row].cells[prev_col] = combined;
 }
 
 pub(super) fn execute(

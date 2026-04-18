@@ -3,6 +3,7 @@ pub mod glyph_atlas;
 pub mod image_atlas;
 mod r#impl;
 mod shelf;
+pub(crate) mod startup;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -36,6 +37,7 @@ use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
 use winit::window::Window;
 
+use crate::APP_START_TIME;
 use crate::AppEvent;
 use crate::INITIAL_COLS;
 use crate::INITIAL_ROWS;
@@ -47,6 +49,7 @@ use crate::config::BellMode;
 use crate::config::Config;
 use crate::config::DEFAULT_SCROLLBACK;
 use crate::keybindings::Action;
+use crate::renderer::r#impl::PreparedRenderer;
 use crate::renderer::r#impl::Renderer;
 use crate::renderer::r#impl::TabInfo;
 use crate::renderer::r#impl::WindowControls;
@@ -368,9 +371,10 @@ impl RenderHost {
     pub fn run(
         &mut self,
         window_rx: mpsc::Receiver<(Arc<Window>, OwnedDisplayHandle)>,
+        startup_release_rx: mpsc::Receiver<()>,
     ) {
         let mut frames = 0u64;
-        let runtime = Instant::now();
+        let mut prepared_renderer: Option<PreparedRenderer> = None;
 
         // Phase 1: wait for the window and initialize the renderer.
         let (window, display) = match window_rx.recv() {
@@ -436,7 +440,18 @@ impl RenderHost {
             // one comparison and nothing else.
             self.update_ime_cursor_area();
 
+            if prepared_renderer.is_none() {
+                prepared_renderer = Some(tracing::debug_span!("prepare_renderer").in_scope(|| {
+                    pollster::block_on(Renderer::prepare(
+                        display.clone(),
+                        self.config.power_preference,
+                    ))
+                }));
+            }
+
             if self.renderer.is_none() {
+                let _ = self.proxy.send_event(AppEvent::ReleaseStartupSurface);
+                let _ = startup_release_rx.recv();
                 // Surface the precedence rule once at startup so the user
                 // isn't confused why their config edit appears to do
                 // nothing — the pasted bg overrides until cleared.
@@ -450,16 +465,17 @@ impl RenderHost {
                     );
                 }
                 self.renderer = Some(tracing::debug_span!("create_renderer").in_scope(|| {
-                    pollster::block_on(Renderer::new(
+                    Renderer::from_prepared(
+                        prepared_renderer
+                            .take()
+                            .expect("prepared renderer must exist before surface handoff"),
                         window.clone(),
-                        display.clone(),
                         self.config.opacity,
                         self.config.gutter,
-                        self.config.power_preference,
                         self.config.vsync,
                         effective_bg_path(&self.config),
                         self.config.background_opacity,
-                    ))
+                    )
                 }));
             }
             // Tick the background's animation clock and re-upload its
@@ -484,7 +500,7 @@ impl RenderHost {
             if frames.is_multiple_of(100) {
                 debug!(
                     "rendering at {:0.0} fps",
-                    frames as f64 / runtime.elapsed().as_secs_f64()
+                    frames as f64 / APP_START_TIME.get().unwrap().elapsed().as_secs_f64()
                 );
             }
         }
@@ -1476,6 +1492,7 @@ impl RenderHost {
             terminal.clone(),
             pty_reader,
             self.render_thread_handle.clone(),
+            None,
         );
 
         self.tabs.push(Tab {
@@ -2543,7 +2560,7 @@ fn clear_pasted_backgrounds() {
 /// always wins over the config-supplied path. The "pasted always wins
 /// until cleared" rule keeps the precedence one-line debuggable —
 /// "does a pasted file exist?" is the whole question.
-fn effective_bg_path(config: &Config) -> Option<PathBuf> {
+pub(crate) fn effective_bg_path(config: &Config) -> Option<PathBuf> {
     find_pasted_background().or_else(|| config.background_image.clone())
 }
 

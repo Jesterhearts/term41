@@ -5,6 +5,7 @@ mod config;
 mod keybindings;
 mod renderer;
 
+use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -15,11 +16,13 @@ use std::sync::mpsc;
 use std::thread;
 use std::thread::Thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use config::Config;
 use font41::FontSystem;
 use pty_pipe41::Pty;
 use renderer::RenderHost;
+use renderer::startup::StartupPresenter;
 use terminal41::MouseButton as TermMouseButton;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
@@ -43,6 +46,8 @@ use crate::renderer::compute_gutter_width;
 
 #[macro_use]
 extern crate log;
+
+static APP_START_TIME: OnceLock<Instant> = OnceLock::new();
 
 const INITIAL_COLS: u32 = 80;
 const INITIAL_ROWS: u32 = 24;
@@ -68,6 +73,8 @@ enum AppEvent {
     SetTitle(String),
     RequestUserAttention,
     SpawnNewWindow { cwd: Option<PathBuf> },
+    RequestStartupRedraw,
+    ReleaseStartupSurface,
 }
 
 struct Tab {
@@ -80,6 +87,10 @@ struct Tab {
 
 struct WindowHost {
     window: Option<Arc<Window>>,
+    startup_presenter: Option<StartupPresenter>,
+    startup_release_tx: Option<mpsc::SyncSender<()>>,
+    startup_terminal: Arc<Mutex<Terminal>>,
+    startup_writer: Arc<Mutex<Box<dyn Write + Send>>>,
     event_tx: cueue::Writer<RenderEvent>,
     /// One-shot channel to deliver the window + display handle to the render
     /// thread after `resumed()` creates the window. Taken (set to `None`)
@@ -89,6 +100,11 @@ struct WindowHost {
     opacity: f32,
     cell_width: u32,
     cell_height: u32,
+    startup_fonts: Option<String>,
+    startup_font_size: f32,
+    startup_supersampling: i32,
+    startup_dpi_scale: Option<f32>,
+    startup_gutter: bool,
 }
 
 impl WindowHost {
@@ -107,7 +123,7 @@ const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
 impl ApplicationHandler<AppEvent> for WindowHost {
     fn user_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         event: AppEvent,
     ) {
         match event {
@@ -123,6 +139,24 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
             AppEvent::SpawnNewWindow { cwd } => {
                 spawn_new_window(cwd);
+            }
+            AppEvent::RequestStartupRedraw => {
+                if self.startup_presenter.is_some()
+                    && let Some(window) = &self.window
+                {
+                    window.request_redraw();
+                }
+            }
+            AppEvent::ReleaseStartupSurface => {
+                info!(
+                    "Releasing startup surface: {} ms",
+                    APP_START_TIME.get().unwrap().elapsed().as_millis()
+                );
+                self.startup_presenter = None;
+                if let Some(tx) = self.startup_release_tx.take() {
+                    let _ = tx.send(());
+                }
+                event_loop.set_control_flow(ControlFlow::Wait);
             }
         }
     }
@@ -159,6 +193,23 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
         let window = Arc::new(event_loop.create_window(attrs).expect("create window"));
 
+        let scale_factor = self
+            .startup_dpi_scale
+            .map(|s| s as f64)
+            .unwrap_or_else(|| window.scale_factor());
+        self.startup_presenter = StartupPresenter::new(
+            window.clone(),
+            self.startup_fonts.clone(),
+            self.startup_font_size,
+            self.startup_supersampling,
+            scale_factor,
+            self.startup_gutter,
+        );
+        if let Some(presenter) = self.startup_presenter.as_mut() {
+            presenter.present(&window, &self.startup_terminal, &self.startup_writer);
+            window.request_redraw();
+        }
+
         // Opt into IME events. `ImePurpose::Terminal` is a hint some
         // Wayland compositors and Android IMEs use to expose extra keys
         // (arrows, Tab, etc.) that wouldn't normally appear on a text-input
@@ -191,6 +242,16 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 width: size.width,
                 height: size.height,
             },
+
+            WindowEvent::RedrawRequested => {
+                if let (Some(window), Some(presenter)) =
+                    (self.window.as_ref(), self.startup_presenter.as_mut())
+                {
+                    presenter.present(window, &self.startup_terminal, &self.startup_writer);
+                    return;
+                }
+                return;
+            }
 
             WindowEvent::Focused(f) => RenderEvent::Focused(f),
 
@@ -280,6 +341,8 @@ impl MouseButtonState {
 fn main() {
     use tracing_subscriber::fmt::format::FmtSpan;
 
+    let _ = APP_START_TIME.set(Instant::now());
+
     tracing_subscriber::fmt()
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_span_events(FmtSpan::CLOSE)
@@ -310,16 +373,23 @@ fn main() {
     let cell_width = font_system.cell_width;
     let cell_height = font_system.cell_height;
     let opacity = config.opacity;
+    let startup_fonts = config.fonts.clone();
+    let startup_font_size = config.font_size;
+    let startup_supersampling = config.font_supersampling;
+    let startup_dpi_scale = config.dpi_scale;
+    let startup_gutter = config.gutter;
 
     // Channels.
     let (event_tx, event_rx) =
         cueue::cueue::<RenderEvent>(EVENT_QUEUE_SIZE).expect("create event queue");
     let (window_tx, window_rx) = mpsc::sync_channel(1);
+    let (startup_release_tx, startup_release_rx) = mpsc::sync_channel(1);
     let (child_exit_tx, child_exit_rx) = mpsc::channel();
     let config_reload = Arc::new(AtomicBool::new(false));
     let render_thread_handle: Arc<OnceLock<Thread>> = Arc::new(OnceLock::new());
 
     let proxy = event_loop.create_proxy();
+    let startup_redraw_proxy = proxy.clone();
 
     // Create the terminal thread handle before spawning the PTY so the PTY
     // reader can unpark the terminal thread once it starts.
@@ -358,11 +428,15 @@ fn main() {
         terminal.clone(),
         pty_reader,
         render_thread_handle.clone(),
+        Some(Arc::new(move || {
+            let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
+        })),
     );
 
+    let pty_writer = pty.writer();
     let tab = Tab {
         id: TabId(0),
-        terminal,
+        terminal: terminal.clone(),
         pty,
         _terminal_thread: terminal_thread,
     };
@@ -392,7 +466,7 @@ fn main() {
                 config,
                 config_path,
             );
-            host.run(window_rx);
+            host.run(window_rx, startup_release_rx);
         })
         .expect("spawn render thread");
 
@@ -407,12 +481,21 @@ fn main() {
 
     let mut host = WindowHost {
         window: None,
+        startup_presenter: None,
+        startup_release_tx: Some(startup_release_tx),
+        startup_terminal: terminal,
+        startup_writer: pty_writer,
         event_tx,
         window_tx: Some(window_tx),
         render_thread,
         opacity,
         cell_width,
         cell_height,
+        startup_fonts,
+        startup_font_size,
+        startup_supersampling,
+        startup_dpi_scale,
+        startup_gutter,
     };
     event_loop.run_app(&mut host).expect("run event loop");
 }

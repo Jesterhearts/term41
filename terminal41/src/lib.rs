@@ -1789,6 +1789,7 @@ impl TerminalThread {
         terminal: Arc<Mutex<Terminal>>,
         pty_reader: PtyReader,
         render_thread: Arc<OnceLock<Thread>>,
+        startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
     ) {
         let stop = Arc::new(AtomicBool::new(false));
         let stop_ = stop.clone();
@@ -1800,7 +1801,7 @@ impl TerminalThread {
                 handle_
                     .set(thread::current())
                     .expect("set terminal thread handle");
-                run_terminal_thread(terminal, pty_reader, stop_, render_thread);
+                run_terminal_thread(terminal, pty_reader, stop_, render_thread, startup_redraw);
             })
             .expect("spawn terminal thread");
     }
@@ -2026,6 +2027,7 @@ pub fn run_terminal_thread(
     mut pty_reader: PtyReader,
     stop: Arc<AtomicBool>,
     render_thread: Arc<OnceLock<Thread>>,
+    startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
 ) {
     let mut parser = vtepp::Parser::new();
     let mut hook_bytes: Vec<Vec<u8>> = vec![];
@@ -2106,6 +2108,9 @@ pub fn run_terminal_thread(
 
         if did_work && let Some(t) = render_thread.get() {
             t.unpark();
+        }
+        if did_work && let Some(request_redraw) = startup_redraw.as_ref() {
+            request_redraw();
         }
 
         if stop.load(Ordering::Acquire) {

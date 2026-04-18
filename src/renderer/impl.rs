@@ -9,10 +9,12 @@ use font41::FontSystem;
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
 use palette::Srgb;
+use smol_str::SmolStrBuilder;
 use terminal41::ColorPalette;
 use terminal41::CursorShape;
 use terminal41::LineAttr;
 use terminal41::Terminal;
+use unicode_segmentation::UnicodeSegmentation;
 use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
@@ -30,6 +32,11 @@ use crate::renderer::background::BgImageVertex;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
+
+pub const MAX_TAB_WIDTH: f32 = 30.0;
+pub const SUCCESS: [u8; 3] = [80, 200, 120];
+pub const FAILURE: [u8; 3] = [220, 80, 80];
+pub const RUNNING: [u8; 3] = [140, 140, 140];
 
 /// Packed vertex for background quads: position + color.
 #[repr(C)]
@@ -72,7 +79,7 @@ fn pack_color(
 /// the renderer already treats the existing cell fg/bg as sRGB8 throughout,
 /// so a gamma-correct blend would be inconsistent with the rest of the
 /// pipeline and is overkill for the search-bar highlight use case.
-fn blend(
+pub(crate) fn blend(
     a: Srgb<u8>,
     b: Srgb<u8>,
     t: f32,
@@ -91,7 +98,7 @@ fn blend(
 
 /// Apply SGR reverse (swap fg/bg) and dim (halve fg brightness) to a cell's
 /// stored colours, returning the effective (fg, bg) pair for rendering.
-fn resolve_cell_colors(
+pub(crate) fn resolve_cell_colors(
     fg: &Srgb<u8>,
     bg: &Srgb<u8>,
     attrs: CellAttrs,
@@ -112,6 +119,101 @@ fn resolve_cell_colors(
         fg = bg;
     }
     (fg, bg)
+}
+
+/// Shared row-layout result consumed by both the GPU renderer and the
+/// startup software presenter. This keeps shaping, style synthesis, and
+/// effective-foreground decisions in one place even though the two
+/// backends rasterize/blit differently.
+pub(crate) struct CollectedGlyph {
+    pub font_index: usize,
+    pub glyph_id: u16,
+    pub cells_wide: u8,
+    pub col: u16,
+    pub x_offset: f32,
+    pub y_offset: f32,
+    pub fg: Srgb<u8>,
+    pub synth_bold: bool,
+    pub synth_italic: bool,
+}
+
+pub(crate) fn collect_row_glyphs(
+    font_system: &mut FontSystem,
+    snap: &TermSnapshot,
+    snap_row: &RowSnapshot,
+    row: u32,
+    visible_cols: u32,
+    block_cursor: Option<(u32, u32)>,
+    blink_off: bool,
+    rapid_blink_off: bool,
+) -> Vec<CollectedGlyph> {
+    let shaped = font_system.shape_row(&snap_row.cells, &snap_row.attrs);
+    let mut collected = Vec::with_capacity(shaped.len());
+
+    for sg in shaped {
+        if sg.col as u32 >= visible_cols {
+            continue;
+        }
+
+        let cell_attrs = snap_row.attrs[sg.col as usize];
+        if cell_attrs.contains(CellAttrs::BLINK) && blink_off {
+            continue;
+        }
+        if cell_attrs.contains(CellAttrs::RAPID_BLINK) && rapid_blink_off {
+            continue;
+        }
+
+        let wants_bold = cell_attrs.contains(CellAttrs::BOLD);
+        let wants_italic = cell_attrs.contains(CellAttrs::ITALIC);
+        let synth_bold = wants_bold && !font_system.font_is_bold(sg.font_index);
+        let synth_italic = wants_italic && !font_system.font_is_italic(sg.font_index);
+
+        let selected = snap_row
+            .selected
+            .get(sg.col as usize)
+            .copied()
+            .unwrap_or(false);
+        let matched = snap_row
+            .matched
+            .get(sg.col as usize)
+            .copied()
+            .unwrap_or(false);
+        let active_match = snap_row
+            .active_match
+            .get(sg.col as usize)
+            .copied()
+            .unwrap_or(false);
+        let block_cursor_here = block_cursor == Some((row, sg.col as u32));
+        let (cell_fg, cell_bg) = resolve_cell_colors(
+            &snap_row.fg[sg.col as usize],
+            &snap_row.bg[sg.col as usize],
+            cell_attrs,
+            snap.screen_reverse,
+        );
+        let fg = if active_match {
+            cell_fg
+        } else if selected {
+            snap.palette.selection_fg.unwrap_or(cell_bg)
+        } else if matched || block_cursor_here {
+            cell_bg
+        } else {
+            cell_fg
+        };
+
+        collected.push(CollectedGlyph {
+            font_index: sg.font_index,
+            glyph_id: sg.glyph_id,
+            cells_wide: sg.cells_wide,
+            col: sg.col,
+            x_offset: sg.x_offset,
+            y_offset: sg.y_offset,
+            fg,
+            synth_bold,
+            synth_italic,
+        });
+    }
+
+    collected
 }
 
 /// Emit background-pass quads for the given underline style. `uy` is the
@@ -433,6 +535,14 @@ pub struct Renderer {
     gutter_enabled: bool,
 }
 
+pub struct PreparedRenderer {
+    instance: wgpu::Instance,
+    adapter: wgpu::Adapter,
+    device: wgpu::Device,
+    queue: wgpu::Queue,
+    pipeline_cache: Option<wgpu::PipelineCache>,
+}
+
 /// Half-period of the cursor blink. xterm uses 530ms by default; 500 lands
 /// just shy of that and is the common choice for newer terminals.
 const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
@@ -473,18 +583,10 @@ const BELL_FLASH_DURATION: Duration = Duration::from_millis(150);
 const BELL_FLASH_PEAK_ALPHA: f32 = 80.0;
 
 impl Renderer {
-    pub async fn new(
-        window: Arc<Window>,
+    pub async fn prepare(
         display: OwnedDisplayHandle,
-        opacity: f32,
-        gutter_enabled: bool,
         power_preference: PowerPreference,
-        vsync: VSync,
-        background_image: Option<PathBuf>,
-        background_opacity: f32,
-    ) -> Self {
-        let size = window.inner_size();
-
+    ) -> PreparedRenderer {
         let instance = tracing::debug_span!("create_instance").in_scope(|| {
             let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
             #[cfg(not(feature = "vulkan"))]
@@ -499,13 +601,11 @@ impl Renderer {
             wgpu::Instance::new(desc)
         });
 
-        let surface = tracing::debug_span!("create_surface")
-            .in_scope(|| instance.create_surface(window).expect("create surface"));
         let adapter = {
             let _s = tracing::debug_span!("request_adapter").entered();
             instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
-                    compatible_surface: Some(&surface),
+                    compatible_surface: None,
                     power_preference,
                     ..Default::default()
                 })
@@ -532,12 +632,42 @@ impl Renderer {
                 .expect("request device")
         };
 
-        let pipeline_cache = cfg_select! {
+        let pipeline_cache: Option<wgpu::PipelineCache> = cfg_select! {
             feature = "vulkan" => {
                 tracing::debug_span!("load_pipeline_cache").in_scope(||Some(load_pipeline_cache(&device)))
             }
             _ => None,
         };
+
+        PreparedRenderer {
+            instance,
+            adapter,
+            device,
+            queue,
+            pipeline_cache,
+        }
+    }
+
+    pub fn from_prepared(
+        prepared: PreparedRenderer,
+        window: Arc<Window>,
+        opacity: f32,
+        gutter_enabled: bool,
+        vsync: VSync,
+        background_image: Option<PathBuf>,
+        background_opacity: f32,
+    ) -> Self {
+        let PreparedRenderer {
+            instance,
+            adapter,
+            device,
+            queue,
+            pipeline_cache,
+        } = prepared;
+
+        let size = window.inner_size();
+        let surface = tracing::debug_span!("create_surface")
+            .in_scope(|| instance.create_surface(window).expect("create surface"));
 
         let surface_caps = surface.get_capabilities(&adapter);
         let preferred_formats = [
@@ -1493,15 +1623,29 @@ impl Renderer {
         layout: &FrameLayout,
         geometry: &mut RenderGeometry,
     ) {
-        let shaped = font_system.shape_row(&snap_row.cells, &snap_row.attrs);
         let is_double_wide = !matches!(line_attr, LineAttr::Normal);
+        let block_cursor = match cursor_state {
+            CursorRenderState::Visible {
+                row,
+                col,
+                shape: CursorShape::Block,
+            } => Some((row, col)),
+            _ => None,
+        };
+        let glyphs = collect_row_glyphs(
+            font_system,
+            snap,
+            snap_row,
+            row,
+            visible_cols,
+            block_cursor,
+            blink_off,
+            rapid_blink_off,
+        );
 
-        for sg in &shaped {
-            if sg.col as u32 >= visible_cols {
-                continue;
-            }
+        for glyph in glyphs {
             if let Some(clip) = popup_clip {
-                let cx = sg.col as f32 * effective_cell_w + layout.gutter_px;
+                let cx = glyph.col as f32 * effective_cell_w + layout.gutter_px;
                 if cx < clip.right
                     && cx + effective_cell_w > clip.left
                     && y < clip.bottom
@@ -1511,30 +1655,18 @@ impl Renderer {
                 }
             }
 
-            let cell_attrs = snap_row.attrs[sg.col as usize];
-            let wants_bold = cell_attrs.contains(CellAttrs::BOLD);
-            let wants_italic = cell_attrs.contains(CellAttrs::ITALIC);
-            let synth_bold = wants_bold && !font_system.font_is_bold(sg.font_index);
-            let synth_italic = wants_italic && !font_system.font_is_italic(sg.font_index);
-
             let slot = match self.glyph_atlas.ensure_cached(
                 &self.queue,
                 font_system,
-                sg.font_index,
-                sg.glyph_id,
-                sg.cells_wide,
-                synth_bold,
+                glyph.font_index,
+                glyph.glyph_id,
+                glyph.cells_wide,
+                glyph.synth_bold,
             ) {
                 Some(e) => e,
                 None => continue,
             };
             if slot.is_empty() {
-                continue;
-            }
-            if cell_attrs.contains(CellAttrs::BLINK) && blink_off {
-                continue;
-            }
-            if cell_attrs.contains(CellAttrs::RAPID_BLINK) && rapid_blink_off {
                 continue;
             }
 
@@ -1543,9 +1675,9 @@ impl Renderer {
             let sw = slot.width();
             let sh = slot.height();
             let scale_x = if is_double_wide { 2.0_f32 } else { 1.0 };
-            let gx = sg.col as f32 * effective_cell_w
+            let gx = glyph.col as f32 * effective_cell_w
                 + slot.bearing_x as f32 * scale_x
-                + sg.x_offset * scale_x
+                + glyph.x_offset * scale_x
                 + layout.gutter_px;
             let gx = gx.floor();
             let gw = (sw as f32 * scale_x).ceil();
@@ -1560,7 +1692,8 @@ impl Renderer {
                 } else {
                     y - layout.cell_h
                 };
-                let gy_v = y_origin + (layout.baseline - slot.bearing_y as f32 - sg.y_offset) * 2.0;
+                let gy_v =
+                    y_origin + (layout.baseline - slot.bearing_y as f32 - glyph.y_offset) * 2.0;
                 let gh_v = 2.0 * sh as f32;
                 let vis_top = gy_v.max(y);
                 let vis_bot = (gy_v + gh_v).min(y + layout.cell_h);
@@ -1571,48 +1704,16 @@ impl Renderer {
                 let uv_bot = sy as f32 + sh as f32 * (vis_bot - gy_v) / gh_v;
                 (vis_top, vis_bot - vis_top, uv_top, uv_bot)
             } else {
-                let gy = y + layout.baseline - slot.bearing_y as f32 - sg.y_offset;
+                let gy = y + layout.baseline - slot.bearing_y as f32 - glyph.y_offset;
                 (gy, sh as f32, sy as f32, (sy + sh) as f32)
             };
             let gy = gy.floor();
             let gh = gh.ceil();
 
             let baseline_y = y + layout.baseline;
-            let shear = if synth_italic { 0.2126_f32 } else { 0.0 };
+            let shear = if glyph.synth_italic { 0.2126_f32 } else { 0.0 };
             let shear_at = |vy: f32| -> f32 { shear * (baseline_y - vy) };
-
-            let selected = snap_row
-                .selected
-                .get(sg.col as usize)
-                .copied()
-                .unwrap_or(false);
-            let matched = snap_row
-                .matched
-                .get(sg.col as usize)
-                .copied()
-                .unwrap_or(false);
-            let active_match = snap_row
-                .active_match
-                .get(sg.col as usize)
-                .copied()
-                .unwrap_or(false);
-            let block_cursor_here = cursor_state.is_block_at(row, sg.col as u32);
-            let (cell_fg, cell_bg) = resolve_cell_colors(
-                &snap_row.fg[sg.col as usize],
-                &snap_row.bg[sg.col as usize],
-                cell_attrs,
-                snap.screen_reverse,
-            );
-            let fg_effective = if active_match {
-                cell_fg
-            } else if selected {
-                snap.palette.selection_fg.unwrap_or(cell_bg)
-            } else if matched || block_cursor_here {
-                cell_bg
-            } else {
-                cell_fg
-            };
-            let fg_color = pack_color(&fg_effective, 255);
+            let fg_color = pack_color(&glyph.fg, 255);
             let flags: u32 = if slot.is_color { 1 } else { 0 };
             let fi = geometry.fg_vertices.len() as u32;
             geometry.fg_vertices.extend_from_slice(&[
@@ -1983,7 +2084,7 @@ impl Renderer {
 
         // Divide available width equally among tabs, capped to a
         // reasonable maximum so a single tab doesn't span the screen.
-        let max_tab_w = cell_w * 30.0;
+        let max_tab_w = (cell_w * MAX_TAB_WIDTH).min(surface_w);
         let tab_w = if tabs.is_empty() {
             0.0
         } else {
@@ -2050,14 +2151,14 @@ impl Renderer {
             // margin on each side.
             let margin = cell_w;
             let max_label_chars = ((tab_w - margin * 2.0) / cell_w).max(1.0) as usize;
-            let label_chars = tab.label.chars().count();
+            let label_chars = tab.label.graphemes(true).count();
             if label_chars > max_label_chars {
                 // If the label is too long, truncate and add an ellipsis.
-                let ellipsis = '…';
+                let ellipsis = "…";
                 let truncated_len = max_label_chars.saturating_sub(1);
                 let truncated_label: String = tab
                     .label
-                    .chars()
+                    .graphemes(true)
                     .take(truncated_len)
                     .chain(std::iter::once(ellipsis))
                     .collect();
@@ -2219,10 +2320,11 @@ impl Renderer {
         fg_indices: &mut Vec<u32>,
     ) {
         let cells: Vec<smol_str::SmolStr> = text
-            .chars()
-            .map(|c| {
-                let mut buf = [0u8; 4];
-                smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
+            .graphemes(true)
+            .map(|g| {
+                let mut builder = SmolStrBuilder::new();
+                builder.push_str(g);
+                builder.finish()
             })
             .collect();
         let attrs = vec![CellAttrs::default(); cells.len()];
@@ -2337,7 +2439,7 @@ impl Renderer {
         // one cell per char is the same approximation we use throughout
         // the ASCII-dominant pieces of this code.
         let max_chars = cols as usize;
-        let label_chars: Vec<char> = label.chars().take(max_chars).collect();
+        let label_graphemes: Vec<&str> = label.graphemes(true).take(max_chars).collect();
 
         // Caret sits at the end of the typed query, in column terms. The
         // prompt is exactly "Find: " (6 chars); the caret lives right
@@ -2399,11 +2501,12 @@ impl Renderer {
         // Label glyphs. Shape through the normal text pipeline so the bar
         // respects whatever font variants are loaded and goes through the
         // atlas LRU like any other glyph.
-        let cells: Vec<smol_str::SmolStr> = label_chars
+        let cells: Vec<smol_str::SmolStr> = label_graphemes
             .iter()
-            .map(|c| {
-                let mut buf = [0u8; 4];
-                smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
+            .map(|g| {
+                let mut builder = SmolStrBuilder::new();
+                builder.push_str(g);
+                builder.finish()
             })
             .collect();
         let attrs = vec![CellAttrs::default(); cells.len()];
@@ -2749,8 +2852,8 @@ impl Renderer {
         // full-width chars in general, but the preedit is a transient
         // overlay on top of the grid, and the candidate popup does the
         // real work of showing full-width layout options.
-        let visible_chars: Vec<char> = preedit.text.chars().take(max_chars).collect();
-        let visible_len = visible_chars.len();
+        let visible_graphemes: Vec<&str> = preedit.text.graphemes(true).take(max_chars).collect();
+        let visible_len = visible_graphemes.len();
         if visible_len == 0 {
             return;
         }
@@ -2849,11 +2952,12 @@ impl Renderer {
 
         // Shape the composing text through the same pipeline normal cells
         // use so fonts, ligatures, and fallback chains behave identically.
-        let cells: Vec<smol_str::SmolStr> = visible_chars
+        let cells: Vec<smol_str::SmolStr> = visible_graphemes
             .iter()
-            .map(|c| {
-                let mut buf = [0u8; 4];
-                smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
+            .map(|g| {
+                let mut builder = SmolStrBuilder::new();
+                builder.push_str(g);
+                builder.finish()
             })
             .collect();
         let attrs = vec![CellAttrs::default(); cells.len()];
@@ -3074,10 +3178,6 @@ fn render_gutter_markers(
     let bar_x = (gutter_px - bar_w) * 0.5;
     let bar_h = cell_h * 0.9;
     let bar_y = (cell_h - bar_h) * 0.5;
-
-    const SUCCESS: [u8; 3] = [80, 200, 120];
-    const FAILURE: [u8; 3] = [220, 80, 80];
-    const RUNNING: [u8; 3] = [140, 140, 140];
 
     for (row_idx, row) in snap.rows.iter().enumerate() {
         if !row.prompt_start {

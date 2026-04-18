@@ -4,6 +4,7 @@ use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -17,6 +18,9 @@ use portable_pty::CommandBuilder;
 use portable_pty::MasterPty;
 use portable_pty::PtySize;
 use portable_pty::native_pty_system;
+
+#[macro_use]
+extern crate log;
 
 pub const MAX_READ_CHUNK: usize = 128 * 1024;
 pub const MAX_BUFFER: usize = MAX_READ_CHUNK * 8 * 32; // 32 MB
@@ -64,7 +68,7 @@ impl PtyReader {
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
     child_killer: Box<dyn ChildKiller>,
-    writer: Box<dyn Write + Send>,
+    writer: Arc<Mutex<Box<dyn Write + Send>>>,
 }
 
 impl Pty {
@@ -94,6 +98,8 @@ impl Pty {
     where
         TabId: Send + 'static + Into<u64>,
     {
+        let start_time = std::time::Instant::now();
+
         let pty_system = native_pty_system();
         let pair = pty_system
             .openpty(PtySize {
@@ -151,7 +157,7 @@ impl Pty {
         // new bytes arrive.
         thread::Builder::new()
             .name("pty-reader".into())
-            .spawn(move || pump_reader(reader, read_tx, data_thread, pending_read_))
+            .spawn(move || pump_reader(start_time, reader, read_tx, data_thread, pending_read_))
             .map_err(io::Error::other)?;
 
         // The child watcher unparks the render thread so it can handle the
@@ -172,10 +178,14 @@ impl Pty {
             Self {
                 master: pair.master,
                 child_killer,
-                writer,
+                writer: Arc::new(Mutex::new(writer)),
             },
             PtyReader { rx, pending_read },
         ))
+    }
+
+    pub fn writer(&self) -> Arc<Mutex<Box<dyn Write + Send>>> {
+        self.writer.clone()
     }
 
     /// Write bytes to the PTY (sends input to the shell).
@@ -183,7 +193,7 @@ impl Pty {
         &mut self,
         data: &[u8],
     ) -> io::Result<()> {
-        self.writer.write_all(data)
+        self.writer.lock().unwrap().write_all(data)
     }
 
     /// Notify the PTY of a terminal resize.
@@ -208,12 +218,14 @@ impl Drop for Pty {
 }
 
 fn pump_reader(
+    start_time: std::time::Instant,
     mut reader: Box<dyn Read + Send>,
     mut tx: cueue::Writer<u8>,
     consumer_thread: Arc<OnceLock<Thread>>,
     pending_read: Arc<AtomicBool>,
 ) {
     let mut buf = [0u8; MAX_READ_CHUNK];
+    let mut read = false;
 
     loop {
         match reader.read(&mut buf) {
@@ -225,24 +237,23 @@ fn pump_reader(
                         Ok(m) => {
                             written += m;
                             tx.commit(m);
-                            if written >= n {
-                                break;
-                            }
                             if !pending_read.swap(true, Ordering::AcqRel)
                                 && let Some(t) = consumer_thread.get()
                             {
+                                if !read {
+                                    info!("TTFR: {} ms", start_time.elapsed().as_millis());
+                                    read = true;
+                                }
                                 t.unpark();
+                            }
+                            if written >= n {
+                                break;
                             }
                             thread::yield_now();
                         }
                         Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,
                         Err(_) => return,
                     }
-                }
-                if !pending_read.swap(true, Ordering::AcqRel)
-                    && let Some(t) = consumer_thread.get()
-                {
-                    t.unpark();
                 }
             }
             Err(err) if err.kind() == io::ErrorKind::Interrupted => continue,

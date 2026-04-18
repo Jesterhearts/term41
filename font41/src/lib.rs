@@ -45,6 +45,7 @@ static FAIRFAX_HD: &[u8] = include_bytes!("../resources/fonts/FairfaxHD.ttf");
 /// into the alpha channel with `rgb = 0`; color glyphs (COLR, emoji bitmaps)
 /// encode full colour and set `is_color = true` so the shader samples the
 /// atlas directly instead of tinting by the fg colour.
+#[derive(Debug, Clone)]
 pub struct RasterizedGlyph {
     pub bitmap: Vec<u8>,
     pub width: u32,
@@ -221,9 +222,11 @@ impl FontSystem {
         // Kick off font loading in the background so the window appears
         // immediately. FONTS/FAMILIES start empty; shape_row falls through
         // to the embedded fallback until they're populated.
-        let _ = thread::Builder::new()
-            .name("font-loader".into())
-            .spawn(|| load_and_install_fonts(fonts_config));
+        if FONTS.read().unwrap().is_empty() {
+            let _ = thread::Builder::new()
+                .name("font-loader".into())
+                .spawn(|| load_and_install_fonts(fonts_config));
+        }
 
         // Always append embedded Fairfax HD as ultimate fallback. It ships
         // only a regular face; cells that want bold/italic from the fallback

@@ -10,6 +10,7 @@
 
 use pulp::Simd;
 use smol_str::SmolStr;
+use smol_str::SmolStrBuilder;
 
 const MAX_PARAMS: usize = 16;
 const MAX_INTERMEDIATES: usize = 4;
@@ -692,7 +693,11 @@ impl Parser {
             let s = std::str::from_utf8(&self.utf8_buf[..self.utf8_len as usize]);
             // Up to 4 UTF-8 bytes → always fits inline in SmolStr (23-byte cap).
             match s.ok() {
-                Some(s) => Some(RawAction::Print(SmolStr::new_inline(s))),
+                Some(s) => {
+                    let mut builder = SmolStrBuilder::new();
+                    builder.push_str(s);
+                    Some(RawAction::Print(builder.finish()))
+                }
                 None => Some(RawAction::Print(SmolStr::new_inline("\u{FFFD}"))),
             }
         } else {
