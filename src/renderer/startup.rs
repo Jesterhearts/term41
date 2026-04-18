@@ -1,8 +1,6 @@
 use std::collections::HashMap;
-use std::io::Write;
 use std::num::NonZeroU32;
 use std::sync::Arc;
-use std::sync::Mutex;
 
 use font41::FontSystem;
 use font41::RasterizedGlyph;
@@ -14,11 +12,11 @@ use softbuffer::Context;
 use softbuffer::Surface;
 use terminal41::CursorShape;
 use terminal41::LineAttr;
-use terminal41::Terminal;
 use unicode_segmentation::UnicodeSegmentation;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
+use crate::InputEndpoint;
 use crate::renderer::compute_gutter_width;
 use crate::renderer::r#impl::FAILURE;
 use crate::renderer::r#impl::MAX_TAB_WIDTH;
@@ -84,8 +82,7 @@ impl StartupPresenter {
     pub(crate) fn present(
         &mut self,
         window: &Arc<Window>,
-        terminal: &Arc<Mutex<Terminal>>,
-        writer: &Arc<Mutex<Box<dyn Write + Send>>>,
+        target: &InputEndpoint,
     ) {
         let size = window.inner_size();
         let Some(width) = NonZeroU32::new(size.width.max(1)) else {
@@ -101,7 +98,7 @@ impl StartupPresenter {
         }
 
         let (title, snap, pending) = {
-            let mut terminal = terminal.lock().unwrap();
+            let mut terminal = target.terminal.lock().unwrap();
             let title = terminal
                 .current_title
                 .clone()
@@ -110,7 +107,7 @@ impl StartupPresenter {
             let pending = terminal.take_pending_output();
             (title, snap, pending)
         };
-        writer.lock().unwrap().write_all(&pending).ok();
+        target.writer.borrow_mut().write(&pending).ok();
 
         let mut buffer = match self.surface.buffer_mut() {
             Ok(buffer) => buffer,

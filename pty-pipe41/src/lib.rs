@@ -4,7 +4,6 @@ use std::io;
 use std::io::Read;
 use std::io::Write;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -63,17 +62,22 @@ impl PtyReader {
 }
 
 /// Write half of a PTY connection. Keeps the master fd (for resize), the
-/// child killer (for cleanup), and the writer (for keyboard/paste input).
-/// Lives on the render thread.
+/// child killer (for cleanup). Lives on the render thread.
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
     child_killer: Box<dyn ChildKiller>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+}
+
+/// Input half of a PTY connection. Lives on the window thread so user input
+/// can be forwarded to the child process without cross-thread locking.
+pub struct PtyWriter {
+    writer: Box<dyn Write + Send>,
 }
 
 impl Pty {
     /// Spawns a child process in a new PTY with the given grid size. Returns
-    /// the write half (`Pty`) and the read half (`PtyReader`).
+    /// the resize/child-control half (`Pty`), the write half (`PtyWriter`),
+    /// and the read half (`PtyReader`).
     ///
     /// When `command` is `Some`, the first element is the program and the rest
     /// are its arguments; otherwise the user's default shell is launched.
@@ -94,7 +98,7 @@ impl Pty {
         data_thread: Arc<OnceLock<Thread>>,
         render_thread: Arc<OnceLock<Thread>>,
         child_exit_tx: mpsc::Sender<TabId>,
-    ) -> io::Result<(Self, PtyReader)>
+    ) -> io::Result<(Self, PtyWriter, PtyReader)>
     where
         TabId: Send + 'static + Into<u64>,
     {
@@ -178,22 +182,10 @@ impl Pty {
             Self {
                 master: pair.master,
                 child_killer,
-                writer: Arc::new(Mutex::new(writer)),
             },
+            PtyWriter { writer },
             PtyReader { rx, pending_read },
         ))
-    }
-
-    pub fn writer(&self) -> Arc<Mutex<Box<dyn Write + Send>>> {
-        self.writer.clone()
-    }
-
-    /// Write bytes to the PTY (sends input to the shell).
-    pub fn write(
-        &mut self,
-        data: &[u8],
-    ) -> io::Result<()> {
-        self.writer.lock().unwrap().write_all(data)
     }
 
     /// Notify the PTY of a terminal resize.
@@ -214,6 +206,16 @@ impl Pty {
 impl Drop for Pty {
     fn drop(&mut self) {
         let _ = self.child_killer.kill();
+    }
+}
+
+impl PtyWriter {
+    /// Write bytes to the PTY (sends input to the shell).
+    pub fn write(
+        &mut self,
+        data: &[u8],
+    ) -> io::Result<()> {
+        self.writer.write_all(data)
     }
 }
 

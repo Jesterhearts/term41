@@ -5,7 +5,8 @@ mod config;
 mod keybindings;
 mod renderer;
 
-use std::io::Write;
+use std::cell::RefCell;
+use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
@@ -18,14 +19,19 @@ use std::thread::Thread;
 use std::time::Duration;
 use std::time::Instant;
 
+use clip41::ClipboardKind;
 use config::Config;
 use font41::FontSystem;
 use pty_pipe41::Pty;
+use pty_pipe41::PtyWriter;
 use renderer::RenderHost;
 use renderer::startup::StartupPresenter;
 use terminal41::MouseButton as TermMouseButton;
+use terminal41::MouseEventKind;
+use terminal41::MouseModifiers;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
+use terminal41::selection::SelectionMode;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::Ime;
@@ -45,7 +51,9 @@ use winit::window::WindowId;
 
 use crate::keybindings::Action;
 use crate::keybindings::Keybindings;
+use crate::renderer::PreeditState;
 use crate::renderer::RenderEvent;
+use crate::renderer::TabContextMenu;
 use crate::renderer::compute_gutter_width;
 use crate::renderer::ctrl_byte;
 use crate::renderer::kitty_encode_ime_commit;
@@ -76,13 +84,18 @@ impl From<TabId> for u64 {
 }
 
 /// Commands sent from the render thread back to the window thread.
-#[derive(Debug, Clone)]
 enum AppEvent {
     SetTitle(String),
     RequestUserAttention,
-    SpawnNewWindow { cwd: Option<PathBuf> },
     RequestStartupRedraw,
     ReleaseStartupSurface,
+    RegisterInputEndpoint {
+        tab_id: TabId,
+        terminal: Arc<Mutex<Terminal>>,
+        writer: PtyWriter,
+    },
+    RemoveInputEndpoint(TabId),
+    SetActiveInputTab(Option<TabId>),
 }
 
 struct Tab {
@@ -93,23 +106,29 @@ struct Tab {
     _terminal_thread: TerminalThread,
 }
 
-#[derive(Clone)]
-pub(crate) struct ActiveInputTarget {
+struct InputEndpoint {
     terminal: Arc<Mutex<Terminal>>,
-    writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    writer: RefCell<PtyWriter>,
 }
 
 pub(crate) struct InputState {
-    active: Option<ActiveInputTarget>,
     keybindings: Keybindings,
+    tab_count: usize,
+    cell_width: u32,
+    cell_height: u32,
+    gutter_width: u32,
+    hovered_button: Option<u8>,
+    tab_context_menu: Option<TabContextMenu>,
+    gutter_popup: Option<renderer::GutterPopup>,
+    preedit: Option<PreeditState>,
 }
 
 struct WindowHost {
     window: Option<Arc<Window>>,
     startup_presenter: Option<StartupPresenter>,
     startup_release_tx: Option<mpsc::SyncSender<()>>,
-    startup_terminal: Arc<Mutex<Terminal>>,
-    startup_writer: Arc<Mutex<Box<dyn Write + Send>>>,
+    input_endpoints: HashMap<TabId, InputEndpoint>,
+    active_input_tab: Option<TabId>,
     input_state: Arc<Mutex<InputState>>,
     event_tx: cueue::Writer<RenderEvent>,
     /// One-shot channel to deliver the window + display handle to the render
@@ -119,6 +138,14 @@ struct WindowHost {
     render_thread: Thread,
     modifiers: ModifiersState,
     ime_preedit_active: bool,
+    mouse_pos: (f64, f64),
+    mouse_buttons: MouseButtonState,
+    last_motion_cell: Option<(u32, u32)>,
+    last_click_time: Option<Instant>,
+    last_click_cell: Option<(u32, u32)>,
+    click_count: u32,
+    left_drag_active: bool,
+    window_size: (u32, u32),
     opacity: f32,
     cell_width: u32,
     cell_height: u32,
@@ -138,23 +165,72 @@ impl WindowHost {
         self.render_thread.unpark();
     }
 
-    fn active_input_target(&self) -> Option<ActiveInputTarget> {
-        self.input_state.lock().unwrap().active.clone()
+    fn active_input_target(&self) -> Option<&InputEndpoint> {
+        let tab_id = self.active_input_tab?;
+        self.input_endpoints.get(&tab_id)
+    }
+
+    fn layout_snapshot(&self) -> (u32, u32, u32, usize) {
+        let state = self.input_state.lock().unwrap();
+        (
+            state.cell_width,
+            state.cell_height,
+            state.gutter_width,
+            state.tab_count,
+        )
     }
 
     fn keybindings(&self) -> Keybindings {
         self.input_state.lock().unwrap().keybindings.clone()
     }
 
+    fn update_preedit(
+        &mut self,
+        preedit: Option<PreeditState>,
+    ) {
+        self.input_state.lock().unwrap().preedit = preedit;
+        self.notify_interaction_changed();
+    }
+
+    fn update_hovered_button(
+        &mut self,
+        hovered_button: Option<u8>,
+    ) {
+        self.input_state.lock().unwrap().hovered_button = hovered_button;
+    }
+
+    fn update_tab_context_menu(
+        &mut self,
+        menu: Option<TabContextMenu>,
+    ) {
+        self.input_state.lock().unwrap().tab_context_menu = menu;
+    }
+
+    fn update_gutter_popup(
+        &mut self,
+        popup: Option<renderer::GutterPopup>,
+    ) {
+        self.input_state.lock().unwrap().gutter_popup = popup;
+    }
+
+    fn notify_interaction_changed(&self) {
+        self.render_thread.unpark();
+        if self.startup_presenter.is_some()
+            && let Some(window) = &self.window
+        {
+            window.request_redraw();
+        }
+    }
+
     fn flush_target_output(
         &self,
-        target: &ActiveInputTarget,
+        target: &InputEndpoint,
     ) {
         let pending = target.terminal.lock().unwrap().take_pending_output();
         if pending.is_empty() {
             return;
         }
-        let _ = target.writer.lock().unwrap().write_all(&pending);
+        let _ = target.writer.borrow_mut().write(&pending);
         target.terminal.lock().unwrap().reset_viewport();
     }
 
@@ -167,12 +243,12 @@ impl WindowHost {
         };
         target.terminal.lock().unwrap().report_focus_change(focused);
         self.flush_target_output(&target);
-        self.render_thread.unpark();
+        self.notify_interaction_changed();
     }
 
     fn handle_search_key(
         &self,
-        target: &ActiveInputTarget,
+        target: &InputEndpoint,
         key: &Key,
     ) {
         let shift = self.modifiers.shift_key();
@@ -196,8 +272,11 @@ impl WindowHost {
     fn run_local_action(
         &mut self,
         action: Action,
-        target: &ActiveInputTarget,
+        tab_id: TabId,
     ) -> bool {
+        let Some(target) = self.input_endpoints.get(&tab_id) else {
+            return true;
+        };
         match action {
             Action::ScrollPageUp => {
                 let mut terminal = target.terminal.lock().unwrap();
@@ -261,24 +340,32 @@ impl WindowHost {
             return;
         }
 
-        let Some(target) = self.active_input_target() else {
+        let Some(active_tab_id) = self.active_input_tab else {
             return;
         };
 
-        if target.terminal.lock().unwrap().search_active() {
+        if self.input_endpoints[&active_tab_id]
+            .terminal
+            .lock()
+            .unwrap()
+            .search_active()
+        {
+            let target = &self.input_endpoints[&active_tab_id];
             self.handle_search_key(&target, &key);
-            self.render_thread.unpark();
+            self.notify_interaction_changed();
             return;
         }
 
         if let Some(action) = self.keybindings().lookup(&key, self.modifiers) {
-            if self.run_local_action(action, &target) {
-                self.render_thread.unpark();
+            if self.run_local_action(action, active_tab_id) {
+                self.notify_interaction_changed();
             } else {
                 self.send(RenderEvent::Action(action));
             }
             return;
         }
+
+        let target = &self.input_endpoints[&active_tab_id];
 
         let (kitty_flags, c1_mode) = {
             let terminal = target.terminal.lock().unwrap();
@@ -286,8 +373,8 @@ impl WindowHost {
         };
         if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags, c1_mode) {
             target.terminal.lock().unwrap().reset_viewport();
-            let _ = target.writer.lock().unwrap().write_all(&bytes);
-            self.render_thread.unpark();
+            let _ = target.writer.borrow_mut().write(&bytes);
+            self.notify_interaction_changed();
             return;
         }
 
@@ -301,11 +388,11 @@ impl WindowHost {
             if let Some(byte) = byte {
                 target.terminal.lock().unwrap().reset_viewport();
                 if self.modifiers.alt_key() {
-                    let _ = target.writer.lock().unwrap().write_all(&[0x1b, byte]);
+                    let _ = target.writer.borrow_mut().write(&[0x1b, byte]);
                 } else {
-                    let _ = target.writer.lock().unwrap().write_all(&[byte]);
+                    let _ = target.writer.borrow_mut().write(&[byte]);
                 }
-                self.render_thread.unpark();
+                self.notify_interaction_changed();
                 return;
             }
         }
@@ -337,8 +424,8 @@ impl WindowHost {
 
         if let Some(bytes) = bytes {
             target.terminal.lock().unwrap().reset_viewport();
-            let _ = target.writer.lock().unwrap().write_all(&bytes);
-            self.render_thread.unpark();
+            let _ = target.writer.borrow_mut().write(&bytes);
+            self.notify_interaction_changed();
         }
     }
 
@@ -362,8 +449,719 @@ impl WindowHost {
             text.as_bytes().to_vec()
         };
         target.terminal.lock().unwrap().reset_viewport();
-        let _ = target.writer.lock().unwrap().write_all(&bytes);
-        self.render_thread.unpark();
+        let _ = target.writer.borrow_mut().write(&bytes);
+        self.notify_interaction_changed();
+    }
+
+    fn handle_cursor_moved(
+        &mut self,
+        x: f64,
+        y: f64,
+    ) {
+        self.mouse_pos = (x, y);
+
+        let hovered_button = self.window_button_at().map(|b| b as u8);
+        self.update_hovered_button(hovered_button);
+
+        let hovered_menu_item = self.tab_menu_item_at(x, y).map(|(_, idx)| idx);
+        {
+            let mut state = self.input_state.lock().unwrap();
+            if let Some(menu) = state.tab_context_menu.as_mut() {
+                menu.hovered_item = hovered_menu_item;
+            }
+            let hovered_popup_item = popup_item_at(
+                state.gutter_popup.as_ref(),
+                x,
+                y,
+                state.cell_width,
+                state.cell_height,
+                state.gutter_width,
+                self.window_size.1,
+            );
+            if let Some(popup) = state.gutter_popup.as_mut() {
+                popup.hovered_item = hovered_popup_item;
+            }
+        }
+
+        if let Some(dir) = self.resize_direction_at() {
+            if let Some(w) = &self.window {
+                w.set_cursor(winit::window::CursorIcon::from(dir));
+            }
+        } else if let Some(w) = &self.window {
+            w.set_cursor(winit::window::CursorIcon::Default);
+        }
+
+        let cell = self.cell_at(x, y);
+        if self.forward_mouse_to_app() {
+            if self.last_motion_cell == Some(cell) {
+                return;
+            }
+            self.last_motion_cell = Some(cell);
+            let Some(target) = self.active_input_target() else {
+                return;
+            };
+            target.terminal.lock().unwrap().mouse_report(
+                MouseEventKind::Motion,
+                self.mouse_buttons.primary_held(),
+                cell.0,
+                cell.1,
+                self.mouse_modifiers(),
+            );
+            self.flush_target_output(&target);
+            self.notify_interaction_changed();
+            return;
+        }
+
+        if self.left_drag_active
+            && let Some(target) = self.active_input_target()
+        {
+            target
+                .terminal
+                .lock()
+                .unwrap()
+                .extend_selection(cell.0, cell.1);
+            self.notify_interaction_changed();
+            return;
+        }
+
+        self.notify_interaction_changed();
+    }
+
+    fn handle_mouse_input(
+        &mut self,
+        pressed: bool,
+        button: MouseButton,
+    ) {
+        let term_button = match button {
+            MouseButton::Left => TermMouseButton::Left,
+            MouseButton::Middle => TermMouseButton::Middle,
+            MouseButton::Right => TermMouseButton::Right,
+            _ => return,
+        };
+        self.mouse_buttons.set(button, pressed);
+
+        if pressed
+            && button == MouseButton::Left
+            && let Some(dir) = self.resize_direction_at()
+        {
+            if let Some(w) = &self.window {
+                let _ = w.drag_resize_window(dir);
+            }
+            return;
+        }
+
+        if pressed
+            && button == MouseButton::Left
+            && let Some(btn) = self.window_button_at()
+        {
+            match btn {
+                WindowButton::Close => std::process::exit(0),
+                WindowButton::Maximize => {
+                    if let Some(w) = &self.window {
+                        w.set_maximized(!w.is_maximized());
+                    }
+                }
+                WindowButton::Minimize => {
+                    if let Some(w) = &self.window {
+                        w.set_minimized(true);
+                    }
+                }
+            }
+            return;
+        }
+
+        if pressed
+            && button == MouseButton::Left
+            && (self.is_in_titlebar_drag_region() || self.is_in_tab_bar())
+        {
+            if self.is_in_titlebar_drag_region() {
+                let now = Instant::now();
+                let double_click = self
+                    .last_click_time
+                    .is_some_and(|t| now.duration_since(t) <= MULTI_CLICK_WINDOW);
+                if double_click {
+                    if let Some(w) = &self.window {
+                        w.set_maximized(!w.is_maximized());
+                    }
+                } else if let Some(w) = &self.window {
+                    let _ = w.drag_window();
+                }
+                self.last_click_time = Some(now);
+            }
+            if self.is_in_tab_bar() {
+                self.close_gutter_popup();
+                self.update_tab_context_menu(None);
+                if let Some(idx) = self.tab_at_mouse() {
+                    self.send(RenderEvent::SetActiveTab(idx));
+                }
+                self.notify_interaction_changed();
+            }
+            return;
+        }
+
+        if pressed && button == MouseButton::Right && self.is_in_tab_bar() {
+            let has_menu = self.input_state.lock().unwrap().tab_context_menu.is_some();
+            if has_menu {
+                self.update_tab_context_menu(None);
+                if let Some(w) = &self.window {
+                    let pos = winit::dpi::PhysicalPosition::new(
+                        self.mouse_pos.0 as i32,
+                        self.mouse_pos.1 as i32,
+                    );
+                    w.show_window_menu(pos);
+                }
+            } else {
+                self.update_tab_context_menu(Some(TabContextMenu {
+                    x: self.mouse_pos.0 as f32,
+                    hovered_item: None,
+                }));
+            }
+            self.notify_interaction_changed();
+            return;
+        }
+
+        if pressed
+            && button == MouseButton::Left
+            && self.input_state.lock().unwrap().tab_context_menu.is_some()
+        {
+            if let Some((action, _)) = self.tab_menu_item_at(self.mouse_pos.0, self.mouse_pos.1) {
+                self.execute_tab_menu_action(action);
+            }
+            self.update_tab_context_menu(None);
+            self.notify_interaction_changed();
+            return;
+        }
+
+        if pressed
+            && button == MouseButton::Left
+            && self.input_state.lock().unwrap().gutter_popup.is_some()
+        {
+            if let Some(item) = self.popup_item_at(self.mouse_pos.0, self.mouse_pos.1) {
+                self.execute_popup_action(item);
+                return;
+            }
+            self.close_gutter_popup();
+            if !self.is_in_gutter() {
+                self.notify_interaction_changed();
+                return;
+            }
+        }
+
+        if pressed && button == MouseButton::Left && self.is_in_gutter() {
+            let (_, screen_row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+            self.open_gutter_popup(screen_row);
+            return;
+        }
+
+        if pressed {
+            self.last_motion_cell = None;
+        }
+
+        if self.forward_mouse_to_app() {
+            let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+            let kind = if pressed {
+                MouseEventKind::Press
+            } else {
+                MouseEventKind::Release
+            };
+            let Some(target) = self.active_input_target() else {
+                return;
+            };
+            target.terminal.lock().unwrap().mouse_report(
+                kind,
+                term_button,
+                col,
+                row,
+                self.mouse_modifiers(),
+            );
+            self.flush_target_output(&target);
+            self.notify_interaction_changed();
+            return;
+        }
+
+        let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+        match (button, pressed) {
+            (MouseButton::Left, true) => {
+                if self.modifiers.control_key()
+                    && let Some(target) = self.active_input_target()
+                {
+                    let url = target
+                        .terminal
+                        .lock()
+                        .unwrap()
+                        .hyperlink_at(row, col)
+                        .map(str::to_owned);
+                    if let Some(url) = url {
+                        if let Err(e) = open::that_detached(&url) {
+                            warn!("failed to open hyperlink {url:?}: {e}");
+                        }
+                        return;
+                    }
+                }
+                self.click_count = self.next_click_count((col, row));
+                self.last_click_cell = Some((col, row));
+                self.last_click_time = Some(Instant::now());
+                let mode = match self.click_count {
+                    2 => SelectionMode::Word,
+                    3 => SelectionMode::Line,
+                    _ => SelectionMode::Char,
+                };
+                if let Some(target) = self.active_input_target() {
+                    target
+                        .terminal
+                        .lock()
+                        .unwrap()
+                        .start_selection(col, row, mode);
+                }
+                self.left_drag_active = true;
+                self.notify_interaction_changed();
+            }
+            (MouseButton::Left, false) => {
+                self.left_drag_active = false;
+                if let Some(target) = self.active_input_target() {
+                    let mut terminal = target.terminal.lock().unwrap();
+                    if terminal.has_selection() {
+                        terminal.copy_selection(ClipboardKind::Primary);
+                    } else {
+                        terminal.clear_selection();
+                    }
+                }
+                self.notify_interaction_changed();
+            }
+            (MouseButton::Right, true) => {
+                if let Some(target) = self.active_input_target() {
+                    let mut terminal = target.terminal.lock().unwrap();
+                    if terminal.has_selection() {
+                        terminal.copy_selection(ClipboardKind::Clipboard);
+                        terminal.clear_selection();
+                    } else {
+                        terminal.reset_viewport();
+                        terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                    }
+                    drop(terminal);
+                    self.flush_target_output(&target);
+                }
+                self.notify_interaction_changed();
+            }
+            _ => {}
+        }
+    }
+
+    fn handle_mouse_wheel(
+        &mut self,
+        raw_x: f64,
+        raw_y: f64,
+        pixels: bool,
+    ) {
+        self.close_gutter_popup();
+        let (cell_w, cell_h, _, _) = self.layout_snapshot();
+        let (x_lines, y_lines) = if pixels {
+            let cw = cell_w as i32;
+            let ch = cell_h as i32;
+            ((raw_x as i32) / cw, -(raw_y as i32) / ch)
+        } else {
+            (raw_x as i32, -(raw_y as i32))
+        };
+
+        if self.forward_mouse_to_app() {
+            let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+            let Some(target) = self.active_input_target() else {
+                return;
+            };
+            let mut terminal = target.terminal.lock().unwrap();
+            if y_lines < 0 {
+                for _ in 0..y_lines.unsigned_abs() {
+                    terminal.mouse_report(
+                        MouseEventKind::Press,
+                        TermMouseButton::WheelUp,
+                        col,
+                        row,
+                        self.mouse_modifiers(),
+                    );
+                }
+            } else if y_lines > 0 {
+                for _ in 0..y_lines as u32 {
+                    terminal.mouse_report(
+                        MouseEventKind::Press,
+                        TermMouseButton::WheelDown,
+                        col,
+                        row,
+                        self.mouse_modifiers(),
+                    );
+                }
+            }
+            if x_lines < 0 {
+                for _ in 0..x_lines.unsigned_abs() {
+                    terminal.mouse_report(
+                        MouseEventKind::Press,
+                        TermMouseButton::WheelLeft,
+                        col,
+                        row,
+                        self.mouse_modifiers(),
+                    );
+                }
+            } else if x_lines > 0 {
+                for _ in 0..x_lines as u32 {
+                    terminal.mouse_report(
+                        MouseEventKind::Press,
+                        TermMouseButton::WheelRight,
+                        col,
+                        row,
+                        self.mouse_modifiers(),
+                    );
+                }
+            }
+            drop(terminal);
+            self.flush_target_output(&target);
+            self.notify_interaction_changed();
+            return;
+        }
+
+        if let Some(target) = self.active_input_target() {
+            let mut terminal = target.terminal.lock().unwrap();
+            if y_lines < 0 {
+                terminal.scroll_viewport_up(y_lines.unsigned_abs());
+            } else if y_lines > 0 {
+                terminal.scroll_viewport_down(y_lines as u32);
+            }
+        }
+        self.notify_interaction_changed();
+    }
+
+    fn execute_tab_menu_action(
+        &mut self,
+        action: TabMenuActionLocal,
+    ) {
+        match action {
+            TabMenuActionLocal::NewTab => self.send(RenderEvent::Action(Action::NewTab)),
+            TabMenuActionLocal::CloseTab => self.send(RenderEvent::Action(Action::CloseTab)),
+            TabMenuActionLocal::CloseOtherTabs => self.send(RenderEvent::CloseOtherTabs),
+        }
+    }
+
+    fn close_gutter_popup(&mut self) {
+        let had_popup = self
+            .input_state
+            .lock()
+            .unwrap()
+            .gutter_popup
+            .take()
+            .is_some();
+        if had_popup && let Some(target) = self.active_input_target() {
+            target.terminal.lock().unwrap().clear_selection();
+        }
+    }
+
+    fn open_gutter_popup(
+        &mut self,
+        screen_row: u32,
+    ) {
+        let Some(target) = self.active_input_target() else {
+            return;
+        };
+        let mut terminal = target.terminal.lock().unwrap();
+        let Some(prompt_abs) = terminal.find_prompt_for_screen_row(screen_row) else {
+            return;
+        };
+        terminal.select_command_at(prompt_abs);
+        let duration_text = terminal
+            .command_duration_at(prompt_abs)
+            .map(format_duration);
+        drop(terminal);
+        self.update_gutter_popup(Some(renderer::GutterPopup {
+            prompt_abs_row: prompt_abs,
+            screen_row,
+            duration_text,
+            hovered_item: None,
+        }));
+        self.notify_interaction_changed();
+    }
+
+    fn execute_popup_action(
+        &mut self,
+        item_idx: usize,
+    ) {
+        let popup = self.input_state.lock().unwrap().gutter_popup.take();
+        let Some(popup) = popup else {
+            return;
+        };
+        let Some(target) = self.active_input_target() else {
+            return;
+        };
+        match item_idx {
+            0 => {
+                let mut terminal = target.terminal.lock().unwrap();
+                if let Some(cmd) = terminal.command_text_at(popup.prompt_abs_row) {
+                    let cmd = cmd.trim().to_owned();
+                    terminal.clear_selection();
+                    terminal.reset_viewport();
+                    terminal.paste(&format!("{cmd}\r"));
+                }
+                drop(terminal);
+                self.flush_target_output(&target);
+            }
+            1 => {
+                let mut terminal = target.terminal.lock().unwrap();
+                if let Some(text) = terminal.command_text_at(popup.prompt_abs_row) {
+                    terminal.copy_to_clipboard(text.trim());
+                }
+                terminal.clear_selection();
+            }
+            2 => {
+                let mut terminal = target.terminal.lock().unwrap();
+                if let Some(text) = terminal.command_and_output_text_at(popup.prompt_abs_row) {
+                    terminal.copy_to_clipboard(&text);
+                }
+                terminal.clear_selection();
+            }
+            3 => {
+                let mut terminal = target.terminal.lock().unwrap();
+                if let Some(text) = terminal.output_text_at(popup.prompt_abs_row) {
+                    terminal.copy_to_clipboard(&text);
+                }
+                terminal.clear_selection();
+            }
+            _ => return,
+        }
+        self.notify_interaction_changed();
+    }
+
+    fn mouse_modifiers(&self) -> MouseModifiers {
+        MouseModifiers {
+            shift: self.modifiers.shift_key(),
+            alt: self.modifiers.alt_key(),
+            ctrl: self.modifiers.control_key(),
+        }
+    }
+
+    fn forward_mouse_to_app(&self) -> bool {
+        self.active_input_target().is_some_and(|target| {
+            target.terminal.lock().unwrap().mouse_tracking_enabled() && !self.modifiers.shift_key()
+        })
+    }
+
+    fn next_click_count(
+        &self,
+        cell: (u32, u32),
+    ) -> u32 {
+        let within_window = self
+            .last_click_time
+            .is_some_and(|t| t.elapsed() <= MULTI_CLICK_WINDOW);
+        let same_cell = self.last_click_cell == Some(cell);
+        if within_window && same_cell && self.click_count < 3 {
+            self.click_count + 1
+        } else {
+            1
+        }
+    }
+
+    fn cell_at(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> (u32, u32) {
+        let (cell_w, cell_h, gutter_w, _) = self.layout_snapshot();
+        let raw_x = x.max(0.0) as u32;
+        let raw_y = y.max(0.0) as u32;
+        let y = raw_y.saturating_sub(cell_h);
+        let x = raw_x.saturating_sub(gutter_w);
+        let Some(target) = self.active_input_target() else {
+            return (0, 0);
+        };
+        let terminal = target.terminal.lock().unwrap();
+        let cols = terminal.viewport.cols.saturating_sub(1);
+        let rows = terminal.viewport.rows.saturating_sub(1);
+        ((x / cell_w).min(cols), (y / cell_h).min(rows))
+    }
+
+    fn is_in_tab_bar(&self) -> bool {
+        let (_, cell_h, _, _) = self.layout_snapshot();
+        (self.mouse_pos.1.max(0.0) as u32) < cell_h
+    }
+
+    fn window_button_at(&self) -> Option<WindowButton> {
+        if !self.is_in_tab_bar() {
+            return None;
+        }
+        let (cell_w, _, _, _) = self.layout_snapshot();
+        let cell_w = cell_w as f32;
+        let surface_w = self.window_size.0 as f32;
+        let region_w = cell_w * BUTTONS_REGION_CELLS;
+        let buttons_x = surface_w - region_w;
+        let mx = self.mouse_pos.0 as f32;
+        if mx < buttons_x {
+            return None;
+        }
+        let btn_w = cell_w * BUTTON_CELLS;
+        let idx = ((mx - buttons_x) / btn_w) as usize;
+        match idx {
+            0 => Some(WindowButton::Minimize),
+            1 => Some(WindowButton::Maximize),
+            2 => Some(WindowButton::Close),
+            _ => None,
+        }
+    }
+
+    fn tab_at_mouse(&self) -> Option<usize> {
+        let (cell_w, _, _, tab_count) = self.layout_snapshot();
+        if tab_count == 0 {
+            return None;
+        }
+        let cell_w = cell_w as f32;
+        let surface_w = self.window_size.0 as f32;
+        let region_w = cell_w * BUTTONS_REGION_CELLS;
+        let tabs_w = surface_w - region_w;
+        let max_tab_w = cell_w * 30.0;
+        let tab_w = (tabs_w / tab_count as f32).min(max_tab_w);
+        let mx = self.mouse_pos.0.max(0.0) as f32;
+        if mx >= tabs_w {
+            return None;
+        }
+        let idx = (mx / tab_w) as usize;
+        (idx < tab_count).then_some(idx)
+    }
+
+    fn is_in_titlebar_drag_region(&self) -> bool {
+        self.is_in_tab_bar() && self.window_button_at().is_none()
+    }
+
+    fn resize_direction_at(&self) -> Option<winit::window::ResizeDirection> {
+        use winit::window::ResizeDirection;
+        if self.window.as_ref().is_some_and(|w| w.is_maximized()) {
+            return None;
+        }
+        let (w, h) = self.window_size;
+        let (mx, my) = (self.mouse_pos.0 as f32, self.mouse_pos.1 as f32);
+        let wf = w as f32;
+        let hf = h as f32;
+        let left = mx < RESIZE_BORDER;
+        let right = mx >= wf - RESIZE_BORDER;
+        let top = my < RESIZE_BORDER;
+        let bottom = my >= hf - RESIZE_BORDER;
+        match (left, right, top, bottom) {
+            (true, _, true, _) => Some(ResizeDirection::NorthWest),
+            (_, true, true, _) => Some(ResizeDirection::NorthEast),
+            (true, _, _, true) => Some(ResizeDirection::SouthWest),
+            (_, true, _, true) => Some(ResizeDirection::SouthEast),
+            (true, _, _, _) => Some(ResizeDirection::West),
+            (_, true, _, _) => Some(ResizeDirection::East),
+            (_, _, true, _) => Some(ResizeDirection::North),
+            (_, _, _, true) => Some(ResizeDirection::South),
+            _ => None,
+        }
+    }
+
+    fn tab_menu_item_at(
+        &self,
+        mx: f64,
+        my: f64,
+    ) -> Option<(TabMenuActionLocal, usize)> {
+        let state = self.input_state.lock().unwrap();
+        let menu = state.tab_context_menu.as_ref()?;
+        let pw = state.cell_width as f32 * TAB_MENU_WIDTH_CELLS;
+        let ph = 3.0 * state.cell_height as f32;
+        let px = menu.x.min(self.window_size.0 as f32 - pw);
+        let py = state.cell_height as f32;
+        let fx = mx as f32;
+        let fy = my as f32;
+        if fx < px || fx >= px + pw || fy < py || fy >= py + ph {
+            return None;
+        }
+        let idx = ((fy - py) / state.cell_height as f32) as usize;
+        let action = match idx {
+            0 => TabMenuActionLocal::NewTab,
+            1 => TabMenuActionLocal::CloseTab,
+            2 => TabMenuActionLocal::CloseOtherTabs,
+            _ => return None,
+        };
+        Some((action, idx))
+    }
+
+    fn is_in_gutter(&self) -> bool {
+        let (_, _, gutter_w, _) = self.layout_snapshot();
+        gutter_w > 0 && (self.mouse_pos.0.max(0.0) as u32) < gutter_w
+    }
+
+    fn popup_item_at(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> Option<usize> {
+        let state = self.input_state.lock().unwrap();
+        popup_item_at(
+            state.gutter_popup.as_ref(),
+            x,
+            y,
+            state.cell_width,
+            state.cell_height,
+            state.gutter_width,
+            self.window_size.1,
+        )
+    }
+}
+
+#[derive(Clone, Copy)]
+enum WindowButton {
+    Minimize = 0,
+    Maximize = 1,
+    Close = 2,
+}
+
+#[derive(Clone, Copy)]
+enum TabMenuActionLocal {
+    NewTab,
+    CloseTab,
+    CloseOtherTabs,
+}
+
+const RESIZE_BORDER: f32 = 5.0;
+const BUTTON_CELLS: f32 = 3.0;
+const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
+const TAB_MENU_WIDTH_CELLS: f32 = 16.0;
+const POPUP_WIDTH_CELLS: f32 = 20.0;
+
+fn popup_item_at(
+    popup: Option<&renderer::GutterPopup>,
+    x: f64,
+    y: f64,
+    cell_width: u32,
+    cell_height: u32,
+    gutter_width: u32,
+    window_height: u32,
+) -> Option<usize> {
+    let popup = popup?;
+    let cell_w = cell_width as f32;
+    let cell_h = cell_height as f32;
+    let total_rows = popup.duration_text.is_some() as usize + 4;
+    let popup_w = cell_w * POPUP_WIDTH_CELLS;
+    let popup_h = total_rows as f32 * cell_h;
+    let popup_x = gutter_width as f32;
+    let popup_y = (popup.screen_row as f32 * cell_h + cell_h).min(window_height as f32 - popup_h);
+    let x = x as f32;
+    let y = y as f32;
+    if x < popup_x || x > popup_x + popup_w || y < popup_y || y > popup_y + popup_h {
+        return None;
+    }
+    let row_in_popup = ((y - popup_y) / cell_h) as usize;
+    let header = if popup.duration_text.is_some() { 1 } else { 0 };
+    let item_idx = row_in_popup.checked_sub(header)?;
+    (item_idx < 4).then_some(item_idx)
+}
+
+fn format_duration(d: Duration) -> String {
+    let secs = d.as_secs_f64();
+    if secs < 1.0 {
+        format!("{:.0}ms", secs * 1000.0)
+    } else if secs < 60.0 {
+        format!("{secs:.1}s")
+    } else if secs < 3600.0 {
+        let m = (secs / 60.0).floor();
+        let s = secs - m * 60.0;
+        format!("{m:.0}m {s:.0}s")
+    } else {
+        let h = (secs / 3600.0).floor();
+        let m = ((secs - h * 3600.0) / 60.0).floor();
+        format!("{h:.0}h {m:.0}m")
     }
 }
 
@@ -387,9 +1185,6 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     w.request_user_attention(Some(winit::window::UserAttentionType::Informational));
                 }
             }
-            AppEvent::SpawnNewWindow { cwd } => {
-                spawn_new_window(cwd);
-            }
             AppEvent::RequestStartupRedraw => {
                 if self.startup_presenter.is_some()
                     && let Some(window) = &self.window
@@ -407,6 +1202,25 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     let _ = tx.send(());
                 }
                 event_loop.set_control_flow(ControlFlow::Wait);
+            }
+            AppEvent::RegisterInputEndpoint {
+                tab_id,
+                terminal,
+                writer,
+            } => {
+                self.input_endpoints.insert(
+                    tab_id,
+                    InputEndpoint {
+                        terminal,
+                        writer: RefCell::new(writer),
+                    },
+                );
+            }
+            AppEvent::RemoveInputEndpoint(tab_id) => {
+                self.input_endpoints.remove(&tab_id);
+            }
+            AppEvent::SetActiveInputTab(tab_id) => {
+                self.active_input_tab = tab_id;
             }
         }
     }
@@ -455,9 +1269,13 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             scale_factor,
             self.startup_gutter,
         );
-        if let Some(presenter) = self.startup_presenter.as_mut() {
-            presenter.present(&window, &self.startup_terminal, &self.startup_writer);
-            window.request_redraw();
+        if let Some(tab_id) = self.active_input_tab {
+            if let Some(target) = self.input_endpoints.get(&tab_id) {
+                if let Some(presenter) = self.startup_presenter.as_mut() {
+                    presenter.present(&window, target);
+                    window.request_redraw();
+                }
+            }
         }
 
         // Opt into IME events. `ImePurpose::Terminal` is a hint some
@@ -471,6 +1289,8 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             let _ = tx.send((window.clone(), event_loop.owned_display_handle()));
         }
 
+        let size = window.inner_size();
+        self.window_size = (size.width, size.height);
         self.window = Some(window);
         self.render_thread.unpark();
 
@@ -488,17 +1308,24 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 std::process::exit(0);
             }
 
-            WindowEvent::Resized(size) => RenderEvent::Resized {
-                width: size.width,
-                height: size.height,
-            },
+            WindowEvent::Resized(size) => {
+                self.window_size = (size.width, size.height);
+                RenderEvent::Resized {
+                    width: size.width,
+                    height: size.height,
+                }
+            }
 
             WindowEvent::RedrawRequested => {
-                if let (Some(window), Some(presenter)) =
-                    (self.window.as_ref(), self.startup_presenter.as_mut())
-                {
-                    presenter.present(window, &self.startup_terminal, &self.startup_writer);
-                    return;
+                if let Some(tab_id) = self.active_input_tab {
+                    if let Some(window) = self.window.as_ref() {
+                        if let Some(target) = self.input_endpoints.get(&tab_id) {
+                            if let Some(presenter) = self.startup_presenter.as_mut() {
+                                presenter.present(window, target);
+                                return;
+                            }
+                        }
+                    }
                 }
                 return;
             }
@@ -525,44 +1352,45 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
             WindowEvent::ModifiersChanged(mods) => {
                 self.modifiers = mods.state();
-                RenderEvent::ModifiersChanged(self.modifiers)
+                return;
             }
 
-            WindowEvent::CursorMoved { position, .. } => RenderEvent::CursorMoved {
-                x: position.x,
-                y: position.y,
-            },
+            WindowEvent::CursorMoved { position, .. } => {
+                self.handle_cursor_moved(position.x, position.y);
+                return;
+            }
 
-            WindowEvent::MouseInput { state, button, .. } => RenderEvent::MouseInput {
-                pressed: state == ElementState::Pressed,
-                button,
-            },
+            WindowEvent::MouseInput { state, button, .. } => {
+                self.handle_mouse_input(state == ElementState::Pressed, button);
+                return;
+            }
 
             WindowEvent::MouseWheel { delta, .. } => {
                 let (x, y, pixels) = match delta {
                     MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64, false),
                     MouseScrollDelta::PixelDelta(pos) => (pos.x, pos.y, true),
                 };
-                RenderEvent::MouseWheel { x, y, pixels }
+                self.handle_mouse_wheel(x, y, pixels);
+                return;
             }
 
             WindowEvent::Ime(ime) => match ime {
-                Ime::Enabled => RenderEvent::ImeEnabled(true),
+                Ime::Enabled => return,
                 Ime::Disabled => {
                     self.ime_preedit_active = false;
-                    RenderEvent::ImeEnabled(false)
+                    self.update_preedit(None);
+                    return;
                 }
                 Ime::Preedit(text, cursor) => {
                     self.ime_preedit_active = !text.is_empty();
-                    RenderEvent::ImePreedit { text, cursor }
+                    let preedit = (!text.is_empty()).then_some(PreeditState { text, cursor });
+                    self.update_preedit(preedit);
+                    return;
                 }
                 Ime::Commit(text) => {
                     self.handle_ime_commit(&text);
                     self.ime_preedit_active = false;
-                    self.send(RenderEvent::ImePreedit {
-                        text: String::new(),
-                        cursor: None,
-                    });
+                    self.update_preedit(None);
                     return;
                 }
             },
@@ -666,7 +1494,7 @@ fn main() {
     let terminal_thread = TerminalThread::new();
 
     // Spawn the initial PTY early so the shell starts running immediately.
-    let (pty, pty_reader) = tracing::debug_span!("spawn_pty").in_scope(|| {
+    let (pty, pty_writer, pty_reader) = tracing::debug_span!("spawn_pty").in_scope(|| {
         Pty::spawn(
             TabId(0),
             INITIAL_COLS as u16,
@@ -703,13 +1531,20 @@ fn main() {
         })),
     );
 
-    let pty_writer = pty.writer();
     let input_state = Arc::new(Mutex::new(InputState {
-        active: Some(ActiveInputTarget {
-            terminal: terminal.clone(),
-            writer: pty_writer.clone(),
-        }),
         keybindings: startup_keybindings,
+        tab_count: 1,
+        cell_width,
+        cell_height,
+        gutter_width: if startup_gutter {
+            compute_gutter_width(cell_width)
+        } else {
+            0
+        },
+        hovered_button: None,
+        tab_context_menu: None,
+        gutter_popup: None,
+        preedit: None,
     }));
     let tab = Tab {
         id: TabId(0),
@@ -762,14 +1597,28 @@ fn main() {
         window: None,
         startup_presenter: None,
         startup_release_tx: Some(startup_release_tx),
-        startup_terminal: terminal,
-        startup_writer: pty_writer,
+        input_endpoints: HashMap::from([(
+            TabId(0),
+            InputEndpoint {
+                terminal: terminal.clone(),
+                writer: RefCell::new(pty_writer),
+            },
+        )]),
+        active_input_tab: Some(TabId(0)),
         input_state,
         event_tx,
         window_tx: Some(window_tx),
         render_thread,
         modifiers: ModifiersState::default(),
         ime_preedit_active: false,
+        mouse_pos: (0.0, 0.0),
+        mouse_buttons: MouseButtonState::default(),
+        last_motion_cell: None,
+        last_click_time: None,
+        last_click_cell: None,
+        click_count: 0,
+        left_drag_active: false,
+        window_size: (0, 0),
         opacity,
         cell_width,
         cell_height,

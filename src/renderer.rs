@@ -17,19 +17,13 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clip41::Clipboard;
-use clip41::ClipboardKind;
 use font41::FontSystem;
 use pty_pipe41::Pty;
 use terminal41::C1Mode;
 use terminal41::KittyFlags;
 use terminal41::KittyKeys;
-use terminal41::MouseButton as TermMouseButton;
-use terminal41::MouseEventKind;
-use terminal41::MouseModifiers;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
-use terminal41::selection::SelectionMode;
-use winit::event::MouseButton;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
@@ -38,13 +32,10 @@ use winit::keyboard::NamedKey;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
-use crate::ActiveInputTarget;
 use crate::AppEvent;
 use crate::INITIAL_COLS;
 use crate::INITIAL_ROWS;
 use crate::InputState;
-use crate::MULTI_CLICK_WINDOW;
-use crate::MouseButtonState;
 use crate::Tab;
 use crate::TabId;
 use crate::config::BellMode;
@@ -61,44 +52,27 @@ pub use crate::renderer::r#impl::compute_gutter_width;
 // Gutter popup — shown on click of a shell-integration gutter marker
 // ---------------------------------------------------------------------------
 
-/// Action the user can pick from the gutter popup menu.
-#[derive(Clone, Copy)]
-enum GutterMenuAction {
-    Rerun,
-    CopyCommand,
-    CopyCommandAndOutput,
-    CopyOutput,
+pub(crate) struct GutterMenuItem {
+    pub label: &'static str,
 }
 
-/// A single item in the popup menu.
-struct GutterMenuItem {
-    label: &'static str,
-    action: GutterMenuAction,
-}
-
-const GUTTER_MENU_ITEMS: &[GutterMenuItem] = &[
-    GutterMenuItem {
-        label: "Rerun",
-        action: GutterMenuAction::Rerun,
-    },
+pub(crate) const GUTTER_MENU_ITEMS: &[GutterMenuItem] = &[
+    GutterMenuItem { label: "Rerun" },
     GutterMenuItem {
         label: "Copy command",
-        action: GutterMenuAction::CopyCommand,
     },
     GutterMenuItem {
         label: "Copy cmd+output",
-        action: GutterMenuAction::CopyCommandAndOutput,
     },
     GutterMenuItem {
         label: "Copy output",
-        action: GutterMenuAction::CopyOutput,
     },
 ];
 
-/// Width of the popup in cell units.
-const POPUP_WIDTH_CELLS: f32 = 20.0;
+pub(crate) const POPUP_WIDTH_CELLS: f32 = 20.0;
 
 /// State of the gutter popup while it is open.
+#[derive(Clone)]
 pub(crate) struct GutterPopup {
     /// Absolute row of the prompt whose marker was clicked.
     pub prompt_abs_row: u64,
@@ -110,27 +84,9 @@ pub(crate) struct GutterPopup {
     pub hovered_item: Option<usize>,
 }
 
-impl GutterPopup {
-    /// Number of rows the popup occupies (header + items).
-    fn total_rows(&self) -> usize {
-        let header = if self.duration_text.is_some() { 1 } else { 0 };
-        header + GUTTER_MENU_ITEMS.len()
-    }
-}
-
 // ---------------------------------------------------------------------------
 // CSD — client-side window decoration state
 // ---------------------------------------------------------------------------
-
-/// Which window control button the mouse is hovering over.
-/// Discriminants match the button indices used in rendering (left to right).
-#[derive(Clone, Copy, PartialEq, Eq)]
-#[repr(u8)]
-enum WindowButton {
-    Minimize = 0,
-    Maximize = 1,
-    Close = 2,
-}
 
 /// Width of the resize hit-test border in physical pixels.
 const RESIZE_BORDER: f32 = 5.0;
@@ -145,42 +101,27 @@ const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
 // Tab context menu — right-click on a tab in the tab bar
 // ---------------------------------------------------------------------------
 
-#[derive(Clone, Copy)]
-enum TabMenuAction {
-    NewTab,
-    CloseTab,
-    CloseOtherTabs,
+pub(crate) struct TabMenuItem {
+    pub label: &'static str,
 }
 
-struct TabMenuItem {
-    label: &'static str,
-    action: TabMenuAction,
-}
-
-const TAB_MENU_ITEMS: &[TabMenuItem] = &[
-    TabMenuItem {
-        label: "New tab",
-        action: TabMenuAction::NewTab,
-    },
-    TabMenuItem {
-        label: "Close tab",
-        action: TabMenuAction::CloseTab,
-    },
+pub(crate) const TAB_MENU_ITEMS: &[TabMenuItem] = &[
+    TabMenuItem { label: "New tab" },
+    TabMenuItem { label: "Close tab" },
     TabMenuItem {
         label: "Close others",
-        action: TabMenuAction::CloseOtherTabs,
     },
 ];
 
-/// Width of the tab context menu in cell units.
-const TAB_MENU_WIDTH_CELLS: f32 = 16.0;
+pub(crate) const TAB_MENU_WIDTH_CELLS: f32 = 16.0;
 
 /// State of the tab context popup while it is open.
-struct TabContextMenu {
+#[derive(Clone)]
+pub(crate) struct TabContextMenu {
     /// Pixel position where the popup was opened (used for placement).
-    x: f32,
+    pub x: f32,
     /// Currently hovered menu-item index.
-    hovered_item: Option<usize>,
+    pub hovered_item: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -200,42 +141,15 @@ pub enum RenderEvent {
         width: u32,
         height: u32,
     },
-    ModifiersChanged(ModifiersState),
     Action(Action),
-    CursorMoved {
-        x: f64,
-        y: f64,
-    },
-    MouseInput {
-        pressed: bool,
-        button: MouseButton,
-    },
-    /// Raw scroll delta. `pixels == false` means line units (LineDelta),
-    /// `pixels == true` means physical pixels (PixelDelta). The render
-    /// thread converts to lines using its font metrics.
-    MouseWheel {
-        x: f64,
-        y: f64,
-        pixels: bool,
-    },
+    SetActiveTab(usize),
+    CloseOtherTabs,
     /// The window's DPI scale factor changed (e.g. moved to a different
     /// monitor). The render thread rescales font metrics and re-rasterizes
     /// glyphs.
     ScaleFactorChanged {
         scale_factor: f64,
     },
-    /// IME composition update. `text == ""` signals the preedit is cleared
-    /// (winit emits this synthetically before a commit and on disable).
-    /// `cursor` is a byte-indexed `(start, end)` range into `text` marking
-    /// the composition caret / selected segment; `None` means "hide it".
-    ImePreedit {
-        text: String,
-        cursor: Option<(usize, usize)>,
-    },
-    /// IME was enabled or disabled by the compositor. Used to reset any
-    /// stale preedit state on disable and let the render thread start
-    /// issuing `set_ime_cursor_area` calls on enable.
-    ImeEnabled(bool),
 }
 
 pub struct RenderHost {
@@ -256,35 +170,13 @@ pub struct RenderHost {
     config: Config,
 
     applied_title: Option<String>,
-    modifiers: ModifiersState,
-    mouse_pos: (f64, f64),
-    mouse_buttons: MouseButtonState,
-    last_motion_cell: Option<(u32, u32)>,
-    last_click_time: Option<Instant>,
-    last_click_cell: Option<(u32, u32)>,
-    click_count: u32,
-    left_drag_active: bool,
 
     /// Last known window size in physical pixels. Updated on Resized events.
     window_size: (u32, u32),
 
-    /// Gutter popup menu, shown when a shell-integration marker is clicked.
-    gutter_popup: Option<GutterPopup>,
-
-    /// Which window control button is currently hovered (for highlight).
-    hovered_button: Option<WindowButton>,
-
-    /// Tab context menu, shown on right-click in the tab bar.
-    tab_context_menu: Option<TabContextMenu>,
-
     /// Window handle, persisted after the first frame so IME requests
     /// (`set_ime_cursor_area`) can be issued from event handlers.
     window: Option<Arc<Window>>,
-
-    /// Active IME preedit (composition) state, if any. `text` is the
-    /// composing string; `cursor` is a byte-indexed `(start, end)` range
-    /// into `text` marking the caret / highlighted segment.
-    preedit: Option<PreeditState>,
 
     /// Last pixel position/size we handed to `set_ime_cursor_area`. Used to
     /// skip redundant calls — winit queues each one to the main thread, so
@@ -343,20 +235,8 @@ impl RenderHost {
             config_path,
             config,
             applied_title: None,
-            modifiers: ModifiersState::default(),
-            mouse_pos: (0.0, 0.0),
-            mouse_buttons: MouseButtonState::default(),
-            last_motion_cell: None,
-            last_click_time: None,
-            last_click_cell: None,
-            click_count: 0,
-            left_drag_active: false,
             window_size: (0, 0),
-            gutter_popup: None,
-            hovered_button: None,
-            tab_context_menu: None,
             window: None,
-            preedit: None,
             ime_cursor_area: None,
             clipboard: Clipboard::new(),
             input_state,
@@ -380,6 +260,7 @@ impl RenderHost {
             Err(_) => return,
         };
         self.window = Some(window.clone());
+        self.sync_input_state();
 
         // Apply DPI scale factor: honour the config override if set,
         // otherwise use the monitor's native scale.
@@ -423,10 +304,6 @@ impl RenderHost {
             if self.config_reload.swap(false, Ordering::Acquire) {
                 self.reload_config();
             }
-
-            // Catch-all: flush any pending terminal output that individual
-            // event handlers didn't flush.
-            self.flush_pending();
 
             if self.should_exit || self.event_rx.is_abandoned() {
                 break;
@@ -518,48 +395,15 @@ impl RenderHost {
                 self.window_size = (*width, *height);
                 self.handle_resize(*width, *height);
             }
-            RenderEvent::ModifiersChanged(mods) => {
-                self.modifiers = *mods;
-            }
             RenderEvent::Action(action) => {
                 self.run_action(*action);
             }
-            RenderEvent::CursorMoved { x, y } => {
-                self.handle_cursor_moved(*x, *y);
-            }
-            RenderEvent::MouseInput { pressed, button } => {
-                self.handle_mouse_input(*pressed, *button);
-            }
-            RenderEvent::MouseWheel { x, y, pixels } => {
-                self.handle_mouse_wheel(*x, *y, *pixels);
-            }
+            RenderEvent::SetActiveTab(idx) => self.set_active_tab(*idx),
+            RenderEvent::CloseOtherTabs => self.close_other_tabs(),
             RenderEvent::ScaleFactorChanged { scale_factor } => {
                 self.handle_scale_factor_changed(*scale_factor);
             }
-            RenderEvent::ImePreedit { text, cursor } => {
-                self.handle_ime_preedit(text.clone(), *cursor);
-            }
-            RenderEvent::ImeEnabled(enabled) => {
-                if !*enabled {
-                    self.preedit = None;
-                }
-            }
         }
-    }
-
-    // -- IME ----------------------------------------------------------------
-
-    fn handle_ime_preedit(
-        &mut self,
-        text: String,
-        cursor: Option<(usize, usize)>,
-    ) {
-        if text.is_empty() {
-            self.preedit = None;
-        } else {
-            self.preedit = Some(PreeditState { text, cursor });
-        }
-        self.update_ime_cursor_area();
     }
 
     /// Tell winit where the IME should anchor its candidate popup: the
@@ -609,373 +453,6 @@ impl RenderHost {
         );
     }
 
-    // -- Mouse --------------------------------------------------------------
-
-    fn handle_cursor_moved(
-        &mut self,
-        x: f64,
-        y: f64,
-    ) {
-        self.mouse_pos = (x, y);
-
-        // Track hovered window control button.
-        self.hovered_button = self.window_button_at();
-
-        // Track hovered tab context menu item.
-        if self.tab_context_menu.is_some() {
-            let action = self.tab_menu_item_at(x, y);
-            if let Some(menu) = self.tab_context_menu.as_mut() {
-                menu.hovered_item = action.map(|_| {
-                    let cell_h = self.font_system.cell_height as f32;
-                    ((y as f32 - cell_h) / cell_h) as usize
-                });
-            }
-        }
-
-        // CSD: set resize cursor when hovering window edges.
-        if let Some(dir) = self.resize_direction_at() {
-            if let Some(w) = &self.window {
-                w.set_cursor(winit::window::CursorIcon::from(dir));
-            }
-        } else if let Some(w) = &self.window {
-            w.set_cursor(winit::window::CursorIcon::Default);
-        }
-
-        // Update popup hover state.
-        if self.gutter_popup.is_some() {
-            let item = self.popup_item_at(x, y);
-            if let Some(popup) = self.gutter_popup.as_mut() {
-                popup.hovered_item = item;
-            }
-        }
-
-        let cell = self.cell_at(x, y);
-
-        if self.forward_mouse_to_app() {
-            if self.last_motion_cell == Some(cell) {
-                return;
-            }
-            self.last_motion_cell = Some(cell);
-            let button = self.mouse_buttons.primary_held();
-            let mods = self.mouse_modifiers();
-            if let Some(tab) = self.active_tab_mut() {
-                tab.terminal.lock().unwrap().mouse_report(
-                    MouseEventKind::Motion,
-                    button,
-                    cell.0,
-                    cell.1,
-                    mods,
-                );
-            }
-            self.flush_pending();
-            return;
-        }
-
-        if self.left_drag_active
-            && let Some(tab) = self.active_tab_mut()
-        {
-            tab.terminal
-                .lock()
-                .unwrap()
-                .extend_selection(cell.0, cell.1);
-        }
-    }
-
-    fn handle_mouse_input(
-        &mut self,
-        pressed: bool,
-        button: MouseButton,
-    ) {
-        let term_button = match button {
-            MouseButton::Left => TermMouseButton::Left,
-            MouseButton::Middle => TermMouseButton::Middle,
-            MouseButton::Right => TermMouseButton::Right,
-            _ => return,
-        };
-        self.mouse_buttons.set(button, pressed);
-
-        // ---- CSD: resize border drag ----
-        if pressed
-            && button == MouseButton::Left
-            && let Some(dir) = self.resize_direction_at()
-        {
-            if let Some(w) = &self.window {
-                let _ = w.drag_resize_window(dir);
-            }
-            return;
-        }
-
-        // ---- CSD: window control buttons ----
-        if pressed
-            && button == MouseButton::Left
-            && let Some(btn) = self.window_button_at()
-        {
-            match btn {
-                WindowButton::Close => {
-                    self.should_exit = true;
-                }
-                WindowButton::Maximize => {
-                    if let Some(w) = &self.window {
-                        w.set_maximized(!w.is_maximized());
-                    }
-                }
-                WindowButton::Minimize => {
-                    if let Some(w) = &self.window {
-                        w.set_minimized(true);
-                    }
-                }
-            }
-            return;
-        }
-
-        // ---- CSD: titlebar drag (empty tab bar area) ----
-        if pressed
-            && button == MouseButton::Left
-            && (self.is_in_titlebar_drag_region() || self.is_in_tab_bar())
-        {
-            if self.is_in_titlebar_drag_region() {
-                // Double-click toggles maximize.
-                let now = Instant::now();
-                let double_click = self
-                    .last_click_time
-                    .is_some_and(|t| now.duration_since(t) <= MULTI_CLICK_WINDOW);
-                if double_click {
-                    if let Some(w) = &self.window {
-                        w.set_maximized(!w.is_maximized());
-                    }
-                } else if let Some(w) = &self.window {
-                    let _ = w.drag_window();
-                }
-                self.last_click_time = Some(now);
-            }
-            if self.is_in_tab_bar() {
-                self.close_gutter_popup();
-                self.tab_context_menu = None;
-                self.handle_tab_bar_click();
-            }
-            return;
-        }
-
-        // ---- CSD: right-click cycling on tab bar ----
-        // First right-click opens the tab context menu; a second right-click
-        // while that menu is open closes it and shows the compositor's native
-        // window menu; a third right-click closes that (handled by the
-        // compositor).
-        if pressed && button == MouseButton::Right && self.is_in_tab_bar() {
-            if self.tab_context_menu.is_some() {
-                // Cycle: close our menu → show compositor window menu.
-                self.tab_context_menu = None;
-                if let Some(w) = &self.window {
-                    let pos = winit::dpi::PhysicalPosition::new(
-                        self.mouse_pos.0 as i32,
-                        self.mouse_pos.1 as i32,
-                    );
-                    w.show_window_menu(pos);
-                }
-            } else {
-                self.tab_context_menu = Some(TabContextMenu {
-                    x: self.mouse_pos.0 as f32,
-                    hovered_item: None,
-                });
-            }
-            return;
-        }
-
-        // Left-click inside tab context menu fires the action; outside dismisses.
-        if pressed && button == MouseButton::Left && self.tab_context_menu.is_some() {
-            if let Some(action) = self.tab_menu_item_at(self.mouse_pos.0, self.mouse_pos.1) {
-                self.execute_tab_menu_action(action);
-            }
-            self.tab_context_menu = None;
-            return;
-        }
-
-        // Gutter popup interaction: clicks inside the popup fire the action;
-        // clicks outside dismiss it.
-        if pressed && button == MouseButton::Left && self.gutter_popup.is_some() {
-            if let Some(item) = self.popup_item_at(self.mouse_pos.0, self.mouse_pos.1) {
-                self.execute_popup_action(item);
-                return;
-            }
-            // Click was outside the popup — dismiss it.
-            self.close_gutter_popup();
-            // If the click was in the gutter again, fall through to open a
-            // new popup below; otherwise let the normal path handle it.
-            if !self.is_in_gutter() {
-                return;
-            }
-        }
-
-        // Left-click in the gutter opens the popup for the clicked row.
-        if pressed && button == MouseButton::Left && self.is_in_gutter() {
-            let (_, screen_row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
-            self.open_gutter_popup(screen_row);
-            return;
-        }
-
-        if pressed {
-            self.last_motion_cell = None;
-        }
-
-        if self.forward_mouse_to_app() {
-            let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
-            let kind = if pressed {
-                MouseEventKind::Press
-            } else {
-                MouseEventKind::Release
-            };
-            let mods = self.mouse_modifiers();
-            if let Some(tab) = self.active_tab_mut() {
-                tab.terminal
-                    .lock()
-                    .unwrap()
-                    .mouse_report(kind, term_button, col, row, mods);
-            }
-            self.flush_pending();
-            return;
-        }
-
-        let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
-        match (button, pressed) {
-            (MouseButton::Left, true) => {
-                if self.modifiers.control_key()
-                    && let Some(tab) = self.active_tab()
-                {
-                    let url = tab
-                        .terminal
-                        .lock()
-                        .unwrap()
-                        .hyperlink_at(row, col)
-                        .map(str::to_owned);
-                    if let Some(url) = url {
-                        if let Err(e) = open::that_detached(&url) {
-                            warn!("failed to open hyperlink {url:?}: {e}");
-                        }
-                        return;
-                    }
-                }
-                self.click_count = self.next_click_count((col, row));
-                self.last_click_cell = Some((col, row));
-                self.last_click_time = Some(Instant::now());
-                let mode = match self.click_count {
-                    2 => SelectionMode::Word,
-                    3 => SelectionMode::Line,
-                    _ => SelectionMode::Char,
-                };
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.lock().unwrap().start_selection(col, row, mode);
-                }
-                self.left_drag_active = true;
-            }
-            (MouseButton::Left, false) => {
-                self.left_drag_active = false;
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    if terminal.has_selection() {
-                        terminal.copy_selection(ClipboardKind::Primary);
-                    } else {
-                        terminal.clear_selection();
-                    }
-                }
-            }
-            (MouseButton::Right, true) => {
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    if terminal.has_selection() {
-                        terminal.copy_selection(ClipboardKind::Clipboard);
-                        terminal.clear_selection();
-                    } else {
-                        terminal.reset_viewport();
-                        terminal.paste_from_clipboard(ClipboardKind::Clipboard);
-                    }
-                    drop(terminal);
-                    self.flush_pending();
-                }
-            }
-            _ => {}
-        }
-    }
-
-    fn handle_mouse_wheel(
-        &mut self,
-        raw_x: f64,
-        raw_y: f64,
-        pixels: bool,
-    ) {
-        self.close_gutter_popup();
-        let (x_lines, y_lines) = if pixels {
-            let cw = self.font_system.cell_width as i32;
-            let ch = self.font_system.cell_height as i32;
-            ((raw_x as i32) / cw, -(raw_y as i32) / ch)
-        } else {
-            (raw_x as i32, -(raw_y as i32))
-        };
-
-        let mouse_tracking = self
-            .active_tab()
-            .is_some_and(|tab| tab.terminal.lock().unwrap().mouse_tracking_enabled());
-        if mouse_tracking && !self.modifiers.shift_key() {
-            let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
-            let mods = self.mouse_modifiers();
-            if let Some(tab) = self.active_tab_mut() {
-                let mut terminal = tab.terminal.lock().unwrap();
-                if y_lines < 0 {
-                    for _ in 0..y_lines.unsigned_abs() {
-                        terminal.mouse_report(
-                            MouseEventKind::Press,
-                            TermMouseButton::WheelUp,
-                            col,
-                            row,
-                            mods,
-                        );
-                    }
-                } else if y_lines > 0 {
-                    for _ in 0..y_lines as u32 {
-                        terminal.mouse_report(
-                            MouseEventKind::Press,
-                            TermMouseButton::WheelDown,
-                            col,
-                            row,
-                            mods,
-                        );
-                    }
-                }
-                if x_lines < 0 {
-                    for _ in 0..x_lines.unsigned_abs() {
-                        terminal.mouse_report(
-                            MouseEventKind::Press,
-                            TermMouseButton::WheelLeft,
-                            col,
-                            row,
-                            mods,
-                        );
-                    }
-                } else if x_lines > 0 {
-                    for _ in 0..x_lines as u32 {
-                        terminal.mouse_report(
-                            MouseEventKind::Press,
-                            TermMouseButton::WheelRight,
-                            col,
-                            row,
-                            mods,
-                        );
-                    }
-                }
-            }
-            self.flush_pending();
-            return;
-        }
-
-        if let Some(tab) = self.active_tab_mut() {
-            let mut terminal = tab.terminal.lock().unwrap();
-            if y_lines < 0 {
-                terminal.scroll_viewport_up(y_lines.unsigned_abs());
-            } else if y_lines > 0 {
-                terminal.scroll_viewport_down(y_lines as u32);
-            }
-        }
-    }
-
     // -- Actions ------------------------------------------------------------
 
     fn run_action(
@@ -983,57 +460,14 @@ impl RenderHost {
         action: Action,
     ) {
         match action {
-            Action::ScrollPageUp => {
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    let rows = terminal.viewport.rows;
-                    terminal.scroll_viewport_up(rows);
-                }
-            }
-            Action::ScrollPageDown => {
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    let rows = terminal.viewport.rows;
-                    terminal.scroll_viewport_down(rows);
-                }
-            }
-            Action::Copy => {
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    if terminal.has_selection() {
-                        terminal.copy_selection(ClipboardKind::Clipboard);
-                    }
-                }
-            }
-            Action::Paste => {
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    terminal.reset_viewport();
-                    terminal.paste_from_clipboard(ClipboardKind::Clipboard);
-                }
-                self.flush_pending();
-            }
-            Action::OpenSearch => {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.lock().unwrap().open_search();
-                }
-            }
-            Action::ScrollPrevPrompt => {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.lock().unwrap().scroll_to_prev_prompt();
-                }
-            }
-            Action::ScrollNextPrompt => {
-                if let Some(tab) = self.active_tab_mut() {
-                    tab.terminal.lock().unwrap().scroll_to_next_prompt();
-                }
-            }
-            Action::OpenNewWindow => {
-                if let Some(tab) = self.active_tab() {
-                    let cwd = tab.terminal.lock().unwrap().current_directory.clone();
-                    let _ = self.proxy.send_event(AppEvent::SpawnNewWindow { cwd });
-                }
-            }
+            Action::ScrollPageUp
+            | Action::ScrollPageDown
+            | Action::Copy
+            | Action::Paste
+            | Action::OpenSearch
+            | Action::ScrollPrevPrompt
+            | Action::ScrollNextPrompt
+            | Action::OpenNewWindow => {}
             Action::NewTab => {
                 self.spawn_new_tab();
             }
@@ -1175,6 +609,7 @@ impl RenderHost {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.reset_glyph_atlas();
         }
+        self.sync_input_state();
         // The compositor will follow up with a Resized event carrying the
         // new physical dimensions, which triggers handle_resize and
         // recalculates the grid with the updated cell metrics.
@@ -1205,6 +640,7 @@ impl RenderHost {
                 tab.pty.resize(cols as u16, rows as u16);
             }
         }
+        self.sync_input_state();
     }
 
     fn recalculate_grid_size(&mut self) {
@@ -1227,6 +663,7 @@ impl RenderHost {
             tab.terminal.lock().unwrap().resize(cols, rows);
             tab.pty.resize(cols as u16, rows as u16);
         }
+        self.sync_input_state();
     }
 
     // -- Tab management -----------------------------------------------------
@@ -1283,7 +720,7 @@ impl RenderHost {
 
         let terminal_thread = TerminalThread::new();
 
-        let (pty, pty_reader) = match Pty::spawn(
+        let (pty, writer, pty_reader) = match Pty::spawn(
             id,
             cols as u16,
             rows as u16,
@@ -1310,6 +747,11 @@ impl RenderHost {
             self.render_thread_handle.clone(),
             None,
         );
+        let _ = self.proxy.send_event(AppEvent::RegisterInputEndpoint {
+            tab_id: id,
+            terminal: terminal.clone(),
+            writer,
+        });
 
         self.tabs.push(Tab {
             id,
@@ -1319,6 +761,7 @@ impl RenderHost {
         });
         self.active_tab_id = id;
         self.sync_input_state();
+        self.sync_active_input_tab();
     }
 
     fn close_active_tab(&mut self) {
@@ -1327,8 +770,10 @@ impl RenderHost {
             return;
         };
         self.tabs.remove(idx);
+        let _ = self.proxy.send_event(AppEvent::RemoveInputEndpoint(tab_id));
         if self.tabs.is_empty() {
             self.sync_input_state();
+            self.sync_active_input_tab();
             self.should_exit = true;
             return;
         }
@@ -1336,6 +781,7 @@ impl RenderHost {
         self.active_tab_id = self.tabs[new_idx].id;
         self.recalculate_grid_size();
         self.sync_input_state();
+        self.sync_active_input_tab();
     }
 
     fn switch_tab(
@@ -1354,6 +800,7 @@ impl RenderHost {
         let new_idx = ((idx as i32 + delta).rem_euclid(n)) as usize;
         self.active_tab_id = self.tabs[new_idx].id;
         self.sync_input_state();
+        self.sync_active_input_tab();
     }
 
     fn handle_child_exited(
@@ -1365,8 +812,10 @@ impl RenderHost {
         };
         let was_active = self.active_tab_id == tab_id;
         self.tabs.remove(idx);
+        let _ = self.proxy.send_event(AppEvent::RemoveInputEndpoint(tab_id));
         if self.tabs.is_empty() {
             self.sync_input_state();
+            self.sync_active_input_tab();
             self.should_exit = true;
             return;
         }
@@ -1376,15 +825,7 @@ impl RenderHost {
         }
         self.recalculate_grid_size();
         self.sync_input_state();
-    }
-
-    fn handle_tab_bar_click(&mut self) {
-        if let Some(idx) = self.tab_at_mouse()
-            && let Some(tab) = self.tabs.get(idx)
-        {
-            self.active_tab_id = tab.id;
-            self.sync_input_state();
-        }
+        self.sync_active_input_tab();
     }
 
     // -- Config -------------------------------------------------------------
@@ -1412,6 +853,7 @@ impl RenderHost {
                 renderer.set_gutter_enabled(cfg.gutter);
                 self.recalculate_grid_size();
             }
+            self.sync_input_state();
         }
 
         if cfg.dpi_scale != self.config.dpi_scale {
@@ -1439,6 +881,7 @@ impl RenderHost {
             self.config.fonts = cfg.fonts.clone();
             self.config.font_size = cfg.font_size;
             self.config.font_supersampling = cfg.font_supersampling;
+            self.sync_input_state();
         }
         if (cfg.opacity - self.config.opacity).abs() > f32::EPSILON {
             warn!(
@@ -1535,14 +978,21 @@ impl RenderHost {
             return;
         };
 
+        let (hovered_button, tab_context_menu, gutter_popup, preedit) = {
+            let input_state = self.input_state.lock().unwrap();
+            (
+                input_state.hovered_button,
+                input_state.tab_context_menu.clone(),
+                input_state.gutter_popup.clone(),
+                input_state.preedit.clone(),
+            )
+        };
+
         let controls = WindowControls {
-            hovered: self.hovered_button.map(|b| b as u8),
+            hovered: hovered_button,
             maximized: self.window.as_ref().is_some_and(|w| w.is_maximized()),
             region_width: self.font_system.cell_width as f32 * BUTTONS_REGION_CELLS,
-            tab_menu: self
-                .tab_context_menu
-                .as_ref()
-                .map(|m| (m.x, m.hovered_item)),
+            tab_menu: tab_context_menu.as_ref().map(|m| (m.x, m.hovered_item)),
         };
 
         // Snapshot terminal state under a brief lock, then release it so
@@ -1560,8 +1010,8 @@ impl RenderHost {
             &snap,
             &tab_infos,
             &controls,
-            self.gutter_popup.as_ref(),
-            self.preedit.as_ref(),
+            gutter_popup.as_ref(),
+            preedit.as_ref(),
         );
     }
 
@@ -1612,374 +1062,50 @@ impl RenderHost {
         }
     }
 
-    // -- Helpers ------------------------------------------------------------
-
-    fn cell_at(
-        &self,
-        x: f64,
-        y: f64,
-    ) -> (u32, u32) {
-        let raw_x = x.max(0.0) as u32;
-        let raw_y = y.max(0.0) as u32;
-        let tab_bar_px = if self.tab_bar_visible() {
-            self.font_system.cell_height
+    fn sync_input_state(&mut self) {
+        let mut input_state = self.input_state.lock().unwrap();
+        input_state.keybindings = self.config.keybindings.clone();
+        input_state.tab_count = self.tabs.len();
+        input_state.cell_width = self.font_system.cell_width;
+        input_state.cell_height = self.font_system.cell_height;
+        input_state.gutter_width = if self.config.gutter {
+            self.renderer
+                .as_ref()
+                .map(|r| r.gutter_width_px(self.font_system.cell_width))
+                .unwrap_or_else(|| compute_gutter_width(self.font_system.cell_width))
         } else {
             0
         };
-        let y = raw_y.saturating_sub(tab_bar_px);
-        let gutter_px = self
-            .renderer
-            .as_ref()
-            .map(|r| r.gutter_width_px(self.font_system.cell_width))
-            .unwrap_or(0);
-        let x = raw_x.saturating_sub(gutter_px);
-        let Some(tab) = self.active_tab() else {
-            return (0, 0);
-        };
-        let terminal = tab.terminal.lock().unwrap();
-        let cols = terminal.viewport.cols.saturating_sub(1);
-        let rows = terminal.viewport.rows.saturating_sub(1);
-        (
-            (x / self.font_system.cell_width).min(cols),
-            (y / self.font_system.cell_height).min(rows),
-        )
     }
 
-    fn is_in_tab_bar(&self) -> bool {
-        self.tab_bar_visible() && (self.mouse_pos.1.max(0.0) as u32) < self.font_system.cell_height
+    fn sync_active_input_tab(&self) {
+        let _ = self.proxy.send_event(AppEvent::SetActiveInputTab(
+            self.active_tab().map(|tab| tab.id),
+        ));
     }
 
-    /// Returns which window control button is at the given position, if any.
-    fn window_button_at(&self) -> Option<WindowButton> {
-        if !self.is_in_tab_bar() {
-            return None;
-        }
-        let cell_w = self.font_system.cell_width as f32;
-        let surface_w = self.window_size.0 as f32;
-        let region_w = cell_w * BUTTONS_REGION_CELLS;
-        let buttons_x = surface_w - region_w;
-        let mx = self.mouse_pos.0 as f32;
-        if mx < buttons_x {
-            return None;
-        }
-        let btn_w = cell_w * BUTTON_CELLS;
-        let idx = ((mx - buttons_x) / btn_w) as usize;
-        match idx {
-            0 => Some(WindowButton::Minimize),
-            1 => Some(WindowButton::Maximize),
-            2 => Some(WindowButton::Close),
-            _ => None,
-        }
-    }
-
-    /// Returns the tab index at the current mouse position, accounting
-    /// for the button region on the right. Returns `None` if the cursor
-    /// is outside the tab area (in the button region or past the last tab).
-    fn tab_at_mouse(&self) -> Option<usize> {
-        let cell_w = self.font_system.cell_width as f32;
-        let surface_w = self.window_size.0 as f32;
-        let region_w = cell_w * BUTTONS_REGION_CELLS;
-        let tabs_w = surface_w - region_w;
-        let max_tab_w = cell_w * 30.0;
-        let tab_w = (tabs_w / self.tabs.len() as f32).min(max_tab_w);
-        let mx = self.mouse_pos.0.max(0.0) as f32;
-        if mx >= tabs_w {
-            return None;
-        }
-        let idx = (mx / tab_w) as usize;
-        if idx < self.tabs.len() {
-            Some(idx)
-        } else {
-            None
-        }
-    }
-
-    /// True when the mouse is in the tab bar's "empty" drag region — not
-    /// over a tab and not over a window control button.
-    fn is_in_titlebar_drag_region(&self) -> bool {
-        self.is_in_tab_bar() && self.window_button_at().is_none()
-    }
-
-    /// Returns the resize direction if the cursor is within the resize
-    /// border, or `None` if maximized or not near an edge.
-    fn resize_direction_at(&self) -> Option<winit::window::ResizeDirection> {
-        use winit::window::ResizeDirection;
-        if self.window.as_ref().is_some_and(|w| w.is_maximized()) {
-            return None;
-        }
-        let (w, h) = self.window_size;
-        let (mx, my) = (self.mouse_pos.0 as f32, self.mouse_pos.1 as f32);
-        let b = RESIZE_BORDER;
-        let wf = w as f32;
-        let hf = h as f32;
-
-        let left = mx < b;
-        let right = mx >= wf - b;
-        let top = my < b;
-        let bottom = my >= hf - b;
-
-        match (left, right, top, bottom) {
-            (true, _, true, _) => Some(ResizeDirection::NorthWest),
-            (_, true, true, _) => Some(ResizeDirection::NorthEast),
-            (true, _, _, true) => Some(ResizeDirection::SouthWest),
-            (_, true, _, true) => Some(ResizeDirection::SouthEast),
-            (true, _, _, _) => Some(ResizeDirection::West),
-            (_, true, _, _) => Some(ResizeDirection::East),
-            (_, _, true, _) => Some(ResizeDirection::North),
-            (_, _, _, true) => Some(ResizeDirection::South),
-            _ => None,
-        }
-    }
-
-    /// Returns the tab-menu item index at the given pixel position, if the
-    /// tab context menu is open and the cursor is inside it.
-    fn tab_menu_item_at(
-        &self,
-        mx: f64,
-        my: f64,
-    ) -> Option<TabMenuAction> {
-        let menu = self.tab_context_menu.as_ref()?;
-        let cell_w = self.font_system.cell_width as f32;
-        let cell_h = self.font_system.cell_height as f32;
-        let pw = cell_w * TAB_MENU_WIDTH_CELLS;
-        let ph = TAB_MENU_ITEMS.len() as f32 * cell_h;
-        // Position the menu below the tab bar, clamped to the window.
-        let px = menu.x.min(self.window_size.0 as f32 - pw);
-        let py = cell_h;
-        let fx = mx as f32;
-        let fy = my as f32;
-        if fx < px || fx >= px + pw || fy < py || fy >= py + ph {
-            return None;
-        }
-        let idx = ((fy - py) / cell_h) as usize;
-        TAB_MENU_ITEMS.get(idx).map(|item| item.action)
-    }
-
-    fn execute_tab_menu_action(
+    fn set_active_tab(
         &mut self,
-        action: TabMenuAction,
+        idx: usize,
     ) {
-        match action {
-            TabMenuAction::NewTab => self.spawn_new_tab(),
-            TabMenuAction::CloseTab => self.close_active_tab(),
-            TabMenuAction::CloseOtherTabs => {
-                let keep = self.active_tab_id;
-                self.tabs.retain(|t| t.id == keep);
-                self.recalculate_grid_size();
-                self.sync_input_state();
+        if let Some(tab) = self.tabs.get(idx) {
+            self.active_tab_id = tab.id;
+            self.sync_input_state();
+            self.sync_active_input_tab();
+        }
+    }
+
+    fn close_other_tabs(&mut self) {
+        let keep = self.active_tab_id;
+        for tab in &self.tabs {
+            if tab.id != keep {
+                let _ = self.proxy.send_event(AppEvent::RemoveInputEndpoint(tab.id));
             }
         }
-    }
-
-    fn sync_input_state(&mut self) {
-        let active = self.active_tab().map(|tab| ActiveInputTarget {
-            terminal: tab.terminal.clone(),
-            writer: tab.pty.writer(),
-        });
-        let mut input_state = self.input_state.lock().unwrap();
-        input_state.active = active;
-        input_state.keybindings = self.config.keybindings.clone();
-    }
-
-    fn mouse_modifiers(&self) -> MouseModifiers {
-        MouseModifiers {
-            shift: self.modifiers.shift_key(),
-            alt: self.modifiers.alt_key(),
-            ctrl: self.modifiers.control_key(),
-        }
-    }
-
-    fn flush_pending(&mut self) {
-        let Some(tab) = self.active_tab_mut() else {
-            return;
-        };
-
-        let bytes = tab.terminal.lock().unwrap().take_pending_output();
-        if !bytes.is_empty() {
-            let _ = tab.pty.write(&bytes);
-            tab.terminal.lock().unwrap().reset_viewport();
-        }
-    }
-
-    fn forward_mouse_to_app(&self) -> bool {
-        if let Some(tab) = self.active_tab() {
-            tab.terminal.lock().unwrap().mouse_tracking_enabled() && !self.modifiers.shift_key()
-        } else {
-            false
-        }
-    }
-
-    fn next_click_count(
-        &self,
-        cell: (u32, u32),
-    ) -> u32 {
-        let within_window = self
-            .last_click_time
-            .is_some_and(|t| t.elapsed() <= MULTI_CLICK_WINDOW);
-        let same_cell = self.last_click_cell == Some(cell);
-        if within_window && same_cell && self.click_count < 3 {
-            self.click_count + 1
-        } else {
-            1
-        }
-    }
-
-    // -- Gutter popup -------------------------------------------------------
-
-    /// True when the mouse is in the gutter strip (left of col 0).
-    fn is_in_gutter(&self) -> bool {
-        let gutter_px = self
-            .renderer
-            .as_ref()
-            .map(|r| r.gutter_width_px(self.font_system.cell_width))
-            .unwrap_or(0);
-        gutter_px > 0 && (self.mouse_pos.0.max(0.0) as u32) < gutter_px
-    }
-
-    /// Compute the popup's pixel bounds: `(x, y, w, h)`.
-    fn popup_bounds(&self) -> Option<(f32, f32, f32, f32)> {
-        let popup = self.gutter_popup.as_ref()?;
-        let cell_w = self.font_system.cell_width as f32;
-        let cell_h = self.font_system.cell_height as f32;
-        let gutter_px = self
-            .renderer
-            .as_ref()
-            .map(|r| r.gutter_width_px(self.font_system.cell_width))
-            .unwrap_or(0) as f32;
-        let tab_bar_h = if self.tab_bar_visible() { cell_h } else { 0.0 };
-
-        let total_rows = popup.total_rows() as f32;
-        let popup_w = cell_w * POPUP_WIDTH_CELLS;
-        let popup_h = total_rows * cell_h;
-        let popup_x = gutter_px;
-        let popup_y =
-            (popup.screen_row as f32 * cell_h + tab_bar_h).min(self.window_size.1 as f32 - popup_h);
-        Some((popup_x, popup_y, popup_w, popup_h))
-    }
-
-    /// Which menu-item index (if any) the given pixel position hits.
-    fn popup_item_at(
-        &self,
-        x: f64,
-        y: f64,
-    ) -> Option<usize> {
-        let (px, py, pw, ph) = self.popup_bounds()?;
-        let popup = self.gutter_popup.as_ref()?;
-        let cell_h = self.font_system.cell_height as f32;
-        let x = x as f32;
-        let y = y as f32;
-        if x < px || x > px + pw || y < py || y > py + ph {
-            return None;
-        }
-        let row_in_popup = ((y - py) / cell_h) as usize;
-        let header = if popup.duration_text.is_some() { 1 } else { 0 };
-        let item_idx = row_in_popup.checked_sub(header)?;
-        (item_idx < GUTTER_MENU_ITEMS.len()).then_some(item_idx)
-    }
-
-    /// Open the gutter popup for `screen_row`. Finds the owning prompt,
-    /// selects the command, and builds the popup state.
-    fn open_gutter_popup(
-        &mut self,
-        screen_row: u32,
-    ) {
-        let Some(tab) = self.active_tab_mut() else {
-            return;
-        };
-        let mut terminal = tab.terminal.lock().unwrap();
-        let Some(prompt_abs) = terminal.find_prompt_for_screen_row(screen_row) else {
-            return;
-        };
-        terminal.select_command_at(prompt_abs);
-        let duration_text = terminal
-            .command_duration_at(prompt_abs)
-            .map(format_duration);
-        drop(terminal);
-        self.gutter_popup = Some(GutterPopup {
-            prompt_abs_row: prompt_abs,
-            screen_row,
-            duration_text,
-            hovered_item: None,
-        });
-    }
-
-    /// Dismiss the popup (if open).
-    fn close_gutter_popup(&mut self) {
-        if self.gutter_popup.take().is_some()
-            && let Some(tab) = self.active_tab_mut()
-        {
-            tab.terminal.lock().unwrap().clear_selection();
-        }
-    }
-
-    /// Execute the action from the popup at `item_idx` and close it.
-    fn execute_popup_action(
-        &mut self,
-        item_idx: usize,
-    ) {
-        let Some(popup) = self.gutter_popup.take() else {
-            return;
-        };
-        let action = GUTTER_MENU_ITEMS[item_idx].action;
-        match action {
-            GutterMenuAction::Rerun => {
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    if let Some(cmd) = terminal.command_text_at(popup.prompt_abs_row) {
-                        let cmd = cmd.trim().to_owned();
-                        terminal.clear_selection();
-                        terminal.reset_viewport();
-                        terminal.paste(&format!("{cmd}\r"));
-                    }
-                }
-                self.flush_pending();
-            }
-            GutterMenuAction::CopyCommand => {
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    if let Some(text) = terminal.command_text_at(popup.prompt_abs_row) {
-                        terminal.copy_to_clipboard(text.trim());
-                    }
-                    terminal.clear_selection();
-                }
-            }
-            GutterMenuAction::CopyCommandAndOutput => {
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    if let Some(text) = terminal.command_and_output_text_at(popup.prompt_abs_row) {
-                        terminal.copy_to_clipboard(&text);
-                    }
-                    terminal.clear_selection();
-                }
-            }
-            GutterMenuAction::CopyOutput => {
-                if let Some(tab) = self.active_tab_mut() {
-                    let mut terminal = tab.terminal.lock().unwrap();
-                    if let Some(text) = terminal.output_text_at(popup.prompt_abs_row) {
-                        terminal.copy_to_clipboard(&text);
-                    }
-                    terminal.clear_selection();
-                }
-            }
-        }
-    }
-}
-
-/// Format a Duration as a human-readable string.
-fn format_duration(d: Duration) -> String {
-    let secs = d.as_secs_f64();
-    if secs < 1.0 {
-        format!("{:.0}ms", secs * 1000.0)
-    } else if secs < 60.0 {
-        format!("{secs:.1}s")
-    } else if secs < 3600.0 {
-        let m = (secs / 60.0).floor();
-        let s = secs - m * 60.0;
-        format!("{m:.0}m {s:.0}s")
-    } else {
-        let h = (secs / 3600.0).floor();
-        let m = ((secs - h * 3600.0) / 60.0).floor();
-        format!("{h:.0}h {m:.0}m")
+        self.tabs.retain(|t| t.id == keep);
+        self.recalculate_grid_size();
+        self.sync_input_state();
+        self.sync_active_input_tab();
     }
 }
 
