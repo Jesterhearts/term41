@@ -1502,10 +1502,10 @@ impl Terminal {
         // resize doesn't land the cursor outside its own grid.
         for screen in [&mut self.active, &mut self.stash] {
             resize_screen(screen, old_cols, old_rows, cols, rows);
-            if screen::page_memory_active(screen) {
-                if let Some(page_rows) = screen::page_rows(screen) {
-                    screen::resize_page_memory(screen, &Viewport { rows, cols, top: 0 }, page_rows);
-                }
+            if screen::page_memory_active(screen)
+                && let Some(page_rows) = screen::page_rows(screen)
+            {
+                screen::resize_page_memory(screen, &Viewport { rows, cols, top: 0 }, page_rows);
             }
         }
 
