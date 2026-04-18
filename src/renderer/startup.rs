@@ -519,7 +519,7 @@ fn blend_rgba_over(
     let out_r = (r as u32 * alpha + dr * inv + 127) / 255;
     let out_g = (g as u32 * alpha + dg * inv + 127) / 255;
     let out_b = (b as u32 * alpha + db * inv + 127) / 255;
-    ((out_r as u32) << 16) | ((out_g as u32) << 8) | out_b as u32
+    (out_r << 16) | (out_g << 8) | out_b
 }
 
 fn paint_cursor_overlay(
