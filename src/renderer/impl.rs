@@ -1348,7 +1348,9 @@ impl Renderer {
                     + slot.bearing_x as f32 * scale_x
                     + sg.x_offset * scale_x
                     + gutter_px;
+                let gx = gx.floor();
                 let gw = sw as f32 * scale_x;
+                let gw = gw.ceil();
 
                 // Double-height: each cell of the pair shows exactly half the
                 // glyph's UV range, stretched to fill the entire cell height.
@@ -1383,6 +1385,8 @@ impl Renderer {
                     let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
                     (gy, sh as f32, sy as f32, (sy + sh) as f32)
                 };
+                let gy = gy.floor();
+                let gh = gh.ceil();
 
                 // Fake italic by shearing the glyph quad around the cell
                 // baseline: vertices above the baseline shift right, below
@@ -2012,9 +2016,14 @@ impl Renderer {
             let sh = slot.height();
 
             let gx = x + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+            let gx = gx.floor();
+
             let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
+            let gy = gy.floor();
+
             let gw = sw as f32;
             let gh = sh as f32;
+
             let flags: u32 = if slot.is_color { 1 } else { 0 };
 
             let fi = fg_vertices.len() as u32;
@@ -2189,9 +2198,14 @@ impl Renderer {
             let sh = slot.height();
 
             let gx = sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+            let gx = gx.floor();
+
             let gy = bar_y + baseline - slot.bearing_y as f32 - sg.y_offset;
+            let gy = gy.floor();
+
             let gw = sw as f32;
             let gh = sh as f32;
+
             let flags: u32 = if slot.is_color { 1 } else { 0 };
 
             let fi = fg_vertices.len() as u32;
@@ -2416,7 +2430,11 @@ impl Renderer {
             let sh = slot.height();
 
             let gx = x + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+            let gx = gx.floor();
+
             let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
+            let gy = gy.floor();
+
             let gw = sw as f32;
             let gh = sh as f32;
             let flags: u32 = if slot.is_color { 1 } else { 0 };
@@ -2630,7 +2648,11 @@ impl Renderer {
             let sh = slot.height();
 
             let gx = origin_x + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+            let gx = gx.floor();
+
             let gy = origin_y + baseline - slot.bearing_y as f32 - sg.y_offset;
+            let gy = gy.ceil();
+
             let gw = sw as f32;
             let gh = sh as f32;
             let flags: u32 = if slot.is_color { 1 } else { 0 };

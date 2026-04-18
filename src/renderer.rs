@@ -1340,13 +1340,13 @@ impl RenderHost {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.resize(winit::dpi::PhysicalSize::new(width, height));
             let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
-            let usable_width = width.saturating_sub(gutter_px);
+            let usable_width = width.saturating_sub(gutter_px) - RESIZE_BORDER as u32 * 2;
             let tab_bar_px = if self.tab_bar_visible() {
                 self.font_system.cell_height
             } else {
                 0
             };
-            let usable_height = height.saturating_sub(tab_bar_px);
+            let usable_height = height.saturating_sub(tab_bar_px) - RESIZE_BORDER as u32 * 2;
             let (cols, rows) = self
                 .font_system
                 .grid_dimensions(usable_width, usable_height);
