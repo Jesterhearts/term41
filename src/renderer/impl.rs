@@ -20,6 +20,7 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::config::VSync;
+use crate::renderer::BUTTON_CELLS;
 use crate::renderer::GUTTER_MENU_ITEMS;
 use crate::renderer::GutterPopup;
 use crate::renderer::POPUP_WIDTH_CELLS;
@@ -223,6 +224,22 @@ pub struct TabInfo<'s> {
     pub label: &'s str,
     pub active: bool,
 }
+
+/// CSD window control state passed to the renderer each frame.
+pub struct WindowControls {
+    /// Which button the mouse is hovering, if any.
+    pub hovered: Option<u8>,
+    /// Whether the window is currently maximized (affects the maximize icon).
+    pub maximized: bool,
+    /// Width of the button region in physical pixels, computed from cell
+    /// metrics.
+    pub region_width: f32,
+    /// Tab context menu state, if open: (x position, hovered item index).
+    pub tab_menu: Option<(f32, Option<usize>)>,
+}
+
+/// Button index for the close button (rightmost).
+const BTN_CLOSE: u8 = 2;
 
 pub struct Renderer {
     device: wgpu::Device,
@@ -861,6 +878,7 @@ impl Renderer {
         font_system: &mut FontSystem,
         terminal: MutexGuard<'_, Terminal>,
         tabs: &[TabInfo],
+        controls: &WindowControls,
         gutter_popup: Option<&GutterPopup>,
         preedit: Option<&crate::renderer::PreeditState>,
     ) {
@@ -1318,6 +1336,7 @@ impl Renderer {
             font_system,
             tabs,
             &terminal.palette,
+            controls,
             &mut bg_vertices,
             &mut bg_indices,
             &mut fg_vertices,
@@ -1612,20 +1631,19 @@ impl Renderer {
     /// Paint the tab bar at the top of the window. Each tab gets a
     /// background quad and a label shaped through the glyph atlas. The
     /// active tab uses the palette bg, inactive tabs use a 50/50 blend
-    /// of palette bg and fg.
+    /// of palette bg and fg. Window control buttons (minimize, maximize,
+    /// close) are rendered at the right edge.
     fn render_tab_bar(
         &mut self,
         font_system: &mut FontSystem,
         tabs: &[TabInfo],
         palette: &ColorPalette,
+        controls: &WindowControls,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
         fg_vertices: &mut Vec<FgVertex>,
         fg_indices: &mut Vec<u32>,
     ) {
-        if tabs.is_empty() {
-            return;
-        }
         let cell_w = font_system.cell_width as f32;
         let cell_h = font_system.cell_height as f32;
         let baseline = font_system.baseline_offset();
@@ -1657,10 +1675,17 @@ impl Renderer {
         ]);
         bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
 
+        // Reserve space for window control buttons on the right.
+        let tabs_available_w = surface_w - controls.region_width;
+
         // Divide available width equally among tabs, capped to a
         // reasonable maximum so a single tab doesn't span the screen.
         let max_tab_w = cell_w * 30.0;
-        let tab_w = (surface_w / tabs.len() as f32).min(max_tab_w);
+        let tab_w = if tabs.is_empty() {
+            0.0
+        } else {
+            (tabs_available_w / tabs.len() as f32).min(max_tab_w)
+        };
 
         let label_fg = pack_color(&palette.fg, 255);
 
@@ -1724,72 +1749,191 @@ impl Renderer {
             let max_label_chars = ((tab_w - margin * 2.0) / cell_w).max(1.0) as usize;
             let label: String = tab.label.chars().take(max_label_chars).collect();
 
-            let cells: Vec<smol_str::SmolStr> = label
-                .chars()
-                .map(|c| {
-                    let mut buf = [0u8; 4];
-                    smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
-                })
-                .collect();
-            let attrs = vec![CellAttrs::default(); cells.len()];
-            let shaped = font_system.shape_row(&cells, &attrs);
+            self.shape_and_render_label(
+                font_system,
+                &label,
+                x0 + margin,
+                0.0,
+                baseline,
+                cell_w,
+                label_fg,
+                fg_vertices,
+                fg_indices,
+            );
+        }
 
-            for sg in &shaped {
-                let slot = match self.glyph_atlas.ensure_cached(
-                    &self.queue,
-                    font_system,
-                    sg.font_index,
-                    sg.glyph_id,
-                    sg.cells_wide,
-                    false,
-                ) {
-                    Some(e) => e,
-                    None => continue,
+        // ---- Window control buttons ----
+        let btn_w = cell_w * BUTTON_CELLS;
+        let buttons_x = surface_w - controls.region_width;
+        let button_labels = [
+            "\u{1F5D5}", // 🗕 minimize
+            if controls.maximized {
+                "\u{1F5D7}"
+            } else {
+                "\u{1F5D6}"
+            }, // 🗗 restore / 🗖 maximize
+            "\u{1F5D9}", // × close
+        ];
+
+        for (i, label) in button_labels.iter().enumerate() {
+            let bx = buttons_x + i as f32 * btn_w;
+
+            // Hover highlight.
+            if controls.hovered == Some(i as u8) {
+                let hover_color = if i == BTN_CLOSE as usize {
+                    // Red highlight for close button.
+                    pack_color(&Srgb::new(200, 50, 50), 255)
+                } else {
+                    pack_color(&blend(inactive_bg, palette.fg, 0.3), 255)
                 };
-                if slot.is_empty() {
-                    continue;
+                push_rect(bx, 0.0, btn_w, cell_h, hover_color, bg_vertices, bg_indices);
+            }
+
+            // Center the glyph in the button region.
+            self.shape_and_render_label(
+                font_system,
+                label,
+                bx + (btn_w - cell_w) / 2.0,
+                0.0,
+                baseline,
+                cell_w,
+                label_fg,
+                fg_vertices,
+                fg_indices,
+            );
+        }
+
+        // ---- Tab context menu ----
+        if let Some((menu_x, hovered_idx)) = controls.tab_menu {
+            let menu_items = &crate::renderer::TAB_MENU_ITEMS;
+            let menu_w = cell_w * crate::renderer::TAB_MENU_WIDTH_CELLS;
+            let menu_h = menu_items.len() as f32 * cell_h;
+            let mx = menu_x.min(surface_w - menu_w).max(0.0);
+            let my = cell_h; // directly below the tab bar
+
+            // Panel background.
+            let panel_bg = pack_color(&Srgb::new(30, 30, 38), 255);
+            push_rect(mx, my, menu_w, menu_h, panel_bg, bg_vertices, bg_indices);
+
+            // Border lines (top and bottom).
+            let border_color = pack_color(&Srgb::new(80, 80, 100), 255);
+            push_rect(mx, my, menu_w, 1.0, border_color, bg_vertices, bg_indices);
+            push_rect(
+                mx,
+                my + menu_h - 1.0,
+                menu_w,
+                1.0,
+                border_color,
+                bg_vertices,
+                bg_indices,
+            );
+
+            let normal_fg = pack_color(&Srgb::new(220, 220, 220), 255);
+            let hover_bg = pack_color(&Srgb::new(55, 55, 70), 255);
+            let margin = cell_w * 0.5;
+
+            for (i, item) in menu_items.iter().enumerate() {
+                let iy = my + i as f32 * cell_h;
+
+                if hovered_idx == Some(i) {
+                    push_rect(mx, iy, menu_w, cell_h, hover_bg, bg_vertices, bg_indices);
                 }
 
-                let sx = slot.x();
-                let sy = slot.y();
-                let sw = slot.width();
-                let sh = slot.height();
-
-                let gx = x0 + margin + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
-                let gy = baseline - slot.bearing_y as f32 - sg.y_offset;
-                let gw = sw as f32;
-                let gh = sh as f32;
-                let flags: u32 = if slot.is_color { 1 } else { 0 };
-
-                let fi = fg_vertices.len() as u32;
-                fg_vertices.extend_from_slice(&[
-                    FgVertex {
-                        pos: [gx, gy],
-                        uv: [sx as f32, sy as f32],
-                        color: label_fg,
-                        flags,
-                    },
-                    FgVertex {
-                        pos: [gx + gw, gy],
-                        uv: [(sx + sw) as f32, sy as f32],
-                        color: label_fg,
-                        flags,
-                    },
-                    FgVertex {
-                        pos: [gx, gy + gh],
-                        uv: [sx as f32, (sy + sh) as f32],
-                        color: label_fg,
-                        flags,
-                    },
-                    FgVertex {
-                        pos: [gx + gw, gy + gh],
-                        uv: [(sx + sw) as f32, (sy + sh) as f32],
-                        color: label_fg,
-                        flags,
-                    },
-                ]);
-                fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+                self.shape_and_render_label(
+                    font_system,
+                    item.label,
+                    mx + margin,
+                    iy,
+                    baseline,
+                    cell_w,
+                    normal_fg,
+                    fg_vertices,
+                    fg_indices,
+                );
             }
+        }
+    }
+
+    /// Shape a short text string and emit foreground glyph quads at the
+    /// given position. Used by the tab bar for both tab labels and window
+    /// control button glyphs.
+    fn shape_and_render_label(
+        &mut self,
+        font_system: &mut FontSystem,
+        text: &str,
+        x: f32,
+        y: f32,
+        baseline: f32,
+        cell_w: f32,
+        color: u32,
+        fg_vertices: &mut Vec<FgVertex>,
+        fg_indices: &mut Vec<u32>,
+    ) {
+        let cells: Vec<smol_str::SmolStr> = text
+            .chars()
+            .map(|c| {
+                let mut buf = [0u8; 4];
+                smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf))
+            })
+            .collect();
+        let attrs = vec![CellAttrs::default(); cells.len()];
+        let shaped = font_system.shape_row(&cells, &attrs);
+
+        for sg in &shaped {
+            let slot = match self.glyph_atlas.ensure_cached(
+                &self.queue,
+                font_system,
+                sg.font_index,
+                sg.glyph_id,
+                sg.cells_wide,
+                false,
+            ) {
+                Some(e) => e,
+                None => continue,
+            };
+            if slot.is_empty() {
+                continue;
+            }
+
+            let sx = slot.x();
+            let sy = slot.y();
+            let sw = slot.width();
+            let sh = slot.height();
+
+            let gx = x + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+            let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
+            let gw = sw as f32;
+            let gh = sh as f32;
+            let flags: u32 = if slot.is_color { 1 } else { 0 };
+
+            let fi = fg_vertices.len() as u32;
+            fg_vertices.extend_from_slice(&[
+                FgVertex {
+                    pos: [gx, gy],
+                    uv: [sx as f32, sy as f32],
+                    color,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw, gy],
+                    uv: [(sx + sw) as f32, sy as f32],
+                    color,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx, gy + gh],
+                    uv: [sx as f32, (sy + sh) as f32],
+                    color,
+                    flags,
+                },
+                FgVertex {
+                    pos: [gx + gw, gy + gh],
+                    uv: [(sx + sw) as f32, (sy + sh) as f32],
+                    color,
+                    flags,
+                },
+            ]);
+            fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
         }
     }
 

@@ -136,13 +136,16 @@ impl ApplicationHandler<AppEvent> for WindowHost {
         }
 
         let pixel_width = INITIAL_COLS * self.cell_width + compute_gutter_width(self.cell_width);
-        let pixel_height = INITIAL_ROWS * self.cell_height;
+        // One extra cell_height for the tab bar, which is always visible
+        // (it doubles as the titlebar for CSD window management).
+        let pixel_height = INITIAL_ROWS * self.cell_height + self.cell_height;
         let transparent = self.opacity < 1.0;
         // LogicalSize so the window occupies the same visual area regardless
         // of the monitor's DPI scale factor. Cell metrics are computed at 1x
         // here; the render thread rescales them once it knows the actual
         // scale factor.
         let attrs = Window::default_attributes()
+            .with_decorations(false)
             .with_title("term41")
             .with_transparent(transparent)
             .with_inner_size(winit::dpi::LogicalSize::new(pixel_width, pixel_height));

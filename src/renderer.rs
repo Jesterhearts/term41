@@ -48,6 +48,7 @@ use crate::config::DEFAULT_SCROLLBACK;
 use crate::keybindings::Action;
 use crate::renderer::r#impl::Renderer;
 use crate::renderer::r#impl::TabInfo;
+use crate::renderer::r#impl::WindowControls;
 pub use crate::renderer::r#impl::compute_gutter_width;
 
 // ---------------------------------------------------------------------------
@@ -109,6 +110,71 @@ impl GutterPopup {
         let header = if self.duration_text.is_some() { 1 } else { 0 };
         header + GUTTER_MENU_ITEMS.len()
     }
+}
+
+// ---------------------------------------------------------------------------
+// CSD — client-side window decoration state
+// ---------------------------------------------------------------------------
+
+/// Which window control button the mouse is hovering over.
+/// Discriminants match the button indices used in rendering (left to right).
+#[derive(Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum WindowButton {
+    Minimize = 0,
+    Maximize = 1,
+    Close = 2,
+}
+
+/// Width of the resize hit-test border in physical pixels.
+const RESIZE_BORDER: f32 = 5.0;
+
+/// Number of cell-widths reserved for each window control button.
+const BUTTON_CELLS: f32 = 3.0;
+
+/// Total width of the window-control button region in cell-width units.
+const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
+
+// ---------------------------------------------------------------------------
+// Tab context menu — right-click on a tab in the tab bar
+// ---------------------------------------------------------------------------
+
+#[derive(Clone, Copy)]
+enum TabMenuAction {
+    NewTab,
+    CloseTab,
+    CloseOtherTabs,
+}
+
+struct TabMenuItem {
+    label: &'static str,
+    action: TabMenuAction,
+}
+
+const TAB_MENU_ITEMS: &[TabMenuItem] = &[
+    TabMenuItem {
+        label: "New tab",
+        action: TabMenuAction::NewTab,
+    },
+    TabMenuItem {
+        label: "Close tab",
+        action: TabMenuAction::CloseTab,
+    },
+    TabMenuItem {
+        label: "Close others",
+        action: TabMenuAction::CloseOtherTabs,
+    },
+];
+
+/// Width of the tab context menu in cell units.
+const TAB_MENU_WIDTH_CELLS: f32 = 16.0;
+
+/// State of the tab context popup while it is open.
+struct TabContextMenu {
+    /// Pixel position where the popup was opened (used for placement).
+    x: f32,
+    /// Currently hovered menu-item index.
+    hovered_item: Option<usize>,
 }
 
 // ---------------------------------------------------------------------------
@@ -206,6 +272,12 @@ pub struct RenderHost {
     /// Gutter popup menu, shown when a shell-integration marker is clicked.
     gutter_popup: Option<GutterPopup>,
 
+    /// Which window control button is currently hovered (for highlight).
+    hovered_button: Option<WindowButton>,
+
+    /// Tab context menu, shown on right-click in the tab bar.
+    tab_context_menu: Option<TabContextMenu>,
+
     /// Window handle, persisted after the first frame so IME requests
     /// (`set_ime_cursor_area`) can be issued from event handlers.
     window: Option<Arc<Window>>,
@@ -280,6 +352,8 @@ impl RenderHost {
             left_drag_active: false,
             window_size: (0, 0),
             gutter_popup: None,
+            hovered_button: None,
+            tab_context_menu: None,
             window: None,
             preedit: None,
             ime_cursor_area: None,
@@ -696,6 +770,29 @@ impl RenderHost {
     ) {
         self.mouse_pos = (x, y);
 
+        // Track hovered window control button.
+        self.hovered_button = self.window_button_at();
+
+        // Track hovered tab context menu item.
+        if self.tab_context_menu.is_some() {
+            let action = self.tab_menu_item_at(x, y);
+            if let Some(menu) = self.tab_context_menu.as_mut() {
+                menu.hovered_item = action.map(|_| {
+                    let cell_h = self.font_system.cell_height as f32;
+                    ((y as f32 - cell_h) / cell_h) as usize
+                });
+            }
+        }
+
+        // CSD: set resize cursor when hovering window edges.
+        if let Some(dir) = self.resize_direction_at() {
+            if let Some(w) = &self.window {
+                w.set_cursor(winit::window::CursorIcon::from(dir));
+            }
+        } else if let Some(w) = &self.window {
+            w.set_cursor(winit::window::CursorIcon::Default);
+        }
+
         // Update popup hover state.
         if self.gutter_popup.is_some() {
             let item = self.popup_item_at(x, y);
@@ -749,10 +846,97 @@ impl RenderHost {
         };
         self.mouse_buttons.set(button, pressed);
 
-        // Clicks in the tab bar switch tabs instead of reaching the terminal.
+        // ---- CSD: resize border drag ----
+        if pressed
+            && button == MouseButton::Left
+            && let Some(dir) = self.resize_direction_at()
+        {
+            if let Some(w) = &self.window {
+                let _ = w.drag_resize_window(dir);
+            }
+            return;
+        }
+
+        // ---- CSD: window control buttons ----
+        if pressed
+            && button == MouseButton::Left
+            && let Some(btn) = self.window_button_at()
+        {
+            match btn {
+                WindowButton::Close => {
+                    self.should_exit = true;
+                }
+                WindowButton::Maximize => {
+                    if let Some(w) = &self.window {
+                        w.set_maximized(!w.is_maximized());
+                    }
+                }
+                WindowButton::Minimize => {
+                    if let Some(w) = &self.window {
+                        w.set_minimized(true);
+                    }
+                }
+            }
+            return;
+        }
+
+        // ---- CSD: titlebar drag (empty tab bar area) ----
+        if pressed && button == MouseButton::Left && self.is_in_titlebar_drag_region() {
+            // Double-click toggles maximize.
+            let now = Instant::now();
+            let double_click = self
+                .last_click_time
+                .is_some_and(|t| now.duration_since(t) <= MULTI_CLICK_WINDOW);
+            if double_click {
+                if let Some(w) = &self.window {
+                    w.set_maximized(!w.is_maximized());
+                }
+            } else if let Some(w) = &self.window {
+                let _ = w.drag_window();
+            }
+            self.last_click_time = Some(now);
+            return;
+        }
+
+        // Clicks on tabs switch the active tab.
         if pressed && button == MouseButton::Left && self.is_in_tab_bar() {
             self.close_gutter_popup();
+            self.tab_context_menu = None;
             self.handle_tab_bar_click();
+            return;
+        }
+
+        // ---- CSD: right-click cycling on tab bar ----
+        // First right-click opens the tab context menu; a second right-click
+        // while that menu is open closes it and shows the compositor's native
+        // window menu; a third right-click closes that (handled by the
+        // compositor).
+        if pressed && button == MouseButton::Right && self.is_in_tab_bar() {
+            if self.tab_context_menu.is_some() {
+                // Cycle: close our menu → show compositor window menu.
+                self.tab_context_menu = None;
+                if let Some(w) = &self.window {
+                    let pos = winit::dpi::PhysicalPosition::new(
+                        self.mouse_pos.0 as i32,
+                        self.mouse_pos.1 as i32,
+                    );
+                    w.show_window_menu(pos);
+                }
+            } else {
+                self.tab_context_menu = Some(TabContextMenu {
+                    x: self.mouse_pos.0 as f32,
+                    hovered_item: None,
+                });
+            }
+            return;
+        }
+
+        // Left-click inside tab context menu fires the action; outside dismisses.
+        if pressed && button == MouseButton::Left && self.tab_context_menu.is_some() {
+            if let Some(action) = self.tab_menu_item_at(self.mouse_pos.0, self.mouse_pos.1) {
+                self.execute_tab_menu_action(action);
+            }
+            self.tab_context_menu = None;
             return;
         }
 
@@ -1206,7 +1390,7 @@ impl RenderHost {
     }
 
     fn tab_bar_visible(&self) -> bool {
-        self.tabs.len() >= 2
+        true
     }
 
     fn spawn_new_tab(&mut self) {
@@ -1218,13 +1402,10 @@ impl RenderHost {
         } else {
             Default::default()
         };
-        let was_single = self.tabs.len() == 1;
-
         let (cols, rows) = if let Some(renderer) = &self.renderer {
             let (width, height) = self.window_size;
             let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
             let usable_width = width.saturating_sub(gutter_px);
-            // The tab bar will now be visible (2+ tabs).
             let tab_bar_px = self.font_system.cell_height;
             let usable_height = height.saturating_sub(tab_bar_px);
             self.font_system
@@ -1286,10 +1467,6 @@ impl RenderHost {
             _terminal_thread: terminal_thread,
         });
         self.active_tab_id = id;
-
-        if was_single {
-            self.recalculate_grid_size();
-        }
     }
 
     fn close_active_tab(&mut self) {
@@ -1345,15 +1522,9 @@ impl RenderHost {
     }
 
     fn handle_tab_bar_click(&mut self) {
-        if self.tabs.is_empty() {
-            return;
-        }
-        let cell_w = self.font_system.cell_width as f32;
-        let surface_w = self.window_size.0 as f32;
-        let max_tab_w = cell_w * 30.0;
-        let tab_w = (surface_w / self.tabs.len() as f32).min(max_tab_w);
-        let clicked_idx = (self.mouse_pos.0.max(0.0) as f32 / tab_w) as usize;
-        if let Some(tab) = self.tabs.get(clicked_idx) {
+        if let Some(idx) = self.tab_at_mouse()
+            && let Some(tab) = self.tabs.get(idx)
+        {
             self.active_tab_id = tab.id;
         }
     }
@@ -1505,7 +1676,16 @@ impl RenderHost {
             return;
         };
 
-        // Lock the active terminal for the duration of vertex building +
+        let controls = WindowControls {
+            hovered: self.hovered_button.map(|b| b as u8),
+            maximized: self.window.as_ref().is_some_and(|w| w.is_maximized()),
+            region_width: self.font_system.cell_width as f32 * BUTTONS_REGION_CELLS,
+            tab_menu: self
+                .tab_context_menu
+                .as_ref()
+                .map(|m| (m.x, m.hovered_item)),
+        };
+
         // Lock the active terminal for vertex building only — the renderer
         // drops the guard internally before GPU buffer creation / submit.
         let term = self.tabs[active_idx].terminal.lock().unwrap();
@@ -1514,6 +1694,7 @@ impl RenderHost {
             &mut self.font_system,
             term,
             &tab_infos,
+            &controls,
             self.gutter_popup.as_ref(),
             self.preedit.as_ref(),
         );
@@ -1601,6 +1782,127 @@ impl RenderHost {
 
     fn is_in_tab_bar(&self) -> bool {
         self.tab_bar_visible() && (self.mouse_pos.1.max(0.0) as u32) < self.font_system.cell_height
+    }
+
+    /// Returns which window control button is at the given position, if any.
+    fn window_button_at(&self) -> Option<WindowButton> {
+        if !self.is_in_tab_bar() {
+            return None;
+        }
+        let cell_w = self.font_system.cell_width as f32;
+        let surface_w = self.window_size.0 as f32;
+        let region_w = cell_w * BUTTONS_REGION_CELLS;
+        let buttons_x = surface_w - region_w;
+        let mx = self.mouse_pos.0 as f32;
+        if mx < buttons_x {
+            return None;
+        }
+        let btn_w = cell_w * BUTTON_CELLS;
+        let idx = ((mx - buttons_x) / btn_w) as usize;
+        match idx {
+            0 => Some(WindowButton::Minimize),
+            1 => Some(WindowButton::Maximize),
+            2 => Some(WindowButton::Close),
+            _ => None,
+        }
+    }
+
+    /// Returns the tab index at the current mouse position, accounting
+    /// for the button region on the right. Returns `None` if the cursor
+    /// is outside the tab area (in the button region or past the last tab).
+    fn tab_at_mouse(&self) -> Option<usize> {
+        let cell_w = self.font_system.cell_width as f32;
+        let surface_w = self.window_size.0 as f32;
+        let region_w = cell_w * BUTTONS_REGION_CELLS;
+        let tabs_w = surface_w - region_w;
+        let max_tab_w = cell_w * 30.0;
+        let tab_w = (tabs_w / self.tabs.len() as f32).min(max_tab_w);
+        let mx = self.mouse_pos.0.max(0.0) as f32;
+        if mx >= tabs_w {
+            return None;
+        }
+        let idx = (mx / tab_w) as usize;
+        if idx < self.tabs.len() {
+            Some(idx)
+        } else {
+            None
+        }
+    }
+
+    /// True when the mouse is in the tab bar's "empty" drag region — not
+    /// over a tab and not over a window control button.
+    fn is_in_titlebar_drag_region(&self) -> bool {
+        self.is_in_tab_bar() && self.window_button_at().is_none() && self.tab_at_mouse().is_none()
+    }
+
+    /// Returns the resize direction if the cursor is within the resize
+    /// border, or `None` if maximized or not near an edge.
+    fn resize_direction_at(&self) -> Option<winit::window::ResizeDirection> {
+        use winit::window::ResizeDirection;
+        if self.window.as_ref().is_some_and(|w| w.is_maximized()) {
+            return None;
+        }
+        let (w, h) = self.window_size;
+        let (mx, my) = (self.mouse_pos.0 as f32, self.mouse_pos.1 as f32);
+        let b = RESIZE_BORDER;
+        let wf = w as f32;
+        let hf = h as f32;
+
+        let left = mx < b;
+        let right = mx >= wf - b;
+        let top = my < b;
+        let bottom = my >= hf - b;
+
+        match (left, right, top, bottom) {
+            (true, _, true, _) => Some(ResizeDirection::NorthWest),
+            (_, true, true, _) => Some(ResizeDirection::NorthEast),
+            (true, _, _, true) => Some(ResizeDirection::SouthWest),
+            (_, true, _, true) => Some(ResizeDirection::SouthEast),
+            (true, _, _, _) => Some(ResizeDirection::West),
+            (_, true, _, _) => Some(ResizeDirection::East),
+            (_, _, true, _) => Some(ResizeDirection::North),
+            (_, _, _, true) => Some(ResizeDirection::South),
+            _ => None,
+        }
+    }
+
+    /// Returns the tab-menu item index at the given pixel position, if the
+    /// tab context menu is open and the cursor is inside it.
+    fn tab_menu_item_at(
+        &self,
+        mx: f64,
+        my: f64,
+    ) -> Option<TabMenuAction> {
+        let menu = self.tab_context_menu.as_ref()?;
+        let cell_w = self.font_system.cell_width as f32;
+        let cell_h = self.font_system.cell_height as f32;
+        let pw = cell_w * TAB_MENU_WIDTH_CELLS;
+        let ph = TAB_MENU_ITEMS.len() as f32 * cell_h;
+        // Position the menu below the tab bar, clamped to the window.
+        let px = menu.x.min(self.window_size.0 as f32 - pw);
+        let py = cell_h;
+        let fx = mx as f32;
+        let fy = my as f32;
+        if fx < px || fx >= px + pw || fy < py || fy >= py + ph {
+            return None;
+        }
+        let idx = ((fy - py) / cell_h) as usize;
+        TAB_MENU_ITEMS.get(idx).map(|item| item.action)
+    }
+
+    fn execute_tab_menu_action(
+        &mut self,
+        action: TabMenuAction,
+    ) {
+        match action {
+            TabMenuAction::NewTab => self.spawn_new_tab(),
+            TabMenuAction::CloseTab => self.close_active_tab(),
+            TabMenuAction::CloseOtherTabs => {
+                let keep = self.active_tab_id;
+                self.tabs.retain(|t| t.id == keep);
+                self.recalculate_grid_size();
+            }
+        }
     }
 
     fn mouse_modifiers(&self) -> MouseModifiers {
