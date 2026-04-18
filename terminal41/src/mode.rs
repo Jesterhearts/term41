@@ -40,6 +40,10 @@ pub const DECNKM: u16 = 66;
 /// toggling which is both disruptive and expensive (grid resize + clear).
 pub const ALLOW_DECCOLM: u16 = 40;
 
+/// DECNRCM -- National Replacement Character Set Mode. When set, NRC
+/// designations replace ASCII positions in a 7-bit national environment.
+pub const DECNRCM: u16 = 42;
+
 /// DECSCNM -- Screen Mode (mode 5). When set, the screen displays in
 /// reverse video — default background becomes foreground and vice versa.
 /// Per-cell SGR 7 (REVERSE) stacks with this, so reversed cells appear

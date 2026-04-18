@@ -6,6 +6,8 @@ use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
+use crate::charset::CharsetState;
+use crate::charset::UserPreferredSupplementalSet;
 use crate::grid::Cursor;
 use crate::grid::Grid;
 use crate::grid::Viewport;
@@ -28,11 +30,7 @@ pub struct SavedCursor {
     pub underline: UnderlineStyle,
     pub underline_color: Option<Srgb<u8>>,
     pub origin_mode: bool,
-    pub charset_g0_is_drawing: bool,
-    pub charset_g1_is_drawing: bool,
-    pub charset_g2_is_drawing: bool,
-    pub charset_g3_is_drawing: bool,
-    pub charset_gl_is_g0: bool,
+    pub charset: CharsetState,
 }
 
 /// State for a single screen buffer (primary or alt). The terminal holds
@@ -86,23 +84,15 @@ pub struct Screen {
     /// DECOM — when set, cursor addressing (CUP, VPA) is relative to the
     /// scroll region rather than the full screen. Homes the cursor on toggle.
     pub origin_mode: bool,
-    /// Character set designated to G0. `true` = DEC Special Graphics, `false` =
-    /// ASCII.
-    pub charset_g0_is_drawing: bool,
-    /// Character set designated to G1.
-    pub charset_g1_is_drawing: bool,
-    /// Character set designated to G2. `true` = DEC Special Graphics.
-    pub charset_g2_is_drawing: bool,
-    /// Character set designated to G3.
-    pub charset_g3_is_drawing: bool,
-    /// `true` when G0 is active (GL = G0, default). `false` when G1 is active
-    /// (GL = G1, after SO).
-    pub charset_gl_is_g0: bool,
-    /// Pending single-shift: `Some(2)` after SS2 (ESC N), `Some(3)` after
-    /// SS3 (ESC O). The next graphic character is fetched from G2 or G3,
-    /// then this is cleared. Not saved/restored by DECSC — it applies only
-    /// to the very next character.
-    pub single_shift: Option<u8>,
+    /// `true` when DECNRCM is active and NRC designations should replace
+    /// their ASCII positions.
+    pub nrc_mode: bool,
+    /// Current user-preferred supplemental set for `<` designations and
+    /// DECRQUPSS reporting.
+    pub upss: UserPreferredSupplementalSet,
+    /// Designated sets plus GL/GR invocation state for DEC/ISO-2022-style
+    /// character-set handling.
+    pub charset: CharsetState,
     /// DECAWM (`?7`) — when true (default), printing past the right margin
     /// wraps to the next line. When false, the cursor stays at the right
     /// margin and overwrites the last column.
@@ -120,15 +110,6 @@ pub struct Screen {
 }
 
 impl Screen {
-    /// Whether the active GL character set is DEC Special Graphics.
-    pub fn is_drawing_active(&self) -> bool {
-        if self.charset_gl_is_g0 {
-            self.charset_g0_is_drawing
-        } else {
-            self.charset_g1_is_drawing
-        }
-    }
-
     pub(super) fn new(
         cols: u32,
         rows: u32,
@@ -166,12 +147,9 @@ impl Screen {
             last_char: None,
             tab_stops: init_tab_stops(cols),
             origin_mode: false,
-            charset_g0_is_drawing: false,
-            charset_g1_is_drawing: false,
-            charset_g2_is_drawing: false,
-            charset_g3_is_drawing: false,
-            charset_gl_is_g0: true,
-            single_shift: None,
+            nrc_mode: false,
+            upss: UserPreferredSupplementalSet::DecSupplemental,
+            charset: CharsetState::new(),
             autowrap: true,
             app_cursor_keys: false,
             app_keypad: false,
@@ -202,11 +180,7 @@ pub(super) fn save_cursor_slot(screen: &mut Screen) {
         underline: screen.underline,
         underline_color: screen.underline_color,
         origin_mode: screen.origin_mode,
-        charset_g0_is_drawing: screen.charset_g0_is_drawing,
-        charset_g1_is_drawing: screen.charset_g1_is_drawing,
-        charset_g2_is_drawing: screen.charset_g2_is_drawing,
-        charset_g3_is_drawing: screen.charset_g3_is_drawing,
-        charset_gl_is_g0: screen.charset_gl_is_g0,
+        charset: screen.charset,
     });
 }
 
@@ -227,11 +201,7 @@ pub(super) fn restore_cursor_slot(
             screen.underline = saved.underline;
             screen.underline_color = saved.underline_color;
             screen.origin_mode = saved.origin_mode;
-            screen.charset_g0_is_drawing = saved.charset_g0_is_drawing;
-            screen.charset_g1_is_drawing = saved.charset_g1_is_drawing;
-            screen.charset_g2_is_drawing = saved.charset_g2_is_drawing;
-            screen.charset_g3_is_drawing = saved.charset_g3_is_drawing;
-            screen.charset_gl_is_g0 = saved.charset_gl_is_g0;
+            screen.charset = saved.charset;
         }
         None => {
             screen.cursor.row = 0;

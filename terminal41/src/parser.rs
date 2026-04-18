@@ -11,6 +11,9 @@ use vtepp::Params;
 use crate::C1Mode;
 use crate::ConformanceLevel;
 use crate::TerminalModes;
+use crate::charset;
+use crate::charset::CharacterSet;
+use crate::charset::GraphicSetSlot;
 use crate::color;
 use crate::color::apply_sgr;
 use crate::conformance;
@@ -154,14 +157,12 @@ fn apply_hard_reset(
         s.last_char = None;
         s.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
         s.origin_mode = false;
+        s.nrc_mode = false;
+        s.upss = charset::UserPreferredSupplementalSet::DecSupplemental;
         s.autowrap = true;
         s.app_cursor_keys = false;
-        s.charset_g0_is_drawing = false;
-        s.charset_g1_is_drawing = false;
-        s.charset_g2_is_drawing = false;
-        s.charset_g3_is_drawing = false;
-        s.charset_gl_is_g0 = true;
-        s.single_shift = None;
+        s.app_keypad = false;
+        s.charset = charset::CharsetState::new();
     }
     *ctx.modes = TerminalModes::new();
     ctx.modes.conformance_level = conformance_level;
@@ -212,48 +213,6 @@ fn prev_tab_stop(
     0
 }
 
-/// SCS (Select Character Set) intermediate bytes that designate G0..G3.
-const SCS_INTERMEDIATES: &[u8] = b"()*+";
-
-/// Translate a byte in 0x60..=0x7E to a DEC Special Graphics Unicode character.
-/// The mapping follows the VT100/VT220 standard box-drawing character set.
-fn translate_drawing_char(byte: u8) -> &'static str {
-    const TABLE: [&str; 31] = [
-        "\u{25C6}", // 0x60 → ◆
-        "\u{2592}", // 0x61 → ▒
-        "\u{2409}", // 0x62 → ␉ (HT symbol)
-        "\u{240C}", // 0x63 → ␌ (FF symbol)
-        "\u{240D}", // 0x64 → ␍ (CR symbol)
-        "\u{240A}", // 0x65 → ␊ (LF symbol)
-        "\u{00B0}", // 0x66 → °
-        "\u{00B1}", // 0x67 → ±
-        "\u{2424}", // 0x68 → ␤ (NL symbol)
-        "\u{240B}", // 0x69 → ␋ (VT symbol)
-        "\u{2518}", // 0x6A → ┘
-        "\u{2510}", // 0x6B → ┐
-        "\u{250C}", // 0x6C → ┌
-        "\u{2514}", // 0x6D → └
-        "\u{253C}", // 0x6E → ┼
-        "\u{23BA}", // 0x6F → ⎺ (scan line 1)
-        "\u{23BB}", // 0x70 → ⎻ (scan line 3)
-        "\u{2500}", // 0x71 → ─ (horizontal line)
-        "\u{23BC}", // 0x72 → ⎼ (scan line 7)
-        "\u{23BD}", // 0x73 → ⎽ (scan line 9)
-        "\u{251C}", // 0x74 → ├
-        "\u{2524}", // 0x75 → ┤
-        "\u{2534}", // 0x76 → ┴
-        "\u{252C}", // 0x77 → ┬
-        "\u{2502}", // 0x78 → │ (vertical line)
-        "\u{2264}", // 0x79 → ≤
-        "\u{2265}", // 0x7A → ≥
-        "\u{03C0}", // 0x7B → π
-        "\u{2260}", // 0x7C → ≠
-        "\u{00A3}", // 0x7D → £
-        "\u{00B7}", // 0x7E → ·
-    ];
-    TABLE[(byte - 0x60) as usize]
-}
-
 /// Fast path for a batched run of printable ASCII bytes (0x20..=0x7E).
 ///
 /// Skips the grapheme/width machinery `put_char` needs — every byte is
@@ -271,20 +230,11 @@ pub(super) fn put_ascii_run(
     }
 
     // Single-shift (SS2/SS3): the first character uses G2 or G3 for one
-    // character only. Consume it via put_char (which handles DEC drawing
-    // translation), then continue with the rest of the run.
-    let run = if let Some(ss) = screen.single_shift.take() {
+    // character only, then GL snaps back to its previous mapping.
+    let run = if let Some(charset) = screen.charset.take_single_shift_charset() {
         let b = run[0];
-        let is_drawing = if ss == 2 {
-            screen.charset_g2_is_drawing
-        } else {
-            screen.charset_g3_is_drawing
-        };
-        let ch = if is_drawing && (0x60..=0x7E).contains(&b) {
-            SmolStr::new_inline(translate_drawing_char(b))
-        } else {
-            ASCII_CELLS[(b - 0x20) as usize].clone()
-        };
+        let ch = charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
+            .unwrap_or_else(|| ASCII_CELLS[(b - 0x20) as usize].clone());
         put_char(screen, viewport, ch, insert_mode);
         &run[1..]
     } else {
@@ -294,16 +244,11 @@ pub(super) fn put_ascii_run(
         return;
     }
 
-    // When DEC Special Graphics is active, bytes 0x60-0x7E need to be
-    // translated to Unicode box-drawing characters. Fall back to a
-    // per-character path that handles the translation.
-    if screen.is_drawing_active() {
+    if charset::gl_charset_requires_translation(&screen.charset, screen.nrc_mode) {
+        let charset = screen.charset.gl_charset();
         for &b in run {
-            let ch = if (0x60..=0x7E).contains(&b) {
-                SmolStr::new_inline(translate_drawing_char(b))
-            } else {
-                ASCII_CELLS[(b - 0x20) as usize].clone()
-            };
+            let ch = charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
+                .unwrap_or_else(|| ASCII_CELLS[(b - 0x20) as usize].clone());
             put_char(screen, viewport, ch, insert_mode);
         }
         return;
@@ -397,10 +342,8 @@ pub(super) fn put_char(
         return;
     }
 
-    // Single-shift was already consumed by put_ascii_run for ASCII input.
-    // For non-ASCII graphic characters there is no drawing-table translation,
-    // so just clear the pending shift so it doesn't linger.
-    screen.single_shift = None;
+    // Single-shift applies to the next 7-bit graphic byte only.
+    screen.charset.single_shift = None;
 
     let width = raw_width.max(1);
 
@@ -474,12 +417,11 @@ pub(super) fn put_text_run(
         return;
     }
 
-    // Single-shift (SS2/SS3): the first character uses G2 or G3 for one
-    // character only.  PrintText always starts with a multi-byte UTF-8 lead,
-    // which is outside the DEC drawing range (0x60..=0x7E), so no drawing
-    // translation applies; just grab the first char and forward it.
+    // Single-shift (SS2/SS3): the next 7-bit graphic byte uses G2/G3.
+    // A UTF-8 run starts with a multibyte codepoint, so the shift cannot
+    // apply and must be discarded.
     let mut chars = run.chars();
-    let run = if screen.single_shift.take().is_some() {
+    let run = if screen.charset.single_shift.take().is_some() {
         let ch = chars.next().unwrap();
         put_char(
             screen,
@@ -497,18 +439,14 @@ pub(super) fn put_text_run(
 
     let bytes = run.as_bytes();
 
-    // DEC Special Graphics: bytes 0x60..=0x7E need per-byte translation.
-    // Fall back to per-codepoint dispatch for the whole run.
-    if screen.is_drawing_active() {
+    if charset::gl_charset_requires_translation(&screen.charset, screen.nrc_mode) {
+        let charset = screen.charset.gl_charset();
         for ch in run.chars() {
             let cp = ch as u32;
             if (0x20..=0x7E).contains(&cp) {
                 let b = cp as u8;
-                let s = if (0x60..=0x7E).contains(&b) {
-                    SmolStr::new_inline(translate_drawing_char(b))
-                } else {
-                    ASCII_CELLS[(b - 0x20) as usize].clone()
-                };
+                let s = charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
+                    .unwrap_or_else(|| ASCII_CELLS[(b - 0x20) as usize].clone());
                 put_char(screen, viewport, s, insert_mode);
             } else {
                 put_char(
@@ -659,6 +597,12 @@ fn apply_private_mode(
             ctx.screen.left_margin = 0;
             ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
         }
+    } else if mode == mode::DECNRCM {
+        ctx.modes.decnrcm = enable;
+        for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+            screen.nrc_mode = enable;
+            screen.charset = charset::CharsetState::new();
+        }
     } else if mode == mode::BRACKETED_PASTE {
         ctx.modes.bracketed_paste = enable;
     } else if mode == mode::FOCUS_REPORTING {
@@ -725,6 +669,13 @@ fn query_private_mode(
         }
         mode::DECLRMM => {
             if ctx.modes.declrmm {
+                1
+            } else {
+                2
+            }
+        }
+        mode::DECNRCM => {
+            if ctx.modes.decnrcm {
                 1
             } else {
                 2
@@ -932,11 +883,11 @@ pub(super) fn execute(
         }
         SO => {
             // Shift Out: invoke G1 into GL.
-            screen.charset_gl_is_g0 = false;
+            screen.charset.set_gl(GraphicSetSlot::G1);
         }
         SI => {
             // Shift In: invoke G0 into GL (default).
-            screen.charset_gl_is_g0 = true;
+            screen.charset.set_gl(GraphicSetSlot::G0);
         }
         BEL => {
             *bell_pending = true;
@@ -982,6 +933,12 @@ pub(super) fn csi_dispatch(
                     // Disabling DECLRMM resets margins to full width.
                     ctx.screen.left_margin = 0;
                     ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
+                }
+            } else if p[0] == mode::DECNRCM {
+                ctx.modes.decnrcm = enable;
+                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                    screen.nrc_mode = enable;
+                    screen.charset = charset::CharsetState::new();
                 }
             } else if p[0] == mode::BRACKETED_PASTE {
                 ctx.modes.bracketed_paste = enable;
@@ -1103,6 +1060,15 @@ pub(super) fn csi_dispatch(
             ctx.kitty_keyboard,
             ctx.modes.c1_mode,
             ctx.pending_output,
+        );
+        return;
+    }
+
+    if action == 'u' && intermediates == b"&" {
+        conformance::write_dcs(
+            ctx.pending_output,
+            ctx.modes.c1_mode,
+            format_args!("{}", charset::decaupss_report(ctx.screen.upss)),
         );
         return;
     }
@@ -1258,15 +1224,12 @@ pub(super) fn csi_dispatch(
         screen.last_char = None;
         screen.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
         screen.origin_mode = false;
+        screen.nrc_mode = false;
+        screen.upss = charset::UserPreferredSupplementalSet::DecSupplemental;
         screen.autowrap = true;
         screen.app_cursor_keys = false;
         screen.app_keypad = false;
-        screen.charset_g0_is_drawing = false;
-        screen.charset_g1_is_drawing = false;
-        screen.charset_g2_is_drawing = false;
-        screen.charset_g3_is_drawing = false;
-        screen.charset_gl_is_g0 = true;
-        screen.single_shift = None;
+        screen.charset = charset::CharsetState::new();
         let conformance_level = ctx.modes.conformance_level;
         let c1_mode = ctx.modes.c1_mode;
         *ctx.modes = TerminalModes::new();
@@ -1912,11 +1875,15 @@ pub(super) fn esc_dispatch(
             }
             // ESC F — enter DEC Special Graphics mode (same as SCS G0 = 0).
             b'F' => {
-                ctx.screen.charset_g0_is_drawing = true;
+                ctx.screen
+                    .charset
+                    .designate(GraphicSetSlot::G0, CharacterSet::DecSpecialGraphics);
             }
             // ESC G — exit DEC Special Graphics mode (same as SCS G0 = B).
             b'G' => {
-                ctx.screen.charset_g0_is_drawing = false;
+                ctx.screen
+                    .charset
+                    .designate(GraphicSetSlot::G0, CharacterSet::Ascii);
             }
             // ESC H — cursor home (0, 0).
             b'H' => {
@@ -1986,17 +1953,8 @@ pub(super) fn esc_dispatch(
         return;
     }
 
-    if let Some(&inter) = intermediates.first()
-        && SCS_INTERMEDIATES.contains(&inter)
-    {
-        let is_drawing = byte == b'0';
-        match inter {
-            b'(' => ctx.screen.charset_g0_is_drawing = is_drawing,
-            b')' => ctx.screen.charset_g1_is_drawing = is_drawing,
-            b'*' => ctx.screen.charset_g2_is_drawing = is_drawing,
-            b'+' => ctx.screen.charset_g3_is_drawing = is_drawing,
-            _ => {}
-        }
+    if let Some((slot, charset)) = charset::parse_designation(intermediates, byte) {
+        ctx.screen.charset.designate(slot, charset);
         return;
     }
     // ESC # sequences (DECALN, DECDWL, DECDHL).
@@ -2145,9 +2103,16 @@ pub(super) fn esc_dispatch(
         b'=' => ctx.screen.app_keypad = true,
         b'>' => ctx.screen.app_keypad = false,
         // SS2 — Single Shift G2. Next graphic character uses G2.
-        b'N' => ctx.screen.single_shift = Some(2),
+        b'N' => ctx.screen.charset.single_shift = Some(GraphicSetSlot::G2),
         // SS3 — Single Shift G3. Next graphic character uses G3.
-        b'O' => ctx.screen.single_shift = Some(3),
+        b'O' => ctx.screen.charset.single_shift = Some(GraphicSetSlot::G3),
+        // LS2 / LS3 — lock G2/G3 into GL.
+        b'n' => ctx.screen.charset.set_gl(GraphicSetSlot::G2),
+        b'o' => ctx.screen.charset.set_gl(GraphicSetSlot::G3),
+        // LS1R / LS2R / LS3R — lock G1/G2/G3 into GR.
+        b'~' => ctx.screen.charset.set_gr(GraphicSetSlot::G1),
+        b'}' => ctx.screen.charset.set_gr(GraphicSetSlot::G2),
+        b'|' => ctx.screen.charset.set_gr(GraphicSetSlot::G3),
         // DECBI — Back Index. Scroll region right if at left margin, else
         // move cursor left.
         b'6' => {
@@ -3538,26 +3503,47 @@ mod tests {
     fn scs_decstr_resets_charset_state() {
         let (mut screen, mut viewport) = setup();
         feed(b"\x1b(0", &mut screen, &mut viewport);
-        assert!(screen.charset_g0_is_drawing);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::DecSpecialGraphics
+        );
         // DECSTR should reset charset state.
         feed(b"\x1b[!p", &mut screen, &mut viewport);
-        assert!(!screen.charset_g0_is_drawing);
-        assert!(!screen.charset_g1_is_drawing);
-        assert!(screen.charset_gl_is_g0);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::Ascii
+        );
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G1),
+            CharacterSet::Ascii
+        );
+        assert_eq!(screen.charset.gl_slot(), GraphicSetSlot::G0);
     }
 
     #[test]
     fn scs_ris_resets_charset_state() {
         let (mut screen, mut viewport) = setup();
         feed(b"\x1b(0\x1b)0\x0E", &mut screen, &mut viewport);
-        assert!(screen.charset_g0_is_drawing);
-        assert!(screen.charset_g1_is_drawing);
-        assert!(!screen.charset_gl_is_g0);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::DecSpecialGraphics
+        );
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G1),
+            CharacterSet::DecSpecialGraphics
+        );
+        assert_eq!(screen.charset.gl_slot(), GraphicSetSlot::G1);
         // RIS should reset everything.
         feed(b"\x1bc", &mut screen, &mut viewport);
-        assert!(!screen.charset_g0_is_drawing);
-        assert!(!screen.charset_g1_is_drawing);
-        assert!(screen.charset_gl_is_g0);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::Ascii
+        );
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G1),
+            CharacterSet::Ascii
+        );
+        assert_eq!(screen.charset.gl_slot(), GraphicSetSlot::G0);
     }
 
     #[test]
@@ -3567,10 +3553,67 @@ mod tests {
         feed(b"\x1b(0\x1b7", &mut screen, &mut viewport);
         // Switch back to ASCII.
         feed(b"\x1b(B", &mut screen, &mut viewport);
-        assert!(!screen.charset_g0_is_drawing);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::Ascii
+        );
         // Restore cursor — should bring back DEC drawing.
         feed(b"\x1b8", &mut screen, &mut viewport);
-        assert!(screen.charset_g0_is_drawing);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::DecSpecialGraphics
+        );
+    }
+
+    #[test]
+    fn scs_technical_charset_translates_math_symbols() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b)>", &mut screen, &mut viewport); // G1 = DEC Technical
+        feed(b"\x0Eabc", &mut screen, &mut viewport); // SO -> GL = G1
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{03B1}");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "\u{03B2}");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "\u{03C7}");
+    }
+
+    #[test]
+    fn scs_ls2_maps_g2_into_gl() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b.A", &mut screen, &mut viewport); // G2 = ISO Latin-1 supplemental
+        feed(b"\x1bn!!", &mut screen, &mut viewport); // LS2 -> GL = G2
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{00A1}");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "\u{00A1}");
+        assert_eq!(screen.charset.gl_slot(), GraphicSetSlot::G2);
+    }
+
+    #[test]
+    fn scs_single_shift_uses_g2_for_one_character() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b.A\x1bN!!", &mut screen, &mut viewport); // G2 = ISO Latin-1 supplemental
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{00A1}");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "!");
+    }
+
+    #[test]
+    fn scs_decnrcm_gates_nrc_translation() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b(A#", &mut screen, &mut viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "#");
+
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[?42h\x1b(A#", &mut screen, &mut viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{00A3}");
+    }
+
+    #[test]
+    fn decrqupss_reports_default_upss() {
+        let (mut screen, mut viewport) = setup();
+        let out = feed_with_output(b"\x1b[&u", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1bP0!u%5\x1b\\");
     }
 
     #[test]
@@ -3853,7 +3896,10 @@ mod tests {
     fn vt52_graphics_mode_on() {
         let (mut screen, mut viewport) = setup();
         feed(b"\x1b[?2l\x1bF", &mut screen, &mut viewport);
-        assert!(screen.charset_g0_is_drawing);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::DecSpecialGraphics
+        );
     }
 
     #[test]
@@ -3861,7 +3907,10 @@ mod tests {
         let (mut screen, mut viewport) = setup();
         // Enable then disable in the same parse pass.
         feed(b"\x1b[?2l\x1bF\x1bG", &mut screen, &mut viewport);
-        assert!(!screen.charset_g0_is_drawing);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::Ascii
+        );
     }
 
     /// VT52 ESC Z identify returns ESC / Z.

@@ -1,5 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 
+mod charset;
 mod color;
 mod conformance;
 mod cursor;
@@ -167,6 +168,10 @@ pub struct TerminalModes {
     /// sequence stream can repeatedly toggle 80/132 columns, triggering
     /// expensive grid resizes.
     pub allow_deccolm: bool,
+    /// DECNRCM (`?42`) — when `true`, national replacement character-set
+    /// designations replace their ASCII positions and the terminal behaves
+    /// as a 7-bit national terminal.
+    pub decnrcm: bool,
     /// Saved column count from before DECCOLM switched to 132 columns.
     /// `None` when in normal (80-column) mode.
     pub deccolm_saved_cols: Option<u32>,
@@ -195,6 +200,7 @@ impl TerminalModes {
             decncsm: false,
             screen_reverse: false,
             allow_deccolm: false,
+            decnrcm: false,
             deccolm_saved_cols: None,
             conformance_level: ConformanceLevel::Level4,
             c1_mode: C1Mode::SevenBit,
@@ -1987,6 +1993,32 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 
+fn handle_dcs(
+    params: vtepp::Params,
+    intermediates: &[u8],
+    action: char,
+    payload: &[u8],
+    terminal: &mut Terminal,
+) {
+    if action == 'q' && intermediates == b"+" {
+        let c1_mode = terminal.modes.c1_mode;
+        handle_xtgettcap(payload, c1_mode, &mut terminal.pending_output);
+    } else if action == 'q' && intermediates == b"$" {
+        handle_decrqss(payload, terminal);
+    } else if action == 'u' && intermediates == b"!" {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|group| group.first().copied())
+            .unwrap_or(0);
+        if let Some(upss) = charset::parse_upss_assignment(ps, payload) {
+            for screen in [&mut terminal.active, &mut terminal.stash] {
+                screen.upss = upss;
+            }
+        }
+    }
+}
+
 /// Main loop for the per-tab terminal thread. Drains PTY data, parses it
 /// (without the terminal lock), and applies each action under a brief lock.
 pub fn run_terminal_thread(
@@ -2033,7 +2065,7 @@ pub fn run_terminal_thread(
                     }
                     vtepp::Action::Unhook => {
                         let bytes = hook_bytes.pop().unwrap();
-                        let _params = hook_params.pop().unwrap();
+                        let params = hook_params.pop().unwrap();
                         let intermediates = hook_intermediates.pop().unwrap();
                         let act = hook_action.pop().unwrap();
                         if act == 'q' && intermediates.as_slice() == b"+" {
@@ -2053,8 +2085,16 @@ pub fn run_terminal_thread(
                         } else if act == 'q' && intermediates.as_slice().is_empty() {
                             // Sixel parsing is CPU-heavy — done outside the
                             // lock so rendering isn't blocked.
-                            let image = image41::sixel::parse_sixel(_params, bytes);
+                            let image = image41::sixel::parse_sixel(params, bytes);
                             terminal.lock().unwrap().place_sixel_image(image);
+                        } else {
+                            handle_dcs(
+                                params,
+                                intermediates.as_slice(),
+                                act,
+                                &bytes,
+                                &mut terminal.lock().unwrap(),
+                            );
                         }
                     }
                     action => {
