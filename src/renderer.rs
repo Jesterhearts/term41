@@ -1686,13 +1686,19 @@ impl RenderHost {
                 .map(|m| (m.x, m.hovered_item)),
         };
 
-        // Lock the active terminal for vertex building only — the renderer
-        // drops the guard internally before GPU buffer creation / submit.
-        let term = self.tabs[active_idx].terminal.lock().unwrap();
+        // Snapshot terminal state under a brief lock, then release it so
+        // the terminal thread can continue processing PTY data while the
+        // renderer does shaping and glyph caching.
+        let (term, snap) = {
+            let terminal = self.tabs[active_idx].terminal.lock().unwrap();
+            let snap = r#impl::snapshot_terminal(&terminal);
+            (terminal, snap)
+        };
         renderer.render(
             acquired,
             &mut self.font_system,
             term,
+            &snap,
             &tab_infos,
             &controls,
             self.gutter_popup.as_ref(),

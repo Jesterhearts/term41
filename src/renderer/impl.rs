@@ -225,6 +225,112 @@ pub struct TabInfo<'s> {
     pub active: bool,
 }
 
+// ---------------------------------------------------------------------------
+// Terminal snapshot — captured under the lock, consumed without it
+// ---------------------------------------------------------------------------
+
+/// Per-row snapshot of terminal state. Cloned from the terminal grid under
+/// the lock so that font shaping and glyph caching can happen without
+/// holding the terminal mutex.
+pub struct RowSnapshot {
+    pub cells: Vec<smol_str::SmolStr>,
+    pub attrs: Vec<CellAttrs>,
+    pub fg: Vec<Srgb<u8>>,
+    pub bg: Vec<Srgb<u8>>,
+    pub underline: Vec<UnderlineStyle>,
+    pub underline_color: Vec<Option<Srgb<u8>>>,
+    pub has_link: Vec<bool>,
+    pub line_attr: LineAttr,
+    pub selected: Vec<bool>,
+    pub matched: Vec<bool>,
+    pub active_match: Vec<bool>,
+    /// Shell-integration: this row starts a prompt.
+    pub prompt_start: bool,
+    /// Shell-integration: exit status of the command at this prompt.
+    pub exit_status: Option<i32>,
+}
+
+/// Snapshot of the search bar state for rendering.
+pub struct SearchSnapshot {
+    pub query: String,
+    pub match_count: usize,
+    pub active_idx: usize,
+}
+
+/// All terminal state needed for one render frame, captured under the lock.
+pub struct TermSnapshot {
+    pub rows: Vec<RowSnapshot>,
+    pub viewport_rows: u32,
+    pub viewport_cols: u32,
+    pub palette: ColorPalette,
+    pub search_active: bool,
+    pub search: Option<SearchSnapshot>,
+    /// Cursor position (row, col) if visible and not scrolled off.
+    pub cursor: Option<(u32, u32)>,
+    pub cursor_style: terminal41::CursorStyle,
+}
+
+/// Snapshot the terminal's visible state under the lock. The resulting
+/// struct owns all the data — the lock can be released immediately after.
+pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
+    let vp_rows = terminal.viewport.rows;
+    let vp_cols = terminal.viewport.cols;
+    let search_active = terminal.search_active();
+
+    let mut rows = Vec::with_capacity(vp_rows as usize);
+    for row in 0..vp_rows {
+        // When the search bar is open it overlays the last row, so we
+        // still snapshot it (the bg still renders) but the caller can
+        // decide to skip fg glyphs.
+        let grid_row = terminal.visible_row(row);
+        let is_double = !matches!(grid_row.line_attr, LineAttr::Normal);
+        let cols = if is_double { vp_cols / 2 } else { vp_cols };
+
+        rows.push(RowSnapshot {
+            cells: grid_row.cells.clone(),
+            attrs: grid_row.attrs.clone(),
+            fg: grid_row.fg.clone(),
+            bg: grid_row.bg.clone(),
+            underline: grid_row.underline.clone(),
+            underline_color: grid_row.underline_color.clone(),
+            has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
+            line_attr: grid_row.line_attr,
+            selected: (0..cols)
+                .map(|c| terminal.is_cell_selected(row, c))
+                .collect(),
+            matched: (0..cols).map(|c| terminal.is_cell_match(row, c)).collect(),
+            active_match: (0..cols)
+                .map(|c| terminal.is_cell_active_match(row, c))
+                .collect(),
+            prompt_start: grid_row.prompt_start,
+            exit_status: grid_row.exit_status,
+        });
+    }
+
+    let search = terminal.search_state().map(|s| SearchSnapshot {
+        query: s.query.clone(),
+        match_count: s.matches.len(),
+        active_idx: s.active_idx,
+    });
+
+    let cursor = if terminal.active.offset == 0 && terminal.active.cursor_visible {
+        Some((terminal.active.cursor.row, terminal.active.cursor.col))
+    } else {
+        None
+    };
+
+    TermSnapshot {
+        rows,
+        viewport_rows: vp_rows,
+        viewport_cols: vp_cols,
+        palette: terminal.palette.clone(),
+        search_active,
+        search,
+        cursor,
+        cursor_style: terminal.cursor_style,
+    }
+}
+
 /// CSD window control state passed to the renderer each frame.
 pub struct WindowControls {
     /// Which button the mouse is hovering, if any.
@@ -877,6 +983,7 @@ impl Renderer {
         acquired: (wgpu::SurfaceTexture, wgpu::TextureView),
         font_system: &mut FontSystem,
         terminal: MutexGuard<'_, Terminal>,
+        snap: &TermSnapshot,
         tabs: &[TabInfo],
         controls: &WindowControls,
         gutter_popup: Option<&GutterPopup>,
@@ -890,12 +997,82 @@ impl Renderer {
         // height to make room for the tab bar.
         let tab_bar_h = if tabs.is_empty() { 0.0 } else { cell_h };
 
+        // ---- Phase 1: image quads (needs terminal borrow for pixel data) ----
+        let mut image_vertices: Vec<ImageVertex> = Vec::new();
+        let mut image_indices: Vec<u32> = Vec::new();
+        {
+            let now = std::time::Instant::now();
+            for vis in terminal.visible_images(now) {
+                let entry = match self.image_atlas.ensure_cached(
+                    &self.queue,
+                    vis.id,
+                    vis.frame_index,
+                    vis.image,
+                ) {
+                    Some(e) => e,
+                    None => continue,
+                };
+
+                let base_x = vis.screen_col as f32 * cell_w + gutter_px;
+                let base_y = vis.screen_row as f32 * cell_h + tab_bar_h;
+                let scale_x = if vis.image.width > 0 {
+                    vis.display_width as f32 / vis.image.width as f32
+                } else {
+                    1.0
+                };
+                let scale_y = if vis.image.height > 0 {
+                    vis.display_height as f32 / vis.image.height as f32
+                } else {
+                    1.0
+                };
+
+                for tile in &entry.tiles {
+                    let a = &tile.alloc;
+                    let x = base_x + tile.src_x as f32 * scale_x;
+                    let y = base_y + tile.src_y as f32 * scale_y;
+                    let w = a.width as f32 * scale_x;
+                    let h = a.height as f32 * scale_y;
+                    let u0 = a.x as f32 / IMAGE_ATLAS_SIZE as f32;
+                    let v0 = a.y as f32 / IMAGE_ATLAS_SIZE as f32;
+                    let u1 = (a.x + a.width) as f32 / IMAGE_ATLAS_SIZE as f32;
+                    let v1 = (a.y + a.height) as f32 / IMAGE_ATLAS_SIZE as f32;
+                    let layer = a.layer as f32;
+                    let ii = image_vertices.len() as u32;
+                    image_vertices.extend_from_slice(&[
+                        ImageVertex {
+                            pos: [x, y],
+                            uv_layer: [u0, v0, layer],
+                        },
+                        ImageVertex {
+                            pos: [x + w, y],
+                            uv_layer: [u1, v0, layer],
+                        },
+                        ImageVertex {
+                            pos: [x, y + h],
+                            uv_layer: [u0, v1, layer],
+                        },
+                        ImageVertex {
+                            pos: [x + w, y + h],
+                            uv_layer: [u1, v1, layer],
+                        },
+                    ]);
+                    image_indices.extend_from_slice(&[ii, ii + 1, ii + 2, ii + 2, ii + 1, ii + 3]);
+                }
+            }
+        }
+
+        // Terminal lock no longer needed — all remaining work uses the
+        // snapshot. Release it so the terminal thread can process PTY data
+        // while we shape glyphs and build vertices.
+        drop(terminal);
+
+        // ---- Phase 2: build text quads from snapshot (no lock) ----
         let mut bg_vertices: Vec<BgVertex> = Vec::new();
         let mut bg_indices: Vec<u32> = Vec::new();
         let mut fg_vertices: Vec<FgVertex> = Vec::new();
         let mut fg_indices: Vec<u32> = Vec::new();
 
-        let cursor_state = self.cursor_state(&terminal);
+        let cursor_state = self.cursor_state_from_snapshot(snap);
 
         // Pre-compute the popup's pixel bounds so we can clip terminal
         // text that would otherwise bleed through the opaque panel.
@@ -912,51 +1089,49 @@ impl Renderer {
             (px, py, px + pw, py + ph)
         });
 
-        let skip_bottom_row = terminal.search_active();
-
-        for row in 0..terminal.viewport.rows {
-            if skip_bottom_row && row == terminal.viewport.rows - 1 {
+        for (row, snap_row) in snap.rows.iter().enumerate() {
+            let row = row as u32;
+            if snap.search_active && row == snap.viewport_rows - 1 {
                 continue;
             }
             let y = row as f32 * cell_h + tab_bar_h;
 
-            // Background quads for the whole row.
-            let grid_row = terminal.visible_row(row);
-            let line_attr = grid_row.line_attr;
+            let line_attr = snap_row.line_attr;
             // Double-wide rows render each cell at 2× horizontal width, so only
             // the left half of the column count holds visible content.
             let is_double_wide = !matches!(line_attr, LineAttr::Normal);
             let effective_cell_w = if is_double_wide { cell_w * 2.0 } else { cell_w };
             let visible_cols = if is_double_wide {
-                terminal.viewport.cols / 2
+                snap.viewport_cols / 2
             } else {
-                terminal.viewport.cols
+                snap.viewport_cols
             };
             for col in 0..visible_cols {
                 let x = col as f32 * effective_cell_w + gutter_px;
-                // A cell is rendered with altered fg/bg when it is selected,
-                // matches the search query, or sits under a visible block
-                // cursor. Selection / non-active match / block cursor fully
-                // invert — the glyph reads as its own bg-on-fg. The focused
-                // search match is softer: bg is halfway between the cell's
-                // fg and bg so the user can spot which hit is active at a
-                // glance without the strong pop of a full inversion.
-                let selected = terminal.is_cell_selected(row, col);
-                let matched = terminal.is_cell_match(row, col);
-                let active_match = terminal.is_cell_active_match(row, col);
+                let selected = snap_row
+                    .selected
+                    .get(col as usize)
+                    .copied()
+                    .unwrap_or(false);
+                let matched = snap_row.matched.get(col as usize).copied().unwrap_or(false);
+                let active_match = snap_row
+                    .active_match
+                    .get(col as usize)
+                    .copied()
+                    .unwrap_or(false);
                 let block_cursor_here = cursor_state.is_block_at(row, col);
-                let cell_attrs = grid_row.attrs[col as usize];
+                let cell_attrs = snap_row.attrs[col as usize];
                 let (cell_fg, cell_bg) = resolve_cell_colors(
-                    &grid_row.fg[col as usize],
-                    &grid_row.bg[col as usize],
+                    &snap_row.fg[col as usize],
+                    &snap_row.bg[col as usize],
                     cell_attrs,
                 );
                 let bg_effective = if active_match {
                     blend(cell_fg, cell_bg, 0.5)
                 } else if selected {
-                    terminal.palette.selection_bg.unwrap_or(cell_fg)
+                    snap.palette.selection_bg.unwrap_or(cell_fg)
                 } else if block_cursor_here {
-                    terminal.palette.cursor.unwrap_or(cell_fg)
+                    snap.palette.cursor.unwrap_or(cell_fg)
                 } else if matched {
                     cell_fg
                 } else {
@@ -972,9 +1147,8 @@ impl Renderer {
                 // the cell goes transparent, which is what a wallpaper
                 // user wanted anyway.
                 let interaction_overlay = selected || matched || active_match || block_cursor_here;
-                let skip_default_bg = self.background.is_some()
-                    && !interaction_overlay
-                    && cell_bg == terminal.palette.bg;
+                let skip_default_bg =
+                    self.background.is_some() && !interaction_overlay && cell_bg == snap.palette.bg;
                 if !skip_default_bg {
                     let bg_color = pack_color(&bg_effective, self.bg_alpha);
                     let bi = bg_vertices.len() as u32;
@@ -1004,15 +1178,15 @@ impl Renderer {
                 //   * SGR underline (CSI 4m / 4:Nm) — styled text attribute.
                 // Sits in the bg pass so the glyph paints over any pixels the
                 // line would otherwise eat.
-                let ul_style = grid_row.underline[col as usize];
-                let has_link = grid_row.links[col as usize].is_some();
+                let ul_style = snap_row.underline[col as usize];
+                let has_link = snap_row.has_link[col as usize];
                 let effective_ul = if has_link && ul_style == UnderlineStyle::None {
                     UnderlineStyle::Single
                 } else {
                     ul_style
                 };
                 if effective_ul != UnderlineStyle::None {
-                    let ul_rgb = grid_row.underline_color[col as usize].unwrap_or(cell_fg);
+                    let ul_rgb = snap_row.underline_color[col as usize].unwrap_or(cell_fg);
                     let ul_packed = pack_color(&ul_rgb, 255);
                     let thickness = (cell_h * 0.06).max(1.0);
                     let uy = y + cell_h - thickness;
@@ -1075,7 +1249,7 @@ impl Renderer {
             // Underline / beam cursor overlays sit in the bg pass so the
             // glyph keeps its normal colour and the bar paints behind /
             // beside the character rather than over it.
-            if let Some(overlay) = cursor_state.bar_overlay_at(row, &grid_row.fg, cell_w, cell_h) {
+            if let Some(overlay) = cursor_state.bar_overlay_at(row, &snap_row.fg, cell_w, cell_h) {
                 let ox = overlay.x + gutter_px;
                 let oy = overlay.y + tab_bar_h;
                 let bi = bg_vertices.len() as u32;
@@ -1103,7 +1277,7 @@ impl Renderer {
             // Shape the entire row for foreground glyphs — borrows the cell
             // strings and their attribute bitmasks directly so each cell can
             // pick its bold/italic variant of the primary family.
-            let shaped = font_system.shape_row(&grid_row.cells, &grid_row.attrs);
+            let shaped = font_system.shape_row(&snap_row.cells, &snap_row.attrs);
 
             // Blink: every 500 ms the glyph quad is suppressed while the bg
             // quad (already emitted) remains, so the cursor and background
@@ -1127,7 +1301,7 @@ impl Renderer {
                     }
                 }
 
-                let cell_attrs = grid_row.attrs[sg.col as usize];
+                let cell_attrs = snap_row.attrs[sg.col as usize];
                 let wants_bold = cell_attrs.contains(CellAttrs::BOLD);
                 let wants_italic = cell_attrs.contains(CellAttrs::ITALIC);
                 // Synth flags: true when the cell asks for a style the face
@@ -1223,19 +1397,31 @@ impl Renderer {
                 // block cursor fully invert the text, the active match
                 // keeps the normal fg so it reads naturally against the
                 // softened bg.
-                let selected = terminal.is_cell_selected(row, sg.col as u32);
-                let matched = terminal.is_cell_match(row, sg.col as u32);
-                let active_match = terminal.is_cell_active_match(row, sg.col as u32);
+                let selected = snap_row
+                    .selected
+                    .get(sg.col as usize)
+                    .copied()
+                    .unwrap_or(false);
+                let matched = snap_row
+                    .matched
+                    .get(sg.col as usize)
+                    .copied()
+                    .unwrap_or(false);
+                let active_match = snap_row
+                    .active_match
+                    .get(sg.col as usize)
+                    .copied()
+                    .unwrap_or(false);
                 let block_cursor_here = cursor_state.is_block_at(row, sg.col as u32);
                 let (cell_fg, cell_bg) = resolve_cell_colors(
-                    &grid_row.fg[sg.col as usize],
-                    &grid_row.bg[sg.col as usize],
+                    &snap_row.fg[sg.col as usize],
+                    &snap_row.bg[sg.col as usize],
                     cell_attrs,
                 );
                 let fg_effective = if active_match {
                     cell_fg
                 } else if selected {
-                    terminal.palette.selection_fg.unwrap_or(cell_bg)
+                    snap.palette.selection_fg.unwrap_or(cell_bg)
                 } else if matched || block_cursor_here {
                     cell_bg
                 } else {
@@ -1318,7 +1504,7 @@ impl Renderer {
         // care about cell columns underneath it).
         if gutter_px > 0.0 {
             render_gutter_markers(
-                &terminal,
+                snap,
                 gutter_px,
                 cell_h,
                 tab_bar_h,
@@ -1335,7 +1521,7 @@ impl Renderer {
         self.render_tab_bar(
             font_system,
             tabs,
-            &terminal.palette,
+            &snap.palette,
             controls,
             &mut bg_vertices,
             &mut bg_indices,
@@ -1345,7 +1531,7 @@ impl Renderer {
 
         self.render_search_bar(
             font_system,
-            &terminal,
+            snap,
             tab_bar_h,
             &mut bg_vertices,
             &mut bg_indices,
@@ -1375,11 +1561,11 @@ impl Renderer {
         // terminal grid. Letting the preedit overlay draw at the cursor
         // too would duplicate the feedback and confuse the user.
         if let Some(preedit) = preedit
-            && !terminal.search_active()
+            && !snap.search_active
         {
             self.render_preedit(
                 font_system,
-                &terminal,
+                snap,
                 preedit,
                 gutter_px,
                 cell_w,
@@ -1392,81 +1578,6 @@ impl Renderer {
                 &mut fg_indices,
             );
         }
-
-        // ---- Build image quads ----
-        let mut image_vertices: Vec<ImageVertex> = Vec::new();
-        let mut image_indices: Vec<u32> = Vec::new();
-
-        let now = std::time::Instant::now();
-        for vis in terminal.visible_images(now) {
-            let entry = match self.image_atlas.ensure_cached(
-                &self.queue,
-                vis.id,
-                vis.frame_index,
-                vis.image,
-            ) {
-                Some(e) => e,
-                None => continue,
-            };
-
-            let base_x = vis.screen_col as f32 * cell_w + gutter_px;
-            let base_y = vis.screen_row as f32 * cell_h + tab_bar_h;
-
-            // Scale factor from source-image pixels to display pixels. For
-            // sixel these are equal; kitty's `c=`/`r=` keys can request a
-            // smaller (or larger) display than the source, and we honor that
-            // by scaling the quad rather than resampling the pixels.
-            let scale_x = if vis.image.width > 0 {
-                vis.display_width as f32 / vis.image.width as f32
-            } else {
-                1.0
-            };
-            let scale_y = if vis.image.height > 0 {
-                vis.display_height as f32 / vis.image.height as f32
-            } else {
-                1.0
-            };
-
-            for tile in &entry.tiles {
-                let a = &tile.alloc;
-                let x = base_x + tile.src_x as f32 * scale_x;
-                let y = base_y + tile.src_y as f32 * scale_y;
-                let w = a.width as f32 * scale_x;
-                let h = a.height as f32 * scale_y;
-
-                let u0 = a.x as f32 / IMAGE_ATLAS_SIZE as f32;
-                let v0 = a.y as f32 / IMAGE_ATLAS_SIZE as f32;
-                let u1 = (a.x + a.width) as f32 / IMAGE_ATLAS_SIZE as f32;
-                let v1 = (a.y + a.height) as f32 / IMAGE_ATLAS_SIZE as f32;
-                let layer = a.layer as f32;
-
-                let ii = image_vertices.len() as u32;
-                image_vertices.extend_from_slice(&[
-                    ImageVertex {
-                        pos: [x, y],
-                        uv_layer: [u0, v0, layer],
-                    },
-                    ImageVertex {
-                        pos: [x + w, y],
-                        uv_layer: [u1, v0, layer],
-                    },
-                    ImageVertex {
-                        pos: [x, y + h],
-                        uv_layer: [u0, v1, layer],
-                    },
-                    ImageVertex {
-                        pos: [x + w, y + h],
-                        uv_layer: [u1, v1, layer],
-                    },
-                ]);
-                image_indices.extend_from_slice(&[ii, ii + 1, ii + 2, ii + 2, ii + 1, ii + 3]);
-            }
-        }
-
-        // All terminal data has been read into vertex/index buffers above.
-        // Release the lock so the terminal thread can continue processing
-        // PTY data while we do GPU work.
-        drop(terminal);
 
         let (frame, view) = acquired;
 
@@ -1945,22 +2056,22 @@ impl Renderer {
     fn render_search_bar(
         &mut self,
         font_system: &mut FontSystem,
-        terminal: &Terminal,
+        snap: &TermSnapshot,
         y_offset: f32,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
         fg_vertices: &mut Vec<FgVertex>,
         fg_indices: &mut Vec<u32>,
     ) {
-        let Some(search) = terminal.search_state() else {
+        let Some(search) = &snap.search else {
             return;
         };
 
         let cell_w = font_system.cell_width as f32;
         let cell_h = font_system.cell_height as f32;
         let baseline = font_system.baseline_offset();
-        let cols = terminal.viewport.cols;
-        let rows = terminal.viewport.rows;
+        let cols = snap.viewport_cols;
+        let rows = snap.viewport_rows;
         if rows == 0 || cols == 0 {
             return;
         }
@@ -1968,14 +2079,14 @@ impl Renderer {
         // Build the visible label. The counter only appears once there are
         // matches to count — an empty query draws just the prompt so the
         // user sees something immediately on `Ctrl+Shift+F`.
-        let counter = if search.matches.is_empty() {
+        let counter = if search.match_count == 0 {
             if search.query.is_empty() {
                 String::new()
             } else {
                 "  (no match)".to_string()
             }
         } else {
-            format!("  ({}/{})", search.active_idx + 1, search.matches.len())
+            format!("  ({}/{})", search.active_idx + 1, search.match_count)
         };
         let label = format!("Find: {}{}", search.query, counter);
 
@@ -2354,7 +2465,7 @@ impl Renderer {
     fn render_preedit(
         &mut self,
         font_system: &mut FontSystem,
-        terminal: &Terminal,
+        snap: &TermSnapshot,
         preedit: &crate::renderer::PreeditState,
         gutter_px: f32,
         cell_w: f32,
@@ -2366,22 +2477,17 @@ impl Renderer {
         fg_vertices: &mut Vec<FgVertex>,
         fg_indices: &mut Vec<u32>,
     ) {
-        // Cursor scrolled off-screen or DECTCEM-hidden → nowhere sensible
-        // to anchor the preedit. The IME's candidate popup still works off
-        // `set_ime_cursor_area`; suppressing the inline overlay matches
-        // how the regular cursor is handled.
-        if terminal.active.offset != 0 || !terminal.active.cursor_visible {
+        let Some((cursor_row, cursor_col)) = snap.cursor else {
             return;
-        }
+        };
         if preedit.text.is_empty() {
             return;
         }
 
-        let cursor = terminal.active.cursor;
-        let origin_x = cursor.col as f32 * cell_w + gutter_px;
-        let origin_y = cursor.row as f32 * cell_h + tab_bar_h;
+        let origin_x = cursor_col as f32 * cell_w + gutter_px;
+        let origin_y = cursor_row as f32 * cell_h + tab_bar_h;
 
-        let max_chars = terminal.viewport.cols.saturating_sub(cursor.col) as usize;
+        let max_chars = snap.viewport_cols.saturating_sub(cursor_col) as usize;
         if max_chars == 0 {
             return;
         }
@@ -2564,17 +2670,16 @@ impl Renderer {
     /// once per frame. Hidden cases — scrolled away from live or in the
     /// blink-off phase — collapse to [`CursorRenderState::Hidden`] so the
     /// per-cell loops don't have to know the rules.
-    fn cursor_state(
+    /// Compute the cursor render state from the snapshot.
+    fn cursor_state_from_snapshot(
         &self,
-        terminal: &Terminal,
+        snap: &TermSnapshot,
     ) -> CursorRenderState {
-        if terminal.active.offset != 0 || !terminal.active.cursor_visible {
+        let Some((row, col)) = snap.cursor else {
             return CursorRenderState::Hidden;
-        }
-        let style = terminal.cursor_style;
+        };
+        let style = snap.cursor_style;
         if style.blink {
-            // Square wave: half the period on, half off. `as_secs_f32` keeps
-            // the math out of integer overflow territory for long sessions.
             let elapsed = self.started.elapsed().as_secs_f32();
             let half = CURSOR_BLINK_HALF_PERIOD.as_secs_f32();
             let phase = (elapsed / half) as u64;
@@ -2583,8 +2688,8 @@ impl Renderer {
             }
         }
         CursorRenderState::Visible {
-            row: terminal.active.cursor.row,
-            col: terminal.active.cursor.col,
+            row,
+            col,
             shape: style.shape,
         }
     }
@@ -2700,7 +2805,7 @@ pub fn compute_gutter_width(cell_width: u32) -> u32 {
 /// Drawn as plain rectangular quads in the bg pass so we don't need an
 /// extra pipeline.
 fn render_gutter_markers(
-    terminal: &Terminal,
+    snap: &TermSnapshot,
     gutter_px: f32,
     cell_h: f32,
     y_offset: f32,
@@ -2718,8 +2823,7 @@ fn render_gutter_markers(
     const FAILURE: [u8; 3] = [220, 80, 80];
     const RUNNING: [u8; 3] = [140, 140, 140];
 
-    for row_idx in 0..terminal.viewport.rows {
-        let row = terminal.visible_row(row_idx);
+    for (row_idx, row) in snap.rows.iter().enumerate() {
         if !row.prompt_start {
             continue;
         }
