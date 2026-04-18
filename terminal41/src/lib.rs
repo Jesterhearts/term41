@@ -3560,10 +3560,10 @@ mod tests {
     // ---- Device Attribute queries ----
 
     #[test]
-    fn da1_replies_vt220() {
+    fn da1_replies_vt420() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[c");
-        assert_eq!(term.take_pending_output(), b"\x1b[?62;22;29c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?64;7;21;22;28;29c");
     }
 
     #[test]
@@ -3571,7 +3571,7 @@ mod tests {
         // Apps sometimes send `CSI 0 c` explicitly; the reply is the same.
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[0c");
-        assert_eq!(term.take_pending_output(), b"\x1b[?62;22;29c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?64;7;21;22;28;29c");
     }
 
     #[test]

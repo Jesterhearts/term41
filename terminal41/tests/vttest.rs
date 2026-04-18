@@ -452,7 +452,7 @@ fn da1_responds() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[c");
     let out = t.pending_output();
-    assert!(out.starts_with(b"\x1b[?62;"));
+    assert!(out.starts_with(b"\x1b[?64;"));
 }
 
 #[test]

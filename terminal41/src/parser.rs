@@ -1371,9 +1371,14 @@ pub(super) fn csi_dispatch(
     // DA1 needs pending_output, which lives on ctx rather than on the screen.
     // Handle it before borrowing ctx.screen for the screen-only match below.
     if action == 'c' {
-        // DA1 (Primary Device Attributes). Reply as a VT220 (62) with
-        // ANSI color (22) and ANSI text locator (29) attributes.
-        ctx.pending_output.extend_from_slice(b"\x1b[?62;22;29c");
+        // DA1 (Primary Device Attributes). Reply as a VT420 (64) with:
+        //   7  = printer port (placeholder — signals DECDLD readiness)
+        //  21  = horizontal scrolling
+        //  22  = ANSI color
+        //  28  = rectangular area operations
+        //  29  = ANSI text locator
+        ctx.pending_output
+            .extend_from_slice(b"\x1b[?64;7;21;22;28;29c");
         return;
     }
 
