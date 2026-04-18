@@ -884,28 +884,28 @@ impl RenderHost {
         }
 
         // ---- CSD: titlebar drag (empty tab bar area) ----
-        if pressed && button == MouseButton::Left && self.is_in_titlebar_drag_region() {
-            // Double-click toggles maximize.
-            let now = Instant::now();
-            let double_click = self
-                .last_click_time
-                .is_some_and(|t| now.duration_since(t) <= MULTI_CLICK_WINDOW);
-            if double_click {
-                if let Some(w) = &self.window {
-                    w.set_maximized(!w.is_maximized());
+        if pressed && button == MouseButton::Left {
+            if self.is_in_titlebar_drag_region() {
+                // Double-click toggles maximize.
+                let now = Instant::now();
+                let double_click = self
+                    .last_click_time
+                    .is_some_and(|t| now.duration_since(t) <= MULTI_CLICK_WINDOW);
+                if double_click {
+                    if let Some(w) = &self.window {
+                        w.set_maximized(!w.is_maximized());
+                    }
+                } else if let Some(w) = &self.window {
+                    let _ = w.drag_window();
                 }
-            } else if let Some(w) = &self.window {
-                let _ = w.drag_window();
+                self.last_click_time = Some(now);
             }
-            self.last_click_time = Some(now);
-            return;
-        }
-
-        // Clicks on tabs switch the active tab.
-        if pressed && button == MouseButton::Left && self.is_in_tab_bar() {
-            self.close_gutter_popup();
-            self.tab_context_menu = None;
-            self.handle_tab_bar_click();
+            if self.is_in_tab_bar() {
+                self.close_gutter_popup();
+                self.tab_context_menu = None;
+                self.handle_tab_bar_click();
+                return;
+            }
             return;
         }
 
@@ -1841,7 +1841,7 @@ impl RenderHost {
     /// True when the mouse is in the tab bar's "empty" drag region — not
     /// over a tab and not over a window control button.
     fn is_in_titlebar_drag_region(&self) -> bool {
-        self.is_in_tab_bar() && self.window_button_at().is_none() && self.tab_at_mouse().is_none()
+        self.is_in_tab_bar() && self.window_button_at().is_none()
     }
 
     /// Returns the resize direction if the cursor is within the resize

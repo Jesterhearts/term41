@@ -1871,19 +1871,41 @@ impl Renderer {
             // margin on each side.
             let margin = cell_w;
             let max_label_chars = ((tab_w - margin * 2.0) / cell_w).max(1.0) as usize;
-            let label: String = tab.label.chars().take(max_label_chars).collect();
-
-            self.shape_and_render_label(
-                font_system,
-                &label,
-                x0 + margin,
-                0.0,
-                baseline,
-                cell_w,
-                label_fg,
-                fg_vertices,
-                fg_indices,
-            );
+            let label_chars = tab.label.chars().count();
+            if label_chars > max_label_chars {
+                // If the label is too long, truncate and add an ellipsis.
+                let ellipsis = '…';
+                let truncated_len = max_label_chars.saturating_sub(1);
+                let truncated_label: String = tab
+                    .label
+                    .chars()
+                    .take(truncated_len)
+                    .chain(std::iter::once(ellipsis))
+                    .collect();
+                self.shape_and_render_label(
+                    font_system,
+                    &truncated_label,
+                    x0 + margin,
+                    0.0,
+                    baseline,
+                    cell_w,
+                    label_fg,
+                    fg_vertices,
+                    fg_indices,
+                );
+            } else {
+                self.shape_and_render_label(
+                    font_system,
+                    tab.label,
+                    x0 + margin,
+                    0.0,
+                    baseline,
+                    cell_w,
+                    label_fg,
+                    fg_vertices,
+                    fg_indices,
+                );
+            }
         }
 
         // ---- Window control buttons ----
