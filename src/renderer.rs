@@ -350,6 +350,7 @@ impl RenderHost {
                         self.config.vsync,
                         effective_bg_path(&self.config),
                         self.config.background_opacity,
+                        self.startup_snapshot_size(),
                     )
                 }));
             }
@@ -528,8 +529,13 @@ impl RenderHost {
                 path.display(),
                 bytes.len()
             );
+            let startup_snapshot_size = self.startup_snapshot_size();
             if let Some(renderer) = self.renderer.as_mut() {
-                renderer.set_background(Some(&path), self.config.background_opacity);
+                renderer.set_background(
+                    Some(&path),
+                    self.config.background_opacity,
+                    startup_snapshot_size,
+                );
             }
             return;
         }
@@ -561,8 +567,13 @@ impl RenderHost {
             img.width,
             img.height
         );
+        let startup_snapshot_size = self.startup_snapshot_size();
         if let Some(renderer) = self.renderer.as_mut() {
-            renderer.set_background(Some(&path), self.config.background_opacity);
+            renderer.set_background(
+                Some(&path),
+                self.config.background_opacity,
+                startup_snapshot_size,
+            );
         }
     }
 
@@ -575,10 +586,12 @@ impl RenderHost {
             "background: pasted image at {} cleared, reverting to config",
             path.display()
         );
+        let startup_snapshot_size = self.startup_snapshot_size();
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.set_background(
                 self.config.background_image.as_deref(),
                 self.config.background_opacity,
+                startup_snapshot_size,
             );
         }
     }
@@ -678,6 +691,18 @@ impl RenderHost {
 
     fn tab_bar_visible(&self) -> bool {
         true
+    }
+
+    fn startup_snapshot_size(&self) -> (u32, u32) {
+        let gutter = if self.config.gutter {
+            compute_gutter_width(self.font_system.cell_width)
+        } else {
+            0
+        };
+        (
+            INITIAL_COLS * self.font_system.cell_width + gutter,
+            INITIAL_ROWS * self.font_system.cell_height + self.font_system.cell_height,
+        )
     }
 
     fn spawn_new_tab(&mut self) {
@@ -907,9 +932,14 @@ impl RenderHost {
         if bg_path_changed || bg_opacity_changed {
             self.config.background_image = cfg.background_image.clone();
             self.config.background_opacity = cfg.background_opacity;
+            let startup_snapshot_size = self.startup_snapshot_size();
             if let Some(renderer) = self.renderer.as_mut() {
                 let path = effective_bg_path(&self.config);
-                renderer.set_background(path.as_deref(), self.config.background_opacity);
+                renderer.set_background(
+                    path.as_deref(),
+                    self.config.background_opacity,
+                    startup_snapshot_size,
+                );
             }
         }
     }
@@ -1121,6 +1151,10 @@ pub(crate) fn ctrl_byte(c: &str) -> Option<u8> {
         [b'_'] => Some(0x1F),
         _ => None,
     }
+}
+
+pub(crate) fn term41_data_dir() -> Option<PathBuf> {
+    dirs::data_dir().map(|d| d.join("term41"))
 }
 
 fn kitty_modifier_bits(mods: ModifiersState) -> u8 {
@@ -1471,7 +1505,7 @@ fn legacy_modifier_param(mods: ModifiersState) -> u8 {
 /// on macOS, `%APPDATA%\term41\` on Windows. Returns `None` on platforms
 /// where `dirs` can't resolve a data dir (rare — usually broken environment).
 fn pasted_background_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("term41"))
+    term41_data_dir()
 }
 
 /// Build the full pasted-background path for a given file extension.

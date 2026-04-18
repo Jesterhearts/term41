@@ -656,6 +656,7 @@ impl Renderer {
         vsync: VSync,
         background_image: Option<PathBuf>,
         background_opacity: f32,
+        startup_snapshot_size: (u32, u32),
     ) -> Self {
         let PreparedRenderer {
             instance,
@@ -993,6 +994,7 @@ impl Renderer {
                     p,
                     background_opacity.clamp(0.0, 1.0),
                     (size.width.max(1), size.height.max(1)),
+                    startup_snapshot_size,
                 )
             })
         });
@@ -1062,6 +1064,7 @@ impl Renderer {
         &mut self,
         path: Option<&std::path::Path>,
         opacity: f32,
+        startup_snapshot_size: (u32, u32),
     ) {
         let opacity = opacity.clamp(0.0, 1.0);
         let window = (
@@ -1083,6 +1086,7 @@ impl Renderer {
                     p.to_path_buf(),
                     opacity,
                     window,
+                    startup_snapshot_size,
                 );
             }
         }

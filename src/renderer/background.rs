@@ -38,6 +38,7 @@ use wgpu::util::DeviceExt;
 /// RGBA is ~32 MB always-resident — cheap compared to loading a whole
 /// GIF/video into RAM, the failure mode this module exists to avoid.
 const FRAME_BUFFER_CAPACITY: usize = 4;
+const STARTUP_SNAPSHOT_PREFIX: &str = "startup_background_";
 
 /// One vertex of the background quad: position in pixels, UV into the
 /// background texture (computed CPU-side for the chosen fit mode), and a
@@ -127,6 +128,7 @@ impl Background {
         path: PathBuf,
         dim: f32,
         window_size: (u32, u32),
+        startup_snapshot_size: (u32, u32),
     ) -> Option<Self> {
         let bytes = match std::fs::read(&path) {
             Ok(b) => b,
@@ -141,7 +143,16 @@ impl Background {
         let is_animated = is_animated_format(&bytes);
 
         if is_animated {
-            return Self::load_streaming(device, queue, layout, path, bytes, dim, window_size);
+            return Self::load_streaming(
+                device,
+                queue,
+                layout,
+                path,
+                bytes,
+                dim,
+                window_size,
+                startup_snapshot_size,
+            );
         }
 
         let image = match decode_image(&bytes) {
@@ -170,6 +181,7 @@ impl Background {
             BackgroundSource::Static,
             dim,
             window_size,
+            startup_snapshot_size,
         ))
     }
 
@@ -182,6 +194,7 @@ impl Background {
         bytes: Vec<u8>,
         dim: f32,
         window_size: (u32, u32),
+        startup_snapshot_size: (u32, u32),
     ) -> Option<Self> {
         // Decoder thread model: the `FrameReader` is opened, used, and
         // dropped entirely on the decoder thread — it never crosses a
@@ -227,6 +240,7 @@ impl Background {
             },
             dim,
             window_size,
+            startup_snapshot_size,
         ))
     }
 
@@ -239,6 +253,7 @@ impl Background {
         _bytes: Vec<u8>,
         _dim: f32,
         _window_size: (u32, u32),
+        _startup_snapshot_size: (u32, u32),
     ) -> Option<Self> {
         error!(
             "background image: {} looks animated but ffmpeg support isn't compiled in",
@@ -257,7 +272,9 @@ impl Background {
         source: BackgroundSource,
         dim: f32,
         window_size: (u32, u32),
+        startup_snapshot_size: (u32, u32),
     ) -> Self {
+        save_startup_snapshot(&path, &first, dim, startup_snapshot_size);
         let texture = create_texture(device, first.width, first.height);
         upload_frame(queue, &texture, first.width, first.height, &first.pixels);
 
@@ -403,6 +420,210 @@ impl Background {
     pub(crate) fn ibuf(&self) -> &wgpu::Buffer {
         &self.ibuf
     }
+}
+
+pub(crate) fn startup_snapshot_path(
+    source_path: &Path,
+    window_size: (u32, u32),
+    dim: f32,
+) -> Option<PathBuf> {
+    let dir = crate::renderer::term41_data_dir()?;
+    let key = startup_snapshot_key(source_path, window_size, dim);
+    Some(dir.join(format!("{STARTUP_SNAPSHOT_PREFIX}{key}.png")))
+}
+
+fn save_startup_snapshot(
+    source_path: &Path,
+    frame: &Frame,
+    dim: f32,
+    window_size: (u32, u32),
+) {
+    let Some(path) = startup_snapshot_path(source_path, window_size, dim) else {
+        return;
+    };
+    let rgba =
+        render_startup_snapshot_rgba(window_size, frame.width, frame.height, &frame.pixels, dim);
+    if rgba.is_empty() {
+        return;
+    }
+
+    if let Some(parent) = path.parent() {
+        if let Err(err) = std::fs::create_dir_all(parent) {
+            warn!("startup background snapshot: failed to create data dir: {err}");
+            return;
+        }
+        clear_old_startup_snapshots(parent, &path);
+    }
+
+    let Ok(mut file) = atomic_write_file::AtomicWriteFile::options().open(&path) else {
+        warn!(
+            "startup background snapshot: failed to open {} for atomic write",
+            path.display()
+        );
+        return;
+    };
+
+    if let Err(err) = write_png_rgba(&mut file, window_size.0, window_size.1, &rgba) {
+        warn!(
+            "startup background snapshot: failed to write {}: {err}",
+            path.display()
+        );
+        return;
+    }
+    if let Err(err) = file.commit() {
+        warn!(
+            "startup background snapshot: failed to commit {}: {err}",
+            path.display()
+        );
+    }
+}
+
+fn clear_old_startup_snapshots(
+    dir: &Path,
+    keep_path: &Path,
+) {
+    let Ok(entries) = std::fs::read_dir(dir) else {
+        return;
+    };
+    for entry in entries.flatten() {
+        let path = entry.path();
+        if path == keep_path {
+            continue;
+        }
+        if entry
+            .file_name()
+            .to_str()
+            .is_some_and(|name| name.starts_with(STARTUP_SNAPSHOT_PREFIX))
+        {
+            let _ = std::fs::remove_file(path);
+        }
+    }
+}
+
+fn startup_snapshot_key(
+    source_path: &Path,
+    window_size: (u32, u32),
+    dim: f32,
+) -> String {
+    let mut hash = 0xcbf29ce484222325u64;
+    for &byte in source_path.to_string_lossy().as_bytes() {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    for byte in window_size
+        .0
+        .to_le_bytes()
+        .into_iter()
+        .chain(window_size.1.to_le_bytes())
+        .chain(dim.to_bits().to_le_bytes())
+    {
+        hash ^= byte as u64;
+        hash = hash.wrapping_mul(0x100000001b3);
+    }
+    format!("{hash:016x}")
+}
+
+fn render_startup_snapshot_rgba(
+    window_size: (u32, u32),
+    img_w: u32,
+    img_h: u32,
+    pixels: &[u8],
+    dim: f32,
+) -> Vec<u8> {
+    let out_w = window_size.0.max(1) as usize;
+    let out_h = window_size.1.max(1) as usize;
+    let src_w = img_w.max(1) as usize;
+    let src_h = img_h.max(1) as usize;
+    let expected = src_w.saturating_mul(src_h).saturating_mul(4);
+    if pixels.len() < expected {
+        return Vec::new();
+    }
+
+    let scale = (out_w as f32 / src_w as f32).max(out_h as f32 / src_h as f32);
+    let scaled_w = src_w as f32 * scale;
+    let scaled_h = src_h as f32 * scale;
+    let crop_x = ((scaled_w - out_w as f32) * 0.5).max(0.0);
+    let crop_y = ((scaled_h - out_h as f32) * 0.5).max(0.0);
+    let dim = dim.clamp(0.0, 1.0);
+
+    let mut out = vec![0u8; out_w * out_h * 4];
+    for y in 0..out_h {
+        let src_y = ((y as f32 + crop_y) / scale).clamp(0.0, (src_h - 1) as f32);
+        for x in 0..out_w {
+            let src_x = ((x as f32 + crop_x) / scale).clamp(0.0, (src_w - 1) as f32);
+            let rgba = sample_bilinear_rgba(pixels, src_w, src_h, src_x, src_y);
+            let dst = (y * out_w + x) * 4;
+            out[dst] = (rgba[0] as f32 * dim).round() as u8;
+            out[dst + 1] = (rgba[1] as f32 * dim).round() as u8;
+            out[dst + 2] = (rgba[2] as f32 * dim).round() as u8;
+            out[dst + 3] = rgba[3];
+        }
+    }
+    out
+}
+
+fn sample_bilinear_rgba(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    x: f32,
+    y: f32,
+) -> [u8; 4] {
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let c00 = rgba_at(pixels, width, x0, y0);
+    let c10 = rgba_at(pixels, width, x1, y0);
+    let c01 = rgba_at(pixels, width, x0, y1);
+    let c11 = rgba_at(pixels, width, x1, y1);
+    let mut out = [0u8; 4];
+    for channel in 0..4 {
+        let top = lerp(c00[channel] as f32, c10[channel] as f32, tx);
+        let bottom = lerp(c01[channel] as f32, c11[channel] as f32, tx);
+        out[channel] = lerp(top, bottom, ty).round() as u8;
+    }
+    out
+}
+
+fn rgba_at(
+    pixels: &[u8],
+    width: usize,
+    x: usize,
+    y: usize,
+) -> [u8; 4] {
+    let idx = (y * width + x) * 4;
+    [
+        pixels[idx],
+        pixels[idx + 1],
+        pixels[idx + 2],
+        pixels[idx + 3],
+    ]
+}
+
+fn lerp(
+    a: f32,
+    b: f32,
+    t: f32,
+) -> f32 {
+    a + (b - a) * t
+}
+
+fn write_png_rgba(
+    writer: &mut atomic_write_file::AtomicWriteFile,
+    width: u32,
+    height: u32,
+    rgba: &[u8],
+) -> std::io::Result<()> {
+    let mut encoder = png::Encoder::new(&mut *writer, width, height);
+    encoder.set_color(png::ColorType::Rgba);
+    encoder.set_depth(png::BitDepth::Eight);
+    let mut png = encoder.write_header().map_err(std::io::Error::other)?;
+    png.write_image_data(rgba).map_err(std::io::Error::other)?;
+    png.finish().map_err(std::io::Error::other)?;
+    Ok(())
 }
 
 /// Decoder thread body. Owns the `FrameReader` for its entire lifetime —
@@ -701,5 +922,22 @@ mod tests {
     fn png_not_treated_as_animated() {
         let png_magic = [0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0, 0];
         assert!(!is_animated_format(&png_magic));
+    }
+
+    #[test]
+    fn startup_snapshot_applies_dim_without_touching_alpha() {
+        let rgba = render_startup_snapshot_rgba((1, 1), 1, 1, &[200, 100, 50, 128], 0.5);
+        assert_eq!(rgba, vec![100, 50, 25, 128]);
+    }
+
+    #[test]
+    fn startup_snapshot_uses_cover_crop() {
+        let pixels = [
+            255, 0, 0, 255, 0, 255, 0, 255, 0, 0, 255, 255, 255, 255, 255, 255,
+        ];
+        let rgba = render_startup_snapshot_rgba((1, 2), 2, 2, &pixels, 1.0);
+        assert_eq!(rgba.len(), 8);
+        assert_ne!(&rgba[0..4], &pixels[0..4]);
+        assert_ne!(&rgba[4..8], &pixels[12..16]);
     }
 }

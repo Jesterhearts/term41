@@ -1,11 +1,13 @@
 use std::collections::HashMap;
 use std::num::NonZeroU32;
+use std::path::PathBuf;
 use std::sync::Arc;
 
 use font41::FontSystem;
 use font41::RasterizedGlyph;
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
+use image41::decode_image;
 use palette::Srgb;
 use smol_str::SmolStrBuilder;
 use softbuffer::Context;
@@ -31,12 +33,19 @@ use crate::renderer::r#impl::snapshot_terminal;
 
 type StartupGlyphKey = (usize, u16, u8, bool);
 
+struct CachedBackground {
+    width: u32,
+    height: u32,
+    pixels: Vec<u8>,
+}
+
 pub(crate) struct StartupPresenter {
     _context: Context<Arc<Window>>,
     surface: Surface<Arc<Window>, Arc<Window>>,
     font_system: FontSystem,
     glyph_cache: HashMap<StartupGlyphKey, RasterizedGlyph>,
     gutter_enabled: bool,
+    background: Option<CachedBackground>,
     first_frame: bool,
 }
 
@@ -48,6 +57,7 @@ impl StartupPresenter {
         supersampling: i32,
         scale_factor: f64,
         gutter_enabled: bool,
+        background_path: Option<PathBuf>,
     ) -> Option<Self> {
         let context = match Context::new(window.clone()) {
             Ok(context) => context,
@@ -75,6 +85,7 @@ impl StartupPresenter {
             font_system,
             glyph_cache: HashMap::new(),
             gutter_enabled,
+            background: background_path.and_then(|path| load_cached_background(&path)),
             first_frame: true,
         })
     }
@@ -130,6 +141,9 @@ impl StartupPresenter {
         };
 
         clear(buffer.as_mut(), pack_rgb(snap.palette.bg));
+        if let Some(background) = self.background.as_ref() {
+            paint_cached_background(buffer.as_mut(), width, height, background);
+        }
         paint_tab_bar(
             &mut self.font_system,
             &snap,
@@ -185,6 +199,7 @@ impl StartupPresenter {
                 cell_h,
                 gutter_w,
                 block_cursor,
+                self.background.is_some(),
             );
 
             let glyphs = collect_row_glyphs(
@@ -267,7 +282,6 @@ fn paint_tab_bar(
     fg: Srgb<u8>,
 ) {
     let inactive_bg = blend(bg, fg, 0.5);
-    let border = blend(bg, inactive_bg, 0.5);
     let max_tab_w = (cell_w as f32 * MAX_TAB_WIDTH).min(width as f32);
 
     fill_rect(
@@ -289,16 +303,6 @@ fn paint_tab_bar(
         width as i32 - max_tab_w as i32,
         tab_bar_h,
         pack_rgb(inactive_bg),
-    );
-    fill_rect(
-        buffer,
-        width,
-        height,
-        0,
-        tab_bar_h.saturating_sub(1),
-        width as i32,
-        1,
-        pack_rgb(border),
     );
 
     let margin = cell_w as f32;
@@ -392,6 +396,7 @@ fn paint_row_backgrounds(
     cell_h: i32,
     gutter_w: i32,
     block_cursor: Option<(u32, u32)>,
+    has_background_image: bool,
 ) {
     for col in 0..row.attrs.len() {
         let x = gutter_w + col as i32 * cell_w;
@@ -410,11 +415,62 @@ fn paint_row_backgrounds(
             snap.palette.cursor.unwrap_or(cell_fg)
         } else if matched {
             cell_fg
+        } else if has_background_image && cell_bg == snap.palette.bg {
+            continue;
         } else {
             cell_bg
         };
         fill_rect(buffer, width, height, x, y, cell_w, cell_h, pack_rgb(bg));
     }
+}
+
+fn load_cached_background(path: &PathBuf) -> Option<CachedBackground> {
+    let bytes = std::fs::read(path).ok()?;
+    let decoded = decode_image(&bytes)?;
+    let frame = decoded.frames.into_iter().next()?;
+    Some(CachedBackground {
+        width: decoded.width,
+        height: decoded.height,
+        pixels: frame.pixels,
+    })
+}
+
+fn paint_cached_background(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    background: &CachedBackground,
+) {
+    if background.width as usize != width || background.height as usize != height {
+        return;
+    }
+    for (dst, src) in buffer.iter_mut().zip(background.pixels.chunks_exact(4)) {
+        *dst = blend_rgba_over(*dst, src[0], src[1], src[2], src[3]);
+    }
+}
+
+fn blend_rgba_over(
+    dst: u32,
+    r: u8,
+    g: u8,
+    b: u8,
+    a: u8,
+) -> u32 {
+    if a == 255 {
+        return ((r as u32) << 16) | ((g as u32) << 8) | b as u32;
+    }
+    if a == 0 {
+        return dst;
+    }
+    let alpha = a as u32;
+    let inv = 255 - alpha;
+    let dr = (dst >> 16) & 0xff;
+    let dg = (dst >> 8) & 0xff;
+    let db = dst & 0xff;
+    let out_r = (r as u32 * alpha + dr * inv + 127) / 255;
+    let out_g = (g as u32 * alpha + dg * inv + 127) / 255;
+    let out_b = (b as u32 * alpha + db * inv + 127) / 255;
+    ((out_r as u32) << 16) | ((out_g as u32) << 8) | out_b as u32
 }
 
 fn paint_cursor_overlay(
