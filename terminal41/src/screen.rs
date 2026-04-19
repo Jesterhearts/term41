@@ -564,6 +564,20 @@ pub(super) fn clear_visible(
     }
 }
 
+pub(super) fn ensure_visible_rows(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    let required_rows = screen_viewport(screen, viewport).top + viewport.rows as usize;
+    while screen.grid.rows.len() < required_rows {
+        screen.grid.rows.push_back(Row::new(
+            viewport.cols,
+            screen.grid.default_fg,
+            screen.grid.default_bg,
+        ));
+    }
+}
+
 /// Switch between the primary and alt screens. Idempotent: a no-op if the
 /// target screen is already active.
 fn switch_screen(
@@ -580,6 +594,7 @@ fn switch_screen(
     std::mem::swap(active, stash);
     *on_alt = target_alt;
     viewport.rows = total_rows.saturating_sub(status_line_rows(active));
+    ensure_visible_rows(active, viewport);
     // Incoming screen's offset is preserved; most apps don't care, and it
     // gives primary back its scroll position on 1049l if the user had
     // scrolled back before the app hijacked the terminal.
@@ -668,9 +683,14 @@ pub(super) fn resize_screen(
     let cursor = &mut screen.cursor;
     let images = &mut screen.images;
 
-    // Trim trailing empty rows that accumulated from padding in previous
-    // resizes, so content stays visible when the viewport shrinks.
-    let cursor_abs = grid.rows.len() - old_rows as usize + cursor.row as usize;
+    let effective_old_rows = (old_rows as usize).min(grid.rows.len());
+    let visible_start = grid.rows.len().saturating_sub(effective_old_rows);
+    let clamped_cursor_row = cursor.row.min(effective_old_rows.saturating_sub(1) as u32) as usize;
+    // If the caller's old row count is stale, clamp it to the rows the grid
+    // actually has and keep the cursor on the visible tail. Status-line and
+    // alt-screen transitions can shrink the backing grid before a later
+    // resize observes the new logical height.
+    let cursor_abs = visible_start + clamped_cursor_row;
     while grid.rows.len() > cursor_abs + 1 {
         if grid.rows.back().is_some_and(|r| r.content_len() == 0) {
             grid.rows.pop_back();
@@ -678,7 +698,6 @@ pub(super) fn resize_screen(
             break;
         }
     }
-    let effective_old_rows = (old_rows as usize).min(grid.rows.len());
     let visible_start = grid.rows.len().saturating_sub(effective_old_rows);
     cursor.row = cursor_abs.saturating_sub(visible_start) as u32;
 
@@ -687,7 +706,8 @@ pub(super) fn resize_screen(
     if new_cols as usize != old_cols as usize {
         let anchors = anchor_images(&grid.rows, images);
 
-        let cursor_abs_now = grid.rows.len() - effective_old_rows + cursor.row as usize;
+        let cursor_abs_now =
+            grid.rows.len().saturating_sub(effective_old_rows) + cursor.row as usize;
         let old_distance_from_bottom = grid.rows.len().saturating_sub(cursor_abs_now + 1);
 
         grid.reflow(new_cols);
@@ -712,7 +732,7 @@ pub(super) fn resize_screen(
         cursor.col = cursor.col.min(new_cols.saturating_sub(1));
     } else {
         let old_len = grid.rows.len();
-        let old_abs = grid.rows.len() - effective_old_rows + cursor.row as usize;
+        let old_abs = grid.rows.len().saturating_sub(effective_old_rows) + cursor.row as usize;
 
         while grid.rows.len() > max_rows {
             grid.rows.pop_front();

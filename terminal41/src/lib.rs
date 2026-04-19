@@ -5165,6 +5165,34 @@ mod tests {
     }
 
     #[test]
+    fn status_line_demo_ris_round_trip_keeps_visible_rows_in_bounds() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.inner
+            .set_default_status_display(StatusDisplayKind::Indicator);
+
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[?1049l");
+        term.process(b"\x1b[2$~");
+        term.process(b"\x1b[1$}STATUS > selftest41 > host-writable demo");
+        term.process(b"\x1bc");
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[2J\x1b[H");
+        term.process(b"\x1b[?1049l");
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[2J\x1b[H");
+
+        assert!(
+            term.inner.active.grid.rows.len() >= term.inner.viewport.rows as usize,
+            "active grid shorter than viewport: len={} rows={}",
+            term.inner.active.grid.rows.len(),
+            term.inner.viewport.rows
+        );
+        for row in 0..term.inner.viewport.rows {
+            let _ = term.inner.visible_row(row);
+        }
+    }
+
+    #[test]
     fn ris_resets_modes_the_app_flipped() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
         term.process(b"\x1b[?2004h"); // bracketed paste

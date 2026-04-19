@@ -145,11 +145,17 @@ fn run_identity_demo(
 ) -> std::io::Result<()> {
     heading(out, "Identity & Queries")?;
     if let Some(raw) = &capabilities.raw_reply {
-        line(out, &format!("Captured DA1 reply: {}", raw.escape_default()))?;
+        line(
+            out,
+            &format!("Captured DA1 reply: {}", raw.escape_default()),
+        )?;
     } else {
         line(out, "No DA1 reply captured.")?;
     }
-    line(out, "Visible status bar tracks this same parsed capability set.")?;
+    line(
+        out,
+        "Visible status bar tracks this same parsed capability set.",
+    )?;
     line(out, "")?;
     line(out, "Query sequences used:")?;
     line(out, "  CSI c               DA1")?;
@@ -190,7 +196,10 @@ fn run_charset_demo(out: &mut impl Write) -> std::io::Result<()> {
 
 fn run_drcs_demo(out: &mut impl Write) -> std::io::Result<()> {
     heading(out, "DRCS Soft Characters")?;
-    line(out, "Downloading one simple 94-character DRCS glyph into G0.")?;
+    line(
+        out,
+        "Downloading one simple 94-character DRCS glyph into G0.",
+    )?;
     write!(out, "\x1bP1;1;1;6;0;2;16;0{{ @~~~~~~\x1b\\")?;
     write!(out, "\x1b( @")?;
     line(out, "DRCS sample: ! ! !")?;
@@ -206,7 +215,10 @@ fn run_rectangles_demo(out: &mut impl Write) -> std::io::Result<()> {
     line(out, "GHIJKLMNOPQRSTUV")?;
     line(out, "\x1b[2;3H\x1b[1;3;2;8;1$r")?;
     line(out, "")?;
-    line(out, "The terminal should have applied DECCARA to a rectangle in the middle.")?;
+    line(
+        out,
+        "The terminal should have applied DECCARA to a rectangle in the middle.",
+    )?;
     line(out, "A follow-up reverse-attributes pass runs next.")?;
     write!(out, "\x1b[1;3;2;8;1$t")?;
     Ok(())
@@ -214,7 +226,10 @@ fn run_rectangles_demo(out: &mut impl Write) -> std::io::Result<()> {
 
 fn run_vt525_color_demo(out: &mut impl Write) -> std::io::Result<()> {
     heading(out, "VT525 Color Controls")?;
-    line(out, "Assign normal text to white-on-black and load a dim blue cloud color.")?;
+    line(
+        out,
+        "Assign normal text to white-on-black and load a dim blue cloud color.",
+    )?;
     write!(out, "\x1b[1;7;0,|")?;
     write!(out, "\x1bP2$p0;2;12;12;12/4;2;33;33;44/7;2;90;90;90\x1b\\")?;
     line(out, "Normal text under DECAC.")?;
@@ -227,12 +242,18 @@ fn run_vt525_color_demo(out: &mut impl Write) -> std::io::Result<()> {
 
 fn run_status_line_demo(out: &mut impl Write) -> std::io::Result<()> {
     heading(out, "Status Line")?;
-    line(out, "Enabling the host-writable status line for this transient demo.")?;
+    line(
+        out,
+        "Enabling the host-writable status line for this transient demo.",
+    )?;
     write!(out, "\x1b[2$~")?;
     write!(out, "\x1b[1$}}STATUS > selftest41 > host-writable demo")?;
     write!(out, "\x1b[0$}}")?;
     line(out, "")?;
-    line(out, "Main display stays visually separate from the bottom status line.")?;
+    line(
+        out,
+        "Main display stays visually separate from the bottom status line.",
+    )?;
     Ok(())
 }
 
@@ -249,7 +270,10 @@ fn run_macro_demo(
         )?;
         return Ok(());
     }
-    line(out, "Defining macro 1 to print a short status line, then invoking it.")?;
+    line(
+        out,
+        "Defining macro 1 to print a short status line, then invoking it.",
+    )?;
     write!(out, "\x1bP1;0;0!zMacro path: DECDMAC works here.\x1b\\")?;
     write!(out, "\x1b[1*z")?;
     Ok(())
@@ -257,7 +281,10 @@ fn run_macro_demo(
 
 fn run_page_demo(out: &mut impl Write) -> std::io::Result<()> {
     heading(out, "VT420 Page Memory")?;
-    line(out, "Building page memory and copying between pages without changing outer geometry.")?;
+    line(
+        out,
+        "Building page memory and copying between pages without changing outer geometry.",
+    )?;
     write!(out, "\x1b[?64l")?;
     write!(out, "\x1b[2 P")?;
     line(out, "This text is on page 2.")?;
@@ -268,7 +295,10 @@ fn run_page_demo(out: &mut impl Write) -> std::io::Result<()> {
 
 fn run_vt52_demo(out: &mut impl Write) -> std::io::Result<()> {
     heading(out, "VT52 / Conformance")?;
-    line(out, "Entering VT52 mode, drawing one line, then returning to ANSI.")?;
+    line(
+        out,
+        "Entering VT52 mode, drawing one line, then returning to ANSI.",
+    )?;
     write!(out, "\x1b[?2l")?;
     write!(out, "\x1bHVT52 home\x1bY#$cursor addr")?;
     write!(out, "\x1b<")?;
