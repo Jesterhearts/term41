@@ -1456,10 +1456,10 @@ impl Renderer {
                 font_system,
                 popup,
                 layout,
-                &mut geometry.bg_vertices,
-                &mut geometry.bg_indices,
-                &mut geometry.fg_vertices,
-                &mut geometry.fg_indices,
+                &mut geometry.overlay_bg_vertices,
+                &mut geometry.overlay_bg_indices,
+                &mut geometry.overlay_fg_vertices,
+                &mut geometry.overlay_fg_indices,
             );
         }
 
