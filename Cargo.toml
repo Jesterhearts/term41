@@ -10,7 +10,7 @@ members = [
   "clip41",
   "font41",
   "image41",
-  "pty-pipe41",
+  "pty-pipe41", "selftest41",
   "terminal41",
   "vte-mode41",
   "vtepp",
