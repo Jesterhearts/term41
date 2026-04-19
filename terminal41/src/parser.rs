@@ -2180,6 +2180,32 @@ pub(super) fn csi_dispatch(
         return;
     }
 
+    if intermediates == b" " && matches!(action, 'P' | 'Q' | 'R') {
+        let n = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(1)
+            .max(1) as u32;
+        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+        screen::activate_page_memory(ctx.screen, &view, view.rows);
+        if let Some(page) = ctx.screen.page_memory.as_mut() {
+            match action {
+                'P' => {
+                    page.active_page =
+                        (n.saturating_sub(1)).min(page.page_count().saturating_sub(1))
+                }
+                'Q' => {
+                    page.active_page =
+                        (page.active_page + n).min(page.page_count().saturating_sub(1))
+                }
+                'R' => page.active_page = page.active_page.saturating_sub(n),
+                _ => {}
+            }
+        }
+        return;
+    }
+
     // -- No-intermediates sequences -----------------------------------------
 
     if !intermediates.is_empty() {
@@ -2348,32 +2374,6 @@ pub(super) fn csi_dispatch(
             let view = screen::screen_viewport(ctx.screen, ctx.viewport);
             for _ in 0..n {
                 put_char(ctx.screen, &view, ch.clone(), insert);
-            }
-        }
-        return;
-    }
-
-    if intermediates == b" " && matches!(action, 'P' | 'Q' | 'R') {
-        let n = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(1)
-            .max(1) as u32;
-        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-        screen::activate_page_memory(ctx.screen, &view, view.rows);
-        if let Some(page) = ctx.screen.page_memory.as_mut() {
-            match action {
-                'P' => {
-                    page.active_page =
-                        (n.saturating_sub(1)).min(page.page_count().saturating_sub(1))
-                }
-                'Q' => {
-                    page.active_page =
-                        (page.active_page + n).min(page.page_count().saturating_sub(1))
-                }
-                'R' => page.active_page = page.active_page.saturating_sub(n),
-                _ => {}
             }
         }
         return;
