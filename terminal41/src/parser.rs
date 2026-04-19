@@ -547,10 +547,10 @@ fn apply_hard_reset(
         std::mem::swap(ctx.screen, ctx.stash);
         *ctx.on_alt_screen = false;
     }
-    screen::clear_visible(ctx.screen, ctx.viewport);
-    screen::clear_visible(ctx.stash, ctx.viewport);
     let total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
     for s in [&mut *ctx.screen, &mut *ctx.stash] {
+        s.grid.default_fg = ctx.palette.fg;
+        s.grid.default_bg = ctx.palette.bg;
         s.cursor = grid::Cursor::default();
         s.fg = ctx.palette.fg;
         s.bg = ctx.palette.bg;
@@ -586,6 +586,7 @@ fn apply_hard_reset(
             ctx.palette,
         );
         sync_screen_erase_defaults(s, ctx.dec_color);
+        screen::clear_visible(s, ctx.viewport);
     }
     ctx.viewport.rows = total_rows.saturating_sub(screen::status_line_rows(ctx.screen));
     *ctx.modes = TerminalModes::new();

@@ -5149,13 +5149,19 @@ mod tests {
     #[test]
     fn ris_resets_dec_color_state() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        let mut custom = term.inner.palette.clone();
+        custom.bg = Srgb::new(24, 32, 48);
+        custom.fg = Srgb::new(220, 210, 200);
+        term.inner.set_palette(custom.clone());
         term.process(b"\x1b[1;4;7,|\x1bP2$p4;2;8;9;10\x1b\\");
         term.process(b"\x1bc");
 
         handle_decrqss(b"1,|", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r1;7;0,|\x1b\\");
-        assert_eq!(term.palette.fg, term.base_palette.fg);
-        assert_eq!(term.palette.bg, term.base_palette.bg);
+        assert_eq!(term.palette.fg, custom.fg);
+        assert_eq!(term.palette.bg, custom.bg);
+        assert_eq!(term.active.grid.default_bg, custom.bg);
+        assert_eq!(term.visible_row(0).bg[0], custom.bg);
     }
 
     #[test]
