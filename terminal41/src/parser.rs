@@ -2427,222 +2427,188 @@ pub(super) fn csi_dispatch(
         _ => {}
     }
 
-    // DECTST — Invoke Confidence Test.
-    if action == 'y' && intermediates.is_empty() {
-        let mut groups = params.iter();
-        let selector = groups.next().and_then(|g| g.first().copied()).unwrap_or(0);
-        if selector != 4 {
-            return;
-        }
-        let requested_tests: Vec<u16> = groups.flat_map(|g| g.iter().copied()).collect();
-        let power_up_self_test = requested_tests.is_empty()
-            || requested_tests.contains(&0)
-            || requested_tests.contains(&1);
-        if power_up_self_test {
-            apply_hard_reset_state(
-                ctx.screen,
-                ctx.stash,
-                ctx.viewport,
-                ctx.on_alt_screen,
-                ctx.modes,
-                ctx.kitty_keyboard,
-                ctx.cursor_style,
-                ctx.current_title,
-                ctx.title_stack,
-                ctx.saved_modes,
-                ctx.current_prompt_row,
-                ctx.bell_pending,
-                ctx.vt52_cursor_addr,
-                ctx.palette,
-                ctx.base_palette,
-                ctx.default_status_display,
-                ctx.dec_color,
-                ctx.macros,
-                ctx.drcs,
-                ConformanceLevel::Level4,
-                C1Mode::SevenBit,
-            );
-        }
-        return;
-    }
-
     if !intermediates.is_empty() {
         return;
     }
 
-    // DA1 needs pending_output, which lives on ctx rather than on the screen.
-    // Handle it before borrowing ctx.screen for the screen-only match below.
-    if action == 'c' {
-        // DA1 (Primary Device Attributes). Prefix the reply with the active
-        // DECSCL operating level and advertise the subset this emulator
-        // actually implements. Macro support is policy-gated because VT400
-        // level 4 implies macros to older apps like vtrex; when macros are
-        // denied we intentionally under-report as level 3 to avoid a false
-        // positive probe result.
-        //   7  = printer port (placeholder — signals DECDLD readiness)
-        //  21  = horizontal scrolling
-        //  22  = ANSI color
-        //  28  = rectangular area operations
-        //  29  = ANSI text locator
-        let macro_allowed = ctx
-            .feature_permissions
-            .macros
-            .allows_programs(ctx.foreground_processes.as_ref());
-        let level = if macro_allowed {
-            ctx.modes.conformance_level.da1_code()
-        } else {
-            ctx.modes.conformance_level.da1_code().min(63)
-        };
-        let macro_feature = if macro_allowed { ";32" } else { "" };
-        conformance::write_csi(
-            ctx.pending_output,
-            ctx.modes.c1_mode,
-            format_args!("?{level};7;21;22;28;29{macro_feature}c"),
-        );
-        return;
-    }
-
-    // DSR — Device Status Report. `CSI 5 n` checks that the terminal is alive;
-    // `CSI 6 n` asks for the cursor position. Image viewers (viu, chafa) send
-    // `CSI 6 n` after rendering and block on stdin waiting for the reply.
-    if action == 'n' {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        match ps {
-            DSR_OK => {
-                conformance::write_csi(ctx.pending_output, ctx.modes.c1_mode, format_args!("0n"));
-            }
-            DSR_CPR => {
-                // Report is 1-based.
-                let row = ctx.screen.cursor.row + 1;
-                let col = ctx.screen.cursor.col + 1;
-                conformance::write_csi(
-                    ctx.pending_output,
-                    ctx.modes.c1_mode,
-                    format_args!("{row};{col}R"),
-                );
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    // CSI Ps t — window manipulation + size queries (xterm). Image viewers
-    // like viu and chafa send the pixel-size reports (14/16) before
-    // transmitting and block on stdin until they arrive.
-    if action == 't' {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        if params.iter().count() <= 1
-            && let Some(lines_per_page) = valid_page_lines(ps)
-        {
-            let rows = ctx.viewport.rows.min(lines_per_page);
-            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                screen::activate_page_memory(
-                    screen,
-                    &Viewport {
-                        rows,
-                        cols: ctx.viewport.cols,
-                        top: 0,
-                    },
-                    lines_per_page,
-                );
-            }
-            if rows != ctx.viewport.rows {
-                let old_cols = ctx.viewport.cols;
-                let old_total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
-                let new_total_rows = rows + screen::status_line_rows(ctx.screen);
-                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                    let old_rows = old_total_rows.saturating_sub(screen::status_line_rows(screen));
-                    let new_rows = new_total_rows.saturating_sub(screen::status_line_rows(screen));
-                    screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
-                }
-                ctx.viewport.rows = rows;
-                *ctx.pending_resize = Some((
-                    ctx.viewport.cols,
-                    rows + screen::status_line_rows(ctx.screen),
-                ));
-            }
-            return;
-        }
-        match ps {
-            WINOP_TITLE_PUSH => {
-                // Second param (0 or 2) selects icon vs window title;
-                // we only track one title so both are equivalent.
-                if ctx.title_stack.len() < 16 {
-                    ctx.title_stack.push(ctx.current_title.clone());
-                }
-                return;
-            }
-            WINOP_TITLE_POP => {
-                if let Some(title) = ctx.title_stack.pop() {
-                    *ctx.current_title = title;
-                }
-                return;
-            }
-            WINOP_REPORT_PIXELS => {
-                // Report window size in pixels: CSI 4 ; height ; width t.
-                let h = ctx.viewport.rows * ctx.cell_height;
-                let w = ctx.viewport.cols * ctx.cell_width;
-                conformance::write_csi(
-                    ctx.pending_output,
-                    ctx.modes.c1_mode,
-                    format_args!("4;{h};{w}t"),
-                );
-            }
-            WINOP_REPORT_CELL_SIZE => {
-                // Report cell size in pixels: CSI 6 ; height ; width t.
-                conformance::write_csi(
-                    ctx.pending_output,
-                    ctx.modes.c1_mode,
-                    format_args!("6;{};{}t", ctx.cell_height, ctx.cell_width),
-                );
-            }
-            WINOP_REPORT_TEXT_SIZE => {
-                // Report terminal size in cells: CSI 8 ; rows ; cols t.
-                conformance::write_csi(
-                    ctx.pending_output,
-                    ctx.modes.c1_mode,
-                    format_args!("8;{};{}t", ctx.viewport.rows, ctx.viewport.cols),
-                );
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    // REP (Repeat preceding graphic character). Handled before the main
-    // match because `put_char` needs `&mut Screen` which conflicts with
-    // the `cursor` borrow below.
-    if action == 'b' {
-        let n = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(1)
-            .max(1);
-        if let Some(ch) = ctx.screen.last_char.clone() {
-            let insert = ctx.modes.insert_mode;
-            let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-            for _ in 0..n {
-                put_char(ctx.screen, &view, ch.clone(), insert);
-            }
-        }
-        return;
-    }
-
+    let pending_output = &mut *ctx.pending_output;
     let screen = &mut *ctx.screen;
     let viewport = screen::screen_viewport(screen, ctx.viewport);
     let viewport = &viewport;
     let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
 
     match action {
+        'y' => {
+            let mut groups = params.iter();
+            let selector = groups.next().and_then(|g| g.first().copied()).unwrap_or(0);
+            if selector != 4 {
+                return;
+            }
+            let requested_tests: Vec<u16> = groups.flat_map(|g| g.iter().copied()).collect();
+            let power_up_self_test = requested_tests.is_empty()
+                || requested_tests.contains(&0)
+                || requested_tests.contains(&1);
+            if power_up_self_test {
+                apply_hard_reset_state(
+                    ctx.screen,
+                    ctx.stash,
+                    ctx.viewport,
+                    ctx.on_alt_screen,
+                    ctx.modes,
+                    ctx.kitty_keyboard,
+                    ctx.cursor_style,
+                    ctx.current_title,
+                    ctx.title_stack,
+                    ctx.saved_modes,
+                    ctx.current_prompt_row,
+                    ctx.bell_pending,
+                    ctx.vt52_cursor_addr,
+                    ctx.palette,
+                    ctx.base_palette,
+                    ctx.default_status_display,
+                    ctx.dec_color,
+                    ctx.macros,
+                    ctx.drcs,
+                    ConformanceLevel::Level4,
+                    C1Mode::SevenBit,
+                );
+            }
+        }
+        'c' => {
+            let macro_allowed = ctx
+                .feature_permissions
+                .macros
+                .allows_programs(ctx.foreground_processes.as_ref());
+            let level = if macro_allowed {
+                ctx.modes.conformance_level.da1_code()
+            } else {
+                ctx.modes.conformance_level.da1_code().min(63)
+            };
+            let macro_feature = if macro_allowed { ";32" } else { "" };
+            conformance::write_csi(
+                pending_output,
+                ctx.modes.c1_mode,
+                format_args!("?{level};7;21;22;28;29{macro_feature}c"),
+            );
+        }
+        'n' => {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(0);
+            match ps {
+                DSR_OK => {
+                    conformance::write_csi(
+                        ctx.pending_output,
+                        ctx.modes.c1_mode,
+                        format_args!("0n"),
+                    );
+                }
+                DSR_CPR => {
+                    let row = ctx.screen.cursor.row + 1;
+                    let col = ctx.screen.cursor.col + 1;
+                    conformance::write_csi(
+                        ctx.pending_output,
+                        ctx.modes.c1_mode,
+                        format_args!("{row};{col}R"),
+                    );
+                }
+                _ => {}
+            }
+        }
+        't' => {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(0);
+            if params.iter().count() <= 1
+                && let Some(lines_per_page) = valid_page_lines(ps)
+            {
+                let rows = ctx.viewport.rows.min(lines_per_page);
+                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                    screen::activate_page_memory(
+                        screen,
+                        &Viewport {
+                            rows,
+                            cols: ctx.viewport.cols,
+                            top: 0,
+                        },
+                        lines_per_page,
+                    );
+                }
+                if rows != ctx.viewport.rows {
+                    let old_cols = ctx.viewport.cols;
+                    let old_total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
+                    let new_total_rows = rows + screen::status_line_rows(ctx.screen);
+                    for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                        let old_rows =
+                            old_total_rows.saturating_sub(screen::status_line_rows(screen));
+                        let new_rows =
+                            new_total_rows.saturating_sub(screen::status_line_rows(screen));
+                        screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
+                    }
+                    ctx.viewport.rows = rows;
+                    *ctx.pending_resize = Some((
+                        ctx.viewport.cols,
+                        rows + screen::status_line_rows(ctx.screen),
+                    ));
+                }
+                return;
+            }
+            match ps {
+                WINOP_TITLE_PUSH => {
+                    if ctx.title_stack.len() < 16 {
+                        ctx.title_stack.push(ctx.current_title.clone());
+                    }
+                }
+                WINOP_TITLE_POP => {
+                    if let Some(title) = ctx.title_stack.pop() {
+                        *ctx.current_title = title;
+                    }
+                }
+                WINOP_REPORT_PIXELS => {
+                    let h = ctx.viewport.rows * ctx.cell_height;
+                    let w = ctx.viewport.cols * ctx.cell_width;
+                    conformance::write_csi(
+                        ctx.pending_output,
+                        ctx.modes.c1_mode,
+                        format_args!("4;{h};{w}t"),
+                    );
+                }
+                WINOP_REPORT_CELL_SIZE => {
+                    conformance::write_csi(
+                        ctx.pending_output,
+                        ctx.modes.c1_mode,
+                        format_args!("6;{};{}t", ctx.cell_height, ctx.cell_width),
+                    );
+                }
+                WINOP_REPORT_TEXT_SIZE => {
+                    conformance::write_csi(
+                        ctx.pending_output,
+                        ctx.modes.c1_mode,
+                        format_args!("8;{};{}t", ctx.viewport.rows, ctx.viewport.cols),
+                    );
+                }
+                _ => {}
+            }
+        }
+        'b' => {
+            let n = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1)
+                .max(1);
+            if let Some(ch) = ctx.screen.last_char.clone() {
+                let insert = ctx.modes.insert_mode;
+                let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+                for _ in 0..n {
+                    put_char(ctx.screen, &view, ch.clone(), insert);
+                }
+            }
+        }
         'A' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
             let top = if screen.origin_mode {
@@ -2706,15 +2672,18 @@ pub(super) fn csi_dispatch(
             let mode = p.first().copied().unwrap_or(0);
             screen.grid.erase_in_line(&screen.cursor, viewport, mode);
         }
-        'm' => apply_sgr(
-            &mut screen.fg,
-            &mut screen.bg,
-            &mut screen.attrs,
-            &mut screen.underline,
-            &mut screen.underline_color,
-            params,
-            ctx.palette,
-        ),
+        'm' => {
+            apply_sgr(
+                &mut screen.fg,
+                &mut screen.bg,
+                &mut screen.attrs,
+                &mut screen.underline,
+                &mut screen.underline_color,
+                params,
+                ctx.palette,
+            );
+            sync_screen_erase_defaults(screen, ctx.dec_color);
+        }
         'd' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             if screen.origin_mode {
@@ -2933,10 +2902,6 @@ pub(super) fn csi_dispatch(
             }
         }
         _ => {}
-    }
-
-    if action == 'm' {
-        sync_screen_erase_defaults(screen, ctx.dec_color);
     }
 }
 
