@@ -130,8 +130,12 @@ fn resize_tab_to_grid(
     cols: u32,
     rows: u32,
 ) {
-    tab.terminal.lock().unwrap().resize(cols, rows);
-    tab.pty.resize(cols as u16, rows as u16);
+    let pty_rows = {
+        let mut terminal = tab.terminal.lock().unwrap();
+        terminal.resize(cols, rows);
+        terminal.viewport.rows
+    };
+    tab.pty.resize(cols as u16, pty_rows as u16);
 }
 
 // ---------------------------------------------------------------------------
@@ -759,6 +763,7 @@ impl RenderHost {
             cols,
             rows,
             scrollback,
+            self.config.status_line.display_kind(),
             self.config.strict_altscreen_scrollback,
             self.font_system.cell_height,
             self.font_system.cell_width,
@@ -769,11 +774,12 @@ impl RenderHost {
         }
 
         let terminal_thread = TerminalThread::new();
+        let pty_rows = terminal.viewport.rows;
 
         let (pty, writer, pty_reader) = match Pty::spawn(
             id,
             cols as u16,
-            rows as u16,
+            pty_rows as u16,
             self.font_system.cell_width as u16,
             self.font_system.cell_height as u16,
             None,
@@ -903,6 +909,7 @@ impl RenderHost {
         for tab in &mut self.tabs {
             let mut terminal = tab.terminal.lock().unwrap();
             terminal.set_default_cursor_style(cfg.cursor_style);
+            terminal.set_default_status_display(cfg.status_line.display_kind());
             terminal.set_scrollback_policy(cfg.scrollback_lines, cfg.strict_altscreen_scrollback);
             terminal.set_palette(cfg.palette.clone());
         }
@@ -910,6 +917,8 @@ impl RenderHost {
         self.sync_input_state();
         self.config.bell = cfg.bell;
         self.config.scrollback_lines = cfg.scrollback_lines;
+        let status_line_changed = cfg.status_line != self.config.status_line;
+        self.config.status_line = cfg.status_line;
         self.config.strict_altscreen_scrollback = cfg.strict_altscreen_scrollback;
         self.config.palette = cfg.palette.clone();
 
@@ -948,6 +957,9 @@ impl RenderHost {
             self.config.font_size = cfg.font_size;
             self.config.font_supersampling = cfg.font_supersampling;
             self.sync_input_state();
+        }
+        if status_line_changed {
+            self.recalculate_grid_size();
         }
         if (cfg.opacity - self.config.opacity).abs() > f32::EPSILON {
             warn!(

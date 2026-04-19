@@ -23,7 +23,16 @@ impl VtTerm {
         rows: u32,
     ) -> Self {
         Self {
-            terminal: Terminal::new(cols, rows, 1000, false, 16, 8, ColorPalette::default()),
+            terminal: Terminal::new(
+                cols,
+                rows,
+                1000,
+                terminal41::StatusDisplayKind::None,
+                false,
+                16,
+                8,
+                ColorPalette::default(),
+            ),
             parser: Parser::new(),
         }
     }

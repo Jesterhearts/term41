@@ -342,6 +342,7 @@ pub struct Terminal {
     /// column values. This field persists across `apply` calls so the state
     /// survives the per-action dispatch boundary.
     vt52_cursor_addr: Vt52CursorAddr,
+    default_status_display: StatusDisplayKind,
     strict_altscreen_scrollback: bool,
 }
 
@@ -356,12 +357,13 @@ impl Terminal {
         cols: u32,
         rows: u32,
         scrollback_limit: u32,
+        default_status_display: StatusDisplayKind,
         strict_altscreen_scrollback: bool,
         cell_height: u32,
         cell_width: u32,
         palette: ColorPalette,
     ) -> Self {
-        Self {
+        let mut terminal = Self {
             active: Screen::new(
                 cols,
                 rows,
@@ -409,8 +411,11 @@ impl Terminal {
             cell_width,
             palette,
             vt52_cursor_addr: Vt52CursorAddr::Idle,
+            default_status_display,
             strict_altscreen_scrollback,
-        }
+        };
+        terminal.set_default_status_display(default_status_display);
+        terminal
     }
 
     /// Returns `true` when the foreground app has opened a synchronized
@@ -513,13 +518,46 @@ impl Terminal {
         screen::status_line_visible(&self.active)
     }
 
+    pub fn status_display_kind(&self) -> StatusDisplayKind {
+        self.active.status_display
+    }
+
     pub fn status_line_row(&self) -> Option<&Row> {
         self.active.status_line.as_ref().map(|status| &status.row)
+    }
+
+    pub fn indicator_status_text(&self) -> Option<String> {
+        (self.active.status_display == StatusDisplayKind::Indicator)
+            .then(|| format_indicator_status(self))
+            .filter(|text| !text.is_empty())
     }
 
     pub fn status_line_cursor_col(&self) -> Option<u32> {
         (self.active.active_display == screen::ActiveDisplay::Status && self.active.cursor_visible)
             .then_some(self.active.status_line.as_ref()?.cursor.col)
+    }
+
+    pub fn set_default_status_display(
+        &mut self,
+        status_display: StatusDisplayKind,
+    ) {
+        self.default_status_display = status_display;
+        let total_rows = self.total_rows();
+        let cols = self.viewport.cols;
+        self.viewport.rows = apply_status_display_mode(
+            &mut self.active,
+            total_rows,
+            cols,
+            status_display,
+            &self.palette,
+        );
+        apply_status_display_mode(
+            &mut self.stash,
+            total_rows,
+            cols,
+            status_display,
+            &self.palette,
+        );
     }
 
     fn screen_row_to_absolute(
@@ -1741,6 +1779,7 @@ impl Terminal {
                     cell_width: self.cell_width,
                     cell_height: self.cell_height,
                     palette: &self.palette,
+                    default_status_display: &mut self.default_status_display,
                     title_stack: &mut self.title_stack,
                     current_title: &mut self.current_title,
                     saved_modes: &mut self.saved_private_modes,
@@ -1757,7 +1796,7 @@ impl Terminal {
                 let mut ctx = EscContext {
                     screen: &mut self.active,
                     stash: &mut self.stash,
-                    viewport: &self.viewport,
+                    viewport: &mut self.viewport,
                     on_alt_screen: &mut self.on_alt_screen,
                     modes: &mut self.modes,
                     kitty_keyboard: &mut self.kitty_keyboard,
@@ -1768,6 +1807,7 @@ impl Terminal {
                     current_prompt_row: &mut self.current_prompt_row,
                     bell_pending: &mut self.bell_pending,
                     palette: &self.palette,
+                    default_status_display: &mut self.default_status_display,
                     pending_output: &mut self.pending_output,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
                 };
@@ -1898,6 +1938,76 @@ impl Terminal {
             self.command_metas.retain(|&abs, _| abs >= min_abs);
         }
     }
+}
+
+fn format_indicator_status(term: &Terminal) -> String {
+    let mut segments = path_segments(term.current_directory.as_deref());
+    if let Some(command) = running_command_text(term) {
+        segments.push(command);
+    }
+    segments.join(" > ")
+}
+
+fn path_segments(path: Option<&std::path::Path>) -> Vec<String> {
+    let Some(path) = path else {
+        return Vec::new();
+    };
+    path.components()
+        .map(|component| match component {
+            std::path::Component::RootDir => "/".to_owned(),
+            std::path::Component::Prefix(prefix) => prefix.as_os_str().to_string_lossy().into(),
+            std::path::Component::CurDir => ".".to_owned(),
+            std::path::Component::ParentDir => "..".to_owned(),
+            std::path::Component::Normal(part) => part.to_string_lossy().into_owned(),
+        })
+        .collect()
+}
+
+fn running_command_text(term: &Terminal) -> Option<String> {
+    let prompt_abs = term.current_prompt_row?;
+    let meta = term.command_metas.get(&prompt_abs)?;
+    let command_running = meta.started_at.is_some() && meta.finished_at.is_none();
+    if !command_running {
+        return None;
+    }
+    let command = term.command_text_at(prompt_abs)?;
+    let flattened = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    (!flattened.is_empty()).then_some(flattened)
+}
+
+pub(crate) fn apply_status_display_mode(
+    screen: &mut Screen,
+    total_rows: u32,
+    cols: u32,
+    status_display: StatusDisplayKind,
+    palette: &ColorPalette,
+) -> u32 {
+    let old_rows = total_rows.saturating_sub(screen::status_line_rows(screen));
+    screen::set_status_display(
+        screen,
+        cols,
+        status_display,
+        palette.status_line_fg,
+        palette.status_line_bg,
+    );
+    let new_rows = total_rows.saturating_sub(screen::status_line_rows(screen));
+    if new_rows != old_rows {
+        screen::resize_screen(screen, cols, old_rows, cols, new_rows);
+        if screen::page_memory_active(screen)
+            && let Some(page_rows) = screen::page_rows(screen)
+        {
+            screen::resize_page_memory(
+                screen,
+                &Viewport {
+                    rows: new_rows,
+                    cols,
+                    top: 0,
+                },
+                page_rows,
+            );
+        }
+    }
+    new_rows
 }
 
 fn alt_scrollback_limit(
@@ -2944,6 +3054,7 @@ mod tests {
                     cols,
                     rows,
                     scrollback,
+                    StatusDisplayKind::None,
                     false,
                     cell_h,
                     cell_w,
@@ -2966,6 +3077,7 @@ mod tests {
                     cols,
                     rows,
                     scrollback,
+                    StatusDisplayKind::None,
                     strict_altscreen_scrollback,
                     cell_h,
                     cell_w,
@@ -3019,6 +3131,41 @@ mod tests {
 
     fn status_line_text(term: &Terminal) -> Option<String> {
         term.status_line_row().map(|row| row.cells.concat())
+    }
+
+    #[test]
+    fn indicator_status_formats_path_and_running_command() {
+        let mut term = TestTerm::new(16, 4, 100, 16, 8);
+        term.current_directory = Some(PathBuf::from("/tmp/project"));
+        term.process(b"\x1b[1$~");
+        term.process(b"\x1b]133;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]133;B\x07");
+        term.process(b"cargo test");
+        term.process(b"\x1b]133;C\x07");
+
+        assert_eq!(
+            term.indicator_status_text().as_deref(),
+            Some("/ > tmp > project > cargo test")
+        );
+    }
+
+    #[test]
+    fn indicator_status_omits_command_when_not_running() {
+        let mut term = TestTerm::new(16, 4, 100, 16, 8);
+        term.current_directory = Some(PathBuf::from("/tmp/project"));
+        term.process(b"\x1b[1$~");
+        term.process(b"\x1b]133;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]133;B\x07");
+        term.process(b"cargo test");
+        term.process(b"\x1b]133;C\x07");
+        term.process(b"\x1b]133;D;0\x07");
+
+        assert_eq!(
+            term.indicator_status_text().as_deref(),
+            Some("/ > tmp > project")
+        );
     }
 
     #[test]

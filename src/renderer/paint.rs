@@ -72,6 +72,56 @@ pub(crate) fn status_line_label_row(
     }
 }
 
+pub(crate) fn status_line_text_row(
+    text: &str,
+    cols: u32,
+    palette: &ColorPalette,
+) -> RowSnapshot {
+    let segments: Vec<_> = text.graphemes(true).collect();
+    let clipped = clip_status_line_tail(&segments, cols as usize);
+    let mut row = RowSnapshot {
+        line_attr: LineAttr::Normal,
+        fg: vec![palette.status_line_fg; cols as usize],
+        bg: vec![palette.status_line_bg; cols as usize],
+        attrs: vec![CellAttrs::default(); cols as usize],
+        selected: vec![false; cols as usize],
+        matched: vec![false; cols as usize],
+        active_match: vec![false; cols as usize],
+        cells: vec![smol_str::SmolStr::new_inline(" "); cols as usize],
+        exit_status: None,
+        has_link: vec![false; cols as usize],
+        underline: vec![UnderlineStyle::None; cols as usize],
+        underline_color: vec![None; cols as usize],
+        prompt_start: false,
+    };
+    for (idx, grapheme) in clipped.into_iter().enumerate() {
+        let mut builder = SmolStrBuilder::new();
+        builder.push_str(grapheme);
+        row.cells[idx] = builder.finish();
+    }
+    row
+}
+
+fn clip_status_line_tail<'a>(
+    segments: &[&'a str],
+    cols: usize,
+) -> Vec<&'a str> {
+    if segments.len() <= cols {
+        return segments.to_vec();
+    }
+    if cols == 0 {
+        return Vec::new();
+    }
+    if cols == 1 {
+        return vec!["…"];
+    }
+    let keep = cols - 1;
+    let mut clipped = Vec::with_capacity(cols);
+    clipped.push("…");
+    clipped.extend_from_slice(&segments[segments.len() - keep..]);
+    clipped
+}
+
 pub(crate) fn build_tab_bar_plan(
     tabs: &[TabInfo<'_>],
     palette: &ColorPalette,

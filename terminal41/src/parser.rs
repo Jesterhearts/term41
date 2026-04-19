@@ -51,6 +51,7 @@ pub(super) struct CsiContext<'a> {
     pub cell_width: u32,
     pub cell_height: u32,
     pub palette: &'a color::ColorPalette,
+    pub default_status_display: &'a mut StatusDisplayKind,
     pub title_stack: &'a mut Vec<Option<String>>,
     pub current_title: &'a mut Option<String>,
     pub saved_modes: &'a mut std::collections::HashMap<u16, bool>,
@@ -64,7 +65,7 @@ pub(super) struct CsiContext<'a> {
 pub(super) struct EscContext<'a> {
     pub screen: &'a mut Screen,
     pub stash: &'a mut Screen,
-    pub viewport: &'a Viewport,
+    pub viewport: &'a mut Viewport,
     pub on_alt_screen: &'a mut bool,
     pub modes: &'a mut TerminalModes,
     pub kitty_keyboard: &'a mut KittyKeyboardState,
@@ -75,6 +76,7 @@ pub(super) struct EscContext<'a> {
     pub current_prompt_row: &'a mut Option<u64>,
     pub bell_pending: &'a mut bool,
     pub palette: &'a color::ColorPalette,
+    pub default_status_display: &'a mut StatusDisplayKind,
     /// Bytes to write back to the PTY (e.g. VT52 identify response `ESC / Z`).
     pub pending_output: &'a mut Vec<u8>,
     /// State machine for VT52 `ESC Y Pr Pc`. Set to `AwaitingRow` when the
@@ -523,6 +525,7 @@ fn apply_hard_reset(
     }
     screen::clear_visible(ctx.screen, ctx.viewport);
     screen::clear_visible(ctx.stash, ctx.viewport);
+    let total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
     for s in [&mut *ctx.screen, &mut *ctx.stash] {
         s.cursor = grid::Cursor::default();
         s.fg = ctx.palette.fg;
@@ -551,7 +554,15 @@ fn apply_hard_reset(
         s.active_display = ActiveDisplay::Main;
         s.status_display = StatusDisplayKind::None;
         s.status_line = None;
+        crate::apply_status_display_mode(
+            s,
+            total_rows,
+            ctx.viewport.cols,
+            *ctx.default_status_display,
+            ctx.palette,
+        );
     }
+    ctx.viewport.rows = total_rows.saturating_sub(screen::status_line_rows(ctx.screen));
     *ctx.modes = TerminalModes::new();
     ctx.modes.conformance_level = conformance_level;
     ctx.modes.c1_mode = c1_mode;
@@ -1664,6 +1675,7 @@ pub(super) fn csi_dispatch(
             current_prompt_row: ctx.current_prompt_row,
             bell_pending: ctx.bell_pending,
             palette: ctx.palette,
+            default_status_display: ctx.default_status_display,
             pending_output: ctx.pending_output,
             vt52_cursor_addr: ctx.vt52_cursor_addr,
         };
@@ -3005,6 +3017,7 @@ mod tests {
         let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+        let mut default_status_display = StatusDisplayKind::None;
 
         for action in parser.parse(input) {
             // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
@@ -3095,6 +3108,7 @@ mod tests {
                         cell_width: 8,
                         cell_height: 16,
                         palette: &pal,
+                        default_status_display: &mut default_status_display,
                         title_stack: &mut title_stack,
                         current_title: &mut current_title,
                         saved_modes: &mut saved_modes,
@@ -3122,6 +3136,7 @@ mod tests {
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
                         palette: &pal,
+                        default_status_display: &mut default_status_display,
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                     };
@@ -3906,6 +3921,7 @@ mod tests {
         let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+        let mut default_status_display = StatusDisplayKind::None;
 
         for action in parser.parse(input) {
             // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
@@ -3996,6 +4012,7 @@ mod tests {
                         cell_width: 8,
                         cell_height: 16,
                         palette: &pal,
+                        default_status_display: &mut default_status_display,
                         title_stack: &mut title_stack,
                         current_title: &mut current_title,
                         saved_modes: &mut saved_modes,
@@ -4023,6 +4040,7 @@ mod tests {
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
                         palette: &pal,
+                        default_status_display: &mut default_status_display,
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                     };
@@ -4611,6 +4629,7 @@ mod tests {
         let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+        let mut default_status_display = StatusDisplayKind::None;
 
         for chunk in [b"\x1b)>\x1b~\xc3".as_slice(), b"\xa1".as_slice()] {
             for action in parser.parse(chunk) {
@@ -4650,6 +4669,7 @@ mod tests {
                             cell_width: 8,
                             cell_height: 16,
                             palette: &pal,
+                            default_status_display: &mut default_status_display,
                             title_stack: &mut title_stack,
                             current_title: &mut current_title,
                             saved_modes: &mut saved_modes,
@@ -4677,6 +4697,7 @@ mod tests {
                             current_prompt_row: &mut current_prompt_row,
                             bell_pending: &mut bell_pending,
                             palette: &pal,
+                            default_status_display: &mut default_status_display,
                             pending_output: &mut pending_output,
                             vt52_cursor_addr: &mut vt52_cursor_addr,
                         };

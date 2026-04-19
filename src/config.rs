@@ -6,6 +6,7 @@ use serde::Deserialize;
 use terminal41::ColorPalette;
 use terminal41::CursorShape;
 use terminal41::CursorStyle;
+use terminal41::StatusDisplayKind;
 use wgpu::PowerPreference;
 
 use crate::keybindings::Keybinding;
@@ -13,6 +14,23 @@ use crate::keybindings::KeybindingConfig;
 use crate::keybindings::Keybindings;
 
 pub const DEFAULT_SCROLLBACK: u32 = 10_000;
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+#[serde(rename_all = "lowercase")]
+pub enum StatusLineMode {
+    #[default]
+    Off,
+    Indicator,
+}
+
+impl StatusLineMode {
+    pub fn display_kind(self) -> StatusDisplayKind {
+        match self {
+            Self::Off => StatusDisplayKind::None,
+            Self::Indicator => StatusDisplayKind::Indicator,
+        }
+    }
+}
 
 /// VSync mode for frame presentation. See the `vsync` config key and the
 /// `Config::vsync` field for details.
@@ -248,6 +266,11 @@ struct ConfigFile {
     #[serde(deserialize_with = "u32_opt")]
     #[serde(default)]
     scrollback_lines: Option<u32>,
+    /// Default DEC status-line mode on startup and after hard reset.
+    /// `off` hides it; `indicator` shows the emulator-owned indicator line.
+    #[serde(deserialize_with = "status_line_mode_opt")]
+    #[serde(default)]
+    status_line: Option<StatusLineMode>,
     /// When true, the alternate screen uses zero scrollback like a strict
     /// xterm-style implementation. When false (the default), the alternate
     /// screen gets the same scrollback budget as the primary screen.
@@ -326,6 +349,7 @@ pub struct Config {
     pub fonts: Option<String>,
     pub font_size: f32,
     pub scrollback_lines: u32,
+    pub status_line: StatusLineMode,
     pub strict_altscreen_scrollback: bool,
     pub cursor_style: CursorStyle,
     pub keybindings: Keybindings,
@@ -355,6 +379,7 @@ impl Default for Config {
             fonts: None,
             font_size: 24.0,
             scrollback_lines: DEFAULT_SCROLLBACK,
+            status_line: StatusLineMode::Off,
             strict_altscreen_scrollback: false,
             cursor_style: CursorStyle::default(),
             keybindings: Keybindings::defaults(),
@@ -406,6 +431,7 @@ fn parse_config(
         fonts: file.fonts,
         font_size: file.font_size.unwrap_or(24.0).max(1.0),
         scrollback_lines: file.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
+        status_line: file.status_line.unwrap_or_default(),
         strict_altscreen_scrollback: file.strict_altscreen_scrollback.unwrap_or(false),
         cursor_style,
         keybindings,
@@ -615,6 +641,19 @@ where
     }
 }
 
+fn status_line_mode_opt<'de, D>(deserializer: D) -> Result<Option<StatusLineMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<StatusLineMode>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse status_line mode in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
 fn power_preference_opt<'de, D>(deserializer: D) -> Result<Option<PowerPreference>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -694,6 +733,19 @@ mod tests {
     #[test]
     fn strict_altscreen_scrollback_honours_explicit_true() {
         assert!(parse("strict_altscreen_scrollback = true").strict_altscreen_scrollback);
+    }
+
+    #[test]
+    fn status_line_defaults_to_off() {
+        assert_eq!(parse("").status_line, StatusLineMode::Off);
+    }
+
+    #[test]
+    fn status_line_accepts_indicator() {
+        assert_eq!(
+            parse("status_line = \"indicator\"").status_line,
+            StatusLineMode::Indicator
+        );
     }
 
     #[test]

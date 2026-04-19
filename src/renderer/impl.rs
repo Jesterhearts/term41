@@ -34,6 +34,7 @@ use crate::renderer::image_atlas::ImageAtlas;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
+use crate::renderer::paint::status_line_text_row;
 
 pub const MAX_TAB_WIDTH: f32 = 30.0;
 pub const SUCCESS: [u8; 3] = [80, 200, 120];
@@ -388,22 +389,8 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
             exit_status: grid_row.exit_status,
         });
     }
-    if let Some(grid_row) = terminal.status_line_row() {
-        rows.push(RowSnapshot {
-            cells: grid_row.cells.clone(),
-            attrs: grid_row.attrs.clone(),
-            fg: grid_row.fg.clone(),
-            bg: grid_row.bg.clone(),
-            underline: grid_row.underline.clone(),
-            underline_color: grid_row.underline_color.clone(),
-            has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
-            line_attr: grid_row.line_attr,
-            selected: vec![false; vp_cols as usize],
-            matched: vec![false; vp_cols as usize],
-            active_match: vec![false; vp_cols as usize],
-            prompt_start: false,
-            exit_status: None,
-        });
+    if let Some(status_row) = snapshot_status_line_row(terminal, vp_cols) {
+        rows.push(status_row);
     }
 
     let search = terminal.search_state().map(|s| SearchSnapshot {
@@ -434,6 +421,31 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
         cursor_style: terminal.cursor_style,
         screen_reverse: terminal.modes.screen_reverse,
     }
+}
+
+fn snapshot_status_line_row(
+    terminal: &Terminal,
+    vp_cols: u32,
+) -> Option<RowSnapshot> {
+    if let Some(text) = terminal.indicator_status_text() {
+        return Some(status_line_text_row(&text, vp_cols, &terminal.palette));
+    }
+    let grid_row = terminal.status_line_row()?;
+    Some(RowSnapshot {
+        cells: grid_row.cells.clone(),
+        attrs: grid_row.attrs.clone(),
+        fg: grid_row.fg.clone(),
+        bg: grid_row.bg.clone(),
+        underline: grid_row.underline.clone(),
+        underline_color: grid_row.underline_color.clone(),
+        has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
+        line_attr: grid_row.line_attr,
+        selected: vec![false; vp_cols as usize],
+        matched: vec![false; vp_cols as usize],
+        active_match: vec![false; vp_cols as usize],
+        prompt_start: false,
+        exit_status: None,
+    })
 }
 
 /// CSD window control state passed to the renderer each frame.

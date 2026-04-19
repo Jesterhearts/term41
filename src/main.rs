@@ -1568,11 +1568,14 @@ fn main() {
     let terminal_thread = TerminalThread::new();
 
     // Spawn the initial PTY early so the shell starts running immediately.
+    let initial_status_rows =
+        u32::from(config.status_line.display_kind() != terminal41::StatusDisplayKind::None);
+    let initial_main_rows = INITIAL_ROWS.saturating_sub(initial_status_rows);
     let (pty, pty_writer, pty_reader) = tracing::debug_span!("spawn_pty").in_scope(|| {
         Pty::spawn(
             TabId(0),
             INITIAL_COLS as u16,
-            INITIAL_ROWS as u16,
+            initial_main_rows as u16,
             cell_width as u16,
             cell_height as u16,
             command,
@@ -1587,6 +1590,7 @@ fn main() {
         INITIAL_COLS,
         INITIAL_ROWS,
         config.scrollback_lines,
+        config.status_line.display_kind(),
         config.strict_altscreen_scrollback,
         cell_height,
         cell_width,
