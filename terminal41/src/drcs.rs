@@ -13,7 +13,7 @@ use crate::charset::CharacterSet;
 pub const MAX_DRCS_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const MAX_DRCS_TOTAL_STORAGE_BYTES: usize = 256 * 1024;
 pub const MAX_DRCS_GLYPHS_PER_LOAD: usize = 96;
-const MAX_DRCS_BUFFERS: usize = 3;
+const MAX_DRCS_BUFFERS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum CharsetSize {
@@ -105,12 +105,15 @@ impl Store {
         payload: &[u8],
     ) {
         if payload.len() > MAX_DRCS_PAYLOAD_BYTES {
+            warn!("DRCS load payload too large, ignoring");
             return;
         }
         let Some(load) = parse_load(params, payload) else {
+            warn!("Failed to parse DRCS load, ignoring");
             return;
         };
-        let Some(buffer_idx) = resolve_buffer_index(load.font_number, &self.buffers) else {
+        let Some(buffer_idx) = resolve_buffer_index(&load.designator, &self.buffers) else {
+            warn!("Failed to resolve DRCS buffer index, ignoring");
             return;
         };
 
@@ -166,6 +169,7 @@ impl Store {
             }
             let size = glyph_storage_bytes(&glyph);
             if self.total_storage_bytes.saturating_add(size) > MAX_DRCS_TOTAL_STORAGE_BYTES {
+                warn!("DRCS store is full, cannot load more glyphs");
                 continue;
             }
             self.total_storage_bytes += size;
@@ -212,7 +216,6 @@ impl Store {
 
 #[derive(Debug)]
 struct LoadRequest {
-    font_number: u16,
     start_index: usize,
     erase_control: u16,
     geometry: DrcsGeometryClass,
@@ -252,14 +255,17 @@ fn glyph_id(
 }
 
 fn resolve_buffer_index(
-    font_number: u16,
+    designator: &[u8],
     buffers: &[Option<Buffer>],
 ) -> Option<usize> {
-    match font_number {
-        0 => buffers.iter().position(Option::is_none).or(Some(0)),
-        1 | 2 | 3 => Some((font_number - 1) as usize).filter(|idx| *idx < buffers.len()),
-        _ => None,
-    }
+    buffers
+        .iter()
+        .position(|buffer| {
+            buffer
+                .as_ref()
+                .is_some_and(|buffer| buffer.designator == designator)
+        })
+        .or_else(|| buffers.iter().position(Option::is_none))
 }
 
 fn apply_erase_control(
@@ -291,7 +297,7 @@ fn parse_load(
     params: &[u16],
     payload: &[u8],
 ) -> Option<LoadRequest> {
-    let font_number = params.first().copied().unwrap_or(0);
+    let _font_number = params.first().copied().unwrap_or(0);
     let pcn = params.get(1).copied().unwrap_or(0);
     let erase_control = params.get(2).copied().unwrap_or(0);
     let pcmw = params.get(3).copied().unwrap_or(0);
@@ -341,7 +347,6 @@ fn parse_load(
     }
 
     Some(LoadRequest {
-        font_number,
         start_index,
         erase_control,
         geometry,
@@ -416,12 +421,15 @@ fn start_index(
     pcn: u16,
 ) -> Option<usize> {
     match charset_size {
-        CharsetSize::Cs94 => {
-            if !(1..=94).contains(&pcn) {
-                return None;
-            }
-            Some((pcn - 1) as usize)
-        }
+        // VT soft-font downloads commonly use PCN=0 to mean "start at the
+        // first printable slot" for 94-character sets. Rejecting that causes
+        // the whole load to be discarded, which then leaves any subsequent
+        // sampler output rendering as raw ASCII.
+        CharsetSize::Cs94 => match pcn {
+            0 | 1 => Some(0),
+            2..=94 => Some((pcn - 1) as usize),
+            _ => None,
+        },
         CharsetSize::Cs96 => (pcn <= 95).then_some(pcn as usize),
     }
 }

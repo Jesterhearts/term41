@@ -2831,9 +2831,7 @@ pub(super) fn esc_dispatch(
         return;
     }
 
-    if let Some(&inter) = intermediates.first()
-        && inter == b' '
-    {
+    if intermediates == b" " {
         match byte {
             b'F' if can_negotiate_c1(ctx.modes) => {
                 ctx.modes.c1_mode = C1Mode::SevenBit;

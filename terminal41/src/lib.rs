@@ -4807,6 +4807,41 @@ mod tests {
     }
 
     #[test]
+    fn decdld_accepts_pcn_zero_for_94_character_sets() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;0;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1b( @!");
+
+        let expected = font41::encode_drcs_char(0).unwrap();
+        let actual = term.visible_row(0).cells[0].chars().next().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn decdld_supports_space_intermediate_designation() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;0;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1b( @!");
+
+        let expected = font41::encode_drcs_char(0).unwrap();
+        let actual = term.visible_row(0).cells[0].chars().next().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn bundled_selftest_drcs_script_renders_soft_glyphs() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        let script = include_str!("../../selftest41/resources/icon.drcs")
+            .replace('\u{0090}', "\x1bP")
+            .replace('\u{009c}', "\x1b\\");
+        term.process(script.as_bytes());
+
+        let actual = term.visible_row(0).cells[0].chars().next().unwrap();
+        assert_ne!(actual, '!');
+        assert!((actual as u32) >= 0xF0000);
+    }
+
+    #[test]
     fn decdld_94_charset_maps_colon_to_its_own_glyph_slot() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1bP1;26;1;6;0;2;16;0{ @~~~~~~\x1b\\");

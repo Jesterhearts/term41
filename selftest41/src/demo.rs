@@ -23,6 +23,8 @@ pub enum DemoId {
     Vt52,
 }
 
+const DRCS_SAMPLE_SCRIPT: &str = include_str!("../resources/icon.drcs");
+
 pub fn catalog() -> Vec<Demo> {
     vec![
         Demo {
@@ -186,25 +188,25 @@ fn run_sgr_demo(out: &mut impl Write) -> std::io::Result<()> {
 
 fn run_charset_demo(out: &mut impl Write) -> std::io::Result<()> {
     heading(out, "Charset Engine")?;
-    line(out, "ASCII:  +-- charset demo --+")?;
-    line(out, "\x1b(0DEC Special Graphics: lqqqqqqqqqqqqqqqqk")?;
-    line(out, "\x1b(0                     x locking shifts x")?;
-    line(out, "\x1b(0                     mqqqqqqqqqqqqqqqqj")?;
+    line(out, "ASCII:                +-- charset demo --+")?;
+    line(out, "DEC Special Graphics:\x1b(0 lqqqqqqqqqqqqqqqqqqk")?;
+    line(out, "\x1b(0                      x  locking shifts  x")?;
+    line(out, "\x1b(0                      mqqqqqqqqqqqqqqqqqqj")?;
     line(out, "\x1b(BBack to ASCII.")?;
     Ok(())
 }
 
 fn run_drcs_demo(out: &mut impl Write) -> std::io::Result<()> {
     heading(out, "DRCS Soft Characters")?;
-    line(
-        out,
-        "Downloading one simple 94-character DRCS glyph into G0.",
-    )?;
-    write!(out, "\x1bP1;1;1;6;0;2;16;0{{ @~~~~~~\x1b\\")?;
-    write!(out, "\x1b( @")?;
-    line(out, "DRCS sample: ! ! !")?;
-    write!(out, "\x1b(B")?;
+    write!(out, "{}", normalized_drcs_script(DRCS_SAMPLE_SCRIPT))?;
     Ok(())
+}
+
+fn normalized_drcs_script(script: &str) -> String {
+    script
+        .replace('\u{0090}', "\x1bP")
+        .replace('\u{009c}', "\x1b\\")
+        .replace('\n', "\r\n")
 }
 
 fn run_rectangles_demo(out: &mut impl Write) -> std::io::Result<()> {
