@@ -551,6 +551,344 @@ fn status_line_csi_dispatch(
     }
 }
 
+fn csi_dispatch_star_intermediate(
+    ctx: &mut CsiContext<'_>,
+    params: &Params,
+    action: char,
+) -> bool {
+    match action {
+        '|' => {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(24);
+            if let Some(rows) = valid_screen_lines(ps) {
+                let page_rows =
+                    screen::page_rows(ctx.screen).unwrap_or(rows.max(ctx.viewport.rows));
+                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                    screen::activate_page_memory(
+                        screen,
+                        &Viewport {
+                            rows,
+                            cols: ctx.viewport.cols,
+                            top: 0,
+                        },
+                        page_rows,
+                    );
+                }
+                let old_cols = ctx.viewport.cols;
+                let old_total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
+                let new_total_rows = rows + screen::status_line_rows(ctx.screen);
+                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                    let old_rows = old_total_rows.saturating_sub(screen::status_line_rows(screen));
+                    let new_rows = new_total_rows.saturating_sub(screen::status_line_rows(screen));
+                    screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
+                }
+                ctx.viewport.rows = rows;
+                *ctx.pending_resize = Some((
+                    ctx.viewport.cols,
+                    rows + screen::status_line_rows(ctx.screen),
+                ));
+                ctx.screen.scroll_top = 0;
+                ctx.screen.scroll_bottom = rows.saturating_sub(1);
+                ctx.screen.cursor.row = ctx.screen.cursor.row.min(rows.saturating_sub(1));
+            }
+            true
+        }
+        'x' => {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(0);
+            ctx.screen.attr_change_extent = match ps {
+                2 => grid::AttrChangeExtent::Rectangle,
+                0 | 1 => grid::AttrChangeExtent::Stream,
+                _ => ctx.screen.attr_change_extent,
+            };
+            true
+        }
+        _ => false,
+    }
+}
+
+fn csi_dispatch_space_intermediate(
+    ctx: &mut CsiContext<'_>,
+    params: &Params,
+    action: char,
+) -> bool {
+    match action {
+        'q' => {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(0);
+            ctx.cursor_style.apply_decscusr(ps);
+            true
+        }
+        '@' => {
+            let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+            let n = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1)
+                .max(1) as u32;
+            ctx.screen
+                .grid
+                .scroll_left(&view, ctx.screen.scroll_top, ctx.screen.scroll_bottom, n);
+            true
+        }
+        'A' => {
+            let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+            let n = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1)
+                .max(1) as u32;
+            ctx.screen
+                .grid
+                .scroll_right(&view, ctx.screen.scroll_top, ctx.screen.scroll_bottom, n);
+            true
+        }
+        'P' | 'Q' | 'R' => {
+            let n = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1)
+                .max(1) as u32;
+            let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+            screen::activate_page_memory(ctx.screen, &view, view.rows);
+            if let Some(page) = ctx.screen.page_memory.as_mut() {
+                match action {
+                    'P' => {
+                        page.active_page =
+                            (n.saturating_sub(1)).min(page.page_count().saturating_sub(1))
+                    }
+                    'Q' => {
+                        page.active_page =
+                            (page.active_page + n).min(page.page_count().saturating_sub(1))
+                    }
+                    'R' => page.active_page = page.active_page.saturating_sub(n),
+                    _ => unreachable!(),
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn csi_dispatch_quote_intermediate(
+    ctx: &mut CsiContext<'_>,
+    params: &Params,
+    action: char,
+) -> bool {
+    match action {
+        'p' => {
+            let ps1 = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(0);
+            let Some(level) = ConformanceLevel::from_decscl(ps1) else {
+                return true;
+            };
+            let ps2 = params.iter().nth(1).and_then(|g| g.first().copied());
+            let c1_mode = if level.supports_c1_negotiation() {
+                C1Mode::from_decscl(ps2)
+            } else {
+                C1Mode::SevenBit
+            };
+            let mut esc_ctx = EscContext {
+                screen: ctx.screen,
+                stash: ctx.stash,
+                viewport: ctx.viewport,
+                on_alt_screen: ctx.on_alt_screen,
+                modes: ctx.modes,
+                kitty_keyboard: ctx.kitty_keyboard,
+                cursor_style: ctx.cursor_style,
+                current_title: ctx.current_title,
+                title_stack: ctx.title_stack,
+                saved_modes: ctx.saved_modes,
+                current_prompt_row: ctx.current_prompt_row,
+                bell_pending: ctx.bell_pending,
+                palette: ctx.palette,
+                base_palette: ctx.base_palette,
+                default_status_display: ctx.default_status_display,
+                pending_output: ctx.pending_output,
+                vt52_cursor_addr: ctx.vt52_cursor_addr,
+                macros: ctx.macros,
+                dec_color: ctx.dec_color,
+                drcs: ctx.drcs,
+            };
+            apply_hard_reset(&mut esc_ctx, level, c1_mode);
+            true
+        }
+        'q' => {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(0);
+            match ps {
+                1 => ctx.screen.attrs.insert(CellAttrs::PROTECTED),
+                0 | 2 => ctx.screen.attrs.remove(CellAttrs::PROTECTED),
+                _ => {}
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+fn csi_dispatch_apostrophe_intermediate(
+    ctx: &mut CsiContext<'_>,
+    params: &Params,
+    action: char,
+) -> bool {
+    let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+    let n = params
+        .iter()
+        .next()
+        .and_then(|g| g.first().copied())
+        .unwrap_or(1)
+        .max(1) as u32;
+    match action {
+        '}' => {
+            ctx.screen.grid.insert_cols(
+                &view,
+                ctx.screen.cursor.col,
+                ctx.screen.scroll_top,
+                ctx.screen.scroll_bottom,
+                n,
+            );
+            true
+        }
+        '~' => {
+            ctx.screen.grid.delete_cols(
+                &view,
+                ctx.screen.cursor.col,
+                ctx.screen.scroll_top,
+                ctx.screen.scroll_bottom,
+                n,
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+fn csi_dispatch_gt_lt_eq_intermediate(
+    ctx: &mut CsiContext<'_>,
+    params: &Params,
+    intermediates: &[u8],
+    action: char,
+) -> bool {
+    match (intermediates, action) {
+        (b">" | b"<" | b"=", 'u') => {
+            handle_kitty_keyboard(
+                intermediates[0],
+                params,
+                ctx.kitty_keyboard,
+                ctx.modes.c1_mode,
+                ctx.pending_output,
+            );
+            true
+        }
+        (b">", 'q') => {
+            conformance::write_dcs(
+                ctx.pending_output,
+                ctx.modes.c1_mode,
+                format_args!(">|term41 {}", env!("CARGO_PKG_VERSION")),
+            );
+            true
+        }
+        (b">", 'c') => {
+            conformance::write_csi(
+                ctx.pending_output,
+                ctx.modes.c1_mode,
+                format_args!(">41;0;0c"),
+            );
+            true
+        }
+        (b"=", 'c') => {
+            if ctx.modes.vt52_mode || !ctx.modes.conformance_level.supports_c1_negotiation() {
+                return true;
+            }
+            conformance::write_dcs(
+                ctx.pending_output,
+                ctx.modes.c1_mode,
+                format_args!("!|000000000"),
+            );
+            true
+        }
+        _ => false,
+    }
+}
+
+fn csi_dispatch_bang_intermediate(
+    ctx: &mut CsiContext<'_>,
+    action: char,
+) -> bool {
+    if action != 'p' {
+        return false;
+    }
+    if ctx.modes.vt52_mode || !ctx.modes.conformance_level.supports_c1_negotiation() {
+        return true;
+    }
+    let screen = &mut *ctx.screen;
+    screen.fg = ctx.palette.fg;
+    screen.bg = ctx.palette.bg;
+    screen.attrs = CellAttrs::default();
+    screen.underline = UnderlineStyle::None;
+    screen.underline_color = None;
+    screen.scroll_top = 0;
+    screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+    screen.left_margin = 0;
+    screen.right_margin = ctx.viewport.cols.saturating_sub(1);
+    screen.saved_cursor = None;
+    screen.current_hyperlink = None;
+    screen.cursor_visible = true;
+    screen.last_char = None;
+    screen.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
+    screen.origin_mode = false;
+    screen.nrc_mode = false;
+    screen.upss = charset::UserPreferredSupplementalSet::DecSupplemental;
+    screen.autowrap = true;
+    screen.app_cursor_keys = false;
+    screen.attr_change_extent = grid::AttrChangeExtent::Stream;
+    screen.app_keypad = false;
+    screen.charset = charset::CharsetState::new();
+    let conformance_level = ctx.modes.conformance_level;
+    let c1_mode = ctx.modes.c1_mode;
+    *ctx.modes = TerminalModes::new();
+    ctx.modes.conformance_level = conformance_level;
+    ctx.modes.c1_mode = c1_mode;
+    *ctx.kitty_keyboard = KittyKeyboardState::new();
+    *ctx.cursor_style = CursorStyle::default();
+    true
+}
+
+fn csi_dispatch_amp_intermediate(
+    ctx: &mut CsiContext<'_>,
+    action: char,
+) -> bool {
+    if action != 'u' {
+        return false;
+    }
+    conformance::write_dcs(
+        ctx.pending_output,
+        ctx.modes.c1_mode,
+        format_args!("{}", charset::decaupss_report(ctx.screen.upss)),
+    );
+    true
+}
+
 // C0 control bytes (ECMA-48 / ASCII).
 const NUL: u8 = 0x00;
 const BEL: u8 = 0x07;
@@ -1557,102 +1895,6 @@ pub(super) fn csi_dispatch(
     // this state so the cursor reports and behaves as if on the last column.
     clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
 
-    // -- Sequences that carry intermediates ----------------------------------
-
-    if intermediates == b"*" && action == '|' {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(24);
-        if let Some(rows) = valid_screen_lines(ps) {
-            let page_rows = screen::page_rows(ctx.screen).unwrap_or(rows.max(ctx.viewport.rows));
-            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                screen::activate_page_memory(
-                    screen,
-                    &Viewport {
-                        rows,
-                        cols: ctx.viewport.cols,
-                        top: 0,
-                    },
-                    page_rows,
-                );
-            }
-            let old_cols = ctx.viewport.cols;
-            let old_total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
-            let new_total_rows = rows + screen::status_line_rows(ctx.screen);
-            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                let old_rows = old_total_rows.saturating_sub(screen::status_line_rows(screen));
-                let new_rows = new_total_rows.saturating_sub(screen::status_line_rows(screen));
-                screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
-            }
-            ctx.viewport.rows = rows;
-            *ctx.pending_resize = Some((
-                ctx.viewport.cols,
-                rows + screen::status_line_rows(ctx.screen),
-            ));
-            ctx.screen.scroll_top = 0;
-            ctx.screen.scroll_bottom = rows.saturating_sub(1);
-            ctx.screen.cursor.row = ctx.screen.cursor.row.min(rows.saturating_sub(1));
-        }
-        return;
-    }
-
-    if intermediates == b"$" && action == '}' {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        ctx.screen.active_display = match ps {
-            1 if screen::status_line_writable(ctx.screen) => ActiveDisplay::Status,
-            _ => ActiveDisplay::Main,
-        };
-        return;
-    }
-
-    if intermediates == b"$" && action == '~' {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        let total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
-        let old_rows = ctx.viewport.rows;
-        let status_display = match ps {
-            1 => StatusDisplayKind::Indicator,
-            2 => StatusDisplayKind::HostWritable,
-            _ => StatusDisplayKind::None,
-        };
-        screen::set_status_display(
-            ctx.screen,
-            ctx.viewport.cols,
-            status_display,
-            ctx.palette.status_line_fg,
-            ctx.palette.status_line_bg,
-        );
-        let new_rows = total_rows.saturating_sub(screen::status_line_rows(ctx.screen));
-        if new_rows != old_rows {
-            let old_cols = ctx.viewport.cols;
-            screen::resize_screen(ctx.screen, old_cols, old_rows, old_cols, new_rows);
-            if screen::page_memory_active(ctx.screen)
-                && let Some(page_rows) = screen::page_rows(ctx.screen)
-            {
-                screen::resize_page_memory(
-                    ctx.screen,
-                    &Viewport {
-                        rows: new_rows,
-                        cols: old_cols,
-                        top: 0,
-                    },
-                    page_rows,
-                );
-            }
-            ctx.viewport.rows = new_rows;
-        }
-        return;
-    }
-
     if ctx.screen.active_display == ActiveDisplay::Status
         && screen::status_line_writable(ctx.screen)
         && status_line_csi_dispatch(ctx, params, intermediates, action)
@@ -1660,404 +1902,509 @@ pub(super) fn csi_dispatch(
         return;
     }
 
-    if intermediates == b"?" && matches!(action, 'h' | 'l') {
-        let enable = action == 'h';
-        for p in params.iter() {
-            if p[0] == mode::DECANM {
-                // `h` = ANSI (vt52_mode off); `l` = VT52.
-                ctx.modes.vt52_mode = !enable;
-            } else if p[0] == mode::DECSCNM {
-                ctx.modes.screen_reverse = enable;
-            } else if p[0] == mode::DECARM {
-                ctx.modes.decarm = enable;
-            } else if p[0] == mode::ATT610_BLINK {
-                ctx.cursor_style.blink = enable;
-            } else if p[0] == mode::DECNCSM {
-                ctx.modes.decncsm = enable;
-            } else if p[0] == mode::DECLRMM {
-                ctx.modes.declrmm = enable;
-                if !enable {
-                    // Disabling DECLRMM resets margins to full width.
-                    ctx.screen.left_margin = 0;
-                    ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
+    match intermediates {
+        b"?" => {
+            match action {
+                'h' | 'l' => {
+                    let enable = action == 'h';
+                    for p in params.iter() {
+                        if p[0] == mode::DECANM {
+                            ctx.modes.vt52_mode = !enable;
+                        } else if p[0] == mode::DECSCNM {
+                            ctx.modes.screen_reverse = enable;
+                        } else if p[0] == mode::DECARM {
+                            ctx.modes.decarm = enable;
+                        } else if p[0] == mode::ATT610_BLINK {
+                            ctx.cursor_style.blink = enable;
+                        } else if p[0] == mode::DECNCSM {
+                            ctx.modes.decncsm = enable;
+                        } else if p[0] == mode::DECLRMM {
+                            ctx.modes.declrmm = enable;
+                            if !enable {
+                                ctx.screen.left_margin = 0;
+                                ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
+                            }
+                        } else if p[0] == mode::DECNRCM {
+                            ctx.modes.decnrcm = enable;
+                            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                                screen.nrc_mode = enable;
+                                screen.charset = charset::CharsetState::new();
+                            }
+                        } else if p[0] == mode::BRACKETED_PASTE {
+                            ctx.modes.bracketed_paste = enable;
+                        } else if p[0] == mode::FOCUS_REPORTING {
+                            ctx.modes.focus_reporting = enable;
+                        } else if p[0] == mode::SYNCHRONIZED_UPDATE {
+                            ctx.modes.synchronized_update_since = enable.then(Instant::now);
+                        } else if p[0] == mode::ALLOW_DECCOLM {
+                            ctx.modes.allow_deccolm = enable;
+                        } else if p[0] == mode::DECATCUM {
+                            ctx.dec_color.alternate_underline_text = enable;
+                        } else if p[0] == mode::DECATCBM {
+                            ctx.dec_color.alternate_blink_text = enable;
+                        } else if p[0] == mode::DECBBSM {
+                            ctx.dec_color.bold_blink_affects_background = enable;
+                        } else if p[0] == mode::DECECM {
+                            ctx.dec_color.erase_to_screen = enable;
+                            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                                sync_screen_erase_defaults(screen, ctx.dec_color);
+                            }
+                        } else if p[0] == mode::DECCOLM {
+                            if !ctx.modes.allow_deccolm {
+                                continue;
+                            }
+                            let new_cols = if enable {
+                                ctx.modes.deccolm_saved_cols = Some(ctx.viewport.cols);
+                                132
+                            } else {
+                                ctx.modes
+                                    .deccolm_saved_cols
+                                    .take()
+                                    .unwrap_or(ctx.viewport.cols)
+                            };
+                            let old_cols = ctx.viewport.cols;
+                            let rows = ctx.viewport.rows;
+                            for s in [&mut *ctx.screen, &mut *ctx.stash] {
+                                screen::resize_screen(s, old_cols, rows, new_cols, rows);
+                            }
+                            ctx.viewport.cols = new_cols;
+                            if !ctx.modes.decncsm {
+                                let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+                                screen::clear_visible(ctx.screen, &view);
+                            }
+                            ctx.screen.scroll_top = 0;
+                            ctx.screen.scroll_bottom = rows.saturating_sub(1);
+                            ctx.screen.left_margin = 0;
+                            ctx.screen.right_margin = (ctx.viewport.cols).saturating_sub(1);
+                            ctx.screen.cursor = grid::Cursor::default();
+                        } else if !apply_mouse_mode(
+                            p[0],
+                            enable,
+                            &mut ctx.modes.mouse_tracking,
+                            &mut ctx.modes.mouse_encoding,
+                        ) {
+                            screen::set_private_mode(
+                                p[0],
+                                enable,
+                                ctx.screen,
+                                ctx.stash,
+                                ctx.viewport,
+                                ctx.on_alt_screen,
+                            );
+                        }
+                    }
                 }
-            } else if p[0] == mode::DECNRCM {
-                ctx.modes.decnrcm = enable;
-                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                    screen.nrc_mode = enable;
-                    screen.charset = charset::CharsetState::new();
+                's' => {
+                    for p in params.iter() {
+                        let mode = p[0];
+                        let state = query_private_mode(mode, ctx);
+                        ctx.saved_modes.insert(mode, state == 1);
+                    }
                 }
-            } else if p[0] == mode::BRACKETED_PASTE {
-                ctx.modes.bracketed_paste = enable;
-            } else if p[0] == mode::FOCUS_REPORTING {
-                ctx.modes.focus_reporting = enable;
-            } else if p[0] == mode::SYNCHRONIZED_UPDATE {
-                // BSU refreshes the deadline; ESU clears it. Refreshing on a
-                // nested BSU matches the contour spec's "keep the window open"
-                // rule for apps that chain updates.
-                ctx.modes.synchronized_update_since = enable.then(Instant::now);
-            } else if p[0] == mode::ALLOW_DECCOLM {
-                ctx.modes.allow_deccolm = enable;
-            } else if p[0] == mode::DECATCUM {
-                ctx.dec_color.alternate_underline_text = enable;
-            } else if p[0] == mode::DECATCBM {
-                ctx.dec_color.alternate_blink_text = enable;
-            } else if p[0] == mode::DECBBSM {
-                ctx.dec_color.bold_blink_affects_background = enable;
-            } else if p[0] == mode::DECECM {
-                ctx.dec_color.erase_to_screen = enable;
-                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                    sync_screen_erase_defaults(screen, ctx.dec_color);
+                'r' => {
+                    for p in params.iter() {
+                        let mode = p[0];
+                        if let Some(&saved) = ctx.saved_modes.get(&mode) {
+                            apply_private_mode(mode, saved, ctx);
+                        }
+                    }
                 }
-            } else if p[0] == mode::DECCOLM {
-                if !ctx.modes.allow_deccolm {
-                    continue;
-                }
-                // 80/132 column mode. Resize the grid, clear the screen,
-                // reset margins, and home the cursor per DEC spec. This
-                // lets vttest's 132-column pass work.
-                let new_cols = if enable {
-                    ctx.modes.deccolm_saved_cols = Some(ctx.viewport.cols);
-                    132
-                } else {
-                    ctx.modes
-                        .deccolm_saved_cols
-                        .take()
-                        .unwrap_or(ctx.viewport.cols)
-                };
-                let old_cols = ctx.viewport.cols;
-                let rows = ctx.viewport.rows;
-                for s in [&mut *ctx.screen, &mut *ctx.stash] {
-                    screen::resize_screen(s, old_cols, rows, new_cols, rows);
-                }
-                ctx.viewport.cols = new_cols;
-                // DECNCSM (mode 95): when set, skip the screen clear.
-                if !ctx.modes.decncsm {
+                'J' => {
                     let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-                    screen::clear_visible(ctx.screen, &view);
+                    let mode = params
+                        .iter()
+                        .next()
+                        .and_then(|g| g.first().copied())
+                        .unwrap_or(0);
+                    ctx.screen.grid.erase_in_display_selective(
+                        &ctx.screen.cursor,
+                        &view,
+                        &mut ctx.screen.images,
+                        mode,
+                    );
                 }
-                ctx.screen.scroll_top = 0;
-                ctx.screen.scroll_bottom = rows.saturating_sub(1);
-                ctx.screen.left_margin = 0;
-                ctx.screen.right_margin = (ctx.viewport.cols).saturating_sub(1);
-                ctx.screen.cursor = grid::Cursor::default();
-            } else if !apply_mouse_mode(
-                p[0],
-                enable,
-                &mut ctx.modes.mouse_tracking,
-                &mut ctx.modes.mouse_encoding,
-            ) {
-                screen::set_private_mode(
-                    p[0],
-                    enable,
-                    ctx.screen,
-                    ctx.stash,
-                    ctx.viewport,
-                    ctx.on_alt_screen,
-                );
+                'K' => {
+                    let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+                    let mode = params
+                        .iter()
+                        .next()
+                        .and_then(|g| g.first().copied())
+                        .unwrap_or(0);
+                    ctx.screen
+                        .grid
+                        .erase_in_line_selective(&ctx.screen.cursor, &view, mode);
+                }
+                'u' => {
+                    handle_kitty_keyboard(
+                        b'?',
+                        params,
+                        ctx.kitty_keyboard,
+                        ctx.modes.c1_mode,
+                        ctx.pending_output,
+                    );
+                }
+                'n' => {
+                    let ps = params
+                        .iter()
+                        .next()
+                        .and_then(|g| g.first().copied())
+                        .unwrap_or(0);
+                    if ps == DSR_CPR {
+                        let row = ctx.screen.cursor.row + 1;
+                        let col = ctx.screen.cursor.col + 1;
+                        let page = ctx
+                            .screen
+                            .page_memory
+                            .as_ref()
+                            .map(|page| page.active_page + 1)
+                            .unwrap_or(1);
+                        conformance::write_csi(
+                            ctx.pending_output,
+                            ctx.modes.c1_mode,
+                            format_args!("?{row};{col};{page}R"),
+                        );
+                    }
+                }
+                _ => {}
             }
-        }
-        return;
-    }
-
-    // XTSAVE — save individual private mode values (CSI ? Ps s).
-    if intermediates == b"?" && action == 's' {
-        for p in params.iter() {
-            let mode = p[0];
-            let state = query_private_mode(mode, ctx);
-            ctx.saved_modes.insert(mode, state == 1);
-        }
-        return;
-    }
-
-    // XTRESTORE — restore individual private mode values (CSI ? Ps r).
-    if intermediates == b"?" && action == 'r' {
-        for p in params.iter() {
-            let mode = p[0];
-            if let Some(&saved) = ctx.saved_modes.get(&mode) {
-                apply_private_mode(mode, saved, ctx);
-            }
-        }
-        return;
-    }
-
-    // DECSED — Selective Erase in Display (CSI ? Ps J). Like ED but
-    // cells with the PROTECTED attribute (set via DECSCA) are left intact.
-    if action == 'J' && intermediates == b"?" {
-        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-        let mode = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        ctx.screen.grid.erase_in_display_selective(
-            &ctx.screen.cursor,
-            &view,
-            &mut ctx.screen.images,
-            mode,
-        );
-        return;
-    }
-
-    // DECSEL — Selective Erase in Line (CSI ? Ps K). Like EL but
-    // cells with the PROTECTED attribute are left intact.
-    if action == 'K' && intermediates == b"?" {
-        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-        let mode = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        ctx.screen
-            .grid
-            .erase_in_line_selective(&ctx.screen.cursor, &view, mode);
-        return;
-    }
-
-    if action == 'u' && matches!(intermediates, b">" | b"<" | b"=" | b"?") {
-        handle_kitty_keyboard(
-            intermediates[0],
-            params,
-            ctx.kitty_keyboard,
-            ctx.modes.c1_mode,
-            ctx.pending_output,
-        );
-        return;
-    }
-
-    if action == 'u' && intermediates == b"&" {
-        conformance::write_dcs(
-            ctx.pending_output,
-            ctx.modes.c1_mode,
-            format_args!("{}", charset::decaupss_report(ctx.screen.upss)),
-        );
-        return;
-    }
-
-    if action == 'p' && intermediates == b"\"" {
-        let ps1 = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        let Some(level) = ConformanceLevel::from_decscl(ps1) else {
             return;
-        };
-        let ps2 = params.iter().nth(1).and_then(|g| g.first().copied());
-        let c1_mode = if level.supports_c1_negotiation() {
-            C1Mode::from_decscl(ps2)
-        } else {
-            C1Mode::SevenBit
-        };
-        let mut esc_ctx = EscContext {
-            screen: ctx.screen,
-            stash: ctx.stash,
-            viewport: ctx.viewport,
-            on_alt_screen: ctx.on_alt_screen,
-            modes: ctx.modes,
-            kitty_keyboard: ctx.kitty_keyboard,
-            cursor_style: ctx.cursor_style,
-            current_title: ctx.current_title,
-            title_stack: ctx.title_stack,
-            saved_modes: ctx.saved_modes,
-            current_prompt_row: ctx.current_prompt_row,
-            bell_pending: ctx.bell_pending,
-            palette: ctx.palette,
-            base_palette: ctx.base_palette,
-            default_status_display: ctx.default_status_display,
-            pending_output: ctx.pending_output,
-            vt52_cursor_addr: ctx.vt52_cursor_addr,
-            macros: ctx.macros,
-            dec_color: ctx.dec_color,
-            drcs: ctx.drcs,
-        };
-        apply_hard_reset(&mut esc_ctx, level, c1_mode);
-        return;
-    }
-
-    if action == 'q' && intermediates == b" " {
-        // DECSCUSR. The space intermediate is mandatory; the single param
-        // picks shape+blink (0/1=blink block, 2=block, 3/4=underline, 5/6=beam).
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        ctx.cursor_style.apply_decscusr(ps);
-        return;
-    }
-
-    // DECSCA — Select Character Protection Attribute (CSI Ps " q).
-    // Ps=1 marks subsequent characters as protected; Ps=0 or Ps=2 clears
-    // protection. Protected cells are immune to DECSED and DECSEL.
-    if action == 'q' && intermediates == b"\"" {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        match ps {
-            1 => ctx.screen.attrs.insert(CellAttrs::PROTECTED),
-            0 | 2 => ctx.screen.attrs.remove(CellAttrs::PROTECTED),
-            _ => {}
         }
-        return;
-    }
-
-    if action == 'q' && intermediates == b">" {
-        // XTVERSION (xterm name/version query). Apps use the reply to gate
-        // behavior on known-good terminals.
-        conformance::write_dcs(
-            ctx.pending_output,
-            ctx.modes.c1_mode,
-            format_args!(">|term41 {}", env!("CARGO_PKG_VERSION")),
-        );
-        return;
-    }
-
-    // DECRQM — Request Mode (CSI ? Ps $ p for private, CSI Ps $ p for ANSI).
-    // Apps query terminal capabilities by checking whether specific modes are
-    // set or reset. Reply: CSI [?] Ps ; Pm $ y where Pm = 1 (set), 2 (reset),
-    // or 0 (not recognized).
-    if action == 'p' && (intermediates == b"?$" || intermediates == b"$") {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        let private = intermediates == b"?$";
-        let pm = if private {
-            query_private_mode(ps, ctx)
-        } else {
-            match ps {
-                mode::IRM => {
-                    if ctx.modes.insert_mode {
-                        1
-                    } else {
-                        2
-                    }
-                }
-                mode::LNM => {
-                    if ctx.modes.newline_mode {
-                        1
-                    } else {
-                        2
-                    }
-                }
-                1 | 5 | 7 | 10 | 11 | 13 | 14 | 15 | 16 | 17 | 18 | 19 => 4,
-                _ => 0,
-            }
-        };
-        if private {
+        b"?$" if action == 'p' => {
+            let ps = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(0);
+            let pm = query_private_mode(ps, ctx);
             conformance::write_csi(
                 ctx.pending_output,
                 ctx.modes.c1_mode,
                 format_args!("?{ps};{pm}$y"),
             );
-        } else {
-            conformance::write_csi(
-                ctx.pending_output,
-                ctx.modes.c1_mode,
-                format_args!("{ps};{pm}$y"),
-            );
-        }
-        return;
-    }
-
-    if action == 'c' && intermediates == b">" {
-        // DA2 (Secondary Device Attributes).
-        conformance::write_csi(
-            ctx.pending_output,
-            ctx.modes.c1_mode,
-            format_args!(">41;0;0c"),
-        );
-        return;
-    }
-
-    if action == 'p' && intermediates == b"!" {
-        if ctx.modes.vt52_mode || !ctx.modes.conformance_level.supports_c1_negotiation() {
             return;
         }
-        // DECSTR (Soft Terminal Reset). Resets modes, colors, attributes,
-        // scroll region, and cursor style back to defaults without clearing
-        // the screen or scrollback. tmux and neovim use this for a
-        // lightweight cleanup between sessions.
-        let screen = &mut *ctx.screen;
-        screen.fg = ctx.palette.fg;
-        screen.bg = ctx.palette.bg;
-        screen.attrs = CellAttrs::default();
-        screen.underline = UnderlineStyle::None;
-        screen.underline_color = None;
-        screen.scroll_top = 0;
-        screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
-        screen.left_margin = 0;
-        screen.right_margin = ctx.viewport.cols.saturating_sub(1);
-        screen.saved_cursor = None;
-        screen.current_hyperlink = None;
-        screen.cursor_visible = true;
-        screen.last_char = None;
-        screen.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
-        screen.origin_mode = false;
-        screen.nrc_mode = false;
-        screen.upss = charset::UserPreferredSupplementalSet::DecSupplemental;
-        screen.autowrap = true;
-        screen.app_cursor_keys = false;
-        screen.attr_change_extent = grid::AttrChangeExtent::Stream;
-        screen.app_keypad = false;
-        screen.charset = charset::CharsetState::new();
-        let conformance_level = ctx.modes.conformance_level;
-        let c1_mode = ctx.modes.c1_mode;
-        *ctx.modes = TerminalModes::new();
-        ctx.modes.conformance_level = conformance_level;
-        ctx.modes.c1_mode = c1_mode;
-        *ctx.kitty_keyboard = KittyKeyboardState::new();
-        *ctx.cursor_style = CursorStyle::default();
-        return;
-    }
-
-    // DA3 (Tertiary Device Attributes, CSI = c).
-    if action == 'c' && intermediates == b"=" {
-        if ctx.modes.vt52_mode || !ctx.modes.conformance_level.supports_c1_negotiation() {
-            return;
-        }
-        conformance::write_dcs(
-            ctx.pending_output,
-            ctx.modes.c1_mode,
-            format_args!("!|000000000"),
-        );
-        return;
-    }
-
-    // DECRQPSR — Request Presentation State Report.
-    if action == 'w' && intermediates == b"$" {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        match ps {
-            1 => {
-                if let Some(report) =
-                    crate::deccir_report(ctx.screen, ctx.viewport, ctx.modes, ctx.drcs)
-                {
-                    conformance::write_dcs(
+        b"$" => {
+            match action {
+                '}' => {
+                    let ps = params
+                        .iter()
+                        .next()
+                        .and_then(|g| g.first().copied())
+                        .unwrap_or(0);
+                    ctx.screen.active_display = match ps {
+                        1 if screen::status_line_writable(ctx.screen) => ActiveDisplay::Status,
+                        _ => ActiveDisplay::Main,
+                    };
+                }
+                '~' => {
+                    let ps = params
+                        .iter()
+                        .next()
+                        .and_then(|g| g.first().copied())
+                        .unwrap_or(0);
+                    let total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
+                    let old_rows = ctx.viewport.rows;
+                    let status_display = match ps {
+                        1 => StatusDisplayKind::Indicator,
+                        2 => StatusDisplayKind::HostWritable,
+                        _ => StatusDisplayKind::None,
+                    };
+                    screen::set_status_display(
+                        ctx.screen,
+                        ctx.viewport.cols,
+                        status_display,
+                        ctx.palette.status_line_fg,
+                        ctx.palette.status_line_bg,
+                    );
+                    let new_rows = total_rows.saturating_sub(screen::status_line_rows(ctx.screen));
+                    if new_rows != old_rows {
+                        let old_cols = ctx.viewport.cols;
+                        screen::resize_screen(ctx.screen, old_cols, old_rows, old_cols, new_rows);
+                        if screen::page_memory_active(ctx.screen)
+                            && let Some(page_rows) = screen::page_rows(ctx.screen)
+                        {
+                            screen::resize_page_memory(
+                                ctx.screen,
+                                &Viewport {
+                                    rows: new_rows,
+                                    cols: old_cols,
+                                    top: 0,
+                                },
+                                page_rows,
+                            );
+                        }
+                        ctx.viewport.rows = new_rows;
+                    }
+                }
+                'w' => {
+                    let ps = params
+                        .iter()
+                        .next()
+                        .and_then(|g| g.first().copied())
+                        .unwrap_or(0);
+                    match ps {
+                        1 => {
+                            if let Some(report) =
+                                crate::deccir_report(ctx.screen, ctx.viewport, ctx.modes, ctx.drcs)
+                            {
+                                conformance::write_dcs(
+                                    ctx.pending_output,
+                                    ctx.modes.c1_mode,
+                                    format_args!("1$u{report}"),
+                                );
+                            }
+                        }
+                        2 => {
+                            let stops = crate::dectabsr_report(ctx.screen);
+                            conformance::write_dcs(
+                                ctx.pending_output,
+                                ctx.modes.c1_mode,
+                                format_args!("2$u{stops}"),
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                'p' => {
+                    let ps = params
+                        .iter()
+                        .next()
+                        .and_then(|g| g.first().copied())
+                        .unwrap_or(0);
+                    let pm = match ps {
+                        mode::IRM => {
+                            if ctx.modes.insert_mode {
+                                1
+                            } else {
+                                2
+                            }
+                        }
+                        mode::LNM => {
+                            if ctx.modes.newline_mode {
+                                1
+                            } else {
+                                2
+                            }
+                        }
+                        1 | 5 | 7 | 10 | 11 | 13 | 14 | 15 | 16 | 17 | 18 | 19 => 4,
+                        _ => 0,
+                    };
+                    conformance::write_csi(
                         ctx.pending_output,
                         ctx.modes.c1_mode,
-                        format_args!("1$u{report}"),
+                        format_args!("{ps};{pm}$y"),
                     );
                 }
+                '|' => {
+                    let ps = params
+                        .iter()
+                        .next()
+                        .and_then(|g| g.first().copied())
+                        .unwrap_or(80);
+                    let Some(cols) = matches!(ps, 80 | 132).then_some(ps as u32) else {
+                        return;
+                    };
+                    let old_cols = ctx.viewport.cols;
+                    let total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
+                    for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                        let rows = total_rows.saturating_sub(screen::status_line_rows(screen));
+                        screen::resize_screen(screen, old_cols, rows, cols, rows);
+                        if screen::page_memory_active(screen) {
+                            let page_rows = screen::page_rows(screen).unwrap_or(rows);
+                            screen::resize_page_memory(
+                                screen,
+                                &Viewport { rows, cols, top: 0 },
+                                page_rows,
+                            );
+                        }
+                    }
+                    ctx.viewport.cols = cols;
+                    *ctx.pending_resize = Some((
+                        cols,
+                        ctx.viewport.rows + screen::status_line_rows(ctx.screen),
+                    ));
+                    ctx.screen.right_margin = cols.saturating_sub(1);
+                    ctx.screen.cursor.col = ctx.screen.cursor.col.min(cols.saturating_sub(1));
+                }
+                'z' | '{' | 'x' | 'v' | 'r' | 't' => {
+                    let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+                    let rows = view.rows;
+                    let cols = view.cols;
+                    let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
+
+                    if matches!(action, 'r' | 't')
+                        && ctx.screen.attr_change_extent == grid::AttrChangeExtent::Stream
+                    {
+                        let start_row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
+                        let start_col = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
+                        let end_row = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
+                            .min(rows.saturating_sub(1));
+                        let end_col = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
+                            .min(cols.saturating_sub(1));
+                        if start_row > end_row || (start_row == end_row && start_col > end_col) {
+                            return;
+                        }
+                        let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+                        match action {
+                            'r' => ctx.screen.grid.change_attrs_rect(
+                                &view,
+                                start_row,
+                                start_col,
+                                end_row,
+                                end_col,
+                                &sgr,
+                                ctx.screen.attr_change_extent,
+                            ),
+                            't' => ctx.screen.grid.reverse_attrs_rect(
+                                &view,
+                                start_row,
+                                start_col,
+                                end_row,
+                                end_col,
+                                &sgr,
+                                ctx.screen.attr_change_extent,
+                            ),
+                            _ => {}
+                        }
+                        return;
+                    }
+
+                    let rect_top = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
+                    let rect_left = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
+                    let rect_bottom = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
+                        .min(rows.saturating_sub(1));
+                    let rect_right = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
+                        .min(cols.saturating_sub(1));
+
+                    if rect_top > rect_bottom || rect_left > rect_right {
+                        return;
+                    }
+
+                    match action {
+                        'z' => {
+                            ctx.screen.grid.erase_rect(
+                                &view,
+                                rect_top,
+                                rect_left,
+                                rect_bottom,
+                                rect_right,
+                            );
+                        }
+                        '{' => {
+                            ctx.screen.grid.erase_rect_selective(
+                                &view,
+                                rect_top,
+                                rect_left,
+                                rect_bottom,
+                                rect_right,
+                            );
+                        }
+                        'x' => {
+                            let ch_code = p.get(4).copied().unwrap_or(0x20) as u32;
+                            let valid =
+                                (32..=126).contains(&ch_code) || (160..=255).contains(&ch_code);
+                            if valid && let Some(ch) = char::from_u32(ch_code) {
+                                let mut buf = [0u8; 4];
+                                let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
+                                ctx.screen.grid.fill_rect(
+                                    &view,
+                                    rect_top,
+                                    rect_left,
+                                    rect_bottom,
+                                    rect_right,
+                                    s,
+                                    ctx.screen.fg,
+                                    ctx.screen.bg,
+                                    ctx.screen.attrs,
+                                    ctx.screen.underline,
+                                    ctx.screen.underline_color,
+                                );
+                            }
+                        }
+                        'v' => {
+                            let src_page = p.get(4).copied().unwrap_or(1);
+                            let dst_top = p.get(5).copied().unwrap_or(1).max(1) as u32 - 1;
+                            let dst_left = p.get(6).copied().unwrap_or(1).max(1) as u32 - 1;
+                            let dst_page = p.get(7).copied().unwrap_or(1);
+                            if src_page > 1 || dst_page > 1 {
+                                screen::ensure_page_memory(ctx.screen, ctx.viewport);
+                            }
+                            let Some(src_view) =
+                                screen::page_viewport(ctx.screen, ctx.viewport, src_page)
+                            else {
+                                return;
+                            };
+                            let Some(dst_view) =
+                                screen::page_viewport(ctx.screen, ctx.viewport, dst_page)
+                            else {
+                                return;
+                            };
+                            ctx.screen.grid.copy_rect(
+                                &src_view,
+                                rect_top,
+                                rect_left,
+                                rect_bottom,
+                                rect_right,
+                                dst_top,
+                                dst_left,
+                                &dst_view,
+                            );
+                        }
+                        'r' => {
+                            let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+                            ctx.screen.grid.change_attrs_rect(
+                                &view,
+                                rect_top,
+                                rect_left,
+                                rect_bottom,
+                                rect_right,
+                                &sgr,
+                                ctx.screen.attr_change_extent,
+                            );
+                        }
+                        't' => {
+                            let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+                            ctx.screen.grid.reverse_attrs_rect(
+                                &view,
+                                rect_top,
+                                rect_left,
+                                rect_bottom,
+                                rect_right,
+                                &sgr,
+                                ctx.screen.attr_change_extent,
+                            );
+                        }
+                        _ => {}
+                    }
+                }
+                _ => {}
             }
-            2 => {
-                let stops = crate::dectabsr_report(ctx.screen);
-                conformance::write_dcs(
-                    ctx.pending_output,
-                    ctx.modes.c1_mode,
-                    format_args!("2$u{stops}"),
-                );
-            }
-            _ => {}
+            return;
         }
-        return;
+        b"*" if csi_dispatch_star_intermediate(ctx, params, action) => {
+            return;
+        }
+        b" " if csi_dispatch_space_intermediate(ctx, params, action) => {
+            return;
+        }
+        b"\"" if csi_dispatch_quote_intermediate(ctx, params, action) => {
+            return;
+        }
+        b"'" if csi_dispatch_apostrophe_intermediate(ctx, params, action) => {
+            return;
+        }
+        b"!" if csi_dispatch_bang_intermediate(ctx, action) => {
+            return;
+        }
+        b"&" if csi_dispatch_amp_intermediate(ctx, action) => {
+            return;
+        }
+        b">" | b"<" | b"="
+            if csi_dispatch_gt_lt_eq_intermediate(ctx, params, intermediates, action) =>
+        {
+            return;
+        }
+        _ => {}
     }
 
     // DECTST — Invoke Confidence Test.
@@ -2098,338 +2445,6 @@ pub(super) fn csi_dispatch(
         }
         return;
     }
-
-    // DECXCPR — Extended Cursor Position Report (CSI ? 6 n). Reports the
-    // cursor row, column, and active page as CSI ? row ; col ; page R.
-    if action == 'n' && intermediates == b"?" {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        if ps == DSR_CPR {
-            let row = ctx.screen.cursor.row + 1;
-            let col = ctx.screen.cursor.col + 1;
-            let page = ctx
-                .screen
-                .page_memory
-                .as_ref()
-                .map(|page| page.active_page + 1)
-                .unwrap_or(1);
-            conformance::write_csi(
-                ctx.pending_output,
-                ctx.modes.c1_mode,
-                format_args!("?{row};{col};{page}R"),
-            );
-        }
-        return;
-    }
-
-    // SL — Scroll Left (CSI Ps SP @). Shifts every row in the scroll region
-    // left by Ps columns; vacated columns on the right are cleared.
-    if action == '@' && intermediates == b" " {
-        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-        let n = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(1)
-            .max(1) as u32;
-        ctx.screen
-            .grid
-            .scroll_left(&view, ctx.screen.scroll_top, ctx.screen.scroll_bottom, n);
-        return;
-    }
-
-    // SR — Scroll Right (CSI Ps SP A). Shifts every row in the scroll region
-    // right by Ps columns; vacated columns on the left are cleared.
-    if action == 'A' && intermediates == b" " {
-        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-        let n = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(1)
-            .max(1) as u32;
-        ctx.screen
-            .grid
-            .scroll_right(&view, ctx.screen.scroll_top, ctx.screen.scroll_bottom, n);
-        return;
-    }
-
-    // DECIC — Insert Column (CSI Ps ' }). Inserts Ps blank columns at the
-    // cursor column in every row of the scroll region.
-    if action == '}' && intermediates == b"'" {
-        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-        let n = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(1)
-            .max(1) as u32;
-        ctx.screen.grid.insert_cols(
-            &view,
-            ctx.screen.cursor.col,
-            ctx.screen.scroll_top,
-            ctx.screen.scroll_bottom,
-            n,
-        );
-        return;
-    }
-
-    // DECDC — Delete Column (CSI Ps ' ~). Deletes Ps columns at the cursor
-    // column in every row of the scroll region.
-    if action == '~' && intermediates == b"'" {
-        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-        let n = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(1)
-            .max(1) as u32;
-        ctx.screen.grid.delete_cols(
-            &view,
-            ctx.screen.cursor.col,
-            ctx.screen.scroll_top,
-            ctx.screen.scroll_bottom,
-            n,
-        );
-        return;
-    }
-
-    // DEC rectangular-area operations (CSI $ <action>).
-    // Params are 1-based; converted to 0-based before calling grid methods.
-    if intermediates == b"$" {
-        if action == '|' {
-            let ps = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(80);
-            let Some(cols) = matches!(ps, 80 | 132).then_some(ps as u32) else {
-                return;
-            };
-            let old_cols = ctx.viewport.cols;
-            let total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
-            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                let rows = total_rows.saturating_sub(screen::status_line_rows(screen));
-                screen::resize_screen(screen, old_cols, rows, cols, rows);
-                if screen::page_memory_active(screen) {
-                    let page_rows = screen::page_rows(screen).unwrap_or(rows);
-                    screen::resize_page_memory(screen, &Viewport { rows, cols, top: 0 }, page_rows);
-                }
-            }
-            ctx.viewport.cols = cols;
-            *ctx.pending_resize = Some((
-                cols,
-                ctx.viewport.rows + screen::status_line_rows(ctx.screen),
-            ));
-            ctx.screen.right_margin = cols.saturating_sub(1);
-            ctx.screen.cursor.col = ctx.screen.cursor.col.min(cols.saturating_sub(1));
-            return;
-        }
-        if matches!(action, 'r' | 't')
-            && ctx.screen.attr_change_extent == grid::AttrChangeExtent::Stream
-        {
-            let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
-            let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-            let rows = view.rows;
-            let cols = view.cols;
-            let start_row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
-            let start_col = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
-            let end_row = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
-                .min(rows.saturating_sub(1));
-            let end_col = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
-                .min(cols.saturating_sub(1));
-            if start_row > end_row || (start_row == end_row && start_col > end_col) {
-                return;
-            }
-            let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-            match action {
-                'r' => ctx.screen.grid.change_attrs_rect(
-                    &view,
-                    start_row,
-                    start_col,
-                    end_row,
-                    end_col,
-                    &sgr,
-                    ctx.screen.attr_change_extent,
-                ),
-                't' => ctx.screen.grid.reverse_attrs_rect(
-                    &view,
-                    start_row,
-                    start_col,
-                    end_row,
-                    end_col,
-                    &sgr,
-                    ctx.screen.attr_change_extent,
-                ),
-                _ => unreachable!(),
-            }
-            return;
-        }
-        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-        let rows = view.rows;
-        let cols = view.cols;
-        let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
-
-        // Clamp and convert 1-based DEC rect params to 0-based.
-        let rect_top = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
-        let rect_left = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
-        let rect_bottom = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
-            .min(rows.saturating_sub(1));
-        let rect_right = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
-            .min(cols.saturating_sub(1));
-
-        // Ignore empty or inverted rects.
-        if rect_top > rect_bottom || rect_left > rect_right {
-            return;
-        }
-
-        match action {
-            // DECERA — Erase Rectangular Area. Fills with spaces, default colors.
-            'z' => {
-                ctx.screen
-                    .grid
-                    .erase_rect(&view, rect_top, rect_left, rect_bottom, rect_right);
-            }
-            // DECSERA — Selective Erase Rectangular Area.
-            '{' => {
-                ctx.screen.grid.erase_rect_selective(
-                    &view,
-                    rect_top,
-                    rect_left,
-                    rect_bottom,
-                    rect_right,
-                );
-            }
-            // DECFRA — Fill Rectangular Area with character. Uses current SGR.
-            'x' => {
-                let ch_code = p.get(4).copied().unwrap_or(0x20) as u32;
-                // Only code points 32–126 and 160–255 are valid fill chars.
-                let valid = (32..=126).contains(&ch_code) || (160..=255).contains(&ch_code);
-                if valid && let Some(ch) = char::from_u32(ch_code) {
-                    let mut buf = [0u8; 4];
-                    let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
-                    ctx.screen.grid.fill_rect(
-                        &view,
-                        rect_top,
-                        rect_left,
-                        rect_bottom,
-                        rect_right,
-                        s,
-                        ctx.screen.fg,
-                        ctx.screen.bg,
-                        ctx.screen.attrs,
-                        ctx.screen.underline,
-                        ctx.screen.underline_color,
-                    );
-                }
-            }
-            // DECCRA — Copy Rectangular Area.
-            // Params: src_top, src_left, src_bottom, src_right, src_page,
-            //         dst_top, dst_left [, dst_page].
-            'v' => {
-                let src_page = p.get(4).copied().unwrap_or(1);
-                let dst_top = p.get(5).copied().unwrap_or(1).max(1) as u32 - 1;
-                let dst_left = p.get(6).copied().unwrap_or(1).max(1) as u32 - 1;
-                let dst_page = p.get(7).copied().unwrap_or(1);
-                if src_page > 1 || dst_page > 1 {
-                    screen::ensure_page_memory(ctx.screen, ctx.viewport);
-                }
-                let Some(src_view) = screen::page_viewport(ctx.screen, ctx.viewport, src_page)
-                else {
-                    return;
-                };
-                let Some(dst_view) = screen::page_viewport(ctx.screen, ctx.viewport, dst_page)
-                else {
-                    return;
-                };
-                ctx.screen.grid.copy_rect(
-                    &src_view,
-                    rect_top,
-                    rect_left,
-                    rect_bottom,
-                    rect_right,
-                    dst_top,
-                    dst_left,
-                    &dst_view,
-                );
-            }
-            // DECCARA — Change Attributes in Rectangular Area.
-            // Params: top, left, bottom, right, [SGR attrs...]
-            'r' => {
-                let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                ctx.screen.grid.change_attrs_rect(
-                    &view,
-                    rect_top,
-                    rect_left,
-                    rect_bottom,
-                    rect_right,
-                    &sgr,
-                    ctx.screen.attr_change_extent,
-                );
-            }
-            // DECRARA — Reverse Attributes in Rectangular Area.
-            // Params: top, left, bottom, right, [SGR attrs...]
-            't' => {
-                let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                ctx.screen.grid.reverse_attrs_rect(
-                    &view,
-                    rect_top,
-                    rect_left,
-                    rect_bottom,
-                    rect_right,
-                    &sgr,
-                    ctx.screen.attr_change_extent,
-                );
-            }
-            _ => {}
-        }
-        return;
-    }
-
-    if intermediates == b"*" && action == 'x' {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(0);
-        ctx.screen.attr_change_extent = match ps {
-            2 => grid::AttrChangeExtent::Rectangle,
-            0 | 1 => grid::AttrChangeExtent::Stream,
-            _ => ctx.screen.attr_change_extent,
-        };
-        return;
-    }
-
-    if intermediates == b" " && matches!(action, 'P' | 'Q' | 'R') {
-        let n = params
-            .iter()
-            .next()
-            .and_then(|g| g.first().copied())
-            .unwrap_or(1)
-            .max(1) as u32;
-        let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-        screen::activate_page_memory(ctx.screen, &view, view.rows);
-        if let Some(page) = ctx.screen.page_memory.as_mut() {
-            match action {
-                'P' => {
-                    page.active_page =
-                        (n.saturating_sub(1)).min(page.page_count().saturating_sub(1))
-                }
-                'Q' => {
-                    page.active_page =
-                        (page.active_page + n).min(page.page_count().saturating_sub(1))
-                }
-                'R' => page.active_page = page.active_page.saturating_sub(n),
-                _ => {}
-            }
-        }
-        return;
-    }
-
-    // -- No-intermediates sequences -----------------------------------------
 
     if !intermediates.is_empty() {
         return;
