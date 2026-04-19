@@ -334,7 +334,7 @@ fn paint_tab_bar(
                 buffer,
                 width,
                 height,
-                tab.x.round() as i32,
+                tab.x.round() as i32 + tab.width.round() as i32,
                 0,
                 3,
                 tab_bar_h,

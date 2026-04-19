@@ -187,7 +187,7 @@ pub(crate) fn build_tab_bar_plan(
                 x,
                 width: tab_w,
                 bg: tab.active.then_some(active_bg),
-                separator: (i > 0).then_some(blend(active_bg, inactive_bg, 0.5)),
+                separator: (tabs.len() > 1).then(|| blend(active_bg, inactive_bg, 0.5)),
                 label_x: x + margin,
                 label,
             }

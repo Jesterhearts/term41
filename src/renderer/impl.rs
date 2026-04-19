@@ -2167,19 +2167,19 @@ impl Renderer {
                 let bi = bg_vertices.len() as u32;
                 bg_vertices.extend_from_slice(&[
                     BgVertex {
-                        pos: [tab.x, 0.0],
+                        pos: [tab.x + tab.width, 0.0],
                         color: sep_color,
                     },
                     BgVertex {
-                        pos: [tab.x + sep_w, 0.0],
+                        pos: [tab.x + tab.width + sep_w, 0.0],
                         color: sep_color,
                     },
                     BgVertex {
-                        pos: [tab.x, cell_h],
+                        pos: [tab.x + tab.width, cell_h],
                         color: sep_color,
                     },
                     BgVertex {
-                        pos: [tab.x + sep_w, cell_h],
+                        pos: [tab.x + tab.width + sep_w, cell_h],
                         color: sep_color,
                     },
                 ]);
