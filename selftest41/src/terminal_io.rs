@@ -104,7 +104,7 @@ impl TerminalSession {
         wait_for_keypress()?;
         {
             let out = self.terminal.backend_mut();
-            write!(out, "\x1b[0m\x1bc")?;
+            write!(out, "\x1b[0m\x1b[2J\x1b[H\x1bc")?;
             out.flush()?;
         }
         self.resume_tui()
