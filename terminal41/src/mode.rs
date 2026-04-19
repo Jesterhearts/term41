@@ -121,6 +121,23 @@ pub const DECLRMM: u16 = 69;
 /// is off (screen is cleared on DECCOLM change, per DEC spec).
 pub const DECNCSM: u16 = 95;
 
+/// DECATCUM -- when set, underline attributes still render as underlines in
+/// alternate-color mode. When reset, alternate-color mode changes only
+/// colours. VT525 only.
+pub const DECATCUM: u16 = 114;
+
+/// DECATCBM -- when set, blink attributes still animate in alternate-color
+/// mode. When reset, alternate-color mode changes only colours. VT525 only.
+pub const DECATCBM: u16 = 115;
+
+/// DECBBSM -- when set, bold/blink colour styling affects both foreground and
+/// background; when reset, foreground only. VT525 only.
+pub const DECBBSM: u16 = 116;
+
+/// DECECM -- when set, erase operations use the screen background; when reset,
+/// they use the current text background. VT525 only.
+pub const DECECM: u16 = 117;
+
 /// Bracketed paste (mode 2004). Pasted text is wrapped in
 /// `CSI 200~`..`CSI 201~` so apps can distinguish it from typed input.
 pub const BRACKETED_PASTE: u16 = 2004;

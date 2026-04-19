@@ -46,7 +46,14 @@ pub use self::conformance::C1Mode;
 pub use self::conformance::ConformanceLevel;
 pub use self::cursor::CursorShape;
 pub use self::cursor::CursorStyle;
-use self::dec_color::DecColorState;
+pub use self::dec_color::ColorSpace as DecColorSpace;
+pub use self::dec_color::DecColorState;
+pub use self::dec_color::LookupTable as DecColorLookupTable;
+pub use self::dec_color::alternate_assignment_for_style as dec_alternate_assignment_for_style;
+pub use self::dec_color::assign_alternate_text_color as dec_assign_alternate_text_color;
+pub use self::dec_color::select_lookup_table as dec_select_lookup_table;
+pub use self::dec_color::state_from_palette as dec_color_state_from_palette;
+pub use self::dec_color::table_color as dec_table_color;
 use self::decmacro::MAX_MACRO_INVOCATION_DEPTH;
 use self::decmacro::MacroEncoding;
 use self::decmacro::MacroStore;
@@ -493,19 +500,39 @@ impl Terminal {
         self.palette = dec_color::effective_palette(&self.base_palette, &self.dec_color);
         for screen in [&mut self.active, &mut self.stash] {
             apply_screen_palette(screen, &old_palette, &self.palette);
+            sync_screen_erase_defaults(screen, &self.dec_color);
         }
     }
 
-    fn assign_dec_text_colors(
+    fn assign_dec_color(
         &mut self,
+        item: u16,
         fg: u16,
         bg: u16,
     ) -> bool {
-        if !dec_color::assign_normal_text_colors(&mut self.dec_color, fg, bg) {
+        if !dec_color::assign_color(&mut self.dec_color, item, fg, bg) {
             return false;
         }
-        self.apply_dec_color_defaults();
+        if item == dec_color::TEXT_COLOR_ASSIGNMENT_CLASS {
+            self.apply_dec_color_defaults();
+        }
         true
+    }
+
+    fn assign_dec_alternate_text_color(
+        &mut self,
+        item: u16,
+        fg: u16,
+        bg: u16,
+    ) -> bool {
+        dec_color::assign_alternate_text_color(&mut self.dec_color, item, fg, bg)
+    }
+
+    fn select_dec_lookup_table(
+        &mut self,
+        ps: u16,
+    ) -> bool {
+        dec_color::select_lookup_table(&mut self.dec_color, ps)
     }
 
     fn restore_dec_color_table(
@@ -524,6 +551,7 @@ impl Terminal {
         self.palette = dec_color::effective_palette(&self.base_palette, &self.dec_color);
         for screen in [&mut self.active, &mut self.stash] {
             apply_screen_palette(screen, &old_palette, &self.palette);
+            sync_screen_erase_defaults(screen, &self.dec_color);
         }
     }
 
@@ -532,6 +560,10 @@ impl Terminal {
         permissions: FeaturePermissions,
     ) {
         self.feature_permissions = permissions;
+    }
+
+    pub fn dec_color_state(&self) -> &DecColorState {
+        &self.dec_color
     }
 
     pub fn set_foreground_processes(
@@ -1949,18 +1981,41 @@ impl Terminal {
                 }
                 if intermediates.as_slice() == b"," && action == '|' {
                     let mut groups = params.iter();
-                    let assignment_class = groups
+                    let item = groups
                         .next()
                         .and_then(|group| group.first().copied())
                         .unwrap_or(0);
-                    if assignment_class == dec_color::TEXT_COLOR_ASSIGNMENT_CLASS
-                        && let (Some(fg), Some(bg)) = (
-                            groups.next().and_then(|group| group.first().copied()),
-                            groups.next().and_then(|group| group.first().copied()),
-                        )
-                    {
-                        self.assign_dec_text_colors(fg, bg);
+                    if let (Some(fg), Some(bg)) = (
+                        groups.next().and_then(|group| group.first().copied()),
+                        groups.next().and_then(|group| group.first().copied()),
+                    ) {
+                        self.assign_dec_color(item, fg, bg);
                     }
+                    self.track_scroll(popped_before);
+                    return;
+                }
+                if intermediates.as_slice() == b"," && action == '}' {
+                    let mut groups = params.iter();
+                    let item = groups
+                        .next()
+                        .and_then(|group| group.first().copied())
+                        .unwrap_or(0);
+                    if let (Some(fg), Some(bg)) = (
+                        groups.next().and_then(|group| group.first().copied()),
+                        groups.next().and_then(|group| group.first().copied()),
+                    ) {
+                        self.assign_dec_alternate_text_color(item, fg, bg);
+                    }
+                    self.track_scroll(popped_before);
+                    return;
+                }
+                if intermediates.as_slice() == b")" && action == '{' {
+                    let selection = params
+                        .iter()
+                        .next()
+                        .and_then(|group| group.first().copied())
+                        .unwrap_or(0);
+                    self.select_dec_lookup_table(selection);
                     self.track_scroll(popped_before);
                     return;
                 }
@@ -1970,12 +2025,14 @@ impl Terminal {
                         .next()
                         .and_then(|group| group.first().copied())
                         .unwrap_or(0);
-                    let request = groups
+                    let space = groups
                         .next()
                         .and_then(|group| group.first().copied())
                         .unwrap_or(0);
-                    if report_type == 2 && request == 2 {
-                        let report = dec_color::report_color_table(&self.dec_color);
+                    if report_type == 2
+                        && let Some(space) = dec_color::ColorSpace::from_param(Some(space))
+                    {
+                        let report = dec_color::report_color_table(&self.dec_color, space);
                         conformance::write_dcs(
                             &mut self.pending_output,
                             self.modes.c1_mode,
@@ -2451,10 +2508,30 @@ fn handle_decrqss(
             };
             conformance::write_dcs(out, c1_mode, format_args!("1$r{ps} q"));
         }
-        // DECAC — report normal-text color assignment.
-        b"1,|" => {
-            let assignment = dec_color::report_text_color_assignment(&terminal.dec_color);
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{assignment}"));
+        // DECAC / DECATC — report current VT525 color assignments.
+        [item @ b'0'..=b'9', b',', kind @ (b'|' | b'}')] => {
+            let item = (item - b'0') as u16;
+            let report = if *kind == b'|' {
+                dec_color::report_color_assignment(&terminal.dec_color, item)
+            } else {
+                dec_color::report_alternate_text_color(&terminal.dec_color, item)
+            };
+            if let Some(report) = report {
+                conformance::write_dcs(out, c1_mode, format_args!("1$r{report}"));
+            } else {
+                conformance::write_dcs(out, c1_mode, format_args!("0$r"));
+            }
+        }
+        [b'1', b'0'..=b'5', b',', b'}'] => {
+            let item = selector[0..2]
+                .iter()
+                .fold(0u16, |acc, b| acc * 10 + (b - b'0') as u16);
+            if let Some(report) = dec_color::report_alternate_text_color(&terminal.dec_color, item)
+            {
+                conformance::write_dcs(out, c1_mode, format_args!("1$r{report}"));
+            } else {
+                conformance::write_dcs(out, c1_mode, format_args!("0$r"));
+            }
         }
         // DECSCA — report character protection attribute.
         b"\"q" => {
@@ -2784,6 +2861,13 @@ fn apply_screen_palette(
             }
         }
     }
+}
+
+fn sync_screen_erase_defaults(
+    screen: &mut Screen,
+    dec_color: &DecColorState,
+) {
+    screen.grid.default_bg = dec_color::erase_background_color(dec_color, screen.bg);
 }
 
 fn remap_screen_default_colors(
@@ -4915,12 +4999,39 @@ mod tests {
     }
 
     #[test]
+    fn decrqss_reports_window_frame_color_assignment() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[2;4;5,|");
+        handle_decrqss(b"2,|", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r2;4;5,|\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_reports_alternate_text_color_assignment() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[13;4;5,}");
+        handle_decrqss(b"13,}", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r13;4;5,}\x1b\\");
+    }
+
+    #[test]
     fn decctr_reports_current_color_table() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[2;2$u");
         let expected = format!(
             "\x1bP2$s{}\x1b\\",
-            dec_color::report_color_table(&term.dec_color)
+            dec_color::report_color_table(&term.dec_color, dec_color::ColorSpace::Rgb)
+        );
+        assert_eq!(term.take_pending_output(), expected.as_bytes());
+    }
+
+    #[test]
+    fn decctr_reports_current_color_table_in_hls() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[2;1$u");
+        let expected = format!(
+            "\x1bP2$s{}\x1b\\",
+            dec_color::report_color_table(&term.dec_color, dec_color::ColorSpace::Hls)
         );
         assert_eq!(term.take_pending_output(), expected.as_bytes());
     }
@@ -4947,12 +5058,15 @@ mod tests {
         term.process(b"ab");
         term.process(b"\x1bP2$p0;2;1;2;3/7;2;10;20;30\x1b\\");
 
-        assert_eq!(term.palette.bg, Srgb::new(1, 2, 3));
-        assert_eq!(term.palette.fg, Srgb::new(10, 20, 30));
-        assert_eq!(term.active.grid.rows[0].fg[0], Srgb::new(10, 20, 30));
-        assert_eq!(term.active.grid.rows[0].bg[0], Srgb::new(1, 2, 3));
-        assert_eq!(term.active.grid.rows[0].fg[1], Srgb::new(10, 20, 30));
-        assert_eq!(term.active.grid.rows[0].bg[1], Srgb::new(1, 2, 3));
+        let expected_bg = Srgb::new(3, 5, 8);
+        let expected_fg = Srgb::new(26, 51, 77);
+
+        assert_eq!(term.palette.bg, expected_bg);
+        assert_eq!(term.palette.fg, expected_fg);
+        assert_eq!(term.active.grid.rows[0].fg[0], expected_fg);
+        assert_eq!(term.active.grid.rows[0].bg[0], expected_bg);
+        assert_eq!(term.active.grid.rows[0].fg[1], expected_fg);
+        assert_eq!(term.active.grid.rows[0].bg[1], expected_bg);
     }
 
     #[test]
@@ -4964,6 +5078,39 @@ mod tests {
         term.process(b"\x1bP2$p0;2;1;2;3/7;2;10;20;30/1;2;200;10;10\x1b\\");
 
         assert_eq!(term.active.grid.rows[0].fg[0], explicit_fg);
+    }
+
+    #[test]
+    fn decctr_restore_accepts_hls_entries() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1bP2$p4;1;240;50;100\x1b\\");
+        assert_ne!(
+            term.dec_color.table[4],
+            color::palette_color(&term.base_palette, 4)
+        );
+    }
+
+    #[test]
+    fn decstglt_selects_lookup_table_mode() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[1){");
+        assert_eq!(
+            term.dec_color.lookup_table,
+            dec_color::LookupTable::AlternateWithAttrs
+        );
+        term.process(b"\x1b[3){");
+        assert_eq!(term.dec_color.lookup_table, dec_color::LookupTable::AnsiSgr);
+    }
+
+    #[test]
+    fn decrqm_reports_vt525_color_private_modes() {
+        let mut term = TestTerm::new(10, 3, 10, 16, 8);
+        term.process(b"\x1b[?114h\x1b[?115h\x1b[?116h\x1b[?117h");
+        term.process(b"\x1b[?114$p\x1b[?115$p\x1b[?116$p\x1b[?117$p");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1b[?114;1$y\x1b[?115;1$y\x1b[?116;1$y\x1b[?117;1$y"
+        );
     }
 
     #[test]

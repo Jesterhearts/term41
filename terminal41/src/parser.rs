@@ -529,6 +529,13 @@ fn can_negotiate_c1(modes: &TerminalModes) -> bool {
     !modes.vt52_mode && modes.conformance_level.supports_c1_negotiation()
 }
 
+fn sync_screen_erase_defaults(
+    screen: &mut Screen,
+    dec_color: &DecColorState,
+) {
+    screen.grid.default_bg = crate::dec_color::erase_background_color(dec_color, screen.bg);
+}
+
 fn apply_hard_reset(
     ctx: &mut EscContext<'_>,
     conformance_level: ConformanceLevel,
@@ -578,6 +585,7 @@ fn apply_hard_reset(
             *ctx.default_status_display,
             ctx.palette,
         );
+        sync_screen_erase_defaults(s, ctx.dec_color);
     }
     ctx.viewport.rows = total_rows.saturating_sub(screen::status_line_rows(ctx.screen));
     *ctx.modes = TerminalModes::new();
@@ -1098,6 +1106,17 @@ fn apply_private_mode(
         ctx.modes.synchronized_update_since = enable.then(Instant::now);
     } else if mode == mode::ALLOW_DECCOLM {
         ctx.modes.allow_deccolm = enable;
+    } else if mode == mode::DECATCUM {
+        ctx.dec_color.alternate_underline_text = enable;
+    } else if mode == mode::DECATCBM {
+        ctx.dec_color.alternate_blink_text = enable;
+    } else if mode == mode::DECBBSM {
+        ctx.dec_color.bold_blink_affects_background = enable;
+    } else if mode == mode::DECECM {
+        ctx.dec_color.erase_to_screen = enable;
+        for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+            sync_screen_erase_defaults(screen, ctx.dec_color);
+        }
     } else if mode == mode::DECCOLM {
         // DECCOLM restore is tricky (resizes the grid). Skip for save/restore —
         // xterm itself ignores DECCOLM in XTSAVE/XTRESTORE.
@@ -1198,6 +1217,34 @@ fn query_private_mode(
         }
         mode::ALLOW_DECCOLM => {
             if ctx.modes.allow_deccolm {
+                1
+            } else {
+                2
+            }
+        }
+        mode::DECATCUM => {
+            if ctx.dec_color.alternate_underline_text {
+                1
+            } else {
+                2
+            }
+        }
+        mode::DECATCBM => {
+            if ctx.dec_color.alternate_blink_text {
+                1
+            } else {
+                2
+            }
+        }
+        mode::DECBBSM => {
+            if ctx.dec_color.bold_blink_affects_background {
+                1
+            } else {
+                2
+            }
+        }
+        mode::DECECM => {
+            if ctx.dec_color.erase_to_screen {
                 1
             } else {
                 2
@@ -1540,6 +1587,17 @@ pub(super) fn csi_dispatch(
                 ctx.modes.synchronized_update_since = enable.then(Instant::now);
             } else if p[0] == mode::ALLOW_DECCOLM {
                 ctx.modes.allow_deccolm = enable;
+            } else if p[0] == mode::DECATCUM {
+                ctx.dec_color.alternate_underline_text = enable;
+            } else if p[0] == mode::DECATCBM {
+                ctx.dec_color.alternate_blink_text = enable;
+            } else if p[0] == mode::DECBBSM {
+                ctx.dec_color.bold_blink_affects_background = enable;
+            } else if p[0] == mode::DECECM {
+                ctx.dec_color.erase_to_screen = enable;
+                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                    sync_screen_erase_defaults(screen, ctx.dec_color);
+                }
             } else if p[0] == mode::DECCOLM {
                 if !ctx.modes.allow_deccolm {
                     continue;
@@ -2667,6 +2725,10 @@ pub(super) fn csi_dispatch(
             }
         }
         _ => {}
+    }
+
+    if action == 'm' {
+        sync_screen_erase_defaults(screen, ctx.dec_color);
     }
 }
 

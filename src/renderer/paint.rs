@@ -3,6 +3,7 @@ use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStrBuilder;
 use terminal41::ColorPalette;
+use terminal41::DecColorLookupTable;
 use terminal41::LineAttr;
 use unicode_segmentation::UnicodeSegmentation;
 
@@ -41,6 +42,39 @@ pub(crate) struct PaintedCell {
     pub fg: Srgb<u8>,
     pub base_fg: Srgb<u8>,
     pub fill_bg: Option<Srgb<u8>>,
+}
+
+pub(crate) fn blink_animation_enabled(
+    snap: &TermSnapshot,
+    attrs: CellAttrs,
+) -> bool {
+    if !attrs.intersects(CellAttrs::BLINK | CellAttrs::RAPID_BLINK) {
+        return false;
+    }
+    match snap.dec_color.lookup_table {
+        DecColorLookupTable::AlternateWithAttrs => snap.dec_color.alternate_blink_text,
+        DecColorLookupTable::Alternate => false,
+        _ => true,
+    }
+}
+
+pub(crate) fn underline_style_for_render(
+    snap: &TermSnapshot,
+    underline: UnderlineStyle,
+) -> UnderlineStyle {
+    match snap.dec_color.lookup_table {
+        DecColorLookupTable::AlternateWithAttrs if snap.dec_color.alternate_underline_text => {
+            underline
+        }
+        DecColorLookupTable::AlternateWithAttrs | DecColorLookupTable::Alternate => {
+            UnderlineStyle::None
+        }
+        _ => underline,
+    }
+}
+
+pub(crate) fn bold_glyph_enabled(snap: &TermSnapshot) -> bool {
+    snap.dec_color.lookup_table != DecColorLookupTable::Alternate
 }
 
 pub(crate) fn status_line_label_row(
@@ -211,11 +245,12 @@ pub(crate) fn resolve_painted_cell(
         .unwrap_or(false);
     let cell_attrs = snap_row.attrs[col as usize];
     let block_cursor_here = block_cursor == Some((row, col));
-    let (base_fg, base_bg) = resolve_cell_colors(
+    let (base_fg, base_bg) = resolve_dec_color_cell(
+        snap,
         &snap_row.fg[col as usize],
         &snap_row.bg[col as usize],
         cell_attrs,
-        snap.screen_reverse,
+        snap_row.underline[col as usize],
     );
     let fg = if active_match {
         base_fg
@@ -247,6 +282,65 @@ pub(crate) fn resolve_painted_cell(
     }
 }
 
+fn resolve_dec_color_cell(
+    snap: &TermSnapshot,
+    raw_fg: &Srgb<u8>,
+    raw_bg: &Srgb<u8>,
+    attrs: CellAttrs,
+    underline: UnderlineStyle,
+) -> (Srgb<u8>, Srgb<u8>) {
+    let mut color_attrs = attrs;
+    let mut fg = *raw_fg;
+    let mut bg = *raw_bg;
+    let default_colored = *raw_fg == snap.palette.fg && *raw_bg == snap.palette.bg;
+
+    match snap.dec_color.lookup_table {
+        DecColorLookupTable::AlternateWithAttrs | DecColorLookupTable::Alternate
+            if default_colored =>
+        {
+            let assignment =
+                terminal41::dec_alternate_assignment_for_style(&snap.dec_color, attrs, underline);
+            fg = terminal41::dec_table_color(&snap.dec_color, assignment.fg);
+            bg = terminal41::dec_table_color(&snap.dec_color, assignment.bg);
+            color_attrs.remove(CellAttrs::REVERSE);
+        }
+        _ => {}
+    }
+
+    let (mut fg, mut bg) = resolve_cell_colors(&fg, &bg, color_attrs, snap.screen_reverse);
+
+    if snap.dec_color.lookup_table == DecColorLookupTable::Mono {
+        fg = grayscale(fg);
+        bg = grayscale(bg);
+    } else if attrs.contains(CellAttrs::BOLD) {
+        fg = brighten_basic_color(fg, &snap.dec_color).unwrap_or(fg);
+        if snap.dec_color.bold_blink_affects_background {
+            bg = brighten_basic_color(bg, &snap.dec_color).unwrap_or(bg);
+        }
+    }
+
+    (fg, bg)
+}
+
+fn brighten_basic_color(
+    color: Srgb<u8>,
+    state: &terminal41::DecColorState,
+) -> Option<Srgb<u8>> {
+    for idx in 0..8u8 {
+        if terminal41::dec_table_color(state, idx) == color {
+            return Some(terminal41::dec_table_color(state, idx + 8));
+        }
+    }
+    None
+}
+
+fn grayscale(color: Srgb<u8>) -> Srgb<u8> {
+    let luma = (0.299 * color.red as f32 + 0.587 * color.green as f32 + 0.114 * color.blue as f32)
+        .round()
+        .clamp(0.0, 255.0) as u8;
+    Srgb::new(luma, luma, luma)
+}
+
 fn truncate_label(
     label: &str,
     max_chars: usize,
@@ -262,4 +356,92 @@ fn truncate_label(
         .take(truncated_len)
         .chain(std::iter::once(ellipsis))
         .collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use terminal41::CursorStyle;
+
+    use super::*;
+
+    fn test_snapshot(dec_color: terminal41::DecColorState) -> TermSnapshot {
+        let base = ColorPalette::default();
+        let palette = ColorPalette {
+            fg: terminal41::dec_table_color(&dec_color, dec_color.text.fg),
+            bg: terminal41::dec_table_color(&dec_color, dec_color.text.bg),
+            ..base
+        };
+        TermSnapshot {
+            rows: Vec::new(),
+            viewport_rows: 1,
+            viewport_cols: 1,
+            status_line_row: None,
+            drcs_glyphs: Default::default(),
+            dec_color,
+            palette,
+            search_active: false,
+            search: None,
+            cursor: None,
+            cursor_style: CursorStyle::default(),
+            screen_reverse: false,
+        }
+    }
+
+    fn test_row(palette: &ColorPalette) -> RowSnapshot {
+        RowSnapshot {
+            cells: vec![smol_str::SmolStr::new_inline("x")],
+            attrs: vec![CellAttrs::BOLD],
+            fg: vec![palette.fg],
+            bg: vec![palette.bg],
+            underline: vec![UnderlineStyle::None],
+            underline_color: vec![None],
+            has_link: vec![false],
+            line_attr: LineAttr::Normal,
+            selected: vec![false],
+            matched: vec![false],
+            active_match: vec![false],
+            prompt_start: false,
+            exit_status: None,
+        }
+    }
+
+    #[test]
+    fn alternate_lookup_table_recolors_default_cell_by_attrs() {
+        let mut dec = terminal41::dec_color_state_from_palette(&ColorPalette::default());
+        terminal41::dec_assign_alternate_text_color(&mut dec, 1, 2, 3);
+        terminal41::dec_select_lookup_table(&mut dec, 1);
+        let snap = test_snapshot(dec);
+        let row = test_row(&snap.palette);
+
+        let painted = resolve_painted_cell(&snap, &row, 0, 0, None, false);
+        assert_eq!(
+            painted.base_fg,
+            terminal41::dec_table_color(&snap.dec_color, 10)
+        );
+        assert_eq!(
+            painted.fill_bg,
+            Some(terminal41::dec_table_color(&snap.dec_color, 3))
+        );
+    }
+
+    #[test]
+    fn mono_lookup_table_grayscales_colors() {
+        let mut dec = terminal41::dec_color_state_from_palette(&ColorPalette::default());
+        terminal41::dec_select_lookup_table(&mut dec, 0);
+        let mut snap = test_snapshot(dec);
+        snap.palette.fg = Srgb::new(255, 0, 0);
+        snap.palette.bg = Srgb::new(0, 0, 255);
+        let row = RowSnapshot {
+            fg: vec![snap.palette.fg],
+            bg: vec![snap.palette.bg],
+            ..test_row(&snap.palette)
+        };
+
+        let painted = resolve_painted_cell(&snap, &row, 0, 0, None, false);
+        assert_eq!(painted.base_fg.red, painted.base_fg.green);
+        assert_eq!(painted.base_fg.green, painted.base_fg.blue);
+        let fill = painted.fill_bg.expect("mono mode still fills the cell");
+        assert_eq!(fill.red, fill.green);
+        assert_eq!(fill.green, fill.blue);
+    }
 }

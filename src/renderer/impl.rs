@@ -31,10 +31,13 @@ use crate::renderer::background::BgImageVertex;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
+use crate::renderer::paint::blink_animation_enabled;
+use crate::renderer::paint::bold_glyph_enabled;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
 use crate::renderer::paint::status_line_text_row;
+use crate::renderer::paint::underline_style_for_render;
 
 pub const MAX_TAB_WIDTH: f32 = 30.0;
 pub const SUCCESS: [u8; 3] = [80, 200, 120];
@@ -160,14 +163,20 @@ pub(crate) fn collect_row_glyphs(
         }
 
         let cell_attrs = snap_row.attrs[sg.col as usize];
-        if cell_attrs.contains(CellAttrs::BLINK) && blink_off {
+        if blink_animation_enabled(snap, cell_attrs)
+            && cell_attrs.contains(CellAttrs::BLINK)
+            && blink_off
+        {
             continue;
         }
-        if cell_attrs.contains(CellAttrs::RAPID_BLINK) && rapid_blink_off {
+        if blink_animation_enabled(snap, cell_attrs)
+            && cell_attrs.contains(CellAttrs::RAPID_BLINK)
+            && rapid_blink_off
+        {
             continue;
         }
 
-        let wants_bold = cell_attrs.contains(CellAttrs::BOLD);
+        let wants_bold = cell_attrs.contains(CellAttrs::BOLD) && bold_glyph_enabled(snap);
         let wants_italic = cell_attrs.contains(CellAttrs::ITALIC);
         let synth_bold = wants_bold && !font_system.font_is_bold(sg.font_index);
         let synth_italic = wants_italic && !font_system.font_is_italic(sg.font_index);
@@ -355,6 +364,7 @@ pub struct TermSnapshot {
     pub viewport_cols: u32,
     pub status_line_row: Option<u32>,
     pub drcs_glyphs: font41::DrcsGlyphMap,
+    pub dec_color: terminal41::DecColorState,
     pub palette: ColorPalette,
     pub search_active: bool,
     pub search: Option<SearchSnapshot>,
@@ -429,6 +439,7 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
         viewport_cols: vp_cols,
         status_line_row,
         drcs_glyphs: terminal.drcs_render_glyphs(),
+        dec_color: terminal.dec_color_state().clone(),
         palette: terminal.palette.clone(),
         search_active,
         search,
@@ -1523,7 +1534,7 @@ impl Renderer {
                 ]);
             }
 
-            let ul_style = snap_row.underline[col as usize];
+            let ul_style = underline_style_for_render(snap, snap_row.underline[col as usize]);
             let has_link = snap_row.has_link[col as usize];
             let effective_ul = if has_link && ul_style == UnderlineStyle::None {
                 UnderlineStyle::Single
