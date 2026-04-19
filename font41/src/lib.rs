@@ -3,6 +3,7 @@
 pub mod attrs;
 mod bitmap;
 mod colr;
+mod drcs;
 mod legacy;
 mod svg;
 
@@ -54,6 +55,14 @@ pub struct RasterizedGlyph {
     pub bearing_y: i32,
     pub is_color: bool,
 }
+
+pub use self::drcs::GLYPHS_PER_SET as DRCS_GLYPHS_PER_SET;
+pub use self::drcs::GeometryClass as DrcsGeometryClass;
+pub use self::drcs::GeometryGuard as DrcsGeometryGuard;
+pub use self::drcs::GlyphDef as DrcsGlyphDef;
+pub use self::drcs::GlyphMap as DrcsGlyphMap;
+pub use self::drcs::encode_char as encode_drcs_char;
+pub use self::drcs::set_context as set_drcs_context;
 
 /// A shaped glyph with its position info, ready for rendering.
 pub struct ShapedGlyph {
@@ -457,6 +466,16 @@ impl FontSystem {
                     y_offset: 0.0,
                 });
                 has_glyph[col] = true;
+            } else if let Some(glyph_id) = drcs::encode_single(cell) {
+                result.push(ShapedGlyph {
+                    glyph_id,
+                    font_index: drcs::FONT_INDEX,
+                    col: col as u16,
+                    cells_wide: 1,
+                    x_offset: 0.0,
+                    y_offset: 0.0,
+                });
+                has_glyph[col] = true;
             }
         }
 
@@ -612,6 +631,9 @@ impl FontSystem {
         // cells. See `legacy` for the full codepoint list.
         if font_index == legacy::FONT_INDEX {
             return legacy::rasterize(glyph_index, self.cell_width, self.cell_height, self.ascent);
+        }
+        if font_index == drcs::FONT_INDEX {
+            return drcs::rasterize(glyph_index, self.cell_width, self.cell_height);
         }
 
         let fonts = FONTS.read().unwrap();

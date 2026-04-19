@@ -22,6 +22,7 @@ use crate::color::apply_sgr;
 use crate::conformance;
 use crate::cursor::CursorStyle;
 use crate::decmacro::MacroStore;
+use crate::drcs::Store as DrcsStore;
 use crate::feature::FeaturePermissions;
 use crate::grid;
 use crate::grid::Viewport;
@@ -64,6 +65,7 @@ pub(super) struct CsiContext<'a> {
     pub macros: &'a mut MacroStore,
     pub feature_permissions: &'a FeaturePermissions,
     pub foreground_processes: &'a Option<ForegroundProcessSet>,
+    pub drcs: &'a mut DrcsStore,
 }
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that ESC handlers
@@ -90,6 +92,7 @@ pub(super) struct EscContext<'a> {
     /// [`Terminal::apply`] before any other dispatch occurs.
     pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
     pub macros: &'a mut MacroStore,
+    pub drcs: &'a mut DrcsStore,
 }
 
 /// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
@@ -582,6 +585,7 @@ fn apply_hard_reset(
     *ctx.bell_pending = false;
     *ctx.vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
     ctx.macros.clear();
+    ctx.drcs.clear();
 }
 
 /// Forward-scan tab stops from `start_col + 1`. Returns the column of the
@@ -1687,6 +1691,7 @@ pub(super) fn csi_dispatch(
             pending_output: ctx.pending_output,
             vt52_cursor_addr: ctx.vt52_cursor_addr,
             macros: ctx.macros,
+            drcs: ctx.drcs,
         };
         apply_hard_reset(&mut esc_ctx, level, c1_mode);
         return;
@@ -2776,7 +2781,11 @@ pub(super) fn esc_dispatch(
         return;
     }
 
-    if let Some((slot, charset)) = charset::parse_designation(intermediates, byte) {
+    if let Some((slot, charset)) = charset::parse_designation(intermediates, byte).or_else(|| {
+        let slot = charset::slot_for_intermediates(intermediates)?;
+        let charset = ctx.drcs.lookup_designation(intermediates, byte)?;
+        Some((slot, charset))
+    }) {
         ctx.screen.charset.designate(slot, charset);
         return;
     }
@@ -3043,6 +3052,7 @@ mod tests {
         let feature_permissions = FeaturePermissions::default();
         let foreground_processes: Option<ForegroundProcessSet> = None;
         let mut macros = MacroStore::default();
+        let mut drcs = DrcsStore::default();
 
         for action in parser.parse(input) {
             // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
@@ -3143,6 +3153,7 @@ mod tests {
                         macros: &mut macros,
                         feature_permissions: &feature_permissions,
                         foreground_processes: &foreground_processes,
+                        drcs: &mut drcs,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -3168,6 +3179,7 @@ mod tests {
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
+                        drcs: &mut drcs,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
@@ -3954,6 +3966,7 @@ mod tests {
         let feature_permissions = FeaturePermissions::default();
         let foreground_processes: Option<ForegroundProcessSet> = None;
         let mut macros = MacroStore::default();
+        let mut drcs = DrcsStore::default();
 
         for action in parser.parse(input) {
             // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
@@ -4054,6 +4067,7 @@ mod tests {
                         macros: &mut macros,
                         feature_permissions: &feature_permissions,
                         foreground_processes: &foreground_processes,
+                        drcs: &mut drcs,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -4079,6 +4093,7 @@ mod tests {
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
+                        drcs: &mut drcs,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
@@ -4669,6 +4684,7 @@ mod tests {
         let feature_permissions = FeaturePermissions::default();
         let foreground_processes: Option<ForegroundProcessSet> = None;
         let mut macros = MacroStore::default();
+        let mut drcs = DrcsStore::default();
 
         for chunk in [b"\x1b)>\x1b~\xc3".as_slice(), b"\xa1".as_slice()] {
             for action in parser.parse(chunk) {
@@ -4718,6 +4734,7 @@ mod tests {
                             macros: &mut macros,
                             feature_permissions: &feature_permissions,
                             foreground_processes: &foreground_processes,
+                            drcs: &mut drcs,
                         };
                         csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                     }
@@ -4743,6 +4760,7 @@ mod tests {
                             pending_output: &mut pending_output,
                             vt52_cursor_addr: &mut vt52_cursor_addr,
                             macros: &mut macros,
+                            drcs: &mut drcs,
                         };
                         esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                     }

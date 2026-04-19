@@ -150,6 +150,7 @@ pub(crate) fn collect_row_glyphs(
     blink_off: bool,
     rapid_blink_off: bool,
 ) -> Vec<CollectedGlyph> {
+    let _drcs = font41::set_drcs_context(drcs_geometry_class(snap), Some(snap.drcs_glyphs.clone()));
     let shaped = font_system.shape_row(&snap_row.cells, &snap_row.attrs);
     let mut collected = Vec::with_capacity(shaped.len());
 
@@ -187,6 +188,18 @@ pub(crate) fn collect_row_glyphs(
     }
 
     collected
+}
+
+pub(crate) fn drcs_geometry_class(snap: &TermSnapshot) -> Option<font41::DrcsGeometryClass> {
+    match (snap.viewport_cols, snap.rows.len() as u32) {
+        (80, 24) => Some(font41::DrcsGeometryClass::Col80Line24),
+        (132, 24) => Some(font41::DrcsGeometryClass::Col132Line24),
+        (80, 36) => Some(font41::DrcsGeometryClass::Col80Line36),
+        (132, 36) => Some(font41::DrcsGeometryClass::Col132Line36),
+        (80, 48) => Some(font41::DrcsGeometryClass::Col80Line48),
+        (132, 48) => Some(font41::DrcsGeometryClass::Col132Line48),
+        _ => None,
+    }
 }
 
 /// Emit background-pass quads for the given underline style. `uy` is the
@@ -341,6 +354,7 @@ pub struct TermSnapshot {
     pub viewport_rows: u32,
     pub viewport_cols: u32,
     pub status_line_row: Option<u32>,
+    pub drcs_glyphs: font41::DrcsGlyphMap,
     pub palette: ColorPalette,
     pub search_active: bool,
     pub search: Option<SearchSnapshot>,
@@ -414,6 +428,7 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
         viewport_rows: vp_rows,
         viewport_cols: vp_cols,
         status_line_row,
+        drcs_glyphs: terminal.drcs_render_glyphs(),
         palette: terminal.palette.clone(),
         search_active,
         search,
@@ -1685,6 +1700,7 @@ impl Renderer {
                 glyph.glyph_id,
                 glyph.cells_wide,
                 glyph.synth_bold,
+                drcs_geometry_class(snap).map(|geometry| (geometry, snap.drcs_glyphs.clone())),
             ) {
                 Some(e) => e,
                 None => continue,
@@ -2306,6 +2322,7 @@ impl Renderer {
                 sg.glyph_id,
                 sg.cells_wide,
                 false,
+                None,
             ) {
                 Some(e) => e,
                 None => continue,
@@ -2489,6 +2506,7 @@ impl Renderer {
                 sg.glyph_id,
                 sg.cells_wide,
                 false,
+                None,
             ) {
                 Some(e) => e,
                 None => continue,
@@ -2609,6 +2627,7 @@ impl Renderer {
                 sg.glyph_id,
                 sg.cells_wide,
                 false,
+                None,
             ) {
                 Some(e) => e,
                 None => continue,
@@ -2831,6 +2850,7 @@ impl Renderer {
                 sg.glyph_id,
                 sg.cells_wide,
                 false,
+                None,
             ) {
                 Some(e) => e,
                 None => continue,
@@ -3050,6 +3070,7 @@ impl Renderer {
                 sg.glyph_id,
                 sg.cells_wide,
                 false,
+                None,
             ) {
                 Some(e) => e,
                 None => continue,

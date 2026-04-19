@@ -31,7 +31,7 @@ use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
 
-type StartupGlyphKey = (usize, u16, u8, bool);
+type StartupGlyphKey = (usize, u16, u8, bool, Option<font41::DrcsGeometryClass>);
 
 struct CachedBackground {
     width: u32,
@@ -231,6 +231,8 @@ impl StartupPresenter {
                     glyph.glyph_id,
                     glyph.cells_wide,
                     glyph.synth_bold,
+                    super::r#impl::drcs_geometry_class(&snap)
+                        .map(|geometry| (geometry, snap.drcs_glyphs.clone())),
                 );
                 if raster.width == 0 || raster.height == 0 {
                     continue;
@@ -432,6 +434,8 @@ fn paint_shaped_label(
             glyph.glyph_id,
             glyph.cells_wide,
             false,
+            super::r#impl::drcs_geometry_class(snap)
+                .map(|geometry| (geometry, snap.drcs_glyphs.clone())),
         );
         if raster.width == 0 || raster.height == 0 {
             continue;
@@ -635,13 +639,22 @@ fn cached_glyph(
     glyph_id: u16,
     cells_wide: u8,
     synthetic_bold: bool,
+    drcs: Option<(font41::DrcsGeometryClass, font41::DrcsGlyphMap)>,
 ) -> RasterizedGlyph {
     let synthetic_bold = synthetic_bold && font_system.font_is_color(font_index);
-    let key = (font_index, glyph_id, cells_wide, synthetic_bold);
+    let key = (
+        font_index,
+        glyph_id,
+        cells_wide,
+        synthetic_bold,
+        drcs.as_ref().map(|(geometry, _)| *geometry),
+    );
     if let Some(glyph) = cache.get(&key) {
         return glyph.clone();
     }
 
+    let _drcs =
+        drcs.map(|(geometry, glyphs)| font41::set_drcs_context(Some(geometry), Some(glyphs)));
     let mut glyph = font_system.rasterize_glyph(font_index, glyph_id, cells_wide as u32);
     if synthetic_bold {
         dilate_alpha(&mut glyph);

@@ -5,6 +5,7 @@ mod color;
 mod conformance;
 mod cursor;
 mod decmacro;
+mod drcs;
 mod feature;
 mod grid;
 mod hyperlink;
@@ -47,6 +48,7 @@ pub use self::cursor::CursorStyle;
 use self::decmacro::MAX_MACRO_INVOCATION_DEPTH;
 use self::decmacro::MacroEncoding;
 use self::decmacro::MacroStore;
+use self::drcs::Store as DrcsStore;
 pub use self::feature::FeaturePermissions;
 pub use self::feature::ProgramAllowlist;
 pub use self::grid::Viewport;
@@ -135,6 +137,14 @@ pub enum Vt52CursorAddr {
     AwaitingRow,
     /// Got the row byte; waiting for the column byte.
     AwaitingCol(u8),
+}
+
+struct HookState {
+    bytes: Vec<u8>,
+    params: vtepp::Params,
+    intermediates: vtepp::Intermediates,
+    action: char,
+    truncated: bool,
 }
 
 /// Terminal-level modes toggled by escape sequences (DECSET/DECRST, mode
@@ -356,6 +366,7 @@ pub struct Terminal {
     foreground_processes: Option<ForegroundProcessSet>,
     macros: MacroStore,
     macro_invocation_depth: usize,
+    drcs: DrcsStore,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -430,6 +441,7 @@ impl Terminal {
             foreground_processes: None,
             macros: MacroStore::default(),
             macro_invocation_depth: 0,
+            drcs: DrcsStore::default(),
         };
         terminal.set_default_status_display(default_status_display);
         terminal
@@ -485,6 +497,10 @@ impl Terminal {
         processes: Option<ForegroundProcessSet>,
     ) {
         self.foreground_processes = processes;
+    }
+
+    pub fn drcs_render_glyphs(&self) -> font41::DrcsGlyphMap {
+        self.drcs.render_glyphs()
     }
 
     pub fn macro_feature_enabled(&self) -> bool {
@@ -548,10 +564,7 @@ impl Terminal {
         bytes: &[u8],
     ) {
         let mut parser = vtepp::Parser::new();
-        let mut hook_bytes: Vec<Vec<u8>> = vec![];
-        let mut hook_params: Vec<vtepp::Params> = vec![];
-        let mut hook_intermediates: Vec<vtepp::Intermediates> = vec![];
-        let mut hook_action: Vec<char> = vec![];
+        let mut hooks: Vec<HookState> = vec![];
 
         for action in parser.parse(bytes) {
             match action {
@@ -559,36 +572,13 @@ impl Terminal {
                     params,
                     intermediates,
                     action,
-                } => {
-                    hook_bytes.push(vec![]);
-                    hook_params.push(params);
-                    hook_intermediates.push(intermediates);
-                    hook_action.push(action);
-                }
-                vtepp::Action::Put(chunk) => {
-                    if let Some(last) = hook_bytes.last_mut() {
-                        last.extend_from_slice(chunk);
-                    }
-                }
+                } => push_hook_state(&mut hooks, params, intermediates, action),
+                vtepp::Action::Put(chunk) => append_hook_bytes(&mut hooks, chunk),
                 vtepp::Action::Unhook => {
-                    let Some(payload) = hook_bytes.pop() else {
+                    let Some(hook) = hooks.pop() else {
                         continue;
                     };
-                    let Some(params) = hook_params.pop() else {
-                        continue;
-                    };
-                    let Some(intermediates) = hook_intermediates.pop() else {
-                        continue;
-                    };
-                    let Some(action) = hook_action.pop() else {
-                        continue;
-                    };
-                    if action == 'q' && intermediates.as_slice().is_empty() {
-                        let image = image41::sixel::parse_sixel(params, payload);
-                        self.place_sixel_image(image);
-                    } else {
-                        handle_dcs(params, intermediates.as_slice(), action, &payload, self);
-                    }
+                    dispatch_hook(hook, self);
                 }
                 action => self.apply(action),
             }
@@ -1938,6 +1928,7 @@ impl Terminal {
                     macros: &mut self.macros,
                     feature_permissions: &self.feature_permissions,
                     foreground_processes: &self.foreground_processes,
+                    drcs: &mut self.drcs,
                 };
                 csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
             }
@@ -1963,6 +1954,7 @@ impl Terminal {
                     pending_output: &mut self.pending_output,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
                     macros: &mut self.macros,
+                    drcs: &mut self.drcs,
                 };
                 esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
             }
@@ -2467,6 +2459,76 @@ fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
 
+fn hook_payload_limit(
+    action: char,
+    intermediates: &[u8],
+) -> Option<usize> {
+    (action == '{' && intermediates.is_empty()).then_some(drcs::MAX_DRCS_PAYLOAD_BYTES)
+}
+
+fn push_hook_state(
+    hooks: &mut Vec<HookState>,
+    params: vtepp::Params,
+    intermediates: vtepp::Intermediates,
+    action: char,
+) {
+    hooks.push(HookState {
+        bytes: vec![],
+        params,
+        intermediates,
+        action,
+        truncated: false,
+    });
+}
+
+fn append_hook_bytes(
+    hooks: &mut [HookState],
+    chunk: &[u8],
+) {
+    let Some(last) = hooks.last_mut() else {
+        return;
+    };
+    if last.truncated {
+        return;
+    }
+    if let Some(limit) = hook_payload_limit(last.action, last.intermediates.as_slice()) {
+        let remaining = limit.saturating_sub(last.bytes.len());
+        let take = remaining.min(chunk.len());
+        last.bytes.extend_from_slice(&chunk[..take]);
+        if take < chunk.len() {
+            last.truncated = true;
+        }
+    } else {
+        last.bytes.extend_from_slice(chunk);
+    }
+}
+
+fn dispatch_hook(
+    hook: HookState,
+    terminal: &mut Terminal,
+) {
+    if hook.truncated {
+        return;
+    }
+    if hook.action == 'q' && hook.intermediates.as_slice() == b"+" {
+        let c1_mode = terminal.modes.c1_mode;
+        handle_xtgettcap(&hook.bytes, c1_mode, &mut terminal.pending_output);
+    } else if hook.action == 'q' && hook.intermediates.as_slice() == b"$" {
+        handle_decrqss(&hook.bytes, terminal);
+    } else if hook.action == 'q' && hook.intermediates.as_slice().is_empty() {
+        let image = image41::sixel::parse_sixel(hook.params, hook.bytes);
+        terminal.place_sixel_image(image);
+    } else {
+        handle_dcs(
+            hook.params,
+            hook.intermediates.as_slice(),
+            hook.action,
+            &hook.bytes,
+            terminal,
+        );
+    }
+}
+
 fn handle_dcs(
     params: vtepp::Params,
     intermediates: &[u8],
@@ -2490,6 +2552,9 @@ fn handle_dcs(
                 screen.upss = upss;
             }
         }
+    } else if action == '{' && intermediates.is_empty() {
+        let flat_params: Vec<u16> = params.iter().flat_map(|g| g.iter().copied()).collect();
+        terminal.drcs.define(&flat_params, payload);
     } else if action == 'z' && intermediates == b"!" {
         terminal.define_macro(params, payload);
     }
@@ -2507,10 +2572,7 @@ pub fn run_terminal_thread(
     host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
 ) {
     let mut parser = vtepp::Parser::new();
-    let mut hook_bytes: Vec<Vec<u8>> = vec![];
-    let mut hook_params: Vec<vtepp::Params> = vec![];
-    let mut hook_intermediates: Vec<vtepp::Intermediates> = vec![];
-    let mut hook_action: Vec<char> = vec![];
+    let mut hooks: Vec<HookState> = vec![];
     let mut buf = [0u8; MAX_READ_CHUNK];
 
     loop {
@@ -2538,50 +2600,11 @@ pub fn run_terminal_thread(
                         params,
                         intermediates,
                         action,
-                    } => {
-                        hook_bytes.push(vec![]);
-                        hook_params.push(params);
-                        hook_intermediates.push(intermediates);
-                        hook_action.push(action);
-                    }
-                    vtepp::Action::Put(bytes) => {
-                        if let Some(last) = hook_bytes.last_mut() {
-                            last.extend_from_slice(bytes);
-                        }
-                    }
+                    } => push_hook_state(&mut hooks, params, intermediates, action),
+                    vtepp::Action::Put(bytes) => append_hook_bytes(&mut hooks, bytes),
                     vtepp::Action::Unhook => {
-                        let bytes = hook_bytes.pop().unwrap();
-                        let params = hook_params.pop().unwrap();
-                        let intermediates = hook_intermediates.pop().unwrap();
-                        let act = hook_action.pop().unwrap();
-                        if act == 'q' && intermediates.as_slice() == b"+" {
-                            // XTGETTCAP — terminal capability query. tmux and
-                            // neovim use this to discover features like
-                            // truecolor, cursor shapes, styled underlines.
-                            let mut t = terminal.lock().unwrap();
-                            let c1_mode = t.modes.c1_mode;
-                            handle_xtgettcap(&bytes, c1_mode, &mut t.pending_output);
-                        } else if act == 'q' && intermediates.as_slice() == b"$" {
-                            // DECRQSS — Request Selection or Setting.
-                            // The payload identifies the setting being queried;
-                            // we reply with `DCS 1 $ r <value> ST` for
-                            // recognised settings, `DCS 0 $ r ST` otherwise.
-                            let mut t = terminal.lock().unwrap();
-                            handle_decrqss(&bytes, &mut t);
-                        } else if act == 'q' && intermediates.as_slice().is_empty() {
-                            // Sixel parsing is CPU-heavy — done outside the
-                            // lock so rendering isn't blocked.
-                            let image = image41::sixel::parse_sixel(params, bytes);
-                            terminal.lock().unwrap().place_sixel_image(image);
-                        } else {
-                            handle_dcs(
-                                params,
-                                intermediates.as_slice(),
-                                act,
-                                &bytes,
-                                &mut terminal.lock().unwrap(),
-                            );
-                        }
+                        let hook = hooks.pop().unwrap();
+                        dispatch_hook(hook, &mut terminal.lock().unwrap());
                     }
                     action => {
                         terminal.lock().unwrap().apply(action);
@@ -3256,44 +3279,18 @@ mod tests {
             &mut self,
             data: &[u8],
         ) {
-            let mut hook_bytes: Vec<Vec<u8>> = vec![];
-            let mut hook_params: Vec<vtepp::Params> = vec![];
-            let mut hook_intermediates: Vec<vtepp::Intermediates> = vec![];
-            let mut hook_action: Vec<char> = vec![];
+            let mut hooks: Vec<HookState> = vec![];
             for action in self.parser.parse(data) {
                 match action {
                     Action::Hook {
                         params,
                         intermediates,
                         action,
-                    } => {
-                        hook_bytes.push(vec![]);
-                        hook_params.push(params);
-                        hook_intermediates.push(intermediates);
-                        hook_action.push(action);
-                    }
-                    Action::Put(chunk) => {
-                        if let Some(last) = hook_bytes.last_mut() {
-                            last.extend_from_slice(chunk);
-                        }
-                    }
+                    } => push_hook_state(&mut hooks, params, intermediates, action),
+                    Action::Put(chunk) => append_hook_bytes(&mut hooks, chunk),
                     Action::Unhook => {
-                        let payload = hook_bytes.pop().expect("hook bytes");
-                        let params = hook_params.pop().expect("hook params");
-                        let intermediates = hook_intermediates.pop().expect("hook intermediates");
-                        let action = hook_action.pop().expect("hook action");
-                        if action == 'q' && intermediates.as_slice().is_empty() {
-                            let image = image41::sixel::parse_sixel(params, payload);
-                            self.inner.place_sixel_image(image);
-                        } else {
-                            handle_dcs(
-                                params,
-                                intermediates.as_slice(),
-                                action,
-                                &payload,
-                                &mut self.inner,
-                            );
-                        }
+                        let hook = hooks.pop().expect("hook bytes");
+                        dispatch_hook(hook, &mut self.inner);
                     }
                     action => self.inner.apply(action),
                 }
@@ -4580,6 +4577,37 @@ mod tests {
         term.process(b"\x1bc");
         term.process(b"\x1b[1*z");
         assert!(visible_text(&term).trim().is_empty());
+    }
+
+    #[test]
+    fn decdld_loads_and_designates_soft_charset() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;1;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1b( @!");
+
+        let expected = font41::encode_drcs_char(1).unwrap();
+        let actual = term.visible_row(0).cells[0].chars().next().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn ris_clears_loaded_soft_charsets() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;1;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1bc");
+        term.process(b"\x1b( @!");
+        assert_eq!(term.visible_row(0).cells[0].as_str(), "!");
+    }
+
+    #[test]
+    fn oversized_drcs_payload_is_discarded() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        let mut seq = b"\x1bP1;1;1;6;0;2;16;0{ @".to_vec();
+        seq.extend(std::iter::repeat_n(b'~', drcs::MAX_DRCS_PAYLOAD_BYTES + 32));
+        seq.extend_from_slice(b"\x1b\\");
+        term.process(&seq);
+        term.process(b"\x1b( @!");
+        assert_eq!(term.visible_row(0).cells[0].as_str(), "!");
     }
 
     #[test]

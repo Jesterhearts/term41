@@ -23,14 +23,14 @@ const PADDING: u32 = 4;
 const X_OFFSET: u32 = PADDING / 2;
 const Y_OFFSET: u32 = PADDING / 2;
 
-/// `(font_index, glyph_id, cells_wide, synthetic_bold)`. Cluster span is
-/// part of the key because colour rasterisers size their output to the
+/// `(font_index, glyph_id, cells_wide, synthetic_bold, drcs_geometry)`. Cluster
+/// span is part of the key because colour rasterisers size their output to the
 /// cluster's visual footprint — the same `glyph_id` rendered at width 1
 /// versus width 2 yields different bitmaps. The trailing bool distinguishes
 /// the synthetic-bold variant of a colour glyph (dilated coverage) from
 /// the unmodified raster, so the same glyph can live twice in the atlas
 /// without colliding under the same key.
-pub type GlyphKey = (usize, u16, u8, bool);
+pub type GlyphKey = (usize, u16, u8, bool, Option<font41::DrcsGeometryClass>);
 
 /// A cached glyph: its atlas region plus the font metrics needed to position
 /// the quad. Empty glyphs (zero-size whitespace) carry no allocation.
@@ -197,16 +197,25 @@ impl GlyphAtlas {
         glyph_id: u16,
         cells_wide: u8,
         synthetic_bold: bool,
+        drcs: Option<(font41::DrcsGeometryClass, font41::DrcsGlyphMap)>,
     ) -> Option<GlyphSlot> {
         // Outline glyphs never take the synthetic-bold path, so collapse the
         // key bit to avoid double-caching the same raster under two keys.
         let synthetic_bold = synthetic_bold && font_system.font_is_color(font_index);
-        let key = (font_index, glyph_id, cells_wide, synthetic_bold);
+        let key = (
+            font_index,
+            glyph_id,
+            cells_wide,
+            synthetic_bold,
+            drcs.as_ref().map(|(g, _)| *g),
+        );
 
         if let Some(slot) = self.cache.get(&key).copied() {
             return Some(slot);
         }
 
+        let _drcs =
+            drcs.map(|(geometry, glyphs)| font41::set_drcs_context(Some(geometry), Some(glyphs)));
         let mut glyph = font_system.rasterize_glyph(font_index, glyph_id, cells_wide as u32);
         if synthetic_bold {
             dilate_alpha(&mut glyph);

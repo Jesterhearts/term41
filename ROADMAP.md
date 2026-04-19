@@ -149,25 +149,29 @@ Security:
 
 - `LOW`
 
-### [ ] 4. Downloadable soft character sets (DRCS / `DECDLD`)
+### [x] 4. Downloadable soft character sets (DRCS / `DECDLD`)
 
-Missing:
+Implemented:
 
-- [ ] `DECDLD`
-- [ ] DRCS storage, designation, invocation, and lifetime rules
+- [x] `DECDLD`
+- [x] DRCS storage, designation, invocation, and lifetime rules
+- [x] bounded single-payload and total-storage limits
+- [x] render-path support in both the GPU and startup software backends
 
 Why it matters:
 
 - VT420-class terminals support downloadable character glyphs; this is part of
   the character-set subsystem, not the graphics subsystem.
-- `term41` currently treats bare `DCS ... q` as sixel payload, which overlaps
-  with a control-family DEC also used for soft-character loading.
+- `term41` now routes `DCS ... { ... ST` through a dedicated DRCS path while
+  still treating bare `DCS ... q` as sixel.
 
 Security:
 
 - `MEDIUM`
 - This expands the binary parser surface and introduces memory-management and
-  rendering-safety issues. It should be bounded and opt-in.
+  rendering-safety issues.
+- The implementation therefore hard-limits both a single DRCS payload and the
+  total in-memory soft-font store to bound denial-of-service risk.
 
 ### [x] 5. Full tab/page/geometry control family
 

@@ -1,5 +1,7 @@
 use smol_str::SmolStr;
 
+use crate::drcs::CharsetSize;
+
 const SUBSTITUTE: char = '\u{2426}';
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -51,6 +53,7 @@ pub enum CharacterSet {
     DecSupplemental,
     IsoLatin1Supplemental,
     UserPreferredSupplemental,
+    Drcs(u8, CharsetSize),
     NationalReplacement(NationalReplacementSet),
 }
 
@@ -138,13 +141,7 @@ pub fn parse_designation(
     final_byte: u8,
 ) -> Option<(GraphicSetSlot, CharacterSet)> {
     let (&slot_byte, rest) = intermediates.split_first()?;
-    let slot = match slot_byte {
-        b'(' => GraphicSetSlot::G0,
-        b')' | b'-' => GraphicSetSlot::G1,
-        b'*' | b'.' => GraphicSetSlot::G2,
-        b'+' | b'/' => GraphicSetSlot::G3,
-        _ => return None,
-    };
+    let slot = slot_for_byte(slot_byte)?;
     let is_96 = matches!(slot_byte, b'-' | b'.' | b'/');
     let prefix = rest.first().copied();
     let charset = match (is_96, prefix, final_byte) {
@@ -181,6 +178,21 @@ pub fn parse_designation(
     Some((slot, charset))
 }
 
+pub fn slot_for_intermediates(intermediates: &[u8]) -> Option<GraphicSetSlot> {
+    let (&slot_byte, _) = intermediates.split_first()?;
+    slot_for_byte(slot_byte)
+}
+
+fn slot_for_byte(slot_byte: u8) -> Option<GraphicSetSlot> {
+    match slot_byte {
+        b'(' => Some(GraphicSetSlot::G0),
+        b')' | b'-' => Some(GraphicSetSlot::G1),
+        b'*' | b'.' => Some(GraphicSetSlot::G2),
+        b'+' | b'/' => Some(GraphicSetSlot::G3),
+        _ => None,
+    }
+}
+
 pub fn gl_charset_requires_translation(
     state: &CharsetState,
     nrc_mode: bool,
@@ -209,7 +221,8 @@ pub fn charset_requires_translation(
         | CharacterSet::DecTechnical
         | CharacterSet::DecSupplemental
         | CharacterSet::IsoLatin1Supplemental
-        | CharacterSet::UserPreferredSupplemental => true,
+        | CharacterSet::UserPreferredSupplemental
+        | CharacterSet::Drcs(_, _) => true,
     }
 }
 
@@ -231,6 +244,9 @@ pub fn translate_ascii_byte(
                 translate_iso_latin1_supplemental(byte)
             }
         },
+        CharacterSet::Drcs(buffer_id, charset_size) => {
+            crate::drcs::translate_byte(buffer_id, charset_size, byte)
+        }
         CharacterSet::NationalReplacement(set) => {
             if !nrc_mode {
                 return None;
