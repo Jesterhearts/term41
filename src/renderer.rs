@@ -9,11 +9,12 @@ pub(crate) mod startup;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
+use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
+use std::thread::Thread;
 use std::time::Duration;
-use std::time::Instant;
 
 use clip41::Clipboard;
 use font41::FontSystem;
@@ -188,6 +189,7 @@ pub struct RenderHost {
     /// Window handle, persisted after the first frame so IME requests
     /// (`set_ime_cursor_area`) can be issued from event handlers.
     window: Option<Arc<Window>>,
+    render_thread_handle: Arc<OnceLock<Thread>>,
 
     /// Last pixel position/size we handed to `set_ime_cursor_area`. Used to
     /// skip redundant calls — winit queues each one to the main thread, so
@@ -229,6 +231,7 @@ impl RenderHost {
         config: Config,
         config_path: Option<PathBuf>,
         input_state: Arc<Mutex<InputState>>,
+        render_thread_handle: Arc<OnceLock<Thread>>,
     ) -> Self {
         Self {
             renderer: None,
@@ -247,6 +250,7 @@ impl RenderHost {
             window_size: (0, 0),
             window_resize_epoch: 0,
             window: None,
+            render_thread_handle,
             ime_cursor_area: None,
             clipboard: Clipboard::new(),
             input_state,
@@ -263,6 +267,7 @@ impl RenderHost {
     ) {
         let mut frames = 0u64;
         let mut prepared_renderer: Option<PreparedRenderer> = None;
+        let mut first_frame = true;
 
         // Phase 1: wait for the window and initialize the renderer.
         let (window, display) = match window_rx.recv() {
@@ -287,13 +292,15 @@ impl RenderHost {
         self.window_size = (initial_size.width, initial_size.height);
         self.handle_resize(initial_size.width, initial_size.height);
 
-        let mut frame_time = Instant::now();
         // Phase 2: frame loop.
         loop {
-            if let Some(duration) = FRAME_DURATION.checked_sub(frame_time.elapsed()) {
-                std::thread::park_timeout(duration);
+            if !first_frame {
+                match self.next_render_wait() {
+                    Some(duration) => std::thread::park_timeout(duration),
+                    None => std::thread::park(),
+                }
             }
-            frame_time = Instant::now();
+            first_frame = false;
 
             // Batch-drain all pending input events from the window thread.
             // Clone into a local buffer so we can commit() (freeing ring
@@ -378,6 +385,25 @@ impl RenderHost {
         }
 
         std::process::exit(0);
+    }
+
+    fn next_render_wait(&self) -> Option<Duration> {
+        let Some(renderer) = self.renderer.as_ref() else {
+            return Some(Duration::ZERO);
+        };
+        if renderer.has_animated_background() || renderer.visual_bell_active() {
+            return Some(FRAME_DURATION);
+        }
+        let tab = self.active_tab()?;
+        let terminal = tab.terminal.lock().unwrap();
+        if terminal.active.offset == 0
+            && terminal.active.cursor_visible
+            && terminal.cursor_style.blink
+        {
+            Some(r#impl::CURSOR_BLINK_HALF_PERIOD)
+        } else {
+            None
+        }
     }
 
     // -- Event dispatch -----------------------------------------------------
@@ -766,6 +792,7 @@ impl RenderHost {
             format!("terminal-{}", id.0),
             terminal.clone(),
             pty_reader,
+            self.render_thread_handle.clone(),
             None,
             Some(Arc::new({
                 let proxy = self.proxy.clone();

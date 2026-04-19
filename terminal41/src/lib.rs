@@ -1948,6 +1948,7 @@ impl TerminalThread {
         name: String,
         terminal: Arc<Mutex<Terminal>>,
         pty_reader: PtyReader,
+        render_thread_handle: Arc<OnceLock<Thread>>,
         startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
         output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
         host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
@@ -1966,6 +1967,7 @@ impl TerminalThread {
                     terminal,
                     pty_reader,
                     stop_,
+                    render_thread_handle,
                     startup_redraw,
                     output_ready,
                     host_resize,
@@ -2215,6 +2217,7 @@ pub fn run_terminal_thread(
     terminal: Arc<Mutex<Terminal>>,
     mut pty_reader: PtyReader,
     stop: Arc<AtomicBool>,
+    render_thread_handle: Arc<OnceLock<Thread>>,
     startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
     output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
     host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
@@ -2312,6 +2315,9 @@ pub fn run_terminal_thread(
         }
         if did_work && let Some(notify_output) = output_ready.as_ref() {
             notify_output();
+        }
+        if did_work && let Some(thread) = render_thread_handle.get() {
+            thread.unpark();
         }
 
         if stop.load(Ordering::Acquire) {

@@ -551,7 +551,7 @@ pub struct PreparedRenderer {
 
 /// Half-period of the cursor blink. xterm uses 530ms by default; 500 lands
 /// just shy of that and is the common choice for newer terminals.
-const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
+pub(crate) const CURSOR_BLINK_HALF_PERIOD: Duration = Duration::from_millis(500);
 
 #[cfg(feature = "vulkan")]
 fn pipeline_cache_path() -> Option<PathBuf> {
@@ -1108,6 +1108,17 @@ impl Renderer {
         };
         bg.frame_advance(&self.queue);
         bg.is_animated()
+    }
+
+    pub fn has_animated_background(&self) -> bool {
+        self.background
+            .as_ref()
+            .is_some_and(Background::is_animated)
+    }
+
+    pub fn visual_bell_active(&self) -> bool {
+        self.bell_started
+            .is_some_and(|start| start.elapsed() < BELL_FLASH_DURATION)
     }
 
     /// Width reserved for the gutter at the given cell width, in pixels.

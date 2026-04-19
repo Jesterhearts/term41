@@ -162,6 +162,7 @@ struct WindowHost {
     startup_gutter: bool,
     startup_background_source: Option<PathBuf>,
     startup_background_opacity: f32,
+    render_thread_handle: Arc<OnceLock<std::thread::Thread>>,
 }
 
 impl WindowHost {
@@ -170,6 +171,9 @@ impl WindowHost {
         ev: RenderEvent,
     ) {
         let _ = self.event_tx.push(ev);
+        if let Some(thread) = self.render_thread_handle.get() {
+            thread.unpark();
+        }
     }
 
     fn active_input_target(&self) -> Option<&InputEndpoint> {
@@ -1554,6 +1558,7 @@ fn main() {
     let (startup_release_tx, startup_release_rx) = mpsc::sync_channel(1);
     let (child_exit_tx, child_exit_rx) = mpsc::channel();
     let config_reload = Arc::new(AtomicBool::new(false));
+    let render_thread_handle = Arc::new(OnceLock::new());
 
     let proxy = event_loop.create_proxy();
     let startup_redraw_proxy = proxy.clone();
@@ -1593,6 +1598,7 @@ fn main() {
         "terminal-0".into(),
         terminal.clone(),
         pty_reader,
+        render_thread_handle.clone(),
         Some(Arc::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
         })),
@@ -1644,9 +1650,13 @@ fn main() {
     // Spawn the render thread.
     let config_reload_ = config_reload.clone();
     let input_state_for_render = input_state.clone();
+    let render_thread_handle_for_render = render_thread_handle.clone();
     thread::Builder::new()
         .name("renderer".into())
         .spawn(move || {
+            render_thread_handle_for_render
+                .set(thread::current())
+                .expect("set render thread handle");
             let mut host = RenderHost::new(
                 event_rx,
                 child_exit_rx,
@@ -1658,6 +1668,7 @@ fn main() {
                 config,
                 config_path,
                 input_state_for_render,
+                render_thread_handle_for_render.clone(),
             );
             host.run(window_rx, startup_release_rx);
         })
@@ -1665,7 +1676,7 @@ fn main() {
 
     // Spawn the config file watcher.
     if let Some(ref path) = config_path_for_watcher {
-        spawn_config_watcher(path.clone(), config_reload);
+        spawn_config_watcher(path.clone(), config_reload, render_thread_handle.clone());
     }
 
     let mut host = WindowHost {
@@ -1703,6 +1714,7 @@ fn main() {
         startup_gutter,
         startup_background_source,
         startup_background_opacity,
+        render_thread_handle,
     };
     event_loop.run_app(&mut host).expect("run event loop");
 }
@@ -1710,6 +1722,7 @@ fn main() {
 fn spawn_config_watcher(
     config_path: PathBuf,
     config_reload: Arc<AtomicBool>,
+    render_thread_handle: Arc<OnceLock<std::thread::Thread>>,
 ) {
     use notify::EventKind;
     use notify::RecursiveMode;
@@ -1740,6 +1753,9 @@ fn spawn_config_watcher(
                     return;
                 }
                 config_reload_for_handler.store(true, Ordering::Release);
+                if let Some(thread) = render_thread_handle.get() {
+                    thread.unpark();
+                }
             }) {
                 Ok(w) => w,
                 Err(e) => {
