@@ -6,5 +6,6 @@ edition = "2024"
 [dependencies]
 crossterm = "0.29.0"
 ratatui = "0.30.0"
+rustix = { version = "1.1.4", features = ["event", "std"] }
 unicode-width.workspace = true
 vtepp.workspace = true

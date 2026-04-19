@@ -9,11 +9,8 @@ pub struct CapabilityReport {
 }
 
 pub fn parse_da1_reply(bytes: &[u8]) -> Option<CapabilityReport> {
-    let text = std::str::from_utf8(bytes).ok()?;
-    let start = text.find("\u{1b}[?")?;
-    let tail = &text[start + 3..];
-    let end = tail.find('c')?;
-    let payload = &tail[..end];
+    let payload = da1_payload(bytes)?;
+    let payload = std::str::from_utf8(payload).ok()?;
     let mut parts = payload.split(';');
     let level = parts.next()?.parse().ok()?;
     let mut features = Vec::new();
@@ -28,6 +25,36 @@ pub fn parse_da1_reply(bytes: &[u8]) -> Option<CapabilityReport> {
         features,
         query_ok: true,
     })
+}
+
+fn da1_payload(bytes: &[u8]) -> Option<&[u8]> {
+    let mut i = 0;
+    while i < bytes.len() {
+        let start = if bytes[i] == 0x9b {
+            i + 1
+        } else if bytes[i..].starts_with(b"\x1b[") {
+            i + 2
+        } else {
+            i += 1;
+            continue;
+        };
+        let rest = bytes.get(start..)?;
+        if !rest.starts_with(b"?") {
+            i += 1;
+            continue;
+        }
+        let payload_start = start + 1;
+        let payload_end = bytes
+            .get(payload_start..)?
+            .iter()
+            .position(|&b| b == b'c')?;
+        let payload = &bytes[payload_start..payload_start + payload_end];
+        if payload.iter().all(|b| b.is_ascii_digit() || *b == b';') {
+            return Some(payload);
+        }
+        i = payload_start + payload_end + 1;
+    }
+    None
 }
 
 pub fn fallback_report() -> CapabilityReport {
@@ -233,4 +260,23 @@ fn truncate(
         return "…".to_string();
     }
     text.chars().take(width - 1).chain(['…']).collect()
+}
+
+#[cfg(test)]
+mod tests {
+    use super::parse_da1_reply;
+
+    #[test]
+    fn parses_seven_bit_da1_reply() {
+        let report = parse_da1_reply(b"\x1b[?64;7;21;22;28;29c").unwrap();
+        assert_eq!(report.level, Some(64));
+        assert_eq!(report.features, vec![7, 21, 22, 28, 29]);
+    }
+
+    #[test]
+    fn parses_eight_bit_da1_reply() {
+        let report = parse_da1_reply(b"\x9b?63;7;21;22;28;29;32c").unwrap();
+        assert_eq!(report.level, Some(63));
+        assert_eq!(report.features, vec![7, 21, 22, 28, 29, 32]);
+    }
 }

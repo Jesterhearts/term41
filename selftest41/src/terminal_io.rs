@@ -1,6 +1,8 @@
 use std::io;
 use std::io::Stdout;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::fd::AsFd;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -16,6 +18,12 @@ use crossterm::terminal::EnterAlternateScreen;
 use crossterm::terminal::LeaveAlternateScreen;
 use ratatui::Terminal;
 use ratatui::backend::CrosstermBackend;
+#[cfg(unix)]
+use rustix::event::PollFd;
+#[cfg(unix)]
+use rustix::event::PollFlags;
+#[cfg(unix)]
+use rustix::event::Timespec;
 
 use crate::capabilities;
 use crate::capabilities::CapabilityReport;
@@ -59,6 +67,13 @@ impl TerminalSession {
         let out = self.terminal.backend_mut();
         write!(out, "\x1b[c")?;
         out.flush()?;
+
+        #[cfg(unix)]
+        if let Some(report) =
+            probe_capabilities_from_stdin(Instant::now() + Duration::from_millis(250))?
+        {
+            return Ok(report);
+        }
 
         let deadline = Instant::now() + Duration::from_millis(250);
         let mut bytes = Vec::new();
@@ -108,6 +123,35 @@ impl TerminalSession {
         self.terminal.clear()?;
         Ok(())
     }
+}
+
+#[cfg(unix)]
+fn probe_capabilities_from_stdin(deadline: Instant) -> io::Result<Option<CapabilityReport>> {
+    let stdin = io::stdin();
+    let stdin = stdin.lock();
+    let fd = stdin.as_fd();
+    let mut bytes = Vec::new();
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        let timeout = remaining.min(Duration::from_millis(25));
+        let mut poll_fds = [PollFd::from_borrowed_fd(fd, PollFlags::IN)];
+        let timeout = Timespec::try_from(timeout).map_err(io::Error::other)?;
+        let ready = rustix::event::poll(&mut poll_fds, Some(&timeout)).map_err(io::Error::other)?;
+        if ready == 0 {
+            continue;
+        }
+
+        let mut buf = [0u8; 256];
+        let read = rustix::io::read(fd, &mut buf).map_err(io::Error::other)?;
+        if read == 0 {
+            continue;
+        }
+        bytes.extend_from_slice(&buf[..read]);
+        if let Some(report) = capabilities::parse_da1_reply(&bytes) {
+            return Ok(Some(report));
+        }
+    }
+    Ok(None)
 }
 
 impl Drop for TerminalSession {
