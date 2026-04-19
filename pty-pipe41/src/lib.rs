@@ -7,6 +7,8 @@ use std::io::Write;
 use std::os::fd::AsRawFd;
 #[cfg(unix)]
 use std::os::fd::FromRawFd;
+#[cfg(target_os = "macos")]
+use std::os::unix::ffi::OsStringExt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -379,7 +381,20 @@ fn resolve_foreground_processes(pgrp: libc::pid_t) -> Option<ForegroundProcessSe
     (!programs.is_empty()).then_some(ForegroundProcessSet { programs })
 }
 
-#[cfg(all(unix, not(target_os = "linux")))]
+#[cfg(target_os = "macos")]
+fn resolve_foreground_processes(pgrp: libc::pid_t) -> Option<ForegroundProcessSet> {
+    let mut programs = vec![];
+    for pid in list_process_group_members(pgrp)? {
+        let exe = executable_path_for_pid(pid)?;
+        let program = ForegroundProgram::from_exe_path(exe)?;
+        if !programs.contains(&program) {
+            programs.push(program);
+        }
+    }
+    (!programs.is_empty()).then_some(ForegroundProcessSet { programs })
+}
+
+#[cfg(all(unix, not(any(target_os = "linux", target_os = "macos"))))]
 fn resolve_foreground_processes(_pgrp: libc::pid_t) -> Option<ForegroundProcessSet> {
     None
 }
@@ -391,4 +406,39 @@ fn process_group_for_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
     let mut fields = after_comm.split_ascii_whitespace();
     let _state = fields.next()?;
     fields.next()?.parse().ok()
+}
+
+#[cfg(target_os = "macos")]
+fn list_process_group_members(pgrp: libc::pid_t) -> Option<Vec<libc::pid_t>> {
+    let count = unsafe { libc::proc_listpgrppids(pgrp, std::ptr::null_mut(), 0) };
+    if count <= 0 {
+        return None;
+    }
+    let mut pids = vec![0i32; count as usize];
+    let buffer_size = (pids.len() * std::mem::size_of::<libc::pid_t>()) as i32;
+    let written = unsafe {
+        libc::proc_listpgrppids(pgrp, pids.as_mut_ptr().cast::<libc::c_void>(), buffer_size)
+    };
+    if written <= 0 {
+        return None;
+    }
+    pids.truncate(written as usize);
+    Some(pids.into_iter().filter(|pid| *pid > 0).collect())
+}
+
+#[cfg(target_os = "macos")]
+fn executable_path_for_pid(pid: libc::pid_t) -> Option<PathBuf> {
+    let mut path = vec![0u8; libc::PROC_PIDPATHINFO_MAXSIZE as usize];
+    let written = unsafe {
+        libc::proc_pidpath(
+            pid,
+            path.as_mut_ptr().cast::<libc::c_void>(),
+            path.len() as u32,
+        )
+    };
+    if written <= 0 {
+        return None;
+    }
+    path.truncate(written as usize);
+    Some(PathBuf::from(std::ffi::OsString::from_vec(path)))
 }
