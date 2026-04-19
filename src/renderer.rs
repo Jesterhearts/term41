@@ -89,9 +89,6 @@ pub(crate) struct GutterPopup {
 // CSD — client-side window decoration state
 // ---------------------------------------------------------------------------
 
-/// Width of the resize hit-test border in physical pixels.
-pub(crate) const RESIZE_BORDER: f32 = 5.0;
-
 /// Number of cell-widths reserved for each window control button.
 pub(crate) const BUTTON_CELLS: f32 = 3.0;
 
@@ -694,13 +691,13 @@ impl RenderHost {
         let renderer = self.renderer.as_ref()?;
         let (width, height) = self.window_size;
         let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
-        let usable_width = width.saturating_sub(gutter_px) - RESIZE_BORDER as u32 * 2;
+        let usable_width = width.saturating_sub(gutter_px);
         let tab_bar_px = if self.tab_bar_visible() {
             self.font_system.cell_height
         } else {
             0
         };
-        let usable_height = height.saturating_sub(tab_bar_px) - RESIZE_BORDER as u32 * 2;
+        let usable_height = height.saturating_sub(tab_bar_px);
         Some(
             self.font_system
                 .grid_dimensions(usable_width, usable_height),

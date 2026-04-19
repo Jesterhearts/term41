@@ -206,12 +206,10 @@ impl WindowHost {
         let (_, _, gutter_width, _) = self.layout_snapshot();
         let width = cols
             .saturating_mul(self.cell_width)
-            .saturating_add(gutter_width)
-            .saturating_add((RESIZE_BORDER as u32) * 2);
+            .saturating_add(gutter_width);
         let height = rows
             .saturating_mul(self.cell_height)
-            .saturating_add(self.cell_height)
-            .saturating_add((RESIZE_BORDER as u32) * 2);
+            .saturating_add(self.cell_height);
         let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
     }
 
