@@ -385,11 +385,19 @@ impl Background {
             return;
         };
 
-        if last_frame_at.elapsed() < *frame_delay {
-            return;
+        let mut total_delay = *frame_delay;
+        let mut new_frame = None;
+        while last_frame_at.elapsed() >= total_delay {
+            if let Ok(frame) = rx.try_recv() {
+                total_delay += frame.delay;
+                new_frame = Some(frame);
+            } else {
+                break;
+            }
         }
 
-        if let Ok(frame) = rx.try_recv() {
+        if let Some(frame) = new_frame {
+            *last_frame_at = Instant::now();
             upload_frame(
                 queue,
                 &self.texture,
@@ -397,7 +405,6 @@ impl Background {
                 frame.height,
                 &frame.pixels,
             );
-            *last_frame_at = Instant::now();
             *frame_delay = frame.delay;
         }
     }

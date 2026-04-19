@@ -99,7 +99,6 @@ impl Pty {
         command: Option<Vec<String>>,
         cwd: Option<std::path::PathBuf>,
         data_thread: Arc<OnceLock<Thread>>,
-        render_thread: Arc<OnceLock<Thread>>,
         child_exit_tx: mpsc::Sender<TabId>,
     ) -> io::Result<(Self, PtyWriter, PtyReader)>
     where
@@ -175,9 +174,6 @@ impl Pty {
             .spawn(move || {
                 let _ = child.wait();
                 let _ = child_exit_tx.send(tab_id);
-                if let Some(t) = render_thread.get() {
-                    t.unpark();
-                }
             })
             .map_err(io::Error::other)?;
 

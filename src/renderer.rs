@@ -9,11 +9,9 @@ pub(crate) mod startup;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
-use std::thread::Thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -71,6 +69,7 @@ pub(crate) const GUTTER_MENU_ITEMS: &[GutterMenuItem] = &[
 ];
 
 pub(crate) const POPUP_WIDTH_CELLS: f32 = 20.0;
+const FRAME_DURATION: Duration = Duration::from_millis(1000 / 60);
 
 /// State of the gutter popup while it is open.
 #[derive(Clone)]
@@ -168,7 +167,6 @@ pub struct RenderHost {
     child_exit_rx: mpsc::Receiver<TabId>,
     child_exit_tx: mpsc::Sender<TabId>,
     config_reload: Arc<AtomicBool>,
-    render_thread_handle: Arc<OnceLock<Thread>>,
     proxy: EventLoopProxy<AppEvent>,
 
     tabs: Vec<Tab>,
@@ -225,7 +223,6 @@ impl RenderHost {
         child_exit_rx: mpsc::Receiver<TabId>,
         child_exit_tx: mpsc::Sender<TabId>,
         config_reload: Arc<AtomicBool>,
-        render_thread_handle: Arc<OnceLock<Thread>>,
         proxy: EventLoopProxy<AppEvent>,
         font_system: FontSystem,
         tab: Tab,
@@ -239,7 +236,6 @@ impl RenderHost {
             child_exit_rx,
             child_exit_tx,
             config_reload,
-            render_thread_handle,
             proxy,
             tabs: vec![tab],
             active_tab_id: TabId(0),
@@ -294,7 +290,7 @@ impl RenderHost {
         let mut frame_time = Instant::now();
         // Phase 2: frame loop.
         loop {
-            if let Some(duration) = Duration::from_millis(8).checked_sub(frame_time.elapsed()) {
+            if let Some(duration) = FRAME_DURATION.checked_sub(frame_time.elapsed()) {
                 std::thread::park_timeout(duration);
             }
             frame_time = Instant::now();
@@ -368,23 +364,9 @@ impl RenderHost {
                     )
                 }));
             }
-            // Tick the background's animation clock and re-upload its
-            // texture if a new frame is due. The render loop normally
-            // parks waiting for input; an animated background needs the
-            // loop to keep ticking, so the renderer reports back whether
-            // it's animated and we self-unpark if so.
-            let bg_animated = self
-                .renderer
-                .as_mut()
-                .is_some_and(|r| r.advance_background_frame());
-            self.render_frame();
 
-            if bg_animated {
-                self.render_thread_handle
-                    .get()
-                    .expect("render thread handle set")
-                    .unpark();
-            }
+            self.renderer.as_mut().unwrap().advance_background_frame();
+            self.render_frame();
 
             frames += 1;
             if frames.is_multiple_of(100) {
@@ -770,7 +752,6 @@ impl RenderHost {
             None,
             cwd,
             terminal_thread.thread_handle.clone(),
-            self.render_thread_handle.clone(),
             self.child_exit_tx.clone(),
         ) {
             Ok(pair) => pair,
@@ -785,7 +766,6 @@ impl RenderHost {
             format!("terminal-{}", id.0),
             terminal.clone(),
             pty_reader,
-            self.render_thread_handle.clone(),
             None,
             Some(Arc::new({
                 let proxy = self.proxy.clone();

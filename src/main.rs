@@ -15,7 +15,6 @@ use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
-use std::thread::Thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -143,7 +142,6 @@ struct WindowHost {
     /// thread after `resumed()` creates the window. Taken (set to `None`)
     /// after the first send.
     window_tx: Option<mpsc::SyncSender<(Arc<Window>, OwnedDisplayHandle)>>,
-    render_thread: Thread,
     modifiers: ModifiersState,
     ime_preedit_active: bool,
     mouse_pos: (f64, f64),
@@ -172,7 +170,6 @@ impl WindowHost {
         ev: RenderEvent,
     ) {
         let _ = self.event_tx.push(ev);
-        self.render_thread.unpark();
     }
 
     fn active_input_target(&self) -> Option<&InputEndpoint> {
@@ -255,7 +252,6 @@ impl WindowHost {
     }
 
     fn notify_interaction_changed(&self) {
-        self.render_thread.unpark();
         if self.startup_presenter.is_some()
             && let Some(window) = &self.window
         {
@@ -1366,7 +1362,6 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
         self.window_size = (startup_window_size.width, startup_window_size.height);
         self.window = Some(window);
-        self.render_thread.unpark();
 
         event_loop.set_control_flow(ControlFlow::Wait);
     }
@@ -1559,7 +1554,6 @@ fn main() {
     let (startup_release_tx, startup_release_rx) = mpsc::sync_channel(1);
     let (child_exit_tx, child_exit_rx) = mpsc::channel();
     let config_reload = Arc::new(AtomicBool::new(false));
-    let render_thread_handle: Arc<OnceLock<Thread>> = Arc::new(OnceLock::new());
 
     let proxy = event_loop.create_proxy();
     let startup_redraw_proxy = proxy.clone();
@@ -1579,7 +1573,6 @@ fn main() {
             command,
             None,
             terminal_thread.thread_handle.clone(),
-            render_thread_handle.clone(),
             child_exit_tx.clone(),
         )
         .expect("failed to spawn PTY")
@@ -1600,7 +1593,6 @@ fn main() {
         "terminal-0".into(),
         terminal.clone(),
         pty_reader,
-        render_thread_handle.clone(),
         Some(Arc::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
         })),
@@ -1649,22 +1641,17 @@ fn main() {
     // the original is still needed by the config watcher below.
     let config_path_for_watcher = config_path.clone();
 
-    let render_thread_handle_ = render_thread_handle.clone();
     // Spawn the render thread.
     let config_reload_ = config_reload.clone();
     let input_state_for_render = input_state.clone();
     thread::Builder::new()
         .name("renderer".into())
         .spawn(move || {
-            render_thread_handle_
-                .set(thread::current())
-                .expect("set render thread handle");
             let mut host = RenderHost::new(
                 event_rx,
                 child_exit_rx,
                 child_exit_tx,
                 config_reload_,
-                render_thread_handle_,
                 proxy,
                 font_system,
                 tab,
@@ -1676,13 +1663,9 @@ fn main() {
         })
         .expect("spawn render thread");
 
-    // Get the render thread's Thread handle for unparking.
-    // The render thread sets it immediately, but we spin briefly just in case.
-    let render_thread = render_thread_handle.wait().clone();
-
     // Spawn the config file watcher.
     if let Some(ref path) = config_path_for_watcher {
-        spawn_config_watcher(path.clone(), config_reload, render_thread.clone());
+        spawn_config_watcher(path.clone(), config_reload);
     }
 
     let mut host = WindowHost {
@@ -1700,7 +1683,6 @@ fn main() {
         input_state,
         event_tx,
         window_tx: Some(window_tx),
-        render_thread,
         modifiers: ModifiersState::default(),
         ime_preedit_active: false,
         mouse_pos: (0.0, 0.0),
@@ -1728,7 +1710,6 @@ fn main() {
 fn spawn_config_watcher(
     config_path: PathBuf,
     config_reload: Arc<AtomicBool>,
-    render_thread: Thread,
 ) {
     use notify::EventKind;
     use notify::RecursiveMode;
@@ -1743,7 +1724,6 @@ fn spawn_config_watcher(
         .spawn(move || {
             let target = config_path.clone();
             let config_reload_for_handler = config_reload.clone();
-            let render_thread_for_handler = render_thread.clone();
             let mut watcher = match notify::recommended_watcher(move |res| {
                 let event: notify::Event = match res {
                     Ok(e) => e,
@@ -1760,7 +1740,6 @@ fn spawn_config_watcher(
                     return;
                 }
                 config_reload_for_handler.store(true, Ordering::Release);
-                render_thread_for_handler.unpark();
             }) {
                 Ok(w) => w,
                 Err(e) => {

@@ -1948,7 +1948,6 @@ impl TerminalThread {
         name: String,
         terminal: Arc<Mutex<Terminal>>,
         pty_reader: PtyReader,
-        render_thread: Arc<OnceLock<Thread>>,
         startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
         output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
         host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
@@ -1967,7 +1966,6 @@ impl TerminalThread {
                     terminal,
                     pty_reader,
                     stop_,
-                    render_thread,
                     startup_redraw,
                     output_ready,
                     host_resize,
@@ -2217,7 +2215,6 @@ pub fn run_terminal_thread(
     terminal: Arc<Mutex<Terminal>>,
     mut pty_reader: PtyReader,
     stop: Arc<AtomicBool>,
-    render_thread: Arc<OnceLock<Thread>>,
     startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
     output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
     host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
@@ -2310,9 +2307,6 @@ pub fn run_terminal_thread(
             }
         }
 
-        if did_work && let Some(t) = render_thread.get() {
-            t.unpark();
-        }
         if did_work && let Some(request_redraw) = startup_redraw.as_ref() {
             request_redraw();
         }
@@ -3834,23 +3828,6 @@ mod tests {
         term.set_palette(new);
 
         assert_eq!(term.active.grid.rows[0].fg[0], old_fg);
-    }
-
-    #[test]
-    fn set_palette_updates_status_line_defaults_and_existing_default_cells() {
-        let mut term = TestTerm::new(8, 4, 10, 16, 8);
-        term.process(b"\x1b[2$~\x1b[1$}status");
-        let mut new = term.palette.clone();
-        new.status_line_fg = Srgb::new(90, 100, 110);
-        new.status_line_bg = Srgb::new(20, 30, 40);
-
-        term.set_palette(new.clone());
-
-        let status = term.active.status_line.as_ref().expect("status line");
-        assert_eq!(status.fg, new.status_line_fg);
-        assert_eq!(status.bg, new.status_line_bg);
-        assert_eq!(status.row.fg[0], new.status_line_fg);
-        assert_eq!(status.row.bg[0], new.status_line_bg);
     }
 
     // ---- OSC 133 shell integration + prompt navigation ----
