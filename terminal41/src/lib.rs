@@ -4,6 +4,7 @@
 extern crate log;
 
 mod charset;
+pub mod clipboard;
 mod color;
 mod conformance;
 mod cursor;
@@ -22,14 +23,13 @@ mod mouse;
 mod osc;
 mod palette_sync;
 mod parser;
-mod prompt_ops;
+pub mod prompt;
 mod report;
 mod row;
 mod runtime;
 mod screen;
 mod search;
 pub mod selection;
-mod selection_ops;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -44,7 +44,6 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clip41::Clipboard;
-use clip41::ClipboardKind;
 use pty_pipe41::ForegroundProcessSet;
 use pty_pipe41::MAX_READ_CHUNK;
 use pty_pipe41::PtyReader;
@@ -109,13 +108,8 @@ pub use self::row::Row;
 pub use self::screen::Screen;
 pub use self::screen::StatusDisplayKind;
 use self::screen::resize_screen;
-use crate::search::MatchSpan;
 use crate::search::SearchState;
 use crate::selection::Selection;
-use crate::selection::SelectionMode;
-use crate::selection::SelectionPoint;
-use crate::selection::expand_to_line;
-use crate::selection::expand_to_word;
 
 /// Per-prompt metadata recorded from OSC 133 B/C/D sequences. Keyed by
 /// the absolute row of the prompt (`A` mark) in
@@ -274,12 +268,12 @@ pub struct Terminal {
 
     /// System clipboard gateway. Shared between OSC 52 and mouse-driven
     /// copy/paste paths.
-    clipboard: Clipboard,
+    pub clipboard: Clipboard,
 
     /// Bytes produced by the terminal itself that must be written back to
     /// the PTY — responses to queries like OSC 52 `?` reads. Drained by the
     /// event loop after each [`process`](Self::process) call.
-    pending_output: Vec<u8>,
+    pub pending_output: Vec<u8>,
     pending_host_resize: Option<(u32, u32)>,
 
     /// Terminal-level modes toggled by escape sequences (DECSET/DECRST,
@@ -353,7 +347,7 @@ pub struct Terminal {
     /// Per-prompt metadata (command column, output row, timing). Keyed by
     /// the absolute row of the prompt's `A` mark. Stale entries are pruned
     /// when their rows fall off the front of scrollback.
-    pub(crate) command_metas: HashMap<u64, CommandMeta>,
+    pub command_metas: HashMap<u64, CommandMeta>,
 
     /// Kitty graphics protocol image store. Images transmitted via `a=t`
     /// live here until placed or deleted.
@@ -731,7 +725,7 @@ impl Terminal {
     pub fn indicator_status_text(&self) -> Option<String> {
         (self.active.status_display == StatusDisplayKind::Indicator)
             .then(|| {
-                prompt_ops::format_indicator_status(
+                prompt::format_indicator_status(
                     self.current_directory.as_deref(),
                     self.current_prompt_row,
                     &self.command_metas,
@@ -780,6 +774,21 @@ impl Terminal {
         !matches!(self.modes.mouse_tracking, MouseTracking::Off)
     }
 
+    pub fn has_selection(&self) -> bool {
+        self.selection.as_ref().is_some_and(|s| !s.is_empty())
+    }
+
+    pub fn open_search(&mut self) {
+        self.search.active = true;
+        self.search.query.clear();
+        self.search.matches.clear();
+        self.search.active_idx = 0;
+    }
+
+    pub fn search_active(&self) -> bool {
+        self.search.active
+    }
+
     /// Report a mouse event to the foreground app. Returns true if an event
     /// was emitted, false if the current tracking mode suppressed it (so the
     /// caller knows it can handle the event locally instead — e.g. for
@@ -816,7 +825,7 @@ impl Terminal {
         &self,
         screen_row: u32,
     ) -> &Row {
-        let base = selection_ops::active_viewport(&self.active, &self.viewport)
+        let base = selection::active_viewport(&self.active, &self.viewport)
             .top_index(self.active.grid.rows.len());
         &self.active.grid.rows[base + screen_row as usize]
     }
@@ -855,7 +864,7 @@ impl Terminal {
     /// viewport top). No-op if none exists above or the active screen has
     /// no shell-integration marks.
     pub fn scroll_to_prev_prompt(&mut self) {
-        let top = selection_ops::screen_row_to_absolute(&self.active, &self.viewport, 0);
+        let top = selection::screen_row_to_absolute(&self.active, &self.viewport, 0);
         // Iterate the grid directly rather than collecting: prompt rows
         // are sparse, so walking the whole buffer once and taking the max
         // matching index is cheaper than building a vec.
@@ -881,7 +890,7 @@ impl Terminal {
     /// repeated presses at the live prompt are silent rather than
     /// flickering.
     pub fn scroll_to_next_prompt(&mut self) {
-        let top = selection_ops::screen_row_to_absolute(&self.active, &self.viewport, 0);
+        let top = selection::screen_row_to_absolute(&self.active, &self.viewport, 0);
         let popped = self.active.grid.total_popped as u64;
         let target = self
             .active
@@ -959,7 +968,7 @@ impl Terminal {
         &self,
         now: Instant,
     ) -> impl Iterator<Item = VisibleImage<'_>> {
-        let view = selection_ops::active_viewport(&self.active, &self.viewport);
+        let view = selection::active_viewport(&self.active, &self.viewport);
         let viewport_top = view.top_index(self.active.grid.rows.len());
         let viewport_bottom = viewport_top + view.rows as usize;
         let cell_height = self.cell_height;
@@ -1638,11 +1647,13 @@ impl Drop for TerminalThread {
 mod tests {
     use std::path::PathBuf;
 
+    use clip41::ClipboardKind;
     use palette::Srgb;
     use pty_pipe41::ForegroundProgram;
     use vtepp::Parser;
 
     use super::*;
+    use crate::selection::SelectionMode;
 
     /// Test wrapper that bundles a `Terminal` with its own `Parser` so tests
     /// can call `.process()` the same way as before the parser was extracted.
@@ -2045,7 +2056,12 @@ mod tests {
     #[test]
     fn paste_default_is_raw() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
-        term.paste("hello\n");
+        clipboard::paste(
+            &mut term.inner.pending_output,
+            term.inner.modes.c1_mode,
+            term.inner.modes.bracketed_paste,
+            "hello\n",
+        );
         assert_eq!(term.take_pending_output(), b"hello\n");
     }
 
@@ -2054,7 +2070,12 @@ mod tests {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h");
         assert!(term.modes.bracketed_paste);
-        term.paste("hello\n");
+        clipboard::paste(
+            &mut term.inner.pending_output,
+            term.inner.modes.c1_mode,
+            term.inner.modes.bracketed_paste,
+            "hello\n",
+        );
         assert_eq!(term.take_pending_output(), b"\x1b[200~hello\n\x1b[201~");
     }
 
@@ -2062,7 +2083,12 @@ mod tests {
     fn paste_wraps_with_8bit_csi_after_s8c1t() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h\x1b G");
-        term.paste("hello\n");
+        clipboard::paste(
+            &mut term.inner.pending_output,
+            term.inner.modes.c1_mode,
+            term.inner.modes.bracketed_paste,
+            "hello\n",
+        );
         assert_eq!(term.take_pending_output(), b"\x9b200~hello\n\x9b201~");
     }
 
@@ -2072,7 +2098,12 @@ mod tests {
         term.process(b"\x1b[?2004h");
         term.process(b"\x1b[?2004l");
         assert!(!term.modes.bracketed_paste);
-        term.paste("hi");
+        clipboard::paste(
+            &mut term.inner.pending_output,
+            term.inner.modes.c1_mode,
+            term.inner.modes.bracketed_paste,
+            "hi",
+        );
         assert_eq!(term.take_pending_output(), b"hi");
     }
 
@@ -2082,7 +2113,12 @@ mod tests {
         term.process(b"\x1b[?2004h");
         // The clipboard tries to break out of the bracket — the injected
         // `\x1b[201~` is stripped and everything else comes through.
-        term.paste("evil\x1b[201~injection");
+        clipboard::paste(
+            &mut term.inner.pending_output,
+            term.inner.modes.c1_mode,
+            term.inner.modes.bracketed_paste,
+            "evil\x1b[201~injection",
+        );
         assert_eq!(
             term.take_pending_output(),
             b"\x1b[200~evilinjection\x1b[201~"
@@ -2237,7 +2273,13 @@ mod tests {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
         term.clipboard.set(ClipboardKind::Clipboard, "hello");
-        term.paste_from_clipboard(ClipboardKind::Clipboard);
+        clipboard::paste_from_clipboard(
+            &mut term.inner.clipboard,
+            &mut term.inner.pending_output,
+            term.inner.modes.c1_mode,
+            term.inner.modes.bracketed_paste,
+            ClipboardKind::Clipboard,
+        );
         assert_eq!(term.take_pending_output(), b"hello");
     }
 
@@ -2245,7 +2287,13 @@ mod tests {
     fn paste_from_clipboard_ignores_empty_selection() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
-        term.paste_from_clipboard(ClipboardKind::Clipboard);
+        clipboard::paste_from_clipboard(
+            &mut term.inner.clipboard,
+            &mut term.inner.pending_output,
+            term.inner.modes.c1_mode,
+            term.inner.modes.bracketed_paste,
+            ClipboardKind::Clipboard,
+        );
         assert!(term.take_pending_output().is_empty());
     }
 
@@ -2263,7 +2311,13 @@ mod tests {
     #[test]
     fn start_selection_char_mode_is_empty_initially() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
-        term.start_selection(2, 1, SelectionMode::Char);
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            1,
+            SelectionMode::Char,
+        );
         assert!(term.selection.is_some());
         assert!(!term.has_selection()); // empty Char = not "has selection"
     }
@@ -2272,26 +2326,62 @@ mod tests {
     fn char_selection_extend_produces_text() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello");
-        term.start_selection(0, 0, SelectionMode::Char);
-        term.extend_selection(4, 0);
-        assert_eq!(term.selection_text().as_deref(), Some("hello"));
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = selection::extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            4,
+            0,
+        );
+        assert_eq!(
+            selection::selection_text(term.inner.selection.as_ref(), &term.inner.active,)
+                .as_deref(),
+            Some("hello")
+        );
     }
 
     #[test]
     fn word_selection_snaps_to_boundaries() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello world");
-        term.start_selection(2, 0, SelectionMode::Word); // in "hello"
-        assert_eq!(term.selection_text().as_deref(), Some("hello"));
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            0,
+            SelectionMode::Word,
+        );
+        assert_eq!(
+            selection::selection_text(term.inner.selection.as_ref(), &term.inner.active,)
+                .as_deref(),
+            Some("hello")
+        );
     }
 
     #[test]
     fn line_selection_covers_full_row() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello world");
-        term.start_selection(5, 0, SelectionMode::Line);
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            5,
+            0,
+            SelectionMode::Line,
+        );
         // Line selection trims trailing padding spaces.
-        assert_eq!(term.selection_text().as_deref(), Some("hello world"));
+        assert_eq!(
+            selection::selection_text(term.inner.selection.as_ref(), &term.inner.active,)
+                .as_deref(),
+            Some("hello world")
+        );
     }
 
     #[test]
@@ -2299,32 +2389,106 @@ mod tests {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
         write_row(&mut term, 0, "abc");
         write_row(&mut term, 1, "def");
-        term.start_selection(0, 0, SelectionMode::Char);
-        term.extend_selection(2, 1);
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = selection::extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            1,
+        );
         // Intermediate row trims trailing spaces, \n joins hard line breaks.
-        assert_eq!(term.selection_text().as_deref(), Some("abc\ndef"));
+        assert_eq!(
+            selection::selection_text(term.inner.selection.as_ref(), &term.inner.active,)
+                .as_deref(),
+            Some("abc\ndef")
+        );
     }
 
     #[test]
     fn selection_drags_backwards_flips_anchor_head() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello world");
-        term.start_selection(8, 0, SelectionMode::Word); // in "world"
-        term.extend_selection(2, 0); // drag back into "hello"
-        assert_eq!(term.selection_text().as_deref(), Some("hello world"));
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            8,
+            0,
+            SelectionMode::Word,
+        ); // in "world"
+        term.inner.selection = selection::extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            0,
+        ); // drag back into "hello"
+        assert_eq!(
+            selection::selection_text(term.inner.selection.as_ref(), &term.inner.active,)
+                .as_deref(),
+            Some("hello world")
+        );
     }
 
     #[test]
     fn is_cell_selected_matches_contains() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
         write_row(&mut term, 0, "abcdefghij");
-        term.start_selection(2, 0, SelectionMode::Char);
-        term.extend_selection(5, 0);
-        assert!(!term.is_cell_selected(0, 1));
-        assert!(term.is_cell_selected(0, 2));
-        assert!(term.is_cell_selected(0, 5));
-        assert!(!term.is_cell_selected(0, 6));
-        assert!(!term.is_cell_selected(1, 3));
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = selection::extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            5,
+            0,
+        );
+        assert!(!selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            1,
+            0
+        ));
+        assert!(selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            2,
+        ));
+        assert!(selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            5,
+        ));
+        assert!(!selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            6
+        ));
+        assert!(!selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            1,
+            3,
+        ));
     }
 
     #[test]
@@ -2333,18 +2497,59 @@ mod tests {
         write_row(&mut term, 0, "abc foo xyz FOO bar");
         term.open_search();
         assert!(term.search_active());
-        term.search_append("foo");
+        term.active.offset = selection::search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "foo",
+        );
         // Only the lowercase occurrence matches.
         assert_eq!(term.search.matches.len(), 1);
         let m = term.search.matches[0];
         assert_eq!((m.start_col, m.end_col), (4, 6));
-        assert!(term.is_cell_match(0, 4));
-        assert!(term.is_cell_match(0, 5));
-        assert!(term.is_cell_match(0, 6));
-        assert!(!term.is_cell_match(0, 3));
-        assert!(!term.is_cell_match(0, 7));
-        // The uppercase run must stay un-highlighted.
-        assert!(!term.is_cell_match(0, 12));
+
+        assert!(selection::is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            4
+        ));
+        assert!(selection::is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            5
+        ));
+        assert!(selection::is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            6
+        ));
+        assert!(!selection::is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            3
+        ));
+        assert!(!selection::is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            7
+        ));
+        assert!(!selection::is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            12
+        ));
     }
 
     #[test]
@@ -2352,9 +2557,14 @@ mod tests {
         let mut term = TestTerm::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "hello");
         term.open_search();
-        term.search_append("hello");
+        term.active.offset = selection::search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "hello",
+        );
         assert_eq!(term.search.matches.len(), 1);
-        term.close_search();
+        selection::close_search(&mut term.inner.search, &mut term.inner.selection);
         assert!(!term.search_active());
         assert!(term.search.matches.is_empty());
         assert!(term.search.query.is_empty());
@@ -2365,29 +2575,92 @@ mod tests {
         let mut term = TestTerm::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "abc foo def");
         term.open_search();
-        term.search_append("foo");
-        term.close_search();
+        term.active.offset = selection::search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "foo",
+        );
+        selection::close_search(&mut term.inner.search, &mut term.inner.selection);
         // Selection now covers the match columns 4..=6.
-        assert!(term.is_cell_selected(0, 4));
-        assert!(term.is_cell_selected(0, 5));
-        assert!(term.is_cell_selected(0, 6));
-        assert!(!term.is_cell_selected(0, 3));
-        assert!(!term.is_cell_selected(0, 7));
+        assert!(selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            4
+        ));
+        assert!(selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            5
+        ));
+        assert!(selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            6
+        ));
+        assert!(!selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            3
+        ));
+        assert!(!selection::is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            7
+        ));
     }
 
     #[test]
     fn search_close_without_matches_leaves_prior_selection() {
         let mut term = TestTerm::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "hello world");
-        term.start_selection(0, 0, SelectionMode::Char);
-        term.extend_selection(4, 0);
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = selection::extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            4,
+            0,
+        );
         assert!(term.has_selection());
         term.open_search();
-        term.search_append("zzz"); // no match
-        term.close_search();
-        // Pre-existing selection must still be intact.
-        assert!(term.is_cell_selected(0, 0));
-        assert!(term.is_cell_selected(0, 4));
+        term.active.offset = selection::search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "nonexistent",
+        );
+        selection::close_search(&mut term.inner.search, &mut term.inner.selection);
+        assert!(selection::is_cell_selected(
+            term.selection.as_ref(),
+            &term.active,
+            &term.inner.viewport,
+            0,
+            0
+        ));
+        assert!(selection::is_cell_selected(
+            term.selection.as_ref(),
+            &term.active,
+            &term.inner.viewport,
+            0,
+            4
+        ));
     }
 
     #[test]
@@ -2397,13 +2670,29 @@ mod tests {
         write_row(&mut term, 1, "foo");
         write_row(&mut term, 2, "foo");
         term.open_search();
-        term.search_append("foo");
+        term.active.offset = selection::search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "foo",
+        );
         assert_eq!(term.search.matches.len(), 3);
         let start_idx = term.search.active_idx;
-        term.search_next();
-        term.search_next();
-        term.search_next();
-        // Three steps from start returns to start.
+        term.active.offset = selection::search_step_next(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+        );
+        term.active.offset = selection::search_step_next(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+        );
+        term.active.offset = selection::search_step_next(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+        );
         assert_eq!(term.search.active_idx, start_idx);
     }
 
@@ -2412,10 +2701,18 @@ mod tests {
         let mut term = TestTerm::new(20, 4, 100, 16, 8);
         write_row(&mut term, 0, "fox foxy fo");
         term.open_search();
-        term.search_append("foxy");
+        term.active.offset = selection::search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "foxy",
+        );
         assert_eq!(term.search.matches.len(), 1);
-        term.search_backspace(); // query is now "fox"
-        // "fox" hits both "fox" and the start of "foxy".
+        term.active.offset = selection::search_backspace(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+        );
         assert_eq!(term.search.matches.len(), 2);
     }
 
@@ -2424,9 +2721,34 @@ mod tests {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
         write_row(&mut term, 0, "copy-me");
-        term.start_selection(0, 0, SelectionMode::Char);
-        term.extend_selection(6, 0);
-        term.copy_selection(ClipboardKind::Clipboard);
+
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = selection::extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            6,
+            0,
+        );
+        term.inner.selection = selection::extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            6,
+            0,
+        );
+        selection::copy_selection(
+            &mut term.inner.clipboard,
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            ClipboardKind::Clipboard,
+        );
         assert_eq!(
             term.clipboard.get(ClipboardKind::Clipboard).as_deref(),
             Some("copy-me")
@@ -2439,11 +2761,25 @@ mod tests {
     fn clear_selection_drops_state() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello");
-        term.start_selection(0, 0, SelectionMode::Char);
-        term.extend_selection(4, 0);
-        term.clear_selection();
-        assert!(term.selection.is_none());
-        assert!(term.selection_text().is_none());
+        term.inner.selection = selection::start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = selection::extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            4,
+            0,
+        );
+        term.inner.selection = None;
+        assert!(term.inner.selection.is_none());
+        assert!(
+            selection::selection_text(term.inner.selection.as_ref(), &term.inner.active).is_none()
+        );
     }
 
     // ---- OSC 7 cwd ----

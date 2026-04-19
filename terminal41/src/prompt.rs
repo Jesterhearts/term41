@@ -1,4 +1,13 @@
-use super::*;
+use std::collections::HashMap;
+use std::time::Duration;
+
+use crate::CommandMeta;
+use crate::Screen;
+use crate::Viewport;
+use crate::selection;
+use crate::selection::Selection;
+use crate::selection::SelectionMode;
+use crate::selection::SelectionPoint;
 
 pub(crate) fn format_indicator_status(
     current_directory: Option<&std::path::Path>,
@@ -44,12 +53,12 @@ fn running_command_text(
     (!flattened.is_empty()).then_some(flattened)
 }
 
-pub(crate) fn find_prompt_for_screen_row(
+pub fn find_prompt_for_screen_row(
     screen: &Screen,
     viewport: &Viewport,
     screen_row: u32,
 ) -> Option<u64> {
-    let base = selection_ops::active_viewport(screen, viewport).top_index(screen.grid.rows.len());
+    let base = selection::active_viewport(screen, viewport).top_index(screen.grid.rows.len());
     let start = base + screen_row as usize;
     let popped = screen.grid.total_popped as u64;
     for i in (0..=start).rev() {
@@ -74,7 +83,7 @@ fn find_next_prompt_after(
     None
 }
 
-fn command_end_abs(
+pub fn command_end_abs(
     prompt_abs: u64,
     screen: &Screen,
 ) -> u64 {
@@ -125,7 +134,7 @@ fn extract_rows_text(
     out
 }
 
-pub(crate) fn command_text_at(
+pub fn command_text_at(
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
     screen: &Screen,
@@ -157,7 +166,7 @@ fn command_text_end(
     prompt_abs
 }
 
-pub(crate) fn output_text_at(
+pub fn output_text_at(
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
     screen: &Screen,
@@ -171,7 +180,7 @@ pub(crate) fn output_text_at(
     if text.is_empty() { None } else { Some(text) }
 }
 
-pub(crate) fn command_and_output_text_at(
+pub fn command_and_output_text_at(
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
     screen: &Screen,
@@ -187,7 +196,7 @@ pub(crate) fn command_and_output_text_at(
     if text.is_empty() { None } else { Some(text) }
 }
 
-pub(crate) fn command_duration_at(
+pub fn command_duration_at(
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
 ) -> Option<Duration> {
@@ -197,7 +206,7 @@ pub(crate) fn command_duration_at(
     Some(end.duration_since(start))
 }
 
-pub(crate) fn select_command_at(
+pub fn select_command_at(
     selection: &mut Option<Selection>,
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
@@ -214,7 +223,7 @@ pub(crate) fn select_command_at(
     if text.trim().is_empty() {
         return;
     }
-    let end_col = selection_ops::absolute_row_to_local(screen, end_row)
+    let end_col = selection::absolute_row_to_local(screen, end_row)
         .map(|l| screen.grid.rows[l].content_len().saturating_sub(1))
         .unwrap_or(0);
     let anchor = SelectionPoint {
@@ -231,53 +240,4 @@ pub(crate) fn select_command_at(
         mode: SelectionMode::Char,
         origin: anchor,
     });
-}
-
-impl Terminal {
-    pub fn find_prompt_for_screen_row(
-        &self,
-        screen_row: u32,
-    ) -> Option<u64> {
-        find_prompt_for_screen_row(&self.active, &self.viewport, screen_row)
-    }
-
-    pub fn command_text_at(
-        &self,
-        prompt_abs: u64,
-    ) -> Option<String> {
-        command_text_at(prompt_abs, &self.command_metas, &self.active)
-    }
-
-    pub fn output_text_at(
-        &self,
-        prompt_abs: u64,
-    ) -> Option<String> {
-        output_text_at(prompt_abs, &self.command_metas, &self.active)
-    }
-
-    pub fn command_and_output_text_at(
-        &self,
-        prompt_abs: u64,
-    ) -> Option<String> {
-        command_and_output_text_at(prompt_abs, &self.command_metas, &self.active)
-    }
-
-    pub fn command_duration_at(
-        &self,
-        prompt_abs: u64,
-    ) -> Option<Duration> {
-        command_duration_at(prompt_abs, &self.command_metas)
-    }
-
-    pub fn select_command_at(
-        &mut self,
-        prompt_abs: u64,
-    ) {
-        select_command_at(
-            &mut self.selection,
-            prompt_abs,
-            &self.command_metas,
-            &self.active,
-        );
-    }
 }

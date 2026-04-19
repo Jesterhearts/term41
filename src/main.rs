@@ -30,7 +30,24 @@ use terminal41::MouseEventKind;
 use terminal41::MouseModifiers;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
+use terminal41::clipboard::copy_to_clipboard;
+use terminal41::clipboard::paste;
+use terminal41::clipboard::paste_from_clipboard;
+use terminal41::prompt::command_and_output_text_at;
+use terminal41::prompt::command_duration_at;
+use terminal41::prompt::command_text_at;
+use terminal41::prompt::find_prompt_for_screen_row;
+use terminal41::prompt::output_text_at;
+use terminal41::prompt::select_command_at;
 use terminal41::selection::SelectionMode;
+use terminal41::selection::close_search;
+use terminal41::selection::copy_selection;
+use terminal41::selection::extend_selection;
+use terminal41::selection::search_append;
+use terminal41::selection::search_backspace;
+use terminal41::selection::search_step_next;
+use terminal41::selection::search_step_prev;
+use terminal41::selection::start_selection;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::Ime;
@@ -309,18 +326,46 @@ impl WindowHost {
     ) {
         let shift = self.modifiers.shift_key();
         let mut terminal = target.terminal.lock().unwrap();
+        let terminal = &mut *terminal;
         match key {
-            Key::Named(NamedKey::Escape) => terminal.close_search(),
-            Key::Named(NamedKey::Backspace) => terminal.search_backspace(),
+            Key::Named(NamedKey::Escape) => {
+                close_search(&mut terminal.search, &mut terminal.selection);
+            }
+            Key::Named(NamedKey::Backspace) => {
+                terminal.active.offset =
+                    search_backspace(&mut terminal.search, &terminal.active, &terminal.viewport);
+            }
             Key::Named(NamedKey::Enter) => {
                 if shift {
-                    terminal.search_prev();
+                    terminal.active.offset = search_step_prev(
+                        &mut terminal.search,
+                        &terminal.active,
+                        &terminal.viewport,
+                    );
                 } else {
-                    terminal.search_next();
+                    terminal.active.offset = search_step_next(
+                        &mut terminal.search,
+                        &terminal.active,
+                        &terminal.viewport,
+                    );
                 }
             }
-            Key::Named(NamedKey::Space) => terminal.search_append(" "),
-            Key::Character(s) => terminal.search_append(s),
+            Key::Named(NamedKey::Space) => {
+                terminal.active.offset = search_append(
+                    &mut terminal.search,
+                    &terminal.active,
+                    &terminal.viewport,
+                    " ",
+                );
+            }
+            Key::Character(s) => {
+                terminal.active.offset = search_append(
+                    &mut terminal.search,
+                    &terminal.active,
+                    &terminal.viewport,
+                    s,
+                );
+            }
             _ => {}
         }
     }
@@ -348,17 +393,28 @@ impl WindowHost {
             }
             Action::Copy => {
                 let mut terminal = target.terminal.lock().unwrap();
+                let terminal = &mut *terminal;
                 if terminal.has_selection() {
-                    terminal.copy_selection(clip41::ClipboardKind::Clipboard);
+                    copy_selection(
+                        &mut terminal.clipboard,
+                        terminal.selection.as_ref(),
+                        &terminal.active,
+                        ClipboardKind::Clipboard,
+                    );
                 }
                 true
             }
             Action::Paste => {
-                target
-                    .terminal
-                    .lock()
-                    .unwrap()
-                    .paste_from_clipboard(clip41::ClipboardKind::Clipboard);
+                let mut terminal = target.terminal.lock().unwrap();
+                let terminal = &mut *terminal;
+
+                paste_from_clipboard(
+                    &mut terminal.clipboard,
+                    &mut terminal.pending_output,
+                    terminal.modes.c1_mode,
+                    terminal.modes.bracketed_paste,
+                    ClipboardKind::Clipboard,
+                );
                 self.flush_target_output(target);
                 true
             }
@@ -587,11 +643,19 @@ impl WindowHost {
         if self.left_drag_active
             && let Some(target) = self.active_input_target()
         {
-            target
-                .terminal
-                .lock()
-                .unwrap()
-                .extend_selection(cell.0, cell.1);
+            let mut terminal = target.terminal.lock().unwrap();
+            let terminal = &mut *terminal;
+            if let Some(selection) = terminal.selection.as_ref()
+                && let Some(new_sel) = extend_selection(
+                    selection,
+                    &terminal.active,
+                    &terminal.viewport,
+                    cell.0,
+                    cell.1,
+                )
+            {
+                terminal.selection = Some(new_sel);
+            }
             self.notify_interaction_changed();
             return;
         }
@@ -780,11 +844,10 @@ impl WindowHost {
                     _ => SelectionMode::Char,
                 };
                 if let Some(target) = self.active_input_target() {
-                    target
-                        .terminal
-                        .lock()
-                        .unwrap()
-                        .start_selection(col, row, mode);
+                    let mut target = target.terminal.lock().unwrap();
+                    let target = &mut *target;
+                    target.selection =
+                        start_selection(&target.active, &target.viewport, col, row, mode);
                 }
                 self.left_drag_active = true;
                 self.notify_interaction_changed();
@@ -793,10 +856,16 @@ impl WindowHost {
                 self.left_drag_active = false;
                 if let Some(target) = self.active_input_target() {
                     let mut terminal = target.terminal.lock().unwrap();
+                    let terminal = &mut *terminal;
                     if terminal.has_selection() {
-                        terminal.copy_selection(ClipboardKind::Primary);
+                        copy_selection(
+                            &mut terminal.clipboard,
+                            terminal.selection.as_ref(),
+                            &terminal.active,
+                            ClipboardKind::Primary,
+                        );
                     } else {
-                        terminal.clear_selection();
+                        terminal.selection = None;
                     }
                 }
                 self.notify_interaction_changed();
@@ -804,14 +873,25 @@ impl WindowHost {
             (MouseButton::Right, true) => {
                 if let Some(target) = self.active_input_target() {
                     let mut terminal = target.terminal.lock().unwrap();
+                    let terminal = &mut *terminal;
                     if terminal.has_selection() {
-                        terminal.copy_selection(ClipboardKind::Clipboard);
-                        terminal.clear_selection();
+                        copy_selection(
+                            &mut terminal.clipboard,
+                            terminal.selection.as_ref(),
+                            &terminal.active,
+                            ClipboardKind::Clipboard,
+                        );
+                        terminal.selection = None;
                     } else {
                         terminal.reset_viewport();
-                        terminal.paste_from_clipboard(ClipboardKind::Clipboard);
+                        paste_from_clipboard(
+                            &mut terminal.clipboard,
+                            &mut terminal.pending_output,
+                            terminal.modes.c1_mode,
+                            terminal.modes.bracketed_paste,
+                            ClipboardKind::Clipboard,
+                        );
                     }
-                    drop(terminal);
                     self.flush_target_output(target);
                 }
                 self.notify_interaction_changed();
@@ -921,7 +1001,7 @@ impl WindowHost {
             .take()
             .is_some();
         if had_popup && let Some(target) = self.active_input_target() {
-            target.terminal.lock().unwrap().clear_selection();
+            target.terminal.lock().unwrap().selection = None;
         }
     }
 
@@ -932,15 +1012,22 @@ impl WindowHost {
         let Some(target) = self.active_input_target() else {
             return;
         };
-        let mut terminal = target.terminal.lock().unwrap();
-        let Some(prompt_abs) = terminal.find_prompt_for_screen_row(screen_row) else {
+        let mut guard = target.terminal.lock().unwrap();
+        let terminal = &mut *guard;
+        let Some(prompt_abs) =
+            find_prompt_for_screen_row(&terminal.active, &terminal.viewport, screen_row)
+        else {
             return;
         };
-        terminal.select_command_at(prompt_abs);
-        let duration_text = terminal
-            .command_duration_at(prompt_abs)
-            .map(format_duration);
-        drop(terminal);
+        select_command_at(
+            &mut terminal.selection,
+            prompt_abs,
+            &terminal.command_metas,
+            &terminal.active,
+        );
+        let duration_text =
+            command_duration_at(prompt_abs, &terminal.command_metas).map(format_duration);
+        drop(guard);
         self.update_gutter_popup(Some(renderer::GutterPopup {
             prompt_abs_row: prompt_abs,
             screen_row,
@@ -963,36 +1050,59 @@ impl WindowHost {
         };
         match item_idx {
             0 => {
-                let mut terminal = target.terminal.lock().unwrap();
-                if let Some(cmd) = terminal.command_text_at(popup.prompt_abs_row) {
+                let mut guard = target.terminal.lock().unwrap();
+                let terminal = &mut *guard;
+                if let Some(cmd) = command_text_at(
+                    popup.prompt_abs_row,
+                    &terminal.command_metas,
+                    &terminal.active,
+                ) {
                     let cmd = cmd.trim().to_owned();
-                    terminal.clear_selection();
+                    terminal.selection = None;
                     terminal.reset_viewport();
-                    terminal.paste(&format!("{cmd}\r"));
+                    paste(
+                        &mut terminal.pending_output,
+                        terminal.modes.c1_mode,
+                        terminal.modes.bracketed_paste,
+                        &format!("{cmd}\r"),
+                    );
                 }
-                drop(terminal);
+                drop(guard);
                 self.flush_target_output(target);
             }
             1 => {
-                let mut terminal = target.terminal.lock().unwrap();
-                if let Some(text) = terminal.command_text_at(popup.prompt_abs_row) {
-                    terminal.copy_to_clipboard(text.trim());
+                let mut guard = target.terminal.lock().unwrap();
+                let terminal = &mut *guard;
+                if let Some(text) = command_text_at(
+                    popup.prompt_abs_row,
+                    &terminal.command_metas,
+                    &terminal.active,
+                ) {
+                    copy_to_clipboard(&mut terminal.clipboard, text.trim());
                 }
-                terminal.clear_selection();
+                terminal.selection = None;
             }
             2 => {
                 let mut terminal = target.terminal.lock().unwrap();
-                if let Some(text) = terminal.command_and_output_text_at(popup.prompt_abs_row) {
-                    terminal.copy_to_clipboard(&text);
+                if let Some(text) = command_and_output_text_at(
+                    popup.prompt_abs_row,
+                    &terminal.command_metas,
+                    &terminal.active,
+                ) {
+                    copy_to_clipboard(&mut terminal.clipboard, text.trim());
                 }
-                terminal.clear_selection();
+                terminal.selection = None;
             }
             3 => {
                 let mut terminal = target.terminal.lock().unwrap();
-                if let Some(text) = terminal.output_text_at(popup.prompt_abs_row) {
-                    terminal.copy_to_clipboard(&text);
+                if let Some(text) = output_text_at(
+                    popup.prompt_abs_row,
+                    &terminal.command_metas,
+                    &terminal.active,
+                ) {
+                    copy_to_clipboard(&mut terminal.clipboard, text.trim());
                 }
-                terminal.clear_selection();
+                terminal.selection = None;
             }
             _ => return,
         }

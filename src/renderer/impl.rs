@@ -14,6 +14,10 @@ use terminal41::ColorPalette;
 use terminal41::CursorShape;
 use terminal41::LineAttr;
 use terminal41::Terminal;
+use terminal41::selection::is_cell_active_match;
+use terminal41::selection::is_cell_match;
+use terminal41::selection::is_cell_selected;
+use terminal41::selection::search_state;
 use unicode_segmentation::UnicodeSegmentation;
 use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
@@ -403,11 +407,37 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
             has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
             line_attr: grid_row.line_attr,
             selected: (0..cols)
-                .map(|c| terminal.is_cell_selected(row, c))
+                .map(|c| {
+                    is_cell_selected(
+                        terminal.selection.as_ref(),
+                        &terminal.active,
+                        &terminal.viewport,
+                        row,
+                        c,
+                    )
+                })
                 .collect(),
-            matched: (0..cols).map(|c| terminal.is_cell_match(row, c)).collect(),
+            matched: (0..cols)
+                .map(|c| {
+                    is_cell_match(
+                        &terminal.search,
+                        &terminal.active,
+                        &terminal.viewport,
+                        row,
+                        c,
+                    )
+                })
+                .collect(),
             active_match: (0..cols)
-                .map(|c| terminal.is_cell_active_match(row, c))
+                .map(|c| {
+                    is_cell_active_match(
+                        &terminal.search,
+                        &terminal.active,
+                        &terminal.viewport,
+                        row,
+                        c,
+                    )
+                })
                 .collect(),
             prompt_start: grid_row.prompt_start,
             exit_status: grid_row.exit_status,
@@ -417,7 +447,7 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
         rows.push(status_row);
     }
 
-    let search = terminal.search_state().map(|s| SearchSnapshot {
+    let search = search_state(&terminal.search).map(|s| SearchSnapshot {
         query: s.query.clone(),
         match_count: s.matches.len(),
         active_idx: s.active_idx,
