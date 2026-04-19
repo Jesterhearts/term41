@@ -536,37 +536,55 @@ fn sync_screen_erase_defaults(
     screen.grid.default_bg = crate::dec_color::erase_background_color(dec_color, screen.bg);
 }
 
-fn apply_hard_reset(
-    ctx: &mut EscContext<'_>,
+fn apply_hard_reset_state(
+    screen: &mut Screen,
+    stash: &mut Screen,
+    viewport: &mut Viewport,
+    on_alt_screen: &mut bool,
+    modes: &mut TerminalModes,
+    kitty_keyboard: &mut KittyKeyboardState,
+    cursor_style: &mut CursorStyle,
+    current_title: &mut Option<String>,
+    title_stack: &mut Vec<Option<String>>,
+    saved_modes: &mut std::collections::HashMap<u16, bool>,
+    current_prompt_row: &mut Option<u64>,
+    bell_pending: &mut bool,
+    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
+    palette: &mut color::ColorPalette,
+    base_palette: &color::ColorPalette,
+    default_status_display: &StatusDisplayKind,
+    dec_color: &mut DecColorState,
+    macros: &mut MacroStore,
+    drcs: &mut DrcsStore,
     conformance_level: ConformanceLevel,
     c1_mode: C1Mode,
 ) {
-    *ctx.dec_color = crate::dec_color::state_from_palette(ctx.base_palette);
-    *ctx.palette = crate::dec_color::effective_palette(ctx.base_palette, ctx.dec_color);
-    if *ctx.on_alt_screen {
-        std::mem::swap(ctx.screen, ctx.stash);
-        *ctx.on_alt_screen = false;
+    *dec_color = crate::dec_color::state_from_palette(base_palette);
+    *palette = crate::dec_color::effective_palette(base_palette, dec_color);
+    if *on_alt_screen {
+        std::mem::swap(screen, stash);
+        *on_alt_screen = false;
     }
-    let total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
-    for s in [&mut *ctx.screen, &mut *ctx.stash] {
-        s.grid.default_fg = ctx.palette.fg;
-        s.grid.default_bg = ctx.palette.bg;
+    let total_rows = viewport.rows + screen::status_line_rows(screen);
+    for s in [&mut *screen, &mut *stash] {
+        s.grid.default_fg = palette.fg;
+        s.grid.default_bg = palette.bg;
         s.cursor = grid::Cursor::default();
-        s.fg = ctx.palette.fg;
-        s.bg = ctx.palette.bg;
+        s.fg = palette.fg;
+        s.bg = palette.bg;
         s.attrs = CellAttrs::default();
         s.underline = UnderlineStyle::None;
         s.underline_color = None;
         s.scroll_top = 0;
-        s.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+        s.scroll_bottom = viewport.rows.saturating_sub(1);
         s.left_margin = 0;
-        s.right_margin = ctx.viewport.cols.saturating_sub(1);
+        s.right_margin = viewport.cols.saturating_sub(1);
         s.offset = 0;
         s.saved_cursor = None;
         s.current_hyperlink = None;
         s.cursor_visible = true;
         s.last_char = None;
-        s.tab_stops = screen::init_tab_stops(ctx.viewport.cols);
+        s.tab_stops = screen::init_tab_stops(viewport.cols);
         s.origin_mode = false;
         s.nrc_mode = false;
         s.upss = charset::UserPreferredSupplementalSet::DecSupplemental;
@@ -581,27 +599,57 @@ fn apply_hard_reset(
         crate::apply_status_display_mode(
             s,
             total_rows,
-            ctx.viewport.cols,
-            *ctx.default_status_display,
-            ctx.palette,
+            viewport.cols,
+            *default_status_display,
+            palette,
         );
-        sync_screen_erase_defaults(s, ctx.dec_color);
-        screen::clear_visible(s, ctx.viewport);
+        sync_screen_erase_defaults(s, dec_color);
+        screen::clear_visible(s, viewport);
     }
-    ctx.viewport.rows = total_rows.saturating_sub(screen::status_line_rows(ctx.screen));
-    *ctx.modes = TerminalModes::new();
-    ctx.modes.conformance_level = conformance_level;
-    ctx.modes.c1_mode = c1_mode;
-    *ctx.kitty_keyboard = KittyKeyboardState::new();
-    *ctx.cursor_style = CursorStyle::default();
-    *ctx.current_title = None;
-    ctx.title_stack.clear();
-    ctx.saved_modes.clear();
-    *ctx.current_prompt_row = None;
-    *ctx.bell_pending = false;
-    *ctx.vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-    ctx.macros.clear();
-    ctx.drcs.clear();
+    viewport.rows = total_rows.saturating_sub(screen::status_line_rows(screen));
+    *modes = TerminalModes::new();
+    modes.conformance_level = conformance_level;
+    modes.c1_mode = c1_mode;
+    *kitty_keyboard = KittyKeyboardState::new();
+    *cursor_style = CursorStyle::default();
+    *current_title = None;
+    title_stack.clear();
+    saved_modes.clear();
+    *current_prompt_row = None;
+    *bell_pending = false;
+    *vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+    macros.clear();
+    drcs.clear();
+}
+
+fn apply_hard_reset(
+    ctx: &mut EscContext<'_>,
+    conformance_level: ConformanceLevel,
+    c1_mode: C1Mode,
+) {
+    apply_hard_reset_state(
+        ctx.screen,
+        ctx.stash,
+        ctx.viewport,
+        ctx.on_alt_screen,
+        ctx.modes,
+        ctx.kitty_keyboard,
+        ctx.cursor_style,
+        ctx.current_title,
+        ctx.title_stack,
+        ctx.saved_modes,
+        ctx.current_prompt_row,
+        ctx.bell_pending,
+        ctx.vt52_cursor_addr,
+        ctx.palette,
+        ctx.base_palette,
+        ctx.default_status_display,
+        ctx.dec_color,
+        ctx.macros,
+        ctx.drcs,
+        conformance_level,
+        c1_mode,
+    );
 }
 
 /// Forward-scan tab stops from `start_col + 1`. Returns the column of the
@@ -1947,6 +1995,45 @@ pub(super) fn csi_dispatch(
                 );
             }
             _ => {}
+        }
+        return;
+    }
+
+    // DECTST — Invoke Confidence Test.
+    if action == 'y' && intermediates.is_empty() {
+        let mut groups = params.iter();
+        let selector = groups.next().and_then(|g| g.first().copied()).unwrap_or(0);
+        if selector != 4 {
+            return;
+        }
+        let requested_tests: Vec<u16> = groups.flat_map(|g| g.iter().copied()).collect();
+        let power_up_self_test = requested_tests.is_empty()
+            || requested_tests.contains(&0)
+            || requested_tests.contains(&1);
+        if power_up_self_test {
+            apply_hard_reset_state(
+                ctx.screen,
+                ctx.stash,
+                ctx.viewport,
+                ctx.on_alt_screen,
+                ctx.modes,
+                ctx.kitty_keyboard,
+                ctx.cursor_style,
+                ctx.current_title,
+                ctx.title_stack,
+                ctx.saved_modes,
+                ctx.current_prompt_row,
+                ctx.bell_pending,
+                ctx.vt52_cursor_addr,
+                ctx.palette,
+                ctx.base_palette,
+                ctx.default_status_display,
+                ctx.dec_color,
+                ctx.macros,
+                ctx.drcs,
+                ConformanceLevel::Level4,
+                C1Mode::SevenBit,
+            );
         }
         return;
     }

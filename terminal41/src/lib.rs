@@ -2034,19 +2034,32 @@ impl Terminal {
                         .next()
                         .and_then(|group| group.first().copied())
                         .unwrap_or(0);
-                    let space = groups
-                        .next()
-                        .and_then(|group| group.first().copied())
-                        .unwrap_or(0);
-                    if report_type == 2
-                        && let Some(space) = dec_color::ColorSpace::from_param(Some(space))
-                    {
-                        let report = dec_color::report_color_table(&self.dec_color, space);
-                        conformance::write_dcs(
-                            &mut self.pending_output,
-                            self.modes.c1_mode,
-                            format_args!("2$s{report}"),
-                        );
+                    match report_type {
+                        1 => {
+                            let payload = dectsr_payload(&self.active);
+                            conformance::push_dcs_prefix(
+                                &mut self.pending_output,
+                                self.modes.c1_mode,
+                            );
+                            self.pending_output.extend_from_slice(b"1$s");
+                            self.pending_output.extend_from_slice(&payload);
+                            conformance::push_st(&mut self.pending_output, self.modes.c1_mode);
+                        }
+                        2 => {
+                            let space = groups
+                                .next()
+                                .and_then(|group| group.first().copied())
+                                .unwrap_or(0);
+                            if let Some(space) = dec_color::ColorSpace::from_param(Some(space)) {
+                                let report = dec_color::report_color_table(&self.dec_color, space);
+                                conformance::write_dcs(
+                                    &mut self.pending_output,
+                                    self.modes.c1_mode,
+                                    format_args!("2$s{report}"),
+                                );
+                            }
+                        }
+                        _ => {}
                     }
                     self.track_scroll(popped_before);
                     return;
@@ -2749,6 +2762,78 @@ pub(crate) fn dectabsr_report(screen: &Screen) -> String {
         .join(";")
 }
 
+fn append_ddd2_payload(out: &mut Vec<u8>) {
+    out.extend_from_slice(b"\x1b)B");
+}
+
+fn append_ddd3_payload(out: &mut Vec<u8>) {
+    out.extend_from_slice(b"\x1b(B");
+}
+
+pub(crate) fn dectsr_payload(screen: &Screen) -> Vec<u8> {
+    let mut payload = Vec::new();
+    if screen.charset.designated(charset::GraphicSetSlot::G1) == charset::CharacterSet::Ascii {
+        append_ddd2_payload(&mut payload);
+    }
+    if screen.charset.designated(charset::GraphicSetSlot::G0) == charset::CharacterSet::Ascii {
+        append_ddd3_payload(&mut payload);
+    }
+    payload
+}
+
+fn parse_dectsr_payload(payload: &[u8]) -> Vec<&[u8]> {
+    let mut controls = Vec::new();
+    let mut i = 0;
+    while i + 2 < payload.len() {
+        if payload[i] == 0x1b
+            && matches!(payload[i + 1], b'(' | b')')
+            && matches!(payload[i + 2], b'1' | b'B')
+        {
+            controls.push(&payload[i..i + 3]);
+            i += 3;
+        } else {
+            i += 1;
+        }
+    }
+    controls
+}
+
+fn restore_dectsr(
+    payload: &[u8],
+    screen: &mut Screen,
+) -> bool {
+    let controls = parse_dectsr_payload(payload);
+    if controls.is_empty() {
+        return false;
+    }
+
+    let mut restored = false;
+    for control in controls {
+        match control {
+            b"\x1b)1" => {
+                // DDD1 toggles Hebrew keyboard/video modes on real DEC
+                // hardware. term41 accepts the marker so report/restore
+                // streams still round-trip, but has no matching local state.
+                restored = true;
+            }
+            b"\x1b)B" => {
+                screen
+                    .charset
+                    .designate(charset::GraphicSetSlot::G1, charset::CharacterSet::Ascii);
+                restored = true;
+            }
+            b"\x1b(B" => {
+                screen
+                    .charset
+                    .designate(charset::GraphicSetSlot::G0, charset::CharacterSet::Ascii);
+                restored = true;
+            }
+            _ => {}
+        }
+    }
+    restored
+}
+
 fn parse_deccir_designators(mut bytes: &[u8]) -> Option<[Vec<u8>; 4]> {
     let mut parsed: [Vec<u8>; 4] = std::array::from_fn(|_| Vec::new());
     for slot in &mut parsed {
@@ -3130,8 +3215,14 @@ fn handle_dcs(
             .next()
             .and_then(|group| group.first().copied())
             .unwrap_or(0);
-        if ps == 2 {
-            terminal.restore_dec_color_table(payload);
+        match ps {
+            1 => {
+                restore_dectsr(payload, &mut terminal.active);
+            }
+            2 => {
+                terminal.restore_dec_color_table(payload);
+            }
+            _ => {}
         }
     } else if action == 'z' && intermediates == b"!" {
         terminal.define_macro(params, payload);
@@ -5628,6 +5719,53 @@ mod tests {
     }
 
     #[test]
+    fn decrqtsr_reports_ascii_g0_and_g1_designations() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b[1$u");
+        assert_eq!(term.take_pending_output(), b"\x1bP1$s\x1b)B\x1b(B\x1b\\");
+    }
+
+    #[test]
+    fn decrsts_restores_ascii_g0_and_g1_designations() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b(0\x1b)>");
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G0),
+            charset::CharacterSet::DecSpecialGraphics
+        );
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G1),
+            charset::CharacterSet::DecTechnical
+        );
+
+        term.process(b"\x1bP1$p\x1b)B\x1b(B\x1b\\");
+
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G0),
+            charset::CharacterSet::Ascii
+        );
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G1),
+            charset::CharacterSet::Ascii
+        );
+    }
+
+    #[test]
+    fn decrsts_accepts_ddd1_without_rejecting_the_report() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1bP1$p\x1b)1\x1b)B\x1b(B\x1b\\");
+
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G0),
+            charset::CharacterSet::Ascii
+        );
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G1),
+            charset::CharacterSet::Ascii
+        );
+    }
+
+    #[test]
     fn decrqm_reports_permanent_mode_states() {
         let mut term = TestTerm::new(16, 4, 10, 16, 8);
         term.process(b"\x1b[10$p\x1b[20$p\x1b[?60$p");
@@ -5647,6 +5785,24 @@ mod tests {
         assert_eq!(term.active.cursor.row, 0);
         assert_eq!(term.active.cursor.col, 0);
         // Visible content is gone.
+        for r in term.active.grid.rows.iter().rev().take(3) {
+            assert_eq!(r.content_len(), 0);
+        }
+    }
+
+    #[test]
+    fn dectst_power_up_self_test_resets_terminal_state() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        term.process(b"\x1b[?1004h\x1b(0hello");
+        term.process(b"\x1b[4;1y");
+
+        assert!(!term.modes.focus_reporting);
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G0),
+            charset::CharacterSet::Ascii
+        );
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
         for r in term.active.grid.rows.iter().rev().take(3) {
             assert_eq!(r.content_len(), 0);
         }

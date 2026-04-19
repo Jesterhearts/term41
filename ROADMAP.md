@@ -176,12 +176,12 @@ Security:
 
 Missing or incomplete:
 
-- [ ] `DECTST`
+- [x] `DECTST`
 - [ ] `DECSR` / `DECSRC`
 - [ ] `DECRPM`
 - [ ] broader `DECRQSS`
 - [ ] `DECRQPSR` / `DECCIR`
-- [ ] `DECRQTSR` / `DECRSTS`
+- [x] `DECRQTSR` / `DECRSTS`
 - [ ] `DECRSPS`
 
 Why it matters:
