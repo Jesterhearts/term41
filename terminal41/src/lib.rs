@@ -4,6 +4,7 @@ mod charset;
 mod color;
 mod conformance;
 mod cursor;
+mod dec_color;
 mod decmacro;
 mod drcs;
 mod feature;
@@ -45,6 +46,7 @@ pub use self::conformance::C1Mode;
 pub use self::conformance::ConformanceLevel;
 pub use self::cursor::CursorShape;
 pub use self::cursor::CursorStyle;
+use self::dec_color::DecColorState;
 use self::decmacro::MAX_MACRO_INVOCATION_DEPTH;
 use self::decmacro::MacroEncoding;
 use self::decmacro::MacroStore;
@@ -354,6 +356,8 @@ pub struct Terminal {
     /// Runtime color palette. Stored here so SGR resets, OSC color queries,
     /// and the renderer can all resolve themed colors.
     pub palette: ColorPalette,
+    base_palette: ColorPalette,
+    dec_color: DecColorState,
 
     /// State machine for the VT52 `ESC Y Pr Pc` direct cursor address. After
     /// `ESC Y` is dispatched, the next 1–2 byte actions carry the row and
@@ -387,6 +391,9 @@ impl Terminal {
         cell_width: u32,
         palette: ColorPalette,
     ) -> Self {
+        let base_palette = palette;
+        let dec_color = dec_color::state_from_palette(&base_palette);
+        let palette = dec_color::effective_palette(&base_palette, &dec_color);
         let mut terminal = Self {
             active: Screen::new(
                 cols,
@@ -434,6 +441,8 @@ impl Terminal {
             iterm_chunked: image41::iterm::ChunkedTransmission::new(),
             cell_width,
             palette,
+            base_palette,
+            dec_color,
             vt52_cursor_addr: Vt52CursorAddr::Idle,
             default_status_display,
             strict_altscreen_scrollback,
@@ -479,9 +488,42 @@ impl Terminal {
         palette: ColorPalette,
     ) {
         let old_palette = self.palette.clone();
-        self.palette = palette.clone();
+        dec_color::rebase_theme_entries(&mut self.dec_color, &self.base_palette, &palette);
+        self.base_palette = palette;
+        self.palette = dec_color::effective_palette(&self.base_palette, &self.dec_color);
         for screen in [&mut self.active, &mut self.stash] {
-            apply_screen_palette(screen, &old_palette, &palette);
+            apply_screen_palette(screen, &old_palette, &self.palette);
+        }
+    }
+
+    fn assign_dec_text_colors(
+        &mut self,
+        fg: u16,
+        bg: u16,
+    ) -> bool {
+        if !dec_color::assign_normal_text_colors(&mut self.dec_color, fg, bg) {
+            return false;
+        }
+        self.apply_dec_color_defaults();
+        true
+    }
+
+    fn restore_dec_color_table(
+        &mut self,
+        payload: &[u8],
+    ) -> bool {
+        if !dec_color::restore_color_table(&mut self.dec_color, payload) {
+            return false;
+        }
+        self.apply_dec_color_defaults();
+        true
+    }
+
+    fn apply_dec_color_defaults(&mut self) {
+        let old_palette = self.palette.clone();
+        self.palette = dec_color::effective_palette(&self.base_palette, &self.dec_color);
+        for screen in [&mut self.active, &mut self.stash] {
+            apply_screen_palette(screen, &old_palette, &self.palette);
         }
     }
 
@@ -1905,6 +1947,44 @@ impl Terminal {
                     self.track_scroll(popped_before);
                     return;
                 }
+                if intermediates.as_slice() == b"," && action == '|' {
+                    let mut groups = params.iter();
+                    let assignment_class = groups
+                        .next()
+                        .and_then(|group| group.first().copied())
+                        .unwrap_or(0);
+                    if assignment_class == dec_color::TEXT_COLOR_ASSIGNMENT_CLASS
+                        && let (Some(fg), Some(bg)) = (
+                            groups.next().and_then(|group| group.first().copied()),
+                            groups.next().and_then(|group| group.first().copied()),
+                        )
+                    {
+                        self.assign_dec_text_colors(fg, bg);
+                    }
+                    self.track_scroll(popped_before);
+                    return;
+                }
+                if intermediates.as_slice() == b"$" && action == 'u' {
+                    let mut groups = params.iter();
+                    let report_type = groups
+                        .next()
+                        .and_then(|group| group.first().copied())
+                        .unwrap_or(0);
+                    let request = groups
+                        .next()
+                        .and_then(|group| group.first().copied())
+                        .unwrap_or(0);
+                    if report_type == 2 && request == 2 {
+                        let report = dec_color::report_color_table(&self.dec_color);
+                        conformance::write_dcs(
+                            &mut self.pending_output,
+                            self.modes.c1_mode,
+                            format_args!("2$s{report}"),
+                        );
+                    }
+                    self.track_scroll(popped_before);
+                    return;
+                }
                 let mut ctx = CsiContext {
                     screen: &mut self.active,
                     stash: &mut self.stash,
@@ -1917,7 +1997,8 @@ impl Terminal {
                     cursor_style: &mut self.cursor_style,
                     cell_width: self.cell_width,
                     cell_height: self.cell_height,
-                    palette: &self.palette,
+                    palette: &mut self.palette,
+                    base_palette: &self.base_palette,
                     default_status_display: &mut self.default_status_display,
                     title_stack: &mut self.title_stack,
                     current_title: &mut self.current_title,
@@ -1926,6 +2007,7 @@ impl Terminal {
                     bell_pending: &mut self.bell_pending,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
                     macros: &mut self.macros,
+                    dec_color: &mut self.dec_color,
                     feature_permissions: &self.feature_permissions,
                     foreground_processes: &self.foreground_processes,
                     drcs: &mut self.drcs,
@@ -1949,11 +2031,13 @@ impl Terminal {
                     saved_modes: &mut self.saved_private_modes,
                     current_prompt_row: &mut self.current_prompt_row,
                     bell_pending: &mut self.bell_pending,
-                    palette: &self.palette,
+                    palette: &mut self.palette,
+                    base_palette: &self.base_palette,
                     default_status_display: &mut self.default_status_display,
                     pending_output: &mut self.pending_output,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
                     macros: &mut self.macros,
+                    dec_color: &mut self.dec_color,
                     drcs: &mut self.drcs,
                 };
                 esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
@@ -2367,6 +2451,11 @@ fn handle_decrqss(
             };
             conformance::write_dcs(out, c1_mode, format_args!("1$r{ps} q"));
         }
+        // DECAC — report normal-text color assignment.
+        b"1,|" => {
+            let assignment = dec_color::report_text_color_assignment(&terminal.dec_color);
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{assignment}"));
+        }
         // DECSCA — report character protection attribute.
         b"\"q" => {
             let ps = if terminal
@@ -2555,6 +2644,15 @@ fn handle_dcs(
     } else if action == '{' && intermediates.is_empty() {
         let flat_params: Vec<u16> = params.iter().flat_map(|g| g.iter().copied()).collect();
         terminal.drcs.define(&flat_params, payload);
+    } else if action == 'p' && intermediates == b"$" {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|group| group.first().copied())
+            .unwrap_or(0);
+        if ps == 2 {
+            terminal.restore_dec_color_table(payload);
+        }
     } else if action == 'z' && intermediates == b"!" {
         terminal.define_macro(params, payload);
     }
@@ -4631,6 +4729,65 @@ mod tests {
     }
 
     #[test]
+    fn decrqss_reports_normal_text_color_assignment() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        handle_decrqss(b"1,|", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r1;7;0,|\x1b\\");
+    }
+
+    #[test]
+    fn decctr_reports_current_color_table() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[2;2$u");
+        let expected = format!(
+            "\x1bP2$s{}\x1b\\",
+            dec_color::report_color_table(&term.dec_color)
+        );
+        assert_eq!(term.take_pending_output(), expected.as_bytes());
+    }
+
+    #[test]
+    fn decac_changes_effective_default_colors() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[1;4;7,|x");
+
+        assert_eq!(term.palette.fg, term.dec_color.table[4]);
+        assert_eq!(term.palette.bg, term.dec_color.table[7]);
+        assert_eq!(term.active.grid.default_fg, term.dec_color.table[4]);
+        assert_eq!(term.active.grid.default_bg, term.dec_color.table[7]);
+        assert_eq!(term.active.grid.rows[0].fg[0], term.dec_color.table[4]);
+        assert_eq!(term.active.grid.rows[0].bg[0], term.dec_color.table[7]);
+
+        handle_decrqss(b"1,|", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r1;4;7,|\x1b\\");
+    }
+
+    #[test]
+    fn decctr_restore_remaps_existing_default_colored_cells() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"ab");
+        term.process(b"\x1bP2$p0;2;1;2;3/7;2;10;20;30\x1b\\");
+
+        assert_eq!(term.palette.bg, Srgb::new(1, 2, 3));
+        assert_eq!(term.palette.fg, Srgb::new(10, 20, 30));
+        assert_eq!(term.active.grid.rows[0].fg[0], Srgb::new(10, 20, 30));
+        assert_eq!(term.active.grid.rows[0].bg[0], Srgb::new(1, 2, 3));
+        assert_eq!(term.active.grid.rows[0].fg[1], Srgb::new(10, 20, 30));
+        assert_eq!(term.active.grid.rows[0].bg[1], Srgb::new(1, 2, 3));
+    }
+
+    #[test]
+    fn decctr_restore_preserves_explicit_sgr_colors() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[31mx");
+        let explicit_fg = term.active.grid.rows[0].fg[0];
+
+        term.process(b"\x1bP2$p0;2;1;2;3/7;2;10;20;30/1;2;200;10;10\x1b\\");
+
+        assert_eq!(term.active.grid.rows[0].fg[0], explicit_fg);
+    }
+
+    #[test]
     fn page_geometry_commands_queue_host_resize() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[36*|");
@@ -4661,6 +4818,18 @@ mod tests {
         assert!(term.on_alt_screen);
         term.process(b"\x1bc");
         assert!(!term.on_alt_screen);
+    }
+
+    #[test]
+    fn ris_resets_dec_color_state() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        term.process(b"\x1b[1;4;7,|\x1bP2$p4;2;8;9;10\x1b\\");
+        term.process(b"\x1bc");
+
+        handle_decrqss(b"1,|", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r1;7;0,|\x1b\\");
+        assert_eq!(term.palette.fg, term.base_palette.fg);
+        assert_eq!(term.palette.bg, term.base_palette.bg);
     }
 
     #[test]

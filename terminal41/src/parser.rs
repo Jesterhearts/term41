@@ -21,6 +21,7 @@ use crate::color;
 use crate::color::apply_sgr;
 use crate::conformance;
 use crate::cursor::CursorStyle;
+use crate::dec_color::DecColorState;
 use crate::decmacro::MacroStore;
 use crate::drcs::Store as DrcsStore;
 use crate::feature::FeaturePermissions;
@@ -54,7 +55,8 @@ pub(super) struct CsiContext<'a> {
     pub cursor_style: &'a mut CursorStyle,
     pub cell_width: u32,
     pub cell_height: u32,
-    pub palette: &'a color::ColorPalette,
+    pub palette: &'a mut color::ColorPalette,
+    pub base_palette: &'a color::ColorPalette,
     pub default_status_display: &'a mut StatusDisplayKind,
     pub title_stack: &'a mut Vec<Option<String>>,
     pub current_title: &'a mut Option<String>,
@@ -63,6 +65,7 @@ pub(super) struct CsiContext<'a> {
     pub bell_pending: &'a mut bool,
     pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
     pub macros: &'a mut MacroStore,
+    pub dec_color: &'a mut DecColorState,
     pub feature_permissions: &'a FeaturePermissions,
     pub foreground_processes: &'a Option<ForegroundProcessSet>,
     pub drcs: &'a mut DrcsStore,
@@ -83,7 +86,8 @@ pub(super) struct EscContext<'a> {
     pub saved_modes: &'a mut std::collections::HashMap<u16, bool>,
     pub current_prompt_row: &'a mut Option<u64>,
     pub bell_pending: &'a mut bool,
-    pub palette: &'a color::ColorPalette,
+    pub palette: &'a mut color::ColorPalette,
+    pub base_palette: &'a color::ColorPalette,
     pub default_status_display: &'a mut StatusDisplayKind,
     /// Bytes to write back to the PTY (e.g. VT52 identify response `ESC / Z`).
     pub pending_output: &'a mut Vec<u8>,
@@ -92,6 +96,7 @@ pub(super) struct EscContext<'a> {
     /// [`Terminal::apply`] before any other dispatch occurs.
     pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
     pub macros: &'a mut MacroStore,
+    pub dec_color: &'a mut DecColorState,
     pub drcs: &'a mut DrcsStore,
 }
 
@@ -529,6 +534,8 @@ fn apply_hard_reset(
     conformance_level: ConformanceLevel,
     c1_mode: C1Mode,
 ) {
+    *ctx.dec_color = crate::dec_color::state_from_palette(ctx.base_palette);
+    *ctx.palette = crate::dec_color::effective_palette(ctx.base_palette, ctx.dec_color);
     if *ctx.on_alt_screen {
         std::mem::swap(ctx.screen, ctx.stash);
         *ctx.on_alt_screen = false;
@@ -1687,10 +1694,12 @@ pub(super) fn csi_dispatch(
             current_prompt_row: ctx.current_prompt_row,
             bell_pending: ctx.bell_pending,
             palette: ctx.palette,
+            base_palette: ctx.base_palette,
             default_status_display: ctx.default_status_display,
             pending_output: ctx.pending_output,
             vt52_cursor_addr: ctx.vt52_cursor_addr,
             macros: ctx.macros,
+            dec_color: ctx.dec_color,
             drcs: ctx.drcs,
         };
         apply_hard_reset(&mut esc_ctx, level, c1_mode);
@@ -3025,7 +3034,9 @@ mod tests {
         screen: &mut Screen,
         viewport: &mut Viewport,
     ) {
-        let pal = color::ColorPalette::default();
+        let base_pal = color::ColorPalette::default();
+        let mut dec_color = crate::dec_color::state_from_palette(&base_pal);
+        let mut pal = crate::dec_color::effective_palette(&base_pal, &dec_color);
         let mut parser = Parser::new();
         let mut stash = Screen::new(
             viewport.cols,
@@ -3142,7 +3153,8 @@ mod tests {
                         cursor_style: &mut cursor_style,
                         cell_width: 8,
                         cell_height: 16,
-                        palette: &pal,
+                        palette: &mut pal,
+                        base_palette: &base_pal,
                         default_status_display: &mut default_status_display,
                         title_stack: &mut title_stack,
                         current_title: &mut current_title,
@@ -3151,6 +3163,7 @@ mod tests {
                         bell_pending: &mut bell_pending,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
+                        dec_color: &mut dec_color,
                         feature_permissions: &feature_permissions,
                         foreground_processes: &foreground_processes,
                         drcs: &mut drcs,
@@ -3174,11 +3187,13 @@ mod tests {
                         saved_modes: &mut saved_modes,
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
-                        palette: &pal,
+                        palette: &mut pal,
+                        base_palette: &base_pal,
                         default_status_display: &mut default_status_display,
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
+                        dec_color: &mut dec_color,
                         drcs: &mut drcs,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
@@ -3939,7 +3954,9 @@ mod tests {
         screen: &mut Screen,
         viewport: &mut Viewport,
     ) -> Vec<u8> {
-        let pal = color::ColorPalette::default();
+        let base_pal = color::ColorPalette::default();
+        let mut dec_color = crate::dec_color::state_from_palette(&base_pal);
+        let mut pal = crate::dec_color::effective_palette(&base_pal, &dec_color);
         let mut parser = Parser::new();
         let mut stash = Screen::new(
             viewport.cols,
@@ -4056,7 +4073,8 @@ mod tests {
                         cursor_style: &mut cursor_style,
                         cell_width: 8,
                         cell_height: 16,
-                        palette: &pal,
+                        palette: &mut pal,
+                        base_palette: &base_pal,
                         default_status_display: &mut default_status_display,
                         title_stack: &mut title_stack,
                         current_title: &mut current_title,
@@ -4065,6 +4083,7 @@ mod tests {
                         bell_pending: &mut bell_pending,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
+                        dec_color: &mut dec_color,
                         feature_permissions: &feature_permissions,
                         foreground_processes: &foreground_processes,
                         drcs: &mut drcs,
@@ -4088,11 +4107,13 @@ mod tests {
                         saved_modes: &mut saved_modes,
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
-                        palette: &pal,
+                        palette: &mut pal,
+                        base_palette: &base_pal,
                         default_status_display: &mut default_status_display,
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
+                        dec_color: &mut dec_color,
                         drcs: &mut drcs,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
@@ -4657,7 +4678,9 @@ mod tests {
     #[test]
     fn scs_gr_translation_applies_to_split_utf8_codepoint() {
         let (mut screen, mut viewport) = setup();
-        let pal = color::ColorPalette::default();
+        let base_pal = color::ColorPalette::default();
+        let mut dec_color = crate::dec_color::state_from_palette(&base_pal);
+        let mut pal = crate::dec_color::effective_palette(&base_pal, &dec_color);
         let mut parser = Parser::new();
         let mut stash = Screen::new(
             viewport.cols,
@@ -4723,7 +4746,8 @@ mod tests {
                             cursor_style: &mut cursor_style,
                             cell_width: 8,
                             cell_height: 16,
-                            palette: &pal,
+                            palette: &mut pal,
+                            base_palette: &base_pal,
                             default_status_display: &mut default_status_display,
                             title_stack: &mut title_stack,
                             current_title: &mut current_title,
@@ -4732,6 +4756,7 @@ mod tests {
                             bell_pending: &mut bell_pending,
                             vt52_cursor_addr: &mut vt52_cursor_addr,
                             macros: &mut macros,
+                            dec_color: &mut dec_color,
                             feature_permissions: &feature_permissions,
                             foreground_processes: &foreground_processes,
                             drcs: &mut drcs,
@@ -4755,11 +4780,13 @@ mod tests {
                             saved_modes: &mut saved_modes,
                             current_prompt_row: &mut current_prompt_row,
                             bell_pending: &mut bell_pending,
-                            palette: &pal,
+                            palette: &mut pal,
+                            base_palette: &base_pal,
                             default_status_display: &mut default_status_display,
                             pending_output: &mut pending_output,
                             vt52_cursor_addr: &mut vt52_cursor_addr,
                             macros: &mut macros,
+                            dec_color: &mut dec_color,
                             drcs: &mut drcs,
                         };
                         esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
