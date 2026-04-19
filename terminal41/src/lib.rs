@@ -2983,7 +2983,7 @@ fn restore_deccir(
         charset::GraphicSetSlot::G3,
     ]
     .into_iter()
-    .zip(sizes.into_iter().zip(designators.into_iter()))
+    .zip(sizes.into_iter().zip(designators))
     {
         let charset = charset::charset_from_designator(&designator, size)
             .or_else(|| drcs.charset_for_designator(&designator));
