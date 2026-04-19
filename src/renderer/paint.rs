@@ -293,6 +293,7 @@ fn resolve_dec_color_cell(
     let mut fg = *raw_fg;
     let mut bg = *raw_bg;
     let default_colored = *raw_fg == snap.palette.fg && *raw_bg == snap.palette.bg;
+    let mut recolored_by_alternate_lookup = false;
 
     match snap.dec_color.lookup_table {
         DecColorLookupTable::AlternateWithAttrs | DecColorLookupTable::Alternate
@@ -303,6 +304,7 @@ fn resolve_dec_color_cell(
             fg = terminal41::dec_table_color(&snap.dec_color, assignment.fg);
             bg = terminal41::dec_table_color(&snap.dec_color, assignment.bg);
             color_attrs.remove(CellAttrs::REVERSE);
+            recolored_by_alternate_lookup = true;
         }
         _ => {}
     }
@@ -312,7 +314,7 @@ fn resolve_dec_color_cell(
     if snap.dec_color.lookup_table == DecColorLookupTable::Mono {
         fg = grayscale(fg);
         bg = grayscale(bg);
-    } else if attrs.contains(CellAttrs::BOLD) {
+    } else if attrs.contains(CellAttrs::BOLD) && !recolored_by_alternate_lookup {
         fg = brighten_basic_color(fg, &snap.dec_color).unwrap_or(fg);
         if snap.dec_color.bold_blink_affects_background {
             bg = brighten_basic_color(bg, &snap.dec_color).unwrap_or(bg);
@@ -416,7 +418,7 @@ mod tests {
         let painted = resolve_painted_cell(&snap, &row, 0, 0, None, false);
         assert_eq!(
             painted.base_fg,
-            terminal41::dec_table_color(&snap.dec_color, 10)
+            terminal41::dec_table_color(&snap.dec_color, 2)
         );
         assert_eq!(
             painted.fill_bg,

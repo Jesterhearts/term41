@@ -238,7 +238,6 @@ fn run_vt525_color_demo(out: &mut impl Write) -> std::io::Result<()> {
     write!(out, "\x1b[1;4;0,}}")?;
     write!(out, "\x1b[1){{")?;
     line(out, "\x1b[1mAlternate-color bold text\x1b[0m")?;
-    write!(out, "\x1b[3){{\x1b[0m")?;
     Ok(())
 }
 
