@@ -13,6 +13,7 @@ mod dec_color;
 mod decmacro;
 mod drcs;
 mod feature;
+mod feature_ops;
 mod graphics;
 mod grid;
 mod hyperlink;
@@ -63,12 +64,11 @@ pub use self::dec_color::assign_alternate_text_color as dec_assign_alternate_tex
 pub use self::dec_color::select_lookup_table as dec_select_lookup_table;
 pub use self::dec_color::state_from_palette as dec_color_state_from_palette;
 pub use self::dec_color::table_color as dec_table_color;
-use self::decmacro::MAX_MACRO_INVOCATION_DEPTH;
-use self::decmacro::MacroEncoding;
 use self::decmacro::MacroStore;
 use self::drcs::Store as DrcsStore;
 pub use self::feature::FeaturePermissions;
 pub use self::feature::ProgramAllowlist;
+pub(crate) use self::feature_ops::apply_status_display_mode;
 pub use self::grid::Viewport;
 pub use self::hyperlink::HyperlinkRegistry;
 pub use self::image::PlacedImage;
@@ -418,7 +418,7 @@ impl Terminal {
             stash: Screen::new(
                 cols,
                 rows,
-                alt_scrollback_limit(scrollback_limit, strict_altscreen_scrollback),
+                feature_ops::alt_scrollback_limit(scrollback_limit, strict_altscreen_scrollback),
                 palette.fg,
                 palette.bg,
                 palette.status_line_fg,
@@ -573,20 +573,24 @@ impl Terminal {
         processes: Option<ForegroundProcessSet>,
     ) {
         if !self.foreground_processes_logged || self.foreground_processes != processes {
-            log_foreground_process_probe(&self.feature_permissions, processes.as_ref());
+            feature_ops::log_foreground_process_probe(
+                &self.feature_permissions,
+                processes.as_ref(),
+            );
             self.foreground_processes_logged = true;
         }
         self.foreground_processes = processes;
     }
 
     pub fn drcs_render_glyphs(&self) -> font41::DrcsGlyphMap {
-        self.drcs.render_glyphs()
+        feature_ops::drcs_render_glyphs(&self.drcs)
     }
 
     pub fn macro_feature_enabled(&self) -> bool {
-        self.feature_permissions
-            .macros
-            .allows_programs(self.foreground_processes.as_ref())
+        feature_ops::macro_feature_enabled(
+            &self.feature_permissions,
+            self.foreground_processes.as_ref(),
+        )
     }
 
     fn define_macro(
@@ -594,75 +598,29 @@ impl Terminal {
         params: vtepp::Params,
         payload: &[u8],
     ) {
-        if !self.macro_feature_enabled() {
-            return;
-        }
-        let Some(id) = params
-            .iter()
-            .next()
-            .and_then(|group| group.first().copied())
-        else {
-            return;
-        };
-        let delete_existing = matches!(
-            params
-                .iter()
-                .nth(1)
-                .and_then(|group| group.first().copied()),
-            Some(0 | 1)
+        feature_ops::define_macro(
+            self.macro_feature_enabled(),
+            &mut self.macros,
+            params,
+            payload,
         );
-        let Some(encoding) = params
-            .iter()
-            .nth(2)
-            .and_then(|group| group.first().copied())
-            .and_then(MacroEncoding::from_param)
-        else {
-            return;
-        };
-        self.macros.define(id, delete_existing, encoding, payload);
     }
 
     fn invoke_macro(
         &mut self,
         id: u16,
     ) {
-        if !self.macro_feature_enabled()
-            || self.macro_invocation_depth >= MAX_MACRO_INVOCATION_DEPTH
-        {
-            return;
-        }
-        let Some(bytes) = self.macros.get(id).map(ToOwned::to_owned) else {
+        let Some(bytes) = feature_ops::invoke_macro(
+            self.macro_feature_enabled(),
+            &self.macros,
+            self.macro_invocation_depth,
+            id,
+        ) else {
             return;
         };
         self.macro_invocation_depth += 1;
-        self.apply_macro_bytes(&bytes);
+        feature_ops::apply_macro_bytes(self, &bytes);
         self.macro_invocation_depth -= 1;
-    }
-
-    fn apply_macro_bytes(
-        &mut self,
-        bytes: &[u8],
-    ) {
-        let mut parser = vtepp::Parser::new();
-        let mut hooks: Vec<dcs::HookState> = vec![];
-
-        for action in parser.parse(bytes) {
-            match action {
-                vtepp::Action::Hook {
-                    params,
-                    intermediates,
-                    action,
-                } => dcs::push_hook_state(&mut hooks, params, intermediates, action),
-                vtepp::Action::Put(chunk) => dcs::append_hook_bytes(&mut hooks, chunk),
-                vtepp::Action::Unhook => {
-                    let Some(hook) = hooks.pop() else {
-                        continue;
-                    };
-                    dcs::dispatch_hook(hook, self);
-                }
-                action => self.apply(action),
-            }
-        }
     }
 
     pub fn set_cell_dimensions(
@@ -684,9 +642,9 @@ impl Terminal {
         strict_altscreen_scrollback: bool,
     ) {
         self.strict_altscreen_scrollback = strict_altscreen_scrollback;
-        apply_scrollback_limit(&mut self.active, &self.viewport, limit);
-        let alt_limit = alt_scrollback_limit(limit, self.strict_altscreen_scrollback);
-        apply_scrollback_limit(&mut self.stash, &self.viewport, alt_limit);
+        feature_ops::apply_scrollback_limit(&mut self.active, &self.viewport, limit);
+        let alt_limit = feature_ops::alt_scrollback_limit(limit, self.strict_altscreen_scrollback);
+        feature_ops::apply_scrollback_limit(&mut self.stash, &self.viewport, alt_limit);
     }
 
     /// Queue a focus-in / focus-out report onto `pending_output` if focus
@@ -747,14 +705,14 @@ impl Terminal {
         self.default_status_display = status_display;
         let total_rows = self.total_rows();
         let cols = self.viewport.cols;
-        self.viewport.rows = apply_status_display_mode(
+        self.viewport.rows = feature_ops::apply_status_display_mode(
             &mut self.active,
             total_rows,
             cols,
             status_display,
             &self.palette,
         );
-        apply_status_display_mode(
+        feature_ops::apply_status_display_mode(
             &mut self.stash,
             total_rows,
             cols,
@@ -1476,101 +1434,6 @@ impl Terminal {
             }
             let min_abs = self.active.grid.total_popped as u64;
             self.command_metas.retain(|&abs, _| abs >= min_abs);
-        }
-    }
-}
-
-fn log_foreground_process_probe(
-    permissions: &FeaturePermissions,
-    processes: Option<&ForegroundProcessSet>,
-) {
-    let macro_state = if permissions.macros.allows_programs(processes) {
-        "allow"
-    } else {
-        "deny"
-    };
-    match processes {
-        Some(processes) if !processes.programs.is_empty() => {
-            let programs = processes
-                .programs
-                .iter()
-                .map(|program| program.exe_name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            info!("Foreground PTY processes: [{programs}] macros={macro_state}");
-        }
-        _ => info!("Foreground PTY processes: [unresolved] macros={macro_state}"),
-    }
-}
-
-pub(crate) fn apply_status_display_mode(
-    screen: &mut Screen,
-    total_rows: u32,
-    cols: u32,
-    status_display: StatusDisplayKind,
-    palette: &ColorPalette,
-) -> u32 {
-    let old_rows = total_rows.saturating_sub(screen::status_line_rows(screen));
-    screen::set_status_display(
-        screen,
-        cols,
-        status_display,
-        palette.status_line_fg,
-        palette.status_line_bg,
-    );
-    let new_rows = total_rows.saturating_sub(screen::status_line_rows(screen));
-    if new_rows != old_rows {
-        screen::resize_screen(screen, cols, old_rows, cols, new_rows);
-        if screen::page_memory_active(screen)
-            && let Some(page_rows) = screen::page_rows(screen)
-        {
-            screen::resize_page_memory(
-                screen,
-                &Viewport {
-                    rows: new_rows,
-                    cols,
-                    top: 0,
-                },
-                page_rows,
-            );
-        }
-    }
-    new_rows
-}
-
-fn alt_scrollback_limit(
-    scrollback_limit: u32,
-    strict_altscreen_scrollback: bool,
-) -> u32 {
-    if strict_altscreen_scrollback {
-        0
-    } else {
-        scrollback_limit
-    }
-}
-
-fn apply_scrollback_limit(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    limit: u32,
-) {
-    screen.grid.scrollback_limit = limit;
-
-    let max_rows = viewport.rows as usize + limit as usize;
-    let grid = &mut screen.grid;
-    let popped_before = grid.rows.len();
-    while grid.rows.len() > max_rows {
-        grid.rows.pop_front();
-        grid.total_popped += 1;
-    }
-    let popped = popped_before - grid.rows.len();
-    if popped > 0 {
-        // Sixel images anchored to popped rows must move with the
-        // surviving rows; mirrors the same fix-up `process` does after a
-        // row is pushed off the top.
-        screen.images.retain(|_, img| img.row >= popped);
-        for img in screen.images.values_mut() {
-            img.row -= popped;
         }
     }
 }
