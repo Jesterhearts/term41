@@ -1908,89 +1908,109 @@ pub(super) fn csi_dispatch(
                 'h' | 'l' => {
                     let enable = action == 'h';
                     for p in params.iter() {
-                        if p[0] == mode::DECANM {
-                            ctx.modes.vt52_mode = !enable;
-                        } else if p[0] == mode::DECSCNM {
-                            ctx.modes.screen_reverse = enable;
-                        } else if p[0] == mode::DECARM {
-                            ctx.modes.decarm = enable;
-                        } else if p[0] == mode::ATT610_BLINK {
-                            ctx.cursor_style.blink = enable;
-                        } else if p[0] == mode::DECNCSM {
-                            ctx.modes.decncsm = enable;
-                        } else if p[0] == mode::DECLRMM {
-                            ctx.modes.declrmm = enable;
-                            if !enable {
+                        match p[0] {
+                            mode::DECANM => {
+                                ctx.modes.vt52_mode = !enable;
+                            }
+                            mode::DECSCNM => {
+                                ctx.modes.screen_reverse = enable;
+                            }
+                            mode::DECARM => {
+                                ctx.modes.decarm = enable;
+                            }
+                            mode::ATT610_BLINK => {
+                                ctx.cursor_style.blink = enable;
+                            }
+                            mode::DECNCSM => {
+                                ctx.modes.decncsm = enable;
+                            }
+                            mode::DECLRMM => {
+                                ctx.modes.declrmm = enable;
+                                if !enable {
+                                    ctx.screen.left_margin = 0;
+                                    ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
+                                }
+                            }
+                            mode::DECNRCM => {
+                                ctx.modes.decnrcm = enable;
+                                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                                    screen.nrc_mode = enable;
+                                    screen.charset = charset::CharsetState::new();
+                                }
+                            }
+                            mode::BRACKETED_PASTE => {
+                                ctx.modes.bracketed_paste = enable;
+                            }
+                            mode::FOCUS_REPORTING => {
+                                ctx.modes.focus_reporting = enable;
+                            }
+                            mode::SYNCHRONIZED_UPDATE => {
+                                ctx.modes.synchronized_update_since = enable.then(Instant::now);
+                            }
+                            mode::ALLOW_DECCOLM => {
+                                ctx.modes.allow_deccolm = enable;
+                            }
+                            mode::DECATCUM => {
+                                ctx.dec_color.alternate_underline_text = enable;
+                            }
+                            mode::DECATCBM => {
+                                ctx.dec_color.alternate_blink_text = enable;
+                            }
+                            mode::DECBBSM => {
+                                ctx.dec_color.bold_blink_affects_background = enable;
+                            }
+                            mode::DECECM => {
+                                ctx.dec_color.erase_to_screen = enable;
+                                for screen in [&mut *ctx.screen, &mut *ctx.stash] {
+                                    sync_screen_erase_defaults(screen, ctx.dec_color);
+                                }
+                            }
+                            mode::DECCOLM => {
+                                if !ctx.modes.allow_deccolm {
+                                    continue;
+                                }
+                                let new_cols = if enable {
+                                    ctx.modes.deccolm_saved_cols = Some(ctx.viewport.cols);
+                                    132
+                                } else {
+                                    ctx.modes
+                                        .deccolm_saved_cols
+                                        .take()
+                                        .unwrap_or(ctx.viewport.cols)
+                                };
+                                let old_cols = ctx.viewport.cols;
+                                let rows = ctx.viewport.rows;
+                                for s in [&mut *ctx.screen, &mut *ctx.stash] {
+                                    screen::resize_screen(s, old_cols, rows, new_cols, rows);
+                                }
+                                ctx.viewport.cols = new_cols;
+                                if !ctx.modes.decncsm {
+                                    let view = screen::screen_viewport(ctx.screen, ctx.viewport);
+                                    screen::clear_visible(ctx.screen, &view);
+                                }
+                                ctx.screen.scroll_top = 0;
+                                ctx.screen.scroll_bottom = rows.saturating_sub(1);
                                 ctx.screen.left_margin = 0;
-                                ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
+                                ctx.screen.right_margin = (ctx.viewport.cols).saturating_sub(1);
+                                ctx.screen.cursor = grid::Cursor::default();
                             }
-                        } else if p[0] == mode::DECNRCM {
-                            ctx.modes.decnrcm = enable;
-                            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                                screen.nrc_mode = enable;
-                                screen.charset = charset::CharsetState::new();
+                            mode => {
+                                if !apply_mouse_mode(
+                                    mode,
+                                    enable,
+                                    &mut ctx.modes.mouse_tracking,
+                                    &mut ctx.modes.mouse_encoding,
+                                ) {
+                                    screen::set_private_mode(
+                                        mode,
+                                        enable,
+                                        ctx.screen,
+                                        ctx.stash,
+                                        ctx.viewport,
+                                        ctx.on_alt_screen,
+                                    );
+                                }
                             }
-                        } else if p[0] == mode::BRACKETED_PASTE {
-                            ctx.modes.bracketed_paste = enable;
-                        } else if p[0] == mode::FOCUS_REPORTING {
-                            ctx.modes.focus_reporting = enable;
-                        } else if p[0] == mode::SYNCHRONIZED_UPDATE {
-                            ctx.modes.synchronized_update_since = enable.then(Instant::now);
-                        } else if p[0] == mode::ALLOW_DECCOLM {
-                            ctx.modes.allow_deccolm = enable;
-                        } else if p[0] == mode::DECATCUM {
-                            ctx.dec_color.alternate_underline_text = enable;
-                        } else if p[0] == mode::DECATCBM {
-                            ctx.dec_color.alternate_blink_text = enable;
-                        } else if p[0] == mode::DECBBSM {
-                            ctx.dec_color.bold_blink_affects_background = enable;
-                        } else if p[0] == mode::DECECM {
-                            ctx.dec_color.erase_to_screen = enable;
-                            for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                                sync_screen_erase_defaults(screen, ctx.dec_color);
-                            }
-                        } else if p[0] == mode::DECCOLM {
-                            if !ctx.modes.allow_deccolm {
-                                continue;
-                            }
-                            let new_cols = if enable {
-                                ctx.modes.deccolm_saved_cols = Some(ctx.viewport.cols);
-                                132
-                            } else {
-                                ctx.modes
-                                    .deccolm_saved_cols
-                                    .take()
-                                    .unwrap_or(ctx.viewport.cols)
-                            };
-                            let old_cols = ctx.viewport.cols;
-                            let rows = ctx.viewport.rows;
-                            for s in [&mut *ctx.screen, &mut *ctx.stash] {
-                                screen::resize_screen(s, old_cols, rows, new_cols, rows);
-                            }
-                            ctx.viewport.cols = new_cols;
-                            if !ctx.modes.decncsm {
-                                let view = screen::screen_viewport(ctx.screen, ctx.viewport);
-                                screen::clear_visible(ctx.screen, &view);
-                            }
-                            ctx.screen.scroll_top = 0;
-                            ctx.screen.scroll_bottom = rows.saturating_sub(1);
-                            ctx.screen.left_margin = 0;
-                            ctx.screen.right_margin = (ctx.viewport.cols).saturating_sub(1);
-                            ctx.screen.cursor = grid::Cursor::default();
-                        } else if !apply_mouse_mode(
-                            p[0],
-                            enable,
-                            &mut ctx.modes.mouse_tracking,
-                            &mut ctx.modes.mouse_encoding,
-                        ) {
-                            screen::set_private_mode(
-                                p[0],
-                                enable,
-                                ctx.screen,
-                                ctx.stash,
-                                ctx.viewport,
-                                ctx.on_alt_screen,
-                            );
                         }
                     }
                 }
