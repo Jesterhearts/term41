@@ -820,3 +820,45 @@ fn dec_double_height_pair_survives_write() {
         "row 4 should be DoubleHeightBottom"
     );
 }
+
+#[test]
+fn consecutive_double_height_pairs_keep_top_and_bottom_attrs() {
+    let mut t = VtTerm::new_80x24();
+    t.process(b"\x1b[4;1HThis is a Double-width-and-height line\x1b#3");
+    t.process(b"\x1b[5;1HThis is a Double-width-and-height line\x1b#4");
+    t.process(b"\x1b[7;1HThis is another such line\x1b#3");
+    t.process(b"\x1b[8;1HThis is another such line\x1b#4");
+
+    assert_eq!(
+        t.terminal.visible_row(3).line_attr,
+        LineAttr::DoubleHeightTop
+    );
+    assert_eq!(
+        t.terminal.visible_row(4).line_attr,
+        LineAttr::DoubleHeightBottom
+    );
+    assert_eq!(
+        t.terminal.visible_row(6).line_attr,
+        LineAttr::DoubleHeightTop
+    );
+    assert_eq!(
+        t.terminal.visible_row(7).line_attr,
+        LineAttr::DoubleHeightBottom
+    );
+}
+
+#[test]
+fn vttest_double_height_row_keeps_line_attr_across_el2() {
+    let mut t = VtTerm::new_80x24();
+    t.process(b"\x1b[14;2H\x1b#6\x1b#5\x1b#4\x1b#3\x1b[2KThis is another such line");
+    t.process(b"\x1b[15;2H\x1b#6\x1b#5\x1b#3\x1b#4This is another such line");
+
+    assert_eq!(
+        t.terminal.visible_row(13).line_attr,
+        LineAttr::DoubleHeightTop
+    );
+    assert_eq!(
+        t.terminal.visible_row(14).line_attr,
+        LineAttr::DoubleHeightBottom
+    );
+}

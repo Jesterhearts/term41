@@ -148,9 +148,6 @@ impl Row {
         self.prompt_start = false;
         self.output_start = false;
         self.exit_status = None;
-        // DEC line attribute is a whole-row property; reset it when the row is
-        // fully wiped so a double-width row doesn't stay wide after an ED/EL.
-        self.line_attr = LineAttr::Normal;
     }
 
     /// Reset this row for reuse at the bottom of the grid — used when the
@@ -169,6 +166,7 @@ impl Row {
         }
         self.clear(fg, bg);
         self.wrapped = false;
+        self.line_attr = LineAttr::Normal;
     }
 
     pub(super) fn clear_range(

@@ -2982,6 +2982,7 @@ pub(super) fn esc_dispatch(
                     let row = &mut ctx.screen.grid.rows[r];
                     row.clear(fg, bg);
                     row.wrapped = false;
+                    row.line_attr = LineAttr::Normal;
                     for cell in row.cells.iter_mut() {
                         *cell = e_cell.clone();
                     }

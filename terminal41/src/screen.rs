@@ -18,6 +18,7 @@ use crate::image::anchor_images;
 use crate::image::clear_in_range;
 use crate::image::restore_images;
 use crate::mode;
+use crate::row::LineAttr;
 use crate::row::Row;
 
 /// Snapshot of cursor position and active colors, used by DECSC/DECRC
@@ -556,10 +557,14 @@ pub(super) fn clear_visible(
     let bg = screen.grid.default_bg;
     for r in first_visible..screen.grid.rows.len() {
         screen.grid.rows[r].clear(fg, bg);
+        screen.grid.rows[r].wrapped = false;
+        screen.grid.rows[r].line_attr = LineAttr::Normal;
     }
     clear_in_range(&mut screen.images, first_visible, screen.grid.rows.len());
     if let Some(status) = screen.status_line.as_mut() {
         status.row.clear(fg, bg);
+        status.row.wrapped = false;
+        status.row.line_attr = LineAttr::Normal;
         status.cursor = Cursor::default();
     }
 }
