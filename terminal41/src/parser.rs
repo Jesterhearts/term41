@@ -30,7 +30,10 @@ use crate::mouse::apply_mouse_mode;
 use crate::row::LineAttr;
 use crate::row::Row;
 use crate::screen;
+use crate::screen::ActiveDisplay;
 use crate::screen::Screen;
+use crate::screen::StatusDisplayKind;
+use crate::screen::StatusLine;
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that CSI handlers
 /// need beyond the active screen. Keeps the call signature stable as new CSI
@@ -101,6 +104,370 @@ fn continuation_cell() -> SmolStr {
 
 fn blank_cell() -> SmolStr {
     SmolStr::new_inline(" ")
+}
+
+fn status_line_mut(screen: &mut Screen) -> Option<&mut StatusLine> {
+    screen::status_line_writable(screen)
+        .then_some(screen.status_line.as_mut())
+        .flatten()
+}
+
+fn status_insert_chars(
+    status: &mut StatusLine,
+    count: usize,
+) {
+    let cols = status.row.cells.len();
+    let col = status.cursor.col as usize;
+    let count = count.min(cols.saturating_sub(col));
+    if count == 0 {
+        return;
+    }
+    status.row.copy_within(col..cols - count, col + count);
+    status
+        .row
+        .clear_range(col..col + count, status.fg, status.bg);
+}
+
+fn status_delete_chars(
+    status: &mut StatusLine,
+    count: usize,
+) {
+    let cols = status.row.cells.len();
+    let col = status.cursor.col as usize;
+    let count = count.min(cols.saturating_sub(col));
+    if count == 0 {
+        return;
+    }
+    status.row.copy_within(col + count..cols, col);
+    status
+        .row
+        .clear_range(cols - count..cols, status.fg, status.bg);
+}
+
+fn status_erase_chars(
+    status: &mut StatusLine,
+    count: usize,
+) {
+    let cols = status.row.cells.len();
+    let col = status.cursor.col as usize;
+    let end = (col + count).min(cols);
+    status.row.clear_range(col..end, status.fg, status.bg);
+}
+
+fn status_break_wide_glyphs_around_write(
+    status: &mut StatusLine,
+    col: usize,
+    width: usize,
+) {
+    break_wide_glyphs_around_write(&mut status.row, col, width);
+}
+
+fn status_put_char(
+    screen: &mut Screen,
+    s: SmolStr,
+    insert_mode: bool,
+) {
+    screen.charset.single_shift = None;
+    let Some(status) = status_line_mut(screen) else {
+        return;
+    };
+    let cols = status.row.len().max(1);
+    let raw_width = UnicodeWidthStr::width(s.as_str());
+    if raw_width == 0 {
+        let col = status.cursor.col as usize;
+        if col > 0 {
+            let mut builder = SmolStrBuilder::new();
+            builder.push_str(status.row.cells[col - 1].as_str());
+            builder.push_str(&s);
+            status.row.cells[col - 1] = builder.finish();
+        }
+        return;
+    }
+
+    let width = raw_width.max(1);
+    if status.cursor.col + width as u32 > cols {
+        status.cursor.col = cols.saturating_sub(width as u32);
+    }
+
+    if insert_mode {
+        status_insert_chars(status, width);
+    }
+
+    let col = status.cursor.col as usize;
+    status_break_wide_glyphs_around_write(status, col, width);
+    status.row.cells[col] = s.clone();
+    status.row.fg[col] = status.fg;
+    status.row.bg[col] = status.bg;
+    status.row.attrs[col] = status.attrs;
+    status.row.underline[col] = status.underline;
+    status.row.underline_color[col] = status.underline_color;
+    status.row.links[col] = status.current_hyperlink;
+    for i in 1..width {
+        status.row.cells[col + i] = continuation_cell();
+        status.row.fg[col + i] = status.fg;
+        status.row.bg[col + i] = status.bg;
+        status.row.attrs[col + i] = status.attrs;
+        status.row.underline[col + i] = status.underline;
+        status.row.underline_color[col + i] = status.underline_color;
+        status.row.links[col + i] = status.current_hyperlink;
+    }
+    status.last_char = Some(s);
+    status.cursor.col += width as u32;
+}
+
+pub(super) fn put_status_ascii_run(
+    screen: &mut Screen,
+    run: &[u8],
+    insert_mode: bool,
+) {
+    if run.is_empty() {
+        return;
+    }
+    let run = if let Some(charset) = screen.charset.take_single_shift_charset() {
+        let b = run[0];
+        let ch = charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
+            .unwrap_or_else(|| ASCII_CELLS[(b - 0x20) as usize].clone());
+        status_put_char(screen, ch, insert_mode);
+        &run[1..]
+    } else {
+        run
+    };
+
+    if charset::gl_charset_requires_translation(&screen.charset, screen.nrc_mode) {
+        let charset = screen.charset.gl_charset();
+        for &b in run {
+            let ch = charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
+                .unwrap_or_else(|| ASCII_CELLS[(b - 0x20) as usize].clone());
+            status_put_char(screen, ch, insert_mode);
+        }
+        return;
+    }
+
+    for &b in run {
+        status_put_char(
+            screen,
+            ASCII_CELLS[(b - 0x20) as usize].clone(),
+            insert_mode,
+        );
+    }
+}
+
+pub(super) fn put_status_text_run(
+    screen: &mut Screen,
+    run: &str,
+    insert_mode: bool,
+) {
+    for grapheme in run.graphemes(true) {
+        status_put_char(screen, SmolStr::new(grapheme), insert_mode);
+    }
+}
+
+pub(super) fn put_status_printable(
+    screen: &mut Screen,
+    s: SmolStr,
+    insert_mode: bool,
+) {
+    let mut chars = s.chars();
+    if let Some(ch) = chars.next()
+        && chars.next().is_none()
+        && let Some(translated) = translated_codepoint(screen, ch)
+    {
+        status_put_char(screen, translated, insert_mode);
+        return;
+    }
+    status_put_char(screen, s, insert_mode);
+}
+
+pub(super) fn put_status_8bit_byte(
+    screen: &mut Screen,
+    byte: u8,
+    insert_mode: bool,
+) {
+    let ch = char::from_u32(byte as u32).expect("8-bit byte always maps to valid Unicode scalar");
+    if let Some(translated) = translated_codepoint(screen, ch) {
+        status_put_char(screen, translated, insert_mode);
+    } else {
+        let mut buf = [0u8; 4];
+        status_put_char(
+            screen,
+            SmolStr::new_inline(ch.encode_utf8(&mut buf)),
+            insert_mode,
+        );
+    }
+}
+
+pub(super) fn execute_status(
+    screen: &mut Screen,
+    byte: u8,
+    bell_pending: &mut bool,
+    newline_mode: bool,
+) {
+    match byte {
+        NUL => {}
+        BEL => *bell_pending = true,
+        b'\x08' => {
+            if let Some(status) = status_line_mut(screen) {
+                status.cursor.col = status.cursor.col.saturating_sub(1);
+            }
+        }
+        b'\x09' => {
+            let tab_stops = screen.tab_stops.clone();
+            if let Some(status) = status_line_mut(screen) {
+                let cols = status.row.len().max(1);
+                status.cursor.col = next_tab_stop(&tab_stops, status.cursor.col, cols);
+            }
+        }
+        b'\n' | VT | FF => {
+            if newline_mode && let Some(status) = status_line_mut(screen) {
+                status.cursor.col = 0;
+            }
+        }
+        b'\r' => {
+            if let Some(status) = status_line_mut(screen) {
+                status.cursor.col = 0;
+            }
+        }
+        b'\x0e' => screen.charset.set_gl(charset::GraphicSetSlot::G1),
+        b'\x0f' => screen.charset.set_gl(charset::GraphicSetSlot::G0),
+        _ => {}
+    }
+}
+
+fn status_line_csi_dispatch(
+    ctx: &mut CsiContext<'_>,
+    params: &Params,
+    intermediates: &[u8],
+    action: char,
+) -> bool {
+    let Some(status) = status_line_mut(ctx.screen) else {
+        return false;
+    };
+    let cols = status.row.len().max(1);
+    let cursor = &mut status.cursor;
+
+    if intermediates.is_empty() && action == 'm' {
+        apply_sgr(
+            &mut status.fg,
+            &mut status.bg,
+            &mut status.attrs,
+            &mut status.underline,
+            &mut status.underline_color,
+            params,
+            ctx.palette,
+        );
+        return true;
+    }
+
+    if !intermediates.is_empty() {
+        return false;
+    }
+
+    match action {
+        '@' => {
+            let count = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1) as usize;
+            status_insert_chars(status, count);
+            true
+        }
+        'A' | 'B' | 'd' => {
+            cursor.row = 0;
+            true
+        }
+        'C' => {
+            let n = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1) as u32;
+            cursor.col = (cursor.col + n).min(cols - 1);
+            true
+        }
+        'D' => {
+            let n = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1) as u32;
+            cursor.col = cursor.col.saturating_sub(n);
+            true
+        }
+        'G' | '`' => {
+            let col = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1)
+                .max(1);
+            cursor.col = (col as u32 - 1).min(cols - 1);
+            true
+        }
+        'H' | 'f' => {
+            let col = params
+                .iter()
+                .nth(1)
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1)
+                .max(1);
+            cursor.row = 0;
+            cursor.col = (col as u32 - 1).min(cols - 1);
+            true
+        }
+        'J' => {
+            status.row.clear(status.fg, status.bg);
+            true
+        }
+        'K' => {
+            let mode = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(0);
+            let col = cursor.col as usize;
+            let len = cols as usize;
+            match mode {
+                0 => status.row.clear_range(col..len, status.fg, status.bg),
+                1 => status.row.clear_range(0..(col + 1), status.fg, status.bg),
+                2 => status.row.clear(status.fg, status.bg),
+                _ => {}
+            }
+            true
+        }
+        'P' => {
+            let count = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1) as usize;
+            status_delete_chars(status, count);
+            true
+        }
+        'X' => {
+            let count = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1) as usize;
+            status_erase_chars(status, count);
+            true
+        }
+        'b' => {
+            let count = params
+                .iter()
+                .next()
+                .and_then(|g| g.first().copied())
+                .unwrap_or(1);
+            if let Some(last) = status.last_char.clone() {
+                for _ in 0..count {
+                    status_put_char(ctx.screen, last.clone(), ctx.modes.insert_mode);
+                }
+            }
+            true
+        }
+        _ => false,
+    }
 }
 
 // C0 control bytes (ECMA-48 / ASCII).
@@ -178,6 +545,9 @@ fn apply_hard_reset(
         s.attr_change_extent = grid::AttrChangeExtent::Stream;
         s.app_keypad = false;
         s.charset = charset::CharsetState::new();
+        s.active_display = ActiveDisplay::Main;
+        s.status_display = StatusDisplayKind::None;
+        s.status_line = None;
     }
     *ctx.modes = TerminalModes::new();
     ctx.modes.conformance_level = conformance_level;
@@ -1018,16 +1388,78 @@ pub(super) fn csi_dispatch(
                 );
             }
             let old_cols = ctx.viewport.cols;
-            let old_rows = ctx.viewport.rows;
+            let old_total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
+            let new_total_rows = rows + screen::status_line_rows(ctx.screen);
             for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                screen::resize_screen(screen, old_cols, old_rows, old_cols, rows);
+                let old_rows = old_total_rows.saturating_sub(screen::status_line_rows(screen));
+                let new_rows = new_total_rows.saturating_sub(screen::status_line_rows(screen));
+                screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
             }
             ctx.viewport.rows = rows;
-            *ctx.pending_resize = Some((ctx.viewport.cols, rows));
+            *ctx.pending_resize = Some((
+                ctx.viewport.cols,
+                rows + screen::status_line_rows(ctx.screen),
+            ));
             ctx.screen.scroll_top = 0;
             ctx.screen.scroll_bottom = rows.saturating_sub(1);
             ctx.screen.cursor.row = ctx.screen.cursor.row.min(rows.saturating_sub(1));
         }
+        return;
+    }
+
+    if intermediates == b"$" && action == '}' {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        ctx.screen.active_display = match ps {
+            1 if screen::status_line_writable(ctx.screen) => ActiveDisplay::Status,
+            _ => ActiveDisplay::Main,
+        };
+        return;
+    }
+
+    if intermediates == b"$" && action == '~' {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|g| g.first().copied())
+            .unwrap_or(0);
+        let total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
+        let old_rows = ctx.viewport.rows;
+        let status_display = match ps {
+            1 => StatusDisplayKind::Indicator,
+            2 => StatusDisplayKind::HostWritable,
+            _ => StatusDisplayKind::None,
+        };
+        screen::set_status_display(ctx.screen, ctx.viewport.cols, status_display);
+        let new_rows = total_rows.saturating_sub(screen::status_line_rows(ctx.screen));
+        if new_rows != old_rows {
+            let old_cols = ctx.viewport.cols;
+            screen::resize_screen(ctx.screen, old_cols, old_rows, old_cols, new_rows);
+            if screen::page_memory_active(ctx.screen)
+                && let Some(page_rows) = screen::page_rows(ctx.screen)
+            {
+                screen::resize_page_memory(
+                    ctx.screen,
+                    &Viewport {
+                        rows: new_rows,
+                        cols: old_cols,
+                        top: 0,
+                    },
+                    page_rows,
+                );
+            }
+            ctx.viewport.rows = new_rows;
+        }
+        return;
+    }
+
+    if ctx.screen.active_display == ActiveDisplay::Status
+        && screen::status_line_writable(ctx.screen)
+        && status_line_csi_dispatch(ctx, params, intermediates, action)
+    {
         return;
     }
 
@@ -1511,24 +1943,20 @@ pub(super) fn csi_dispatch(
                 return;
             };
             let old_cols = ctx.viewport.cols;
-            let old_rows = ctx.viewport.rows;
+            let total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
             for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                screen::resize_screen(screen, old_cols, old_rows, cols, old_rows);
+                let rows = total_rows.saturating_sub(screen::status_line_rows(screen));
+                screen::resize_screen(screen, old_cols, rows, cols, rows);
                 if screen::page_memory_active(screen) {
-                    let page_rows = screen::page_rows(screen).unwrap_or(old_rows);
-                    screen::resize_page_memory(
-                        screen,
-                        &Viewport {
-                            rows: old_rows,
-                            cols,
-                            top: 0,
-                        },
-                        page_rows,
-                    );
+                    let page_rows = screen::page_rows(screen).unwrap_or(rows);
+                    screen::resize_page_memory(screen, &Viewport { rows, cols, top: 0 }, page_rows);
                 }
             }
             ctx.viewport.cols = cols;
-            *ctx.pending_resize = Some((cols, ctx.viewport.rows));
+            *ctx.pending_resize = Some((
+                cols,
+                ctx.viewport.rows + screen::status_line_rows(ctx.screen),
+            ));
             ctx.screen.right_margin = cols.saturating_sub(1);
             ctx.screen.cursor.col = ctx.screen.cursor.col.min(cols.saturating_sub(1));
             return;
@@ -1787,12 +2215,18 @@ pub(super) fn csi_dispatch(
             }
             if rows != ctx.viewport.rows {
                 let old_cols = ctx.viewport.cols;
-                let old_rows = ctx.viewport.rows;
+                let old_total_rows = ctx.viewport.rows + screen::status_line_rows(ctx.screen);
+                let new_total_rows = rows + screen::status_line_rows(ctx.screen);
                 for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                    screen::resize_screen(screen, old_cols, old_rows, old_cols, rows);
+                    let old_rows = old_total_rows.saturating_sub(screen::status_line_rows(screen));
+                    let new_rows = new_total_rows.saturating_sub(screen::status_line_rows(screen));
+                    screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
                 }
                 ctx.viewport.rows = rows;
-                *ctx.pending_resize = Some((ctx.viewport.cols, rows));
+                *ctx.pending_resize = Some((
+                    ctx.viewport.cols,
+                    rows + screen::status_line_rows(ctx.screen),
+                ));
             }
             return;
         }

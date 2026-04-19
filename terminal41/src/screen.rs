@@ -56,6 +56,52 @@ impl PageMemory {
     }
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ActiveDisplay {
+    Main,
+    Status,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum StatusDisplayKind {
+    None,
+    Indicator,
+    HostWritable,
+}
+
+#[derive(Debug)]
+pub struct StatusLine {
+    pub row: Row,
+    pub cursor: Cursor,
+    pub fg: Srgb<u8>,
+    pub bg: Srgb<u8>,
+    pub attrs: CellAttrs,
+    pub underline: UnderlineStyle,
+    pub underline_color: Option<Srgb<u8>>,
+    pub current_hyperlink: Option<HyperlinkId>,
+    pub last_char: Option<SmolStr>,
+}
+
+impl StatusLine {
+    fn new(
+        cols: u32,
+        fg: Srgb<u8>,
+        bg: Srgb<u8>,
+    ) -> Self {
+        Self {
+            row: Row::new(cols, fg, bg),
+            cursor: Cursor::default(),
+            fg,
+            bg,
+            attrs: CellAttrs::default(),
+            underline: UnderlineStyle::None,
+            underline_color: None,
+            current_hyperlink: None,
+            last_char: None,
+        }
+    }
+}
+
 /// State for a single screen buffer (primary or alt). The terminal holds
 /// two of these — an `active` and a `stash` — and swaps between them with
 /// a single [`std::mem::swap`] on the alt-screen mode transitions.
@@ -137,6 +183,14 @@ pub struct Screen {
     /// the live tail of the grid" behavior. When present, the visible
     /// screen is an explicit slice of rows within page memory.
     pub page_memory: Option<PageMemory>,
+    /// `DECSASD` — which display surface receives host output.
+    pub active_display: ActiveDisplay,
+    /// `DECSSDT` — whether the status line is absent, emulator-owned, or
+    /// host-writable.
+    pub status_display: StatusDisplayKind,
+    /// Dedicated one-row status-line storage. Present whenever
+    /// `status_display != None`.
+    pub status_line: Option<StatusLine>,
 }
 
 impl Screen {
@@ -185,6 +239,66 @@ impl Screen {
             attr_change_extent: AttrChangeExtent::Stream,
             app_keypad: false,
             page_memory: None,
+            active_display: ActiveDisplay::Main,
+            status_display: StatusDisplayKind::None,
+            status_line: None,
+        }
+    }
+}
+
+pub(super) fn status_line_visible(screen: &Screen) -> bool {
+    screen.status_display != StatusDisplayKind::None && screen.status_line.is_some()
+}
+
+pub(super) fn status_line_writable(screen: &Screen) -> bool {
+    screen.status_display == StatusDisplayKind::HostWritable && screen.status_line.is_some()
+}
+
+pub(super) fn status_line_rows(screen: &Screen) -> u32 {
+    u32::from(status_line_visible(screen))
+}
+
+pub(super) fn ensure_status_line(
+    screen: &mut Screen,
+    cols: u32,
+) -> &mut StatusLine {
+    screen.status_line.get_or_insert_with(|| {
+        StatusLine::new(cols, screen.grid.default_fg, screen.grid.default_bg)
+    })
+}
+
+pub(super) fn resize_status_line(
+    screen: &mut Screen,
+    cols: u32,
+) {
+    let Some(status) = screen.status_line.as_mut() else {
+        return;
+    };
+    status
+        .row
+        .resize(cols, screen.grid.default_fg, screen.grid.default_bg);
+    status.cursor.col = status.cursor.col.min(cols.saturating_sub(1));
+}
+
+pub(super) fn set_status_display(
+    screen: &mut Screen,
+    cols: u32,
+    status_display: StatusDisplayKind,
+) {
+    screen.status_display = status_display;
+    match status_display {
+        StatusDisplayKind::None => {
+            screen.status_line = None;
+            screen.active_display = ActiveDisplay::Main;
+        }
+        StatusDisplayKind::Indicator | StatusDisplayKind::HostWritable => {
+            resize_status_line(screen, cols);
+            let _ = ensure_status_line(screen, cols);
+            if status_display != StatusDisplayKind::HostWritable
+                && screen.active_display == ActiveDisplay::Status
+            {
+                screen.active_display = ActiveDisplay::Main;
+            }
         }
     }
 }
@@ -438,6 +552,10 @@ pub(super) fn clear_visible(
         screen.grid.rows[r].clear(fg, bg);
     }
     clear_in_range(&mut screen.images, first_visible, screen.grid.rows.len());
+    if let Some(status) = screen.status_line.as_mut() {
+        status.row.clear(fg, bg);
+        status.cursor = Cursor::default();
+    }
 }
 
 /// Switch between the primary and alt screens. Idempotent: a no-op if the
@@ -446,13 +564,16 @@ fn switch_screen(
     target_alt: bool,
     active: &mut Screen,
     stash: &mut Screen,
+    viewport: &mut Viewport,
     on_alt: &mut bool,
 ) {
     if *on_alt == target_alt {
         return;
     }
+    let total_rows = viewport.rows + status_line_rows(active);
     std::mem::swap(active, stash);
     *on_alt = target_alt;
+    viewport.rows = total_rows.saturating_sub(status_line_rows(active));
     // Incoming screen's offset is preserved; most apps don't care, and it
     // gives primary back its scroll position on 1049l if the user had
     // scrolled back before the app hijacked the terminal.
@@ -466,7 +587,7 @@ pub(super) fn set_private_mode(
     enable: bool,
     active: &mut Screen,
     stash: &mut Screen,
-    viewport: &Viewport,
+    viewport: &mut Viewport,
     on_alt: &mut bool,
 ) {
     match mode {
@@ -484,14 +605,14 @@ pub(super) fn set_private_mode(
         mode::DECTCEM => active.cursor_visible = enable,
         // DECLRMM does not need action here — the `declrmm` bool lives
         // on TerminalModes and is handled at the csi_dispatch level.
-        mode::ALT_SCREEN => switch_screen(enable, active, stash, on_alt),
+        mode::ALT_SCREEN => switch_screen(enable, active, stash, viewport, on_alt),
         mode::ALT_SCREEN_CLEAR => {
             // xterm clears the alt buffer when leaving via 1047l so stale
             // content isn't re-shown the next time it's entered.
             if !enable && *on_alt {
                 clear_visible(active, viewport);
             }
-            switch_screen(enable, active, stash, on_alt);
+            switch_screen(enable, active, stash, viewport, on_alt);
         }
         mode::SAVE_CURSOR => {
             if enable {
@@ -508,13 +629,13 @@ pub(super) fn set_private_mode(
                 if !*on_alt {
                     save_cursor_slot(active);
                 }
-                switch_screen(true, active, stash, on_alt);
+                switch_screen(true, active, stash, viewport, on_alt);
                 clear_visible(active, viewport);
             } else {
                 if *on_alt {
                     clear_visible(active, viewport);
                 }
-                switch_screen(false, active, stash, on_alt);
+                switch_screen(false, active, stash, viewport, on_alt);
                 restore_cursor_slot(active, viewport);
             }
         }
@@ -535,6 +656,8 @@ pub(super) fn resize_screen(
     new_cols: u32,
     new_rows: u32,
 ) {
+    resize_status_line(screen, new_cols);
+
     let grid = &mut screen.grid;
     let cursor = &mut screen.cursor;
     let images = &mut screen.images;

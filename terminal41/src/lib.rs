@@ -62,13 +62,19 @@ use self::parser::EscContext;
 use self::parser::csi_dispatch;
 use self::parser::esc_dispatch;
 use self::parser::execute;
+use self::parser::execute_status;
 use self::parser::put_8bit_byte;
 use self::parser::put_ascii_run;
 use self::parser::put_printable;
+use self::parser::put_status_8bit_byte;
+use self::parser::put_status_ascii_run;
+use self::parser::put_status_printable;
+use self::parser::put_status_text_run;
 use self::parser::put_text_run;
 pub use self::row::LineAttr;
 pub use self::row::Row;
 pub use self::screen::Screen;
+pub use self::screen::StatusDisplayKind;
 use self::screen::resize_screen;
 use crate::search::MatchSpan;
 use crate::search::SearchState;
@@ -499,6 +505,18 @@ impl Terminal {
                 .saturating_sub(self.active.offset as usize);
         }
         view
+    }
+
+    pub fn total_rows(&self) -> u32 {
+        self.viewport.rows + screen::status_line_rows(&self.active)
+    }
+
+    pub fn status_line_visible(&self) -> bool {
+        screen::status_line_visible(&self.active)
+    }
+
+    pub fn status_line_row(&self) -> Option<&Row> {
+        self.active.status_line.as_ref().map(|status| &status.row)
     }
 
     fn screen_row_to_absolute(
@@ -1496,21 +1514,58 @@ impl Terminal {
         rows: u32,
     ) {
         let old_cols = self.viewport.cols;
-        let old_rows = self.viewport.rows;
+        let old_active_rows = self.viewport.rows;
+        let old_total_rows = old_active_rows + screen::status_line_rows(&self.active);
+        let old_stash_rows = old_total_rows.saturating_sub(screen::status_line_rows(&self.stash));
+        let new_active_rows = rows.saturating_sub(screen::status_line_rows(&self.active));
+        let new_stash_rows = rows.saturating_sub(screen::status_line_rows(&self.stash));
 
-        // Keep both screens sized to the new viewport so a swap after a
-        // resize doesn't land the cursor outside its own grid.
-        for screen in [&mut self.active, &mut self.stash] {
-            resize_screen(screen, old_cols, old_rows, cols, rows);
-            if screen::page_memory_active(screen)
-                && let Some(page_rows) = screen::page_rows(screen)
-            {
-                screen::resize_page_memory(screen, &Viewport { rows, cols, top: 0 }, page_rows);
-            }
+        // Keep both screens sized to the same physical terminal height so a
+        // swap after a resize doesn't leave either one outside the window.
+        resize_screen(
+            &mut self.active,
+            old_cols,
+            old_active_rows,
+            cols,
+            new_active_rows,
+        );
+        if screen::page_memory_active(&self.active)
+            && let Some(page_rows) = screen::page_rows(&self.active)
+        {
+            screen::resize_page_memory(
+                &mut self.active,
+                &Viewport {
+                    rows: new_active_rows,
+                    cols,
+                    top: 0,
+                },
+                page_rows,
+            );
+        }
+
+        resize_screen(
+            &mut self.stash,
+            old_cols,
+            old_stash_rows,
+            cols,
+            new_stash_rows,
+        );
+        if screen::page_memory_active(&self.stash)
+            && let Some(page_rows) = screen::page_rows(&self.stash)
+        {
+            screen::resize_page_memory(
+                &mut self.stash,
+                &Viewport {
+                    rows: new_stash_rows,
+                    cols,
+                    top: 0,
+                },
+                page_rows,
+            );
         }
 
         self.viewport.cols = cols;
-        self.viewport.rows = rows;
+        self.viewport.rows = new_active_rows;
     }
 
     pub fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
@@ -1605,30 +1660,65 @@ impl Terminal {
 
         match action {
             Action::PrintAscii(run) => {
-                let view = screen::screen_viewport(&self.active, &self.viewport);
-                put_ascii_run(&mut self.active, &view, run, self.modes.insert_mode)
+                if self.active.active_display == screen::ActiveDisplay::Status
+                    && screen::status_line_writable(&self.active)
+                {
+                    put_status_ascii_run(&mut self.active, run, self.modes.insert_mode);
+                } else {
+                    let view = screen::screen_viewport(&self.active, &self.viewport);
+                    put_ascii_run(&mut self.active, &view, run, self.modes.insert_mode);
+                }
             }
             Action::PrintText(run) => {
-                let view = screen::screen_viewport(&self.active, &self.viewport);
-                put_text_run(&mut self.active, &view, run, self.modes.insert_mode)
+                if self.active.active_display == screen::ActiveDisplay::Status
+                    && screen::status_line_writable(&self.active)
+                {
+                    put_status_text_run(&mut self.active, run, self.modes.insert_mode);
+                } else {
+                    let view = screen::screen_viewport(&self.active, &self.viewport);
+                    put_text_run(&mut self.active, &view, run, self.modes.insert_mode);
+                }
             }
             Action::Print(c) => {
-                let view = screen::screen_viewport(&self.active, &self.viewport);
-                put_printable(&mut self.active, &view, c, self.modes.insert_mode)
+                if self.active.active_display == screen::ActiveDisplay::Status
+                    && screen::status_line_writable(&self.active)
+                {
+                    put_status_printable(&mut self.active, c, self.modes.insert_mode);
+                } else {
+                    let view = screen::screen_viewport(&self.active, &self.viewport);
+                    put_printable(&mut self.active, &view, c, self.modes.insert_mode);
+                }
             }
             Action::Print8Bit(byte) => {
-                let view = screen::screen_viewport(&self.active, &self.viewport);
-                put_8bit_byte(&mut self.active, &view, byte, self.modes.insert_mode)
+                if self.active.active_display == screen::ActiveDisplay::Status
+                    && screen::status_line_writable(&self.active)
+                {
+                    put_status_8bit_byte(&mut self.active, byte, self.modes.insert_mode);
+                } else {
+                    let view = screen::screen_viewport(&self.active, &self.viewport);
+                    put_8bit_byte(&mut self.active, &view, byte, self.modes.insert_mode);
+                }
             }
             Action::Execute(byte) => {
-                let view = screen::screen_viewport(&self.active, &self.viewport);
-                execute(
-                    &mut self.active,
-                    &view,
-                    byte,
-                    &mut self.bell_pending,
-                    self.modes.newline_mode,
-                );
+                if self.active.active_display == screen::ActiveDisplay::Status
+                    && screen::status_line_writable(&self.active)
+                {
+                    execute_status(
+                        &mut self.active,
+                        byte,
+                        &mut self.bell_pending,
+                        self.modes.newline_mode,
+                    );
+                } else {
+                    let view = screen::screen_viewport(&self.active, &self.viewport);
+                    execute(
+                        &mut self.active,
+                        &view,
+                        byte,
+                        &mut self.bell_pending,
+                        self.modes.newline_mode,
+                    );
+                }
             }
             Action::CsiDispatch {
                 params,
@@ -2846,6 +2936,10 @@ mod tests {
         visible_text(term).replace('\n', "")
     }
 
+    fn status_line_text(term: &Terminal) -> Option<String> {
+        term.status_line_row().map(|row| row.cells.concat())
+    }
+
     #[test]
     fn alt_screen_1049_hides_primary_and_restores() {
         let mut term = TestTerm::new(8, 4, 100, 16, 8);
@@ -2872,6 +2966,41 @@ mod tests {
         assert!(visible_text(&term).contains("hello"));
         assert_eq!(term.active.cursor.col, 5);
         assert_eq!(term.active.cursor.row, 0);
+    }
+
+    #[test]
+    fn decssdt_uses_one_physical_row_for_status_line() {
+        let mut term = TestTerm::new(8, 4, 100, 16, 8);
+
+        assert_eq!(term.viewport.rows, 4);
+        assert_eq!(term.total_rows(), 4);
+
+        term.process(b"\x1b[2$~");
+
+        assert!(term.status_line_visible());
+        assert_eq!(term.viewport.rows, 3);
+        assert_eq!(term.total_rows(), 4);
+
+        term.process(b"\x1b[0$~");
+
+        assert!(!term.status_line_visible());
+        assert_eq!(term.viewport.rows, 4);
+        assert_eq!(term.total_rows(), 4);
+    }
+
+    #[test]
+    fn decsasd_routes_printing_to_host_writable_status_line() {
+        let mut term = TestTerm::new(8, 4, 100, 16, 8);
+
+        term.process(b"\x1b[2$~");
+        term.process(b"\x1b[1$}");
+        term.process(b"STATUS");
+        term.process(b"\x1b[0$}");
+        term.process(b"main");
+
+        assert_eq!(status_line_text(&term).unwrap().trim_end(), "STATUS");
+        assert!(visible_text(&term).contains("main"));
+        assert!(!visible_text(&term).contains("STATUS"));
     }
 
     #[test]

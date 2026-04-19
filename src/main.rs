@@ -222,7 +222,7 @@ impl WindowHost {
             return;
         };
         let terminal = endpoint.terminal.lock().unwrap();
-        self.request_window_grid_size(terminal.viewport.cols, terminal.viewport.rows);
+        self.request_window_grid_size(terminal.viewport.cols, terminal.total_rows());
     }
 
     fn update_preedit(

@@ -356,7 +356,7 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
     let vp_cols = terminal.viewport.cols;
     let search_active = terminal.search_active();
 
-    let mut rows = Vec::with_capacity(vp_rows as usize);
+    let mut rows = Vec::with_capacity(terminal.total_rows() as usize);
     for row in 0..vp_rows {
         // When the search bar is open it overlays the last row, so we
         // still snapshot it (the bg still renders) but the caller can
@@ -383,6 +383,23 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
                 .collect(),
             prompt_start: grid_row.prompt_start,
             exit_status: grid_row.exit_status,
+        });
+    }
+    if let Some(grid_row) = terminal.status_line_row() {
+        rows.push(RowSnapshot {
+            cells: grid_row.cells.clone(),
+            attrs: grid_row.attrs.clone(),
+            fg: grid_row.fg.clone(),
+            bg: grid_row.bg.clone(),
+            underline: grid_row.underline.clone(),
+            underline_color: grid_row.underline_color.clone(),
+            has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
+            line_attr: grid_row.line_attr,
+            selected: vec![false; vp_cols as usize],
+            matched: vec![false; vp_cols as usize],
+            active_match: vec![false; vp_cols as usize],
+            prompt_start: false,
+            exit_status: None,
         });
     }
 
