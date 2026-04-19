@@ -2905,18 +2905,33 @@ pub(super) fn csi_dispatch(
     }
 }
 
-pub(super) fn esc_dispatch(
+fn esc_dispatch_vt52(
     ctx: &mut EscContext<'_>,
-    intermediates: &[u8],
     byte: u8,
-) {
-    let viewport = screen::screen_viewport(ctx.screen, ctx.viewport);
-    let viewport = &viewport;
+) -> bool {
+    if !ctx.modes.vt52_mode {
+        return false;
+    }
+    if *ctx.vt52_cursor_addr != crate::Vt52CursorAddr::Idle {
+        return false;
+    }
+
+    if byte == b'Y' {
+        *ctx.vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
+        return true;
+    }
+
+    if !matches!(
+        byte,
+        b'A' | b'B' | b'C' | b'D' | b'F' | b'G' | b'H' | b'I' | b'J' | b'K' | b'Z' | b'<'
+    ) {
+        return false;
+    }
 
     // VT52 mode — completely different ESC vocabulary, no CSI or parameters.
     // The `/` intermediate (ESC / Z identify response) shares the intermediate
     // byte space with ANSI SCS, so we must gate on vt52_mode *first*.
-    if ctx.modes.vt52_mode && intermediates.is_empty() {
+    {
         // Cancel pending wrap before any cursor-moving sequence.
         clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
         match byte {
@@ -3002,109 +3017,138 @@ pub(super) fn esc_dispatch(
             }
             _ => {}
         }
-        return;
     }
+    true
+}
 
-    if intermediates == b" " {
-        match byte {
-            b'F' if can_negotiate_c1(ctx.modes) => {
-                ctx.modes.c1_mode = C1Mode::SevenBit;
-            }
-            b'G' if can_negotiate_c1(ctx.modes) => {
-                ctx.modes.c1_mode = C1Mode::EightBit;
-            }
-            _ => {}
+fn esc_dispatch_with_space_intermediate(
+    ctx: &mut EscContext<'_>,
+    byte: u8,
+) -> bool {
+    match byte {
+        b'F' if can_negotiate_c1(ctx.modes) => {
+            ctx.modes.c1_mode = C1Mode::SevenBit;
+            true
         }
-        return;
+        b'G' if can_negotiate_c1(ctx.modes) => {
+            ctx.modes.c1_mode = C1Mode::EightBit;
+            true
+        }
+        _ => false,
     }
+}
 
-    if intermediates == b"%"
-        && let Some(mode) = TextMode::from_docs_final(byte)
-    {
+fn esc_dispatch_with_percent_intermediate(
+    ctx: &mut EscContext<'_>,
+    byte: u8,
+) -> bool {
+    if let Some(mode) = TextMode::from_docs_final(byte) {
         ctx.modes.text_mode = mode;
-        return;
+        true
+    } else {
+        false
     }
+}
 
+fn esc_dispatch_designation(
+    ctx: &mut EscContext<'_>,
+    intermediates: &[u8],
+    byte: u8,
+) -> bool {
     if let Some((slot, charset)) = charset::parse_designation(intermediates, byte).or_else(|| {
         let slot = charset::slot_for_intermediates(intermediates)?;
         let charset = ctx.drcs.lookup_designation(intermediates, byte)?;
         Some((slot, charset))
     }) {
         ctx.screen.charset.designate(slot, charset);
-        return;
+        true
+    } else {
+        false
     }
-    // ESC # sequences (DECALN, DECDWL, DECDHL).
-    if intermediates == b"#" {
-        match byte {
-            // DECALN — Screen Alignment Pattern. Fills the entire visible
-            // screen with 'E' characters. Used by vttest and for service
-            // alignment testing.
-            b'8' => {
-                let first_visible = ctx
-                    .screen
-                    .grid
-                    .rows
-                    .len()
-                    .saturating_sub(ctx.viewport.rows as usize);
-                let e_cell = SmolStr::new_inline("E");
-                let fg = ctx.palette.fg;
-                let bg = ctx.palette.bg;
-                for r in first_visible..ctx.screen.grid.rows.len() {
-                    let row = &mut ctx.screen.grid.rows[r];
-                    row.clear(fg, bg);
-                    row.wrapped = false;
-                    row.line_attr = LineAttr::Normal;
-                    for cell in row.cells.iter_mut() {
-                        *cell = e_cell.clone();
-                    }
-                    row.fg.fill(fg);
-                    row.bg.fill(bg);
+}
+
+fn esc_dispatch_with_hash_intermediate(
+    ctx: &mut EscContext<'_>,
+    byte: u8,
+) -> bool {
+    match byte {
+        b'8' => {
+            let first_visible = ctx
+                .screen
+                .grid
+                .rows
+                .len()
+                .saturating_sub(ctx.viewport.rows as usize);
+            let e_cell = SmolStr::new_inline("E");
+            let fg = ctx.palette.fg;
+            let bg = ctx.palette.bg;
+            for r in first_visible..ctx.screen.grid.rows.len() {
+                let row = &mut ctx.screen.grid.rows[r];
+                row.clear(fg, bg);
+                row.wrapped = false;
+                row.line_attr = LineAttr::Normal;
+                for cell in row.cells.iter_mut() {
+                    *cell = e_cell.clone();
                 }
-                // DECALN resets margins, origin mode, and homes the cursor
-                // per DEC spec. Without this, vttest's border drawing after
-                // DECALN misaligns if a previous test left a restricted
-                // scroll region or origin mode enabled.
-                ctx.screen.scroll_top = 0;
-                ctx.screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
-                ctx.screen.left_margin = 0;
-                ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
-                ctx.screen.origin_mode = false;
-                ctx.screen.cursor.row = 0;
-                ctx.screen.cursor.col = 0;
+                row.fg.fill(fg);
+                row.bg.fill(bg);
             }
-            // DECDWL (# 6), DECDHL top (# 3), DECDHL bottom (# 4), DECSWL (# 5).
-            // Set the per-row DEC line attribute for the cursor's current row.
-            b'3' | b'4' | b'5' | b'6' => {
-                let visible_start = ctx
-                    .screen
-                    .grid
-                    .rows
-                    .len()
-                    .saturating_sub(ctx.viewport.rows as usize);
-                let abs_row = visible_start + ctx.screen.cursor.row as usize;
-                if let Some(row) = ctx.screen.grid.rows.get_mut(abs_row) {
-                    row.line_attr = match byte {
-                        b'3' => LineAttr::DoubleHeightTop,
-                        b'4' => LineAttr::DoubleHeightBottom,
-                        b'5' => LineAttr::Normal,
-                        _ => LineAttr::DoubleWidth, // b'6'
-                    };
-                    if ctx.screen.cursor.row as usize + visible_start == abs_row {
-                        clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
-                    }
-                }
-            }
-            _ => {}
+            ctx.screen.scroll_top = 0;
+            ctx.screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
+            ctx.screen.left_margin = 0;
+            ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
+            ctx.screen.origin_mode = false;
+            ctx.screen.cursor.row = 0;
+            ctx.screen.cursor.col = 0;
+            true
         }
+        b'3' | b'4' | b'5' | b'6' => {
+            let visible_start = ctx
+                .screen
+                .grid
+                .rows
+                .len()
+                .saturating_sub(ctx.viewport.rows as usize);
+            let abs_row = visible_start + ctx.screen.cursor.row as usize;
+            if let Some(row) = ctx.screen.grid.rows.get_mut(abs_row) {
+                row.line_attr = match byte {
+                    b'3' => LineAttr::DoubleHeightTop,
+                    b'4' => LineAttr::DoubleHeightBottom,
+                    b'5' => LineAttr::Normal,
+                    _ => LineAttr::DoubleWidth,
+                };
+                if ctx.screen.cursor.row as usize + visible_start == abs_row {
+                    clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
+                }
+            }
+            true
+        }
+        _ => false,
+    }
+}
+
+pub(super) fn esc_dispatch(
+    ctx: &mut EscContext<'_>,
+    intermediates: &[u8],
+    byte: u8,
+) {
+    if intermediates.is_empty() && esc_dispatch_vt52(ctx, byte) {
         return;
     }
 
-    if !intermediates.is_empty() {
-        return;
+    match intermediates {
+        b" " if esc_dispatch_with_space_intermediate(ctx, byte) => return,
+        b"%" if esc_dispatch_with_percent_intermediate(ctx, byte) => return,
+        b"#" if esc_dispatch_with_hash_intermediate(ctx, byte) => return,
+        b"" => {}
+        _ if esc_dispatch_designation(ctx, intermediates, byte) => return,
+        _ => return,
     }
 
     // Cancel pending wrap before ESC sequences that move the cursor.
     clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
+    let viewport = screen::screen_viewport(ctx.screen, ctx.viewport);
+    let viewport = &viewport;
 
     match byte {
         b'7' => screen::save_cursor_slot(ctx.screen),
