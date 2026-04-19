@@ -3,6 +3,11 @@
 use std::io;
 use std::io::Read;
 use std::io::Write;
+#[cfg(unix)]
+use std::os::fd::AsRawFd;
+#[cfg(unix)]
+use std::os::fd::FromRawFd;
+use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
@@ -27,6 +32,30 @@ pub const MAX_READ_CHUNK: usize = 128 * 1024;
 // output during huge bursts like `cat bigfile`.
 pub const MAX_BUFFER: usize = MAX_READ_CHUNK * 8; // 1 MB
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct ForegroundProgram {
+    pub exe_path: PathBuf,
+    pub exe_name: String,
+}
+
+impl ForegroundProgram {
+    pub fn from_exe_path(exe_path: PathBuf) -> Option<Self> {
+        let exe_name = exe_path.file_name()?.to_string_lossy().into_owned();
+        Some(Self { exe_path, exe_name })
+    }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ForegroundProcessSet {
+    pub programs: Vec<ForegroundProgram>,
+}
+
+impl ForegroundProcessSet {
+    pub fn is_empty(&self) -> bool {
+        self.programs.is_empty()
+    }
+}
+
 /// Read half of a PTY connection. Owns the cueue ring-buffer consumer and the
 /// coalesce flag shared with the pump thread. Lives on the terminal thread so
 /// PTY data can be drained and parsed without touching the render thread.
@@ -37,6 +66,8 @@ pub struct PtyReader {
     /// a burst of reads produces a single wakeup instead of one per read.
     /// The consumer clears it at the top of its drain.
     pending_read: Arc<AtomicBool>,
+    #[cfg(unix)]
+    foreground_probe: Option<ForegroundProbe>,
 }
 
 impl PtyReader {
@@ -61,6 +92,19 @@ impl PtyReader {
         buf[..read_len].copy_from_slice(data);
         self.rx.commit();
         read_len
+    }
+
+    pub fn foreground_processes(&mut self) -> Option<ForegroundProcessSet> {
+        #[cfg(unix)]
+        {
+            self.foreground_probe
+                .as_mut()
+                .and_then(ForegroundProbe::resolve)
+        }
+        #[cfg(not(unix))]
+        {
+            None
+        }
     }
 }
 
@@ -154,6 +198,8 @@ impl Pty {
 
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
+        #[cfg(unix)]
+        let foreground_probe = pair.master.as_raw_fd().and_then(ForegroundProbe::new);
 
         let (read_tx, rx) = cueue(MAX_BUFFER)?;
         let pending_read = Arc::new(AtomicBool::new(false));
@@ -183,7 +229,12 @@ impl Pty {
                 child_killer,
             },
             PtyWriter { writer },
-            PtyReader { rx, pending_read },
+            PtyReader {
+                rx,
+                pending_read,
+                #[cfg(unix)]
+                foreground_probe,
+            },
         ))
     }
 
@@ -261,4 +312,83 @@ fn pump_reader(
             Err(_) => break,
         }
     }
+}
+
+#[cfg(unix)]
+struct ForegroundProbe {
+    master_fd: std::os::fd::OwnedFd,
+    cached_pgrp: Option<libc::pid_t>,
+    cached_processes: Option<ForegroundProcessSet>,
+}
+
+#[cfg(unix)]
+impl ForegroundProbe {
+    fn new(raw_fd: std::os::unix::io::RawFd) -> Option<Self> {
+        let dup_fd = unsafe { libc::dup(raw_fd) };
+        (dup_fd >= 0).then(|| Self {
+            // SAFETY: dup() returned a fresh owned fd on success.
+            master_fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(dup_fd) },
+            cached_pgrp: None,
+            cached_processes: None,
+        })
+    }
+
+    fn resolve(&mut self) -> Option<ForegroundProcessSet> {
+        let pgrp = current_foreground_pgrp(self.master_fd.as_raw_fd())?;
+        if self.cached_pgrp == Some(pgrp) {
+            return self.cached_processes.clone();
+        }
+        let program = resolve_foreground_processes(pgrp);
+        self.cached_pgrp = Some(pgrp);
+        self.cached_processes = program.clone();
+        program
+    }
+}
+
+#[cfg(unix)]
+fn current_foreground_pgrp(fd: std::os::unix::io::RawFd) -> Option<libc::pid_t> {
+    match unsafe { libc::tcgetpgrp(fd) } {
+        pid if pid > 0 => Some(pid),
+        _ => None,
+    }
+}
+
+#[cfg(target_os = "linux")]
+fn resolve_foreground_processes(pgrp: libc::pid_t) -> Option<ForegroundProcessSet> {
+    let mut programs = vec![];
+    for entry in std::fs::read_dir("/proc").ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let file_name = entry.file_name();
+        let Ok(pid) = file_name.to_string_lossy().parse::<libc::pid_t>() else {
+            continue;
+        };
+        let Some(member_pgrp) = process_group_for_pid(pid) else {
+            continue;
+        };
+        if member_pgrp != pgrp {
+            continue;
+        }
+        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
+        let program = ForegroundProgram::from_exe_path(exe)?;
+        if !programs.contains(&program) {
+            programs.push(program);
+        }
+    }
+    (!programs.is_empty()).then_some(ForegroundProcessSet { programs })
+}
+
+#[cfg(all(unix, not(target_os = "linux")))]
+fn resolve_foreground_processes(_pgrp: libc::pid_t) -> Option<ForegroundProcessSet> {
+    None
+}
+
+#[cfg(target_os = "linux")]
+fn process_group_for_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
+    let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    let after_comm = stat.rsplit_once(") ")?.1;
+    let mut fields = after_comm.split_ascii_whitespace();
+    let _state = fields.next()?;
+    fields.next()?.parse().ok()
 }

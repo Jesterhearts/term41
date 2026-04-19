@@ -6,6 +6,8 @@ use serde::Deserialize;
 use terminal41::ColorPalette;
 use terminal41::CursorShape;
 use terminal41::CursorStyle;
+use terminal41::FeaturePermissions;
+use terminal41::ProgramAllowlist;
 use terminal41::StatusDisplayKind;
 use wgpu::PowerPreference;
 
@@ -114,6 +116,13 @@ struct SelectionColors {
 struct StatusLineColors {
     foreground: Option<String>,
     background: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
+struct AllowFeaturesConfig {
+    #[serde(deserialize_with = "program_allowlist_opt")]
+    #[serde(default)]
+    macros: Option<ProgramAllowlist>,
 }
 
 #[derive(Deserialize, Default)]
@@ -341,6 +350,10 @@ struct ConfigFile {
     /// Color palette in Rio format.
     #[serde(default)]
     colors: Option<ColorsConfig>,
+    /// Security-sensitive terminal features that require a foreground-program
+    /// allowlist before they are advertised or executed.
+    #[serde(default)]
+    allow_features: Option<AllowFeaturesConfig>,
 }
 
 #[derive(Debug)]
@@ -370,6 +383,7 @@ pub struct Config {
     pub font_supersampling: i32,
     /// Color palette (ANSI 16 colors, default fg/bg, cursor, selection).
     pub palette: ColorPalette,
+    pub feature_permissions: FeaturePermissions,
 }
 
 impl Default for Config {
@@ -392,6 +406,7 @@ impl Default for Config {
             background_opacity: 1.0,
             font_supersampling: 4,
             palette: ColorPalette::default(),
+            feature_permissions: FeaturePermissions::default(),
         }
     }
 }
@@ -444,6 +459,12 @@ fn parse_config(
         background_opacity: file.background_opacity.unwrap_or(1.0),
         font_supersampling: file.font_supersampling.unwrap_or(4) as i32,
         palette,
+        feature_permissions: FeaturePermissions {
+            macros: file
+                .allow_features
+                .and_then(|f| f.macros)
+                .unwrap_or_default(),
+        },
     }
 }
 
@@ -654,6 +675,32 @@ where
     }
 }
 
+fn program_allowlist_opt<'de, D>(deserializer: D) -> Result<Option<ProgramAllowlist>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    #[derive(Deserialize)]
+    #[serde(untagged)]
+    enum RawAllowlist {
+        Single(String),
+        Many(Vec<String>),
+    }
+
+    match Option::<RawAllowlist>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt.map(|value| match value {
+            RawAllowlist::Single(value) if value == "*" || value.eq_ignore_ascii_case("all") => {
+                ProgramAllowlist::AllowAll
+            }
+            RawAllowlist::Single(value) => ProgramAllowlist::Programs(vec![value]),
+            RawAllowlist::Many(values) => ProgramAllowlist::Programs(values),
+        })),
+        Err(e) => {
+            warn!("failed to parse feature allowlist in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
 fn power_preference_opt<'de, D>(deserializer: D) -> Result<Option<PowerPreference>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -745,6 +792,40 @@ mod tests {
         assert_eq!(
             parse("status_line = \"indicator\"").status_line,
             StatusLineMode::Indicator
+        );
+    }
+
+    #[test]
+    fn macros_allowlist_defaults_to_deny_all() {
+        assert_eq!(
+            parse("").feature_permissions.macros,
+            ProgramAllowlist::DenyAll
+        );
+    }
+
+    #[test]
+    fn macros_allowlist_accepts_all_string() {
+        assert_eq!(
+            parse("[allow_features]\nmacros = \"all\"\n")
+                .feature_permissions
+                .macros,
+            ProgramAllowlist::AllowAll
+        );
+        assert_eq!(
+            parse("[allow_features]\nmacros = \"*\"\n")
+                .feature_permissions
+                .macros,
+            ProgramAllowlist::AllowAll
+        );
+    }
+
+    #[test]
+    fn macros_allowlist_accepts_program_list() {
+        assert_eq!(
+            parse("[allow_features]\nmacros = [\"vtrex\", \"/usr/bin/foo\"]\n")
+                .feature_permissions
+                .macros,
+            ProgramAllowlist::Programs(vec!["vtrex".into(), "/usr/bin/foo".into()])
         );
     }
 

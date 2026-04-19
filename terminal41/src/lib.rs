@@ -4,6 +4,8 @@ mod charset;
 mod color;
 mod conformance;
 mod cursor;
+mod decmacro;
+mod feature;
 mod grid;
 mod hyperlink;
 mod image;
@@ -31,6 +33,7 @@ use std::time::Instant;
 
 use clip41::Clipboard;
 use clip41::ClipboardKind;
+use pty_pipe41::ForegroundProcessSet;
 use pty_pipe41::MAX_READ_CHUNK;
 use pty_pipe41::PtyReader;
 pub use vte_mode41::TextMode;
@@ -41,6 +44,11 @@ pub use self::conformance::C1Mode;
 pub use self::conformance::ConformanceLevel;
 pub use self::cursor::CursorShape;
 pub use self::cursor::CursorStyle;
+use self::decmacro::MAX_MACRO_INVOCATION_DEPTH;
+use self::decmacro::MacroEncoding;
+use self::decmacro::MacroStore;
+pub use self::feature::FeaturePermissions;
+pub use self::feature::ProgramAllowlist;
 pub use self::grid::Viewport;
 pub use self::hyperlink::HyperlinkRegistry;
 pub use self::image::PlacedImage;
@@ -344,6 +352,10 @@ pub struct Terminal {
     vt52_cursor_addr: Vt52CursorAddr,
     default_status_display: StatusDisplayKind,
     strict_altscreen_scrollback: bool,
+    feature_permissions: FeaturePermissions,
+    foreground_processes: Option<ForegroundProcessSet>,
+    macros: MacroStore,
+    macro_invocation_depth: usize,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -359,6 +371,7 @@ impl Terminal {
         scrollback_limit: u32,
         default_status_display: StatusDisplayKind,
         strict_altscreen_scrollback: bool,
+        feature_permissions: FeaturePermissions,
         cell_height: u32,
         cell_width: u32,
         palette: ColorPalette,
@@ -413,6 +426,10 @@ impl Terminal {
             vt52_cursor_addr: Vt52CursorAddr::Idle,
             default_status_display,
             strict_altscreen_scrollback,
+            feature_permissions,
+            foreground_processes: None,
+            macros: MacroStore::default(),
+            macro_invocation_depth: 0,
         };
         terminal.set_default_status_display(default_status_display);
         terminal
@@ -453,6 +470,128 @@ impl Terminal {
         self.palette = palette.clone();
         for screen in [&mut self.active, &mut self.stash] {
             apply_screen_palette(screen, &old_palette, &palette);
+        }
+    }
+
+    pub fn set_feature_permissions(
+        &mut self,
+        permissions: FeaturePermissions,
+    ) {
+        self.feature_permissions = permissions;
+    }
+
+    pub fn set_foreground_processes(
+        &mut self,
+        processes: Option<ForegroundProcessSet>,
+    ) {
+        self.foreground_processes = processes;
+    }
+
+    pub fn macro_feature_enabled(&self) -> bool {
+        self.feature_permissions
+            .macros
+            .allows_programs(self.foreground_processes.as_ref())
+    }
+
+    fn define_macro(
+        &mut self,
+        params: vtepp::Params,
+        payload: &[u8],
+    ) {
+        if !self.macro_feature_enabled() {
+            return;
+        }
+        let Some(id) = params
+            .iter()
+            .next()
+            .and_then(|group| group.first().copied())
+        else {
+            return;
+        };
+        let delete_existing = matches!(
+            params
+                .iter()
+                .nth(1)
+                .and_then(|group| group.first().copied()),
+            Some(0 | 1)
+        );
+        let Some(encoding) = params
+            .iter()
+            .nth(2)
+            .and_then(|group| group.first().copied())
+            .and_then(MacroEncoding::from_param)
+        else {
+            return;
+        };
+        self.macros.define(id, delete_existing, encoding, payload);
+    }
+
+    fn invoke_macro(
+        &mut self,
+        id: u16,
+    ) {
+        if !self.macro_feature_enabled()
+            || self.macro_invocation_depth >= MAX_MACRO_INVOCATION_DEPTH
+        {
+            return;
+        }
+        let Some(bytes) = self.macros.get(id).map(ToOwned::to_owned) else {
+            return;
+        };
+        self.macro_invocation_depth += 1;
+        self.apply_macro_bytes(&bytes);
+        self.macro_invocation_depth -= 1;
+    }
+
+    fn apply_macro_bytes(
+        &mut self,
+        bytes: &[u8],
+    ) {
+        let mut parser = vtepp::Parser::new();
+        let mut hook_bytes: Vec<Vec<u8>> = vec![];
+        let mut hook_params: Vec<vtepp::Params> = vec![];
+        let mut hook_intermediates: Vec<vtepp::Intermediates> = vec![];
+        let mut hook_action: Vec<char> = vec![];
+
+        for action in parser.parse(bytes) {
+            match action {
+                vtepp::Action::Hook {
+                    params,
+                    intermediates,
+                    action,
+                } => {
+                    hook_bytes.push(vec![]);
+                    hook_params.push(params);
+                    hook_intermediates.push(intermediates);
+                    hook_action.push(action);
+                }
+                vtepp::Action::Put(chunk) => {
+                    if let Some(last) = hook_bytes.last_mut() {
+                        last.extend_from_slice(chunk);
+                    }
+                }
+                vtepp::Action::Unhook => {
+                    let Some(payload) = hook_bytes.pop() else {
+                        continue;
+                    };
+                    let Some(params) = hook_params.pop() else {
+                        continue;
+                    };
+                    let Some(intermediates) = hook_intermediates.pop() else {
+                        continue;
+                    };
+                    let Some(action) = hook_action.pop() else {
+                        continue;
+                    };
+                    if action == 'q' && intermediates.as_slice().is_empty() {
+                        let image = image41::sixel::parse_sixel(params, payload);
+                        self.place_sixel_image(image);
+                    } else {
+                        handle_dcs(params, intermediates.as_slice(), action, &payload, self);
+                    }
+                }
+                action => self.apply(action),
+            }
         }
     }
 
@@ -1766,6 +1905,16 @@ impl Terminal {
                 intermediates,
                 action,
             } => {
+                if intermediates.as_slice() == b"*" && action == 'z' {
+                    let id = params
+                        .iter()
+                        .next()
+                        .and_then(|group| group.first().copied())
+                        .unwrap_or(0);
+                    self.invoke_macro(id);
+                    self.track_scroll(popped_before);
+                    return;
+                }
                 let mut ctx = CsiContext {
                     screen: &mut self.active,
                     stash: &mut self.stash,
@@ -1786,6 +1935,9 @@ impl Terminal {
                     current_prompt_row: &mut self.current_prompt_row,
                     bell_pending: &mut self.bell_pending,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
+                    macros: &mut self.macros,
+                    feature_permissions: &self.feature_permissions,
+                    foreground_processes: &self.foreground_processes,
                 };
                 csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
             }
@@ -1810,6 +1962,7 @@ impl Terminal {
                     default_status_display: &mut self.default_status_display,
                     pending_output: &mut self.pending_output,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
+                    macros: &mut self.macros,
                 };
                 esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
             }
@@ -2337,6 +2490,8 @@ fn handle_dcs(
                 screen.upss = upss;
             }
         }
+    } else if action == 'z' && intermediates == b"!" {
+        terminal.define_macro(params, payload);
     }
 }
 
@@ -2372,6 +2527,11 @@ pub fn run_terminal_thread(
                 break;
             }
             did_work = true;
+            let foreground_processes = pty_reader.foreground_processes();
+            terminal
+                .lock()
+                .unwrap()
+                .set_foreground_processes(foreground_processes);
             for action in parser.parse(&buf[..n]) {
                 match action {
                     vtepp::Action::Hook {
@@ -3028,7 +3188,10 @@ fn place_iterm_image(
 
 #[cfg(test)]
 mod tests {
+    use std::path::PathBuf;
+
     use palette::Srgb;
+    use pty_pipe41::ForegroundProgram;
     use vtepp::Parser;
 
     use super::*;
@@ -3056,6 +3219,7 @@ mod tests {
                     scrollback,
                     StatusDisplayKind::None,
                     false,
+                    FeaturePermissions::default(),
                     cell_h,
                     cell_w,
                     ColorPalette::default(),
@@ -3079,6 +3243,7 @@ mod tests {
                     scrollback,
                     StatusDisplayKind::None,
                     strict_altscreen_scrollback,
+                    FeaturePermissions::default(),
                     cell_h,
                     cell_w,
                     ColorPalette::default(),
@@ -3091,9 +3256,70 @@ mod tests {
             &mut self,
             data: &[u8],
         ) {
+            let mut hook_bytes: Vec<Vec<u8>> = vec![];
+            let mut hook_params: Vec<vtepp::Params> = vec![];
+            let mut hook_intermediates: Vec<vtepp::Intermediates> = vec![];
+            let mut hook_action: Vec<char> = vec![];
             for action in self.parser.parse(data) {
-                self.inner.apply(action);
+                match action {
+                    Action::Hook {
+                        params,
+                        intermediates,
+                        action,
+                    } => {
+                        hook_bytes.push(vec![]);
+                        hook_params.push(params);
+                        hook_intermediates.push(intermediates);
+                        hook_action.push(action);
+                    }
+                    Action::Put(chunk) => {
+                        if let Some(last) = hook_bytes.last_mut() {
+                            last.extend_from_slice(chunk);
+                        }
+                    }
+                    Action::Unhook => {
+                        let payload = hook_bytes.pop().expect("hook bytes");
+                        let params = hook_params.pop().expect("hook params");
+                        let intermediates = hook_intermediates.pop().expect("hook intermediates");
+                        let action = hook_action.pop().expect("hook action");
+                        if action == 'q' && intermediates.as_slice().is_empty() {
+                            let image = image41::sixel::parse_sixel(params, payload);
+                            self.inner.place_sixel_image(image);
+                        } else {
+                            handle_dcs(
+                                params,
+                                intermediates.as_slice(),
+                                action,
+                                &payload,
+                                &mut self.inner,
+                            );
+                        }
+                    }
+                    action => self.inner.apply(action),
+                }
             }
+        }
+
+        fn set_foreground_programs(
+            &mut self,
+            paths: &[&str],
+        ) {
+            let programs = paths
+                .iter()
+                .map(|path| {
+                    ForegroundProgram::from_exe_path(PathBuf::from(path)).expect("exe path")
+                })
+                .collect();
+            self.inner
+                .set_foreground_processes(Some(ForegroundProcessSet { programs }));
+        }
+
+        fn set_macro_permissions(
+            &mut self,
+            macros: ProgramAllowlist,
+        ) {
+            self.inner
+                .set_feature_permissions(FeaturePermissions { macros });
         }
     }
 
@@ -4255,7 +4481,7 @@ mod tests {
     fn da1_replies_vt420() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[c");
-        assert_eq!(term.take_pending_output(), b"\x1b[?64;7;21;22;28;29c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?63;7;21;22;28;29c");
     }
 
     #[test]
@@ -4263,7 +4489,7 @@ mod tests {
         // Apps sometimes send `CSI 0 c` explicitly; the reply is the same.
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[0c");
-        assert_eq!(term.take_pending_output(), b"\x1b[?64;7;21;22;28;29c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?63;7;21;22;28;29c");
     }
 
     #[test]
@@ -4303,6 +4529,57 @@ mod tests {
         assert_eq!(term.modes.conformance_level, ConformanceLevel::Level1);
         assert_eq!(term.modes.c1_mode, C1Mode::SevenBit);
         assert_eq!(term.take_pending_output(), b"\x1b[>41;0;0c");
+    }
+
+    #[test]
+    fn da1_downgrades_when_macros_are_not_allowlisted() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.set_macro_permissions(ProgramAllowlist::Programs(vec!["vtrex".into()]));
+        term.process(b"\x1b[c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?63;7;21;22;28;29c");
+    }
+
+    #[test]
+    fn da1_reports_level4_when_allowlisted_program_is_foreground() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.set_macro_permissions(ProgramAllowlist::Programs(vec!["vtrex".into()]));
+        term.set_foreground_programs(&["/usr/bin/vtrex"]);
+        term.process(b"\x1b[c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?64;7;21;22;28;29;32c");
+    }
+
+    #[test]
+    fn macro_definition_and_invocation_require_allowlisted_foreground_processes() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.set_macro_permissions(ProgramAllowlist::Programs(vec!["vtrex".into()]));
+        term.process(b"\x1bP1;1;1!z414243\x1b\\");
+        term.process(b"\x1b[1*z");
+        assert!(visible_text(&term).trim().is_empty());
+
+        term.set_foreground_programs(&["/usr/bin/vtrex"]);
+        term.process(b"\x1bP1;1;1!z414243\x1b\\");
+        term.process(b"\x1b[1*z");
+        assert!(visible_text(&term).contains("ABC"));
+    }
+
+    #[test]
+    fn macro_permissions_require_all_foreground_processes_to_match() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.set_macro_permissions(ProgramAllowlist::Programs(vec!["vtrex".into()]));
+        term.set_foreground_programs(&["/usr/bin/vtrex", "/usr/bin/helper"]);
+        term.process(b"\x1b[c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?63;7;21;22;28;29c");
+    }
+
+    #[test]
+    fn ris_clears_stored_macros() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.set_macro_permissions(ProgramAllowlist::AllowAll);
+        term.set_foreground_programs(&["/usr/bin/vtrex"]);
+        term.process(b"\x1bP1;1;1!z414243\x1b\\");
+        term.process(b"\x1bc");
+        term.process(b"\x1b[1*z");
+        assert!(visible_text(&term).trim().is_empty());
     }
 
     #[test]

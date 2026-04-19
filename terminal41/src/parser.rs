@@ -3,6 +3,7 @@ use std::time::Instant;
 
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
+use pty_pipe41::ForegroundProcessSet;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
 use unicode_segmentation::UnicodeSegmentation;
@@ -20,6 +21,8 @@ use crate::color;
 use crate::color::apply_sgr;
 use crate::conformance;
 use crate::cursor::CursorStyle;
+use crate::decmacro::MacroStore;
+use crate::feature::FeaturePermissions;
 use crate::grid;
 use crate::grid::Viewport;
 use crate::keyboard::KittyKeyboardState;
@@ -58,6 +61,9 @@ pub(super) struct CsiContext<'a> {
     pub current_prompt_row: &'a mut Option<u64>,
     pub bell_pending: &'a mut bool,
     pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
+    pub macros: &'a mut MacroStore,
+    pub feature_permissions: &'a FeaturePermissions,
+    pub foreground_processes: &'a Option<ForegroundProcessSet>,
 }
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that ESC handlers
@@ -83,6 +89,7 @@ pub(super) struct EscContext<'a> {
     /// `ESC Y` byte is dispatched; the subsequent bytes are consumed in
     /// [`Terminal::apply`] before any other dispatch occurs.
     pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
+    pub macros: &'a mut MacroStore,
 }
 
 /// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
@@ -574,6 +581,7 @@ fn apply_hard_reset(
     *ctx.current_prompt_row = None;
     *ctx.bell_pending = false;
     *ctx.vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+    ctx.macros.clear();
 }
 
 /// Forward-scan tab stops from `start_col + 1`. Returns the column of the
@@ -1678,6 +1686,7 @@ pub(super) fn csi_dispatch(
             default_status_display: ctx.default_status_display,
             pending_output: ctx.pending_output,
             vt52_cursor_addr: ctx.vt52_cursor_addr,
+            macros: ctx.macros,
         };
         apply_hard_reset(&mut esc_ctx, level, c1_mode);
         return;
@@ -2168,16 +2177,29 @@ pub(super) fn csi_dispatch(
     if action == 'c' {
         // DA1 (Primary Device Attributes). Prefix the reply with the active
         // DECSCL operating level and advertise the subset this emulator
-        // actually implements.
+        // actually implements. Macro support is policy-gated because VT400
+        // level 4 implies macros to older apps like vtrex; when macros are
+        // denied we intentionally under-report as level 3 to avoid a false
+        // positive probe result.
         //   7  = printer port (placeholder — signals DECDLD readiness)
         //  21  = horizontal scrolling
         //  22  = ANSI color
         //  28  = rectangular area operations
         //  29  = ANSI text locator
+        let macro_allowed = ctx
+            .feature_permissions
+            .macros
+            .allows_programs(ctx.foreground_processes.as_ref());
+        let level = if macro_allowed {
+            ctx.modes.conformance_level.da1_code()
+        } else {
+            ctx.modes.conformance_level.da1_code().min(63)
+        };
+        let macro_feature = if macro_allowed { ";32" } else { "" };
         conformance::write_csi(
             ctx.pending_output,
             ctx.modes.c1_mode,
-            format_args!("?{};7;21;22;28;29c", ctx.modes.conformance_level.da1_code()),
+            format_args!("?{level};7;21;22;28;29{macro_feature}c"),
         );
         return;
     }
@@ -3018,6 +3040,9 @@ mod tests {
         let mut current_prompt_row = None;
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
         let mut default_status_display = StatusDisplayKind::None;
+        let feature_permissions = FeaturePermissions::default();
+        let foreground_processes: Option<ForegroundProcessSet> = None;
+        let mut macros = MacroStore::default();
 
         for action in parser.parse(input) {
             // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
@@ -3115,6 +3140,9 @@ mod tests {
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
+                        macros: &mut macros,
+                        feature_permissions: &feature_permissions,
+                        foreground_processes: &foreground_processes,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -3139,6 +3167,7 @@ mod tests {
                         default_status_display: &mut default_status_display,
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
+                        macros: &mut macros,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
@@ -3922,6 +3951,9 @@ mod tests {
         let mut current_prompt_row = None;
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
         let mut default_status_display = StatusDisplayKind::None;
+        let feature_permissions = FeaturePermissions::default();
+        let foreground_processes: Option<ForegroundProcessSet> = None;
+        let mut macros = MacroStore::default();
 
         for action in parser.parse(input) {
             // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
@@ -4019,6 +4051,9 @@ mod tests {
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
+                        macros: &mut macros,
+                        feature_permissions: &feature_permissions,
+                        foreground_processes: &foreground_processes,
                     };
                     csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                 }
@@ -4043,6 +4078,7 @@ mod tests {
                         default_status_display: &mut default_status_display,
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
+                        macros: &mut macros,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                 }
@@ -4630,6 +4666,9 @@ mod tests {
         let mut current_prompt_row = None;
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
         let mut default_status_display = StatusDisplayKind::None;
+        let feature_permissions = FeaturePermissions::default();
+        let foreground_processes: Option<ForegroundProcessSet> = None;
+        let mut macros = MacroStore::default();
 
         for chunk in [b"\x1b)>\x1b~\xc3".as_slice(), b"\xa1".as_slice()] {
             for action in parser.parse(chunk) {
@@ -4676,6 +4715,9 @@ mod tests {
                             current_prompt_row: &mut current_prompt_row,
                             bell_pending: &mut bell_pending,
                             vt52_cursor_addr: &mut vt52_cursor_addr,
+                            macros: &mut macros,
+                            feature_permissions: &feature_permissions,
+                            foreground_processes: &foreground_processes,
                         };
                         csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
                     }
@@ -4700,6 +4742,7 @@ mod tests {
                             default_status_display: &mut default_status_display,
                             pending_output: &mut pending_output,
                             vt52_cursor_addr: &mut vt52_cursor_addr,
+                            macros: &mut macros,
                         };
                         esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
                     }

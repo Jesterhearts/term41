@@ -4,6 +4,7 @@
 //! grid to verify correct behavior.
 
 use terminal41::ColorPalette;
+use terminal41::FeaturePermissions;
 use terminal41::LineAttr;
 use terminal41::Terminal;
 use vtepp::Parser;
@@ -29,6 +30,7 @@ impl VtTerm {
                 1000,
                 terminal41::StatusDisplayKind::None,
                 false,
+                FeaturePermissions::default(),
                 16,
                 8,
                 ColorPalette::default(),
@@ -461,7 +463,7 @@ fn da1_responds() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[c");
     let out = t.pending_output();
-    assert!(out.starts_with(b"\x1b[?64;"));
+    assert!(out.starts_with(b"\x1b[?63;"));
 }
 
 #[test]

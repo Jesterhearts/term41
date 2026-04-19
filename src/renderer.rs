@@ -762,6 +762,7 @@ impl RenderHost {
             scrollback,
             self.config.status_line.display_kind(),
             self.config.strict_altscreen_scrollback,
+            self.config.feature_permissions.clone(),
             self.font_system.cell_height,
             self.font_system.cell_width,
             self.config.palette.clone(),
@@ -908,6 +909,7 @@ impl RenderHost {
             terminal.set_default_cursor_style(cfg.cursor_style);
             terminal.set_default_status_display(cfg.status_line.display_kind());
             terminal.set_scrollback_policy(cfg.scrollback_lines, cfg.strict_altscreen_scrollback);
+            terminal.set_feature_permissions(cfg.feature_permissions.clone());
             terminal.set_palette(cfg.palette.clone());
         }
         self.config.keybindings = cfg.keybindings;
@@ -918,6 +920,7 @@ impl RenderHost {
         self.config.status_line = cfg.status_line;
         self.config.strict_altscreen_scrollback = cfg.strict_altscreen_scrollback;
         self.config.palette = cfg.palette.clone();
+        self.config.feature_permissions = cfg.feature_permissions.clone();
 
         if cfg.gutter != self.config.gutter {
             self.config.gutter = cfg.gutter;
