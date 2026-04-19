@@ -7,10 +7,12 @@ mod charset;
 mod color;
 mod conformance;
 mod cursor;
+mod dcs;
 mod dec_color;
 mod decmacro;
 mod drcs;
 mod feature;
+mod graphics;
 mod grid;
 mod hyperlink;
 mod image;
@@ -18,8 +20,11 @@ mod keyboard;
 mod mode;
 mod mouse;
 mod osc;
+mod palette_sync;
 mod parser;
+mod report;
 mod row;
+mod runtime;
 mod screen;
 mod search;
 pub mod selection;
@@ -79,6 +84,8 @@ use self::mouse::encode_mouse_event;
 use self::mouse::should_report;
 use self::osc::OscContext;
 use self::osc::handle_osc;
+use self::palette_sync::apply_screen_palette;
+use self::palette_sync::sync_screen_erase_defaults;
 use self::parser::CsiContext;
 use self::parser::EscContext;
 use self::parser::csi_dispatch;
@@ -93,6 +100,8 @@ use self::parser::put_status_ascii_run;
 use self::parser::put_status_printable;
 use self::parser::put_status_text_run;
 use self::parser::put_text_run;
+pub(crate) use self::report::deccir_report;
+pub(crate) use self::report::dectabsr_report;
 pub use self::row::LineAttr;
 pub use self::row::Row;
 pub use self::screen::Screen;
@@ -149,14 +158,6 @@ pub enum Vt52CursorAddr {
     AwaitingRow,
     /// Got the row byte; waiting for the column byte.
     AwaitingCol(u8),
-}
-
-struct HookState {
-    bytes: Vec<u8>,
-    params: vtepp::Params,
-    intermediates: vtepp::Intermediates,
-    action: char,
-    truncated: bool,
 }
 
 /// Terminal-level modes toggled by escape sequences (DECSET/DECRST, mode
@@ -647,7 +648,7 @@ impl Terminal {
         bytes: &[u8],
     ) {
         let mut parser = vtepp::Parser::new();
-        let mut hooks: Vec<HookState> = vec![];
+        let mut hooks: Vec<dcs::HookState> = vec![];
 
         for action in parser.parse(bytes) {
             match action {
@@ -655,13 +656,13 @@ impl Terminal {
                     params,
                     intermediates,
                     action,
-                } => push_hook_state(&mut hooks, params, intermediates, action),
-                vtepp::Action::Put(chunk) => append_hook_bytes(&mut hooks, chunk),
+                } => dcs::push_hook_state(&mut hooks, params, intermediates, action),
+                vtepp::Action::Put(chunk) => dcs::append_hook_bytes(&mut hooks, chunk),
                 vtepp::Action::Unhook => {
                     let Some(hook) = hooks.pop() else {
                         continue;
                     };
-                    dispatch_hook(hook, self);
+                    dcs::dispatch_hook(hook, self);
                 }
                 action => self.apply(action),
             }
@@ -2036,7 +2037,7 @@ impl Terminal {
                         .unwrap_or(0);
                     match report_type {
                         1 => {
-                            let payload = dectsr_payload(&self.active);
+                            let payload = report::dectsr_payload(&self.active);
                             conformance::push_dcs_prefix(
                                 &mut self.pending_output,
                                 self.modes.c1_mode,
@@ -2127,9 +2128,9 @@ impl Terminal {
                 // on DCS) rather than through the text-OSC dispatcher,
                 // which doesn't carry cursor / cell-size state.
                 if let Some(rest) = data.strip_prefix(b"1337;")
-                    && is_iterm_image_cmd(rest)
+                    && graphics::is_iterm_image_cmd(rest)
                 {
-                    handle_iterm_graphics(
+                    graphics::handle_iterm_graphics(
                         rest,
                         &mut self.iterm_chunked,
                         &mut self.active,
@@ -2158,7 +2159,7 @@ impl Terminal {
                 }
             }
             Action::ApcDispatch(data) => {
-                handle_kitty_graphics(
+                graphics::handle_kitty_graphics(
                     &data,
                     &mut self.kitty_images,
                     &mut self.kitty_chunked,
@@ -2423,7 +2424,7 @@ impl TerminalThread {
                 handle_
                     .set(thread::current())
                     .expect("set terminal thread handle");
-                run_terminal_thread(
+                runtime::run_terminal_thread(
                     terminal,
                     pty_reader,
                     stop_,
@@ -2443,1447 +2444,6 @@ impl Drop for TerminalThread {
         if let Some(t) = self.thread_handle.get() {
             t.unpark();
         }
-    }
-}
-
-/// Handle XTGETTCAP (DCS + q). The payload is a semicolon-separated list of
-/// hex-encoded terminfo capability names. For each recognized name, reply
-/// `DCS 1 + r <hex_name>=<hex_value> ST`; for unknown names reply
-/// `DCS 0 + r <hex_name> ST`.
-///
-/// DECRQSS — Request Selection or Setting (`DCS $ q <selector> ST`).
-/// The selector identifies which setting to report. We reply with
-/// `DCS 1 $ r <value> ST` for recognised settings, or
-/// `DCS 0 $ r ST` for unrecognised ones.
-fn handle_decrqss(
-    selector: &[u8],
-    terminal: &mut Terminal,
-) {
-    let out = &mut terminal.pending_output;
-    let c1_mode = terminal.modes.c1_mode;
-
-    match selector {
-        // SGR — report current graphic rendition.
-        b"m" => {
-            let screen = &terminal.active;
-            let mut parts: Vec<String> = Vec::new();
-            let attrs = screen.attrs;
-            if attrs.contains(font41::attrs::CellAttrs::BOLD) {
-                parts.push("1".into());
-            }
-            if attrs.contains(font41::attrs::CellAttrs::DIM) {
-                parts.push("2".into());
-            }
-            if attrs.contains(font41::attrs::CellAttrs::ITALIC) {
-                parts.push("3".into());
-            }
-            if attrs.contains(font41::attrs::CellAttrs::REVERSE) {
-                parts.push("7".into());
-            }
-            if attrs.contains(font41::attrs::CellAttrs::HIDDEN) {
-                parts.push("8".into());
-            }
-            if attrs.contains(font41::attrs::CellAttrs::STRIKETHROUGH) {
-                parts.push("9".into());
-            }
-            if attrs.contains(font41::attrs::CellAttrs::OVERLINE) {
-                parts.push("53".into());
-            }
-            if parts.is_empty() {
-                parts.push("0".into());
-            }
-            let sgr = parts.join(";");
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{sgr}m"));
-        }
-        // DECSTBM — report scroll region.
-        b"r" => {
-            let top = terminal.active.scroll_top + 1;
-            let bottom = terminal.active.scroll_bottom + 1;
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{top};{bottom}r"));
-        }
-        // DECSLRM — report left/right margins.
-        b"s" => {
-            let left = terminal.active.left_margin + 1;
-            let right = terminal.active.right_margin + 1;
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{left};{right}s"));
-        }
-        // DECSLPP — report lines per page.
-        b"t" => {
-            let lines = screen::page_rows(&terminal.active).unwrap_or(terminal.viewport.rows);
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{lines}t"));
-        }
-        // DECSCPP — report columns per page.
-        b"$|" => {
-            conformance::write_dcs(
-                out,
-                c1_mode,
-                format_args!("1$r{}$|", terminal.viewport.cols),
-            );
-        }
-        // DECSNLS — report visible lines per screen.
-        b"*|" => {
-            conformance::write_dcs(
-                out,
-                c1_mode,
-                format_args!("1$r{}*|", terminal.viewport.rows),
-            );
-        }
-        // DECSCL — report operating level / C1 transmission mode.
-        b"\"p" => {
-            let level = terminal.modes.conformance_level.da1_code();
-            if terminal.modes.conformance_level == ConformanceLevel::Level1 {
-                conformance::write_dcs(out, c1_mode, format_args!("1$r{level}\"p"));
-            } else {
-                conformance::write_dcs(
-                    out,
-                    c1_mode,
-                    format_args!("1$r{level};{}\"p", terminal.modes.c1_mode.decscl_param()),
-                );
-            }
-        }
-        // DECSACE — report attribute-change extent.
-        b"*x" => {
-            let ps = match terminal.active.attr_change_extent {
-                grid::AttrChangeExtent::Stream => 1,
-                grid::AttrChangeExtent::Rectangle => 2,
-            };
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}*x"));
-        }
-        // DECSCUSR — report cursor style.
-        b" q" => {
-            let ps = match (terminal.cursor_style.shape, terminal.cursor_style.blink) {
-                (cursor::CursorShape::Block, true) => 1,
-                (cursor::CursorShape::Block, false) => 2,
-                (cursor::CursorShape::Underline, true) => 3,
-                (cursor::CursorShape::Underline, false) => 4,
-                (cursor::CursorShape::Beam, true) => 5,
-                (cursor::CursorShape::Beam, false) => 6,
-            };
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps} q"));
-        }
-        // DECSASD — report active display target.
-        b"$}" => {
-            let ps = match terminal.active.active_display {
-                screen::ActiveDisplay::Main => 0,
-                screen::ActiveDisplay::Status => 1,
-            };
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}$}}"));
-        }
-        // DECSSDT — report status line kind.
-        b"$~" => {
-            let ps = match terminal.active.status_display {
-                screen::StatusDisplayKind::None => 0,
-                screen::StatusDisplayKind::Indicator => 1,
-                screen::StatusDisplayKind::HostWritable => 2,
-            };
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}$~"));
-        }
-        // DECAC / DECATC — report current VT525 color assignments.
-        [item @ b'0'..=b'9', b',', kind @ (b'|' | b'}')] => {
-            let item = (item - b'0') as u16;
-            let report = if *kind == b'|' {
-                dec_color::report_color_assignment(&terminal.dec_color, item)
-            } else {
-                dec_color::report_alternate_text_color(&terminal.dec_color, item)
-            };
-            if let Some(report) = report {
-                conformance::write_dcs(out, c1_mode, format_args!("1$r{report}"));
-            } else {
-                conformance::write_dcs(out, c1_mode, format_args!("0$r"));
-            }
-        }
-        [b'1', b'0'..=b'5', b',', b'}'] => {
-            let item = selector[0..2]
-                .iter()
-                .fold(0u16, |acc, b| acc * 10 + (b - b'0') as u16);
-            if let Some(report) = dec_color::report_alternate_text_color(&terminal.dec_color, item)
-            {
-                conformance::write_dcs(out, c1_mode, format_args!("1$r{report}"));
-            } else {
-                conformance::write_dcs(out, c1_mode, format_args!("0$r"));
-            }
-        }
-        // DECSCA — report character protection attribute.
-        b"\"q" => {
-            let ps = if terminal
-                .active
-                .attrs
-                .contains(font41::attrs::CellAttrs::PROTECTED)
-            {
-                1
-            } else {
-                0
-            };
-            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}\"q"));
-        }
-        // Unrecognised — invalid response.
-        _ => {
-            conformance::write_dcs(out, c1_mode, format_args!("0$r"));
-        }
-    }
-}
-
-fn current_page_number(screen: &Screen) -> u32 {
-    screen
-        .page_memory
-        .as_ref()
-        .map(|page| page.active_page + 1)
-        .unwrap_or(1)
-}
-
-fn encode_report_byte(bits: u8) -> char {
-    char::from(0x40 | (bits & 0x1f))
-}
-
-fn decode_report_byte(byte: u8) -> Option<u8> {
-    (0x40..=0x5f).contains(&byte).then_some(byte & 0x1f)
-}
-
-fn encode_srend(screen: &Screen) -> String {
-    let mut bits = 0u8;
-    if screen.attrs.contains(font41::attrs::CellAttrs::BOLD) {
-        bits |= 1;
-    }
-    if screen.underline != font41::attrs::UnderlineStyle::None {
-        bits |= 2;
-    }
-    if screen
-        .attrs
-        .intersects(font41::attrs::CellAttrs::BLINK | font41::attrs::CellAttrs::RAPID_BLINK)
-    {
-        bits |= 4;
-    }
-    if screen.attrs.contains(font41::attrs::CellAttrs::REVERSE) {
-        bits |= 8;
-    }
-    encode_report_byte(bits).to_string()
-}
-
-fn encode_satt(screen: &Screen) -> String {
-    let bits = if screen.attrs.contains(font41::attrs::CellAttrs::PROTECTED) {
-        1
-    } else {
-        0
-    };
-    encode_report_byte(bits).to_string()
-}
-
-fn encode_sflag(
-    screen: &Screen,
-    _modes: &TerminalModes,
-) -> String {
-    let mut bits = 0u8;
-    if screen.origin_mode {
-        bits |= 1;
-    }
-    match screen.charset.single_shift {
-        Some(charset::GraphicSetSlot::G2) => bits |= 2,
-        Some(charset::GraphicSetSlot::G3) => bits |= 4,
-        _ => {}
-    }
-    encode_report_byte(bits).to_string()
-}
-
-fn charset_size_bit(charset: charset::CharacterSet) -> u8 {
-    match charset {
-        charset::CharacterSet::IsoLatin1Supplemental
-        | charset::CharacterSet::Drcs(_, drcs::CharsetSize::Cs96) => 1,
-        _ => 0,
-    }
-}
-
-fn encode_scss(screen: &Screen) -> String {
-    let bits = charset_size_bit(screen.charset.designated(charset::GraphicSetSlot::G0))
-        | (charset_size_bit(screen.charset.designated(charset::GraphicSetSlot::G1)) << 1)
-        | (charset_size_bit(screen.charset.designated(charset::GraphicSetSlot::G2)) << 2)
-        | (charset_size_bit(screen.charset.designated(charset::GraphicSetSlot::G3)) << 3);
-    encode_report_byte(bits).to_string()
-}
-
-fn charset_designator_bytes(
-    charset: charset::CharacterSet,
-    drcs: &DrcsStore,
-) -> Option<Vec<u8>> {
-    match charset {
-        charset::CharacterSet::Drcs(buffer_id, _) => drcs
-            .designation_for_buffer(buffer_id)
-            .map(|bytes| bytes.to_vec()),
-        charset => charset::designator_for_charset(charset).map(|bytes| bytes.to_vec()),
-    }
-}
-
-fn encode_sdesig(
-    screen: &Screen,
-    drcs: &DrcsStore,
-) -> Option<String> {
-    let mut data = vec![];
-    for slot in [
-        charset::GraphicSetSlot::G0,
-        charset::GraphicSetSlot::G1,
-        charset::GraphicSetSlot::G2,
-        charset::GraphicSetSlot::G3,
-    ] {
-        data.extend(charset_designator_bytes(
-            screen.charset.designated(slot),
-            drcs,
-        )?);
-    }
-    String::from_utf8(data).ok()
-}
-
-pub(crate) fn deccir_report(
-    screen: &Screen,
-    viewport: &Viewport,
-    modes: &TerminalModes,
-    drcs: &DrcsStore,
-) -> Option<String> {
-    let row = screen.cursor.row.min(viewport.rows.saturating_sub(1)) + 1;
-    let col = screen.cursor.col.min(viewport.cols.saturating_sub(1)) + 1;
-    let pgl = screen.charset.gl_slot() as u8;
-    let pgr = screen.charset.gr_slot() as u8;
-    let sdesig = encode_sdesig(screen, drcs)?;
-    Some(format!(
-        "{row};{col};{};{};{};{};{pgl};{pgr};{};{sdesig}",
-        current_page_number(screen),
-        encode_srend(screen),
-        encode_satt(screen),
-        encode_sflag(screen, modes),
-        encode_scss(screen),
-    ))
-}
-
-pub(crate) fn dectabsr_report(screen: &Screen) -> String {
-    screen
-        .tab_stops
-        .iter()
-        .enumerate()
-        .filter_map(|(idx, &set)| set.then_some((idx + 1).to_string()))
-        .collect::<Vec<_>>()
-        .join(";")
-}
-
-fn append_ddd2_payload(out: &mut Vec<u8>) {
-    out.extend_from_slice(b"\x1b)B");
-}
-
-fn append_ddd3_payload(out: &mut Vec<u8>) {
-    out.extend_from_slice(b"\x1b(B");
-}
-
-pub(crate) fn dectsr_payload(screen: &Screen) -> Vec<u8> {
-    let mut payload = Vec::new();
-    if screen.charset.designated(charset::GraphicSetSlot::G1) == charset::CharacterSet::Ascii {
-        append_ddd2_payload(&mut payload);
-    }
-    if screen.charset.designated(charset::GraphicSetSlot::G0) == charset::CharacterSet::Ascii {
-        append_ddd3_payload(&mut payload);
-    }
-    payload
-}
-
-fn parse_dectsr_payload(payload: &[u8]) -> Vec<&[u8]> {
-    let mut controls = Vec::new();
-    let mut i = 0;
-    while i + 2 < payload.len() {
-        if payload[i] == 0x1b
-            && matches!(payload[i + 1], b'(' | b')')
-            && matches!(payload[i + 2], b'1' | b'B')
-        {
-            controls.push(&payload[i..i + 3]);
-            i += 3;
-        } else {
-            i += 1;
-        }
-    }
-    controls
-}
-
-fn restore_dectsr(
-    payload: &[u8],
-    screen: &mut Screen,
-) -> bool {
-    let controls = parse_dectsr_payload(payload);
-    if controls.is_empty() {
-        return false;
-    }
-
-    let mut restored = false;
-    for control in controls {
-        match control {
-            b"\x1b)1" => {
-                // DDD1 toggles Hebrew keyboard/video modes on real DEC
-                // hardware. term41 accepts the marker so report/restore
-                // streams still round-trip, but has no matching local state.
-                restored = true;
-            }
-            b"\x1b)B" => {
-                screen
-                    .charset
-                    .designate(charset::GraphicSetSlot::G1, charset::CharacterSet::Ascii);
-                restored = true;
-            }
-            b"\x1b(B" => {
-                screen
-                    .charset
-                    .designate(charset::GraphicSetSlot::G0, charset::CharacterSet::Ascii);
-                restored = true;
-            }
-            _ => {}
-        }
-    }
-    restored
-}
-
-fn parse_deccir_designators(mut bytes: &[u8]) -> Option<[Vec<u8>; 4]> {
-    let mut parsed: [Vec<u8>; 4] = std::array::from_fn(|_| Vec::new());
-    for slot in &mut parsed {
-        while slot.len() < 2 && matches!(bytes.first(), Some(0x20..=0x2f)) {
-            slot.push(bytes[0]);
-            bytes = &bytes[1..];
-        }
-        let final_byte = *bytes.first()?;
-        if !(0x30..=0x7e).contains(&final_byte) {
-            return None;
-        }
-        slot.push(final_byte);
-        bytes = &bytes[1..];
-    }
-    bytes.is_empty().then_some(parsed)
-}
-
-fn decode_charset_sizes(bytes: &[u8]) -> Option<[drcs::CharsetSize; 4]> {
-    let bits = decode_report_byte(*bytes.first()?)?;
-    Some(std::array::from_fn(|idx| {
-        if bits & (1 << idx) != 0 {
-            drcs::CharsetSize::Cs96
-        } else {
-            drcs::CharsetSize::Cs94
-        }
-    }))
-}
-
-fn restore_deccir(
-    payload: &[u8],
-    screen: &mut Screen,
-    viewport: &Viewport,
-    _modes: &mut TerminalModes,
-    drcs: &DrcsStore,
-) -> bool {
-    let Ok(text) = std::str::from_utf8(payload) else {
-        return false;
-    };
-    let mut fields = text.split(';');
-    let Some(row) = fields.next().and_then(|s| s.parse::<u32>().ok()) else {
-        return false;
-    };
-    let Some(col) = fields.next().and_then(|s| s.parse::<u32>().ok()) else {
-        return false;
-    };
-    let page = fields
-        .next()
-        .and_then(|s| s.parse::<u32>().ok())
-        .unwrap_or(1)
-        .max(1);
-    let Some(srend) = fields.next().map(str::as_bytes) else {
-        return false;
-    };
-    let Some(satt) = fields.next().map(str::as_bytes) else {
-        return false;
-    };
-    let Some(sflag) = fields.next().map(str::as_bytes) else {
-        return false;
-    };
-    let Some(pgl) = fields.next().and_then(|s| s.parse::<u8>().ok()) else {
-        return false;
-    };
-    let Some(pgr) = fields.next().and_then(|s| s.parse::<u8>().ok()) else {
-        return false;
-    };
-    let Some(scss) = fields.next().map(str::as_bytes) else {
-        return false;
-    };
-    let Some(sdesig) = fields.next().map(str::as_bytes) else {
-        return false;
-    };
-    if fields.next().is_some() {
-        return false;
-    }
-
-    if let Some(page_memory) = screen.page_memory.as_mut() {
-        page_memory.active_page = page
-            .saturating_sub(1)
-            .min(page_memory.page_count().saturating_sub(1));
-    }
-    screen.cursor.row = row.saturating_sub(1).min(viewport.rows.saturating_sub(1));
-    screen.cursor.col = col.saturating_sub(1).min(viewport.cols.saturating_sub(1));
-
-    let srend_bits = decode_report_byte(*srend.first().unwrap_or(&0x40)).unwrap_or(0);
-    screen.attrs.remove(
-        font41::attrs::CellAttrs::BOLD
-            | font41::attrs::CellAttrs::BLINK
-            | font41::attrs::CellAttrs::RAPID_BLINK
-            | font41::attrs::CellAttrs::REVERSE,
-    );
-    if srend_bits & 1 != 0 {
-        screen.attrs.insert(font41::attrs::CellAttrs::BOLD);
-    }
-    if srend_bits & 2 != 0 {
-        screen.underline = font41::attrs::UnderlineStyle::Single;
-    } else {
-        screen.underline = font41::attrs::UnderlineStyle::None;
-    }
-    if srend_bits & 4 != 0 {
-        screen.attrs.insert(font41::attrs::CellAttrs::BLINK);
-    }
-    if srend_bits & 8 != 0 {
-        screen.attrs.insert(font41::attrs::CellAttrs::REVERSE);
-    }
-
-    let satt_bits = decode_report_byte(*satt.first().unwrap_or(&0x40)).unwrap_or(0);
-    if satt_bits & 1 != 0 {
-        screen.attrs.insert(font41::attrs::CellAttrs::PROTECTED);
-    } else {
-        screen.attrs.remove(font41::attrs::CellAttrs::PROTECTED);
-    }
-
-    let sflag_bits = decode_report_byte(*sflag.first().unwrap_or(&0x40)).unwrap_or(0);
-    screen.origin_mode = sflag_bits & 1 != 0;
-    screen.charset.single_shift = match sflag_bits & 0b110 {
-        0b010 => Some(charset::GraphicSetSlot::G2),
-        0b100 => Some(charset::GraphicSetSlot::G3),
-        _ => None,
-    };
-
-    let gl = match pgl {
-        0 => charset::GraphicSetSlot::G0,
-        1 => charset::GraphicSetSlot::G1,
-        2 => charset::GraphicSetSlot::G2,
-        3 => charset::GraphicSetSlot::G3,
-        _ => return false,
-    };
-    let gr = match pgr {
-        0 => charset::GraphicSetSlot::G0,
-        1 => charset::GraphicSetSlot::G1,
-        2 => charset::GraphicSetSlot::G2,
-        3 => charset::GraphicSetSlot::G3,
-        _ => return false,
-    };
-    let sizes = match decode_charset_sizes(scss) {
-        Some(sizes) => sizes,
-        None => return false,
-    };
-    let designators = match parse_deccir_designators(sdesig) {
-        Some(designators) => designators,
-        None => return false,
-    };
-    for (slot, (size, designator)) in [
-        charset::GraphicSetSlot::G0,
-        charset::GraphicSetSlot::G1,
-        charset::GraphicSetSlot::G2,
-        charset::GraphicSetSlot::G3,
-    ]
-    .into_iter()
-    .zip(sizes.into_iter().zip(designators))
-    {
-        let charset = charset::charset_from_designator(&designator, size)
-            .or_else(|| drcs.charset_for_designator(&designator));
-        let Some(charset) = charset else {
-            return false;
-        };
-        screen.charset.designate(slot, charset);
-    }
-    screen.charset.set_gl(gl);
-    screen.charset.set_gr(gr);
-    true
-}
-
-fn restore_dectabsr(
-    payload: &[u8],
-    screen: &mut Screen,
-) -> bool {
-    screen.tab_stops.fill(false);
-    if payload.is_empty() {
-        return true;
-    }
-    let Ok(text) = std::str::from_utf8(payload) else {
-        return false;
-    };
-    for part in text.split(';') {
-        let Some(col) = part.parse::<usize>().ok() else {
-            return false;
-        };
-        let idx = col.saturating_sub(1);
-        if idx < screen.tab_stops.len() {
-            screen.tab_stops[idx] = true;
-        }
-    }
-    true
-}
-
-/// This lets tmux and neovim discover features like truecolor, styled
-/// underlines, and cursor shapes without relying on a terminfo entry.
-fn handle_xtgettcap(
-    payload: &[u8],
-    c1_mode: C1Mode,
-    output: &mut Vec<u8>,
-) {
-    for cap_hex in payload.split(|&b| b == b';') {
-        if cap_hex.is_empty() {
-            continue;
-        }
-        let cap_name = hex_decode(cap_hex);
-        let cap_str = std::str::from_utf8(&cap_name).unwrap_or("");
-        if let Some(value) = xtgettcap_value(cap_str) {
-            let value_hex = hex_encode(value.as_bytes());
-            conformance::push_dcs_prefix(output, c1_mode);
-            output.extend_from_slice(b"1+r");
-            output.extend_from_slice(cap_hex);
-            output.push(b'=');
-            output.extend_from_slice(value_hex.as_bytes());
-            conformance::push_st(output, c1_mode);
-        } else {
-            conformance::push_dcs_prefix(output, c1_mode);
-            output.extend_from_slice(b"0+r");
-            output.extend_from_slice(cap_hex);
-            conformance::push_st(output, c1_mode);
-        }
-    }
-}
-
-/// Map a terminfo capability name to its value string. Returns `None` for
-/// unrecognized capabilities.
-fn xtgettcap_value(name: &str) -> Option<&'static str> {
-    match name {
-        // Truecolor support (tmux, neovim gate on this).
-        "RGB" => Some(""),
-        // Number of colors.
-        "colors" => Some("256"),
-        // Set cursor shape: CSI Ps SP q (DECSCUSR).
-        "Ss" => Some("\x1b[%p1%d q"),
-        // Reset cursor shape.
-        "Se" => Some("\x1b[2 q"),
-        // Styled underlines (kitty extension). CSI 4:Pm m.
-        "Smulx" => Some("\x1b[4:%p1%dm"),
-        // Set underline color. CSI 58:2::%p1%d:%p2%d:%p3%d m.
-        "Setulc" => Some("\x1b[58:2::%p1%{65536}%*%p2%{256}%*%+%p3%+m"),
-        // Set RGB foreground. CSI 38:2::R:G:B m.
-        "setrgbf" => Some("\x1b[38:2:%p1%d:%p2%d:%p3%dm"),
-        // Set RGB background. CSI 48:2::R:G:B m.
-        "setrgbb" => Some("\x1b[48:2:%p1%d:%p2%d:%p3%dm"),
-        // Terminal name.
-        "TN" => Some("xterm-256color"),
-        _ => None,
-    }
-}
-
-fn hex_decode(hex: &[u8]) -> Vec<u8> {
-    hex.chunks(2)
-        .filter_map(|pair| {
-            if pair.len() == 2 {
-                u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
-            } else {
-                None
-            }
-        })
-        .collect()
-}
-
-fn hex_encode(bytes: &[u8]) -> String {
-    bytes.iter().map(|b| format!("{b:02X}")).collect()
-}
-
-fn hook_payload_limit(
-    action: char,
-    intermediates: &[u8],
-) -> Option<usize> {
-    (action == '{' && intermediates.is_empty()).then_some(drcs::MAX_DRCS_PAYLOAD_BYTES)
-}
-
-fn push_hook_state(
-    hooks: &mut Vec<HookState>,
-    params: vtepp::Params,
-    intermediates: vtepp::Intermediates,
-    action: char,
-) {
-    hooks.push(HookState {
-        bytes: vec![],
-        params,
-        intermediates,
-        action,
-        truncated: false,
-    });
-}
-
-fn append_hook_bytes(
-    hooks: &mut [HookState],
-    chunk: &[u8],
-) {
-    let Some(last) = hooks.last_mut() else {
-        return;
-    };
-    if last.truncated {
-        return;
-    }
-    if let Some(limit) = hook_payload_limit(last.action, last.intermediates.as_slice()) {
-        let remaining = limit.saturating_sub(last.bytes.len());
-        let take = remaining.min(chunk.len());
-        last.bytes.extend_from_slice(&chunk[..take]);
-        if take < chunk.len() {
-            last.truncated = true;
-        }
-    } else {
-        last.bytes.extend_from_slice(chunk);
-    }
-}
-
-fn dispatch_hook(
-    hook: HookState,
-    terminal: &mut Terminal,
-) {
-    if hook.truncated {
-        return;
-    }
-    if hook.action == 'q' && hook.intermediates.as_slice() == b"+" {
-        let c1_mode = terminal.modes.c1_mode;
-        handle_xtgettcap(&hook.bytes, c1_mode, &mut terminal.pending_output);
-    } else if hook.action == 'q' && hook.intermediates.as_slice() == b"$" {
-        handle_decrqss(&hook.bytes, terminal);
-    } else if hook.action == 'q' && hook.intermediates.as_slice().is_empty() {
-        let image = image41::sixel::parse_sixel(hook.params, hook.bytes);
-        terminal.place_sixel_image(image);
-    } else {
-        handle_dcs(
-            hook.params,
-            hook.intermediates.as_slice(),
-            hook.action,
-            &hook.bytes,
-            terminal,
-        );
-    }
-}
-
-fn handle_dcs(
-    params: vtepp::Params,
-    intermediates: &[u8],
-    action: char,
-    payload: &[u8],
-    terminal: &mut Terminal,
-) {
-    if action == 'q' && intermediates == b"+" {
-        let c1_mode = terminal.modes.c1_mode;
-        handle_xtgettcap(payload, c1_mode, &mut terminal.pending_output);
-    } else if action == 'q' && intermediates == b"$" {
-        handle_decrqss(payload, terminal);
-    } else if action == 'u' && intermediates == b"!" {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|group| group.first().copied())
-            .unwrap_or(0);
-        if let Some(upss) = charset::parse_upss_assignment(ps, payload) {
-            for screen in [&mut terminal.active, &mut terminal.stash] {
-                screen.upss = upss;
-            }
-        }
-    } else if action == '{' && intermediates.is_empty() {
-        let flat_params: Vec<u16> = params.iter().flat_map(|g| g.iter().copied()).collect();
-        terminal.drcs.define(&flat_params, payload);
-    } else if action == 't' && intermediates == b"$" {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|group| group.first().copied())
-            .unwrap_or(0);
-        match ps {
-            1 => {
-                restore_deccir(
-                    payload,
-                    &mut terminal.active,
-                    &terminal.viewport,
-                    &mut terminal.modes,
-                    &terminal.drcs,
-                );
-            }
-            2 => {
-                restore_dectabsr(payload, &mut terminal.active);
-            }
-            _ => {}
-        }
-    } else if action == 'p' && intermediates == b"$" {
-        let ps = params
-            .iter()
-            .next()
-            .and_then(|group| group.first().copied())
-            .unwrap_or(0);
-        match ps {
-            1 => {
-                restore_dectsr(payload, &mut terminal.active);
-            }
-            2 => {
-                terminal.restore_dec_color_table(payload);
-            }
-            _ => {}
-        }
-    } else if action == 'z' && intermediates == b"!" {
-        terminal.define_macro(params, payload);
-    }
-}
-
-/// Main loop for the per-tab terminal thread. Drains PTY data, parses it
-/// (without the terminal lock), and applies each action under a brief lock.
-pub fn run_terminal_thread(
-    terminal: Arc<Mutex<Terminal>>,
-    mut pty_reader: PtyReader,
-    stop: Arc<AtomicBool>,
-    render_thread_handle: Arc<OnceLock<Thread>>,
-    startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
-    output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
-    host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
-) {
-    let mut parser = vtepp::Parser::new();
-    let mut hooks: Vec<HookState> = vec![];
-    let mut buf = [0u8; MAX_READ_CHUNK];
-
-    loop {
-        // Drain all available PTY data. On the first iteration this catches
-        // bytes that arrived before the OnceLock was set (PTY reader couldn't
-        // unpark us yet).
-        pty_reader.clear_pending();
-        let mut did_work = false;
-        let mut hit_budget = false;
-        let batch_start = std::time::Instant::now();
-        loop {
-            let n = pty_reader.read(&mut buf);
-            if n == 0 {
-                break;
-            }
-            did_work = true;
-            let foreground_processes = pty_reader.foreground_processes();
-            trace!("Read {n} bytes from PTY, foreground processes: {foreground_processes:?}");
-
-            terminal
-                .lock()
-                .unwrap()
-                .set_foreground_processes(foreground_processes);
-            for action in parser.parse(&buf[..n]) {
-                match action {
-                    vtepp::Action::Hook {
-                        params,
-                        intermediates,
-                        action,
-                    } => push_hook_state(&mut hooks, params, intermediates, action),
-                    vtepp::Action::Put(bytes) => append_hook_bytes(&mut hooks, bytes),
-                    vtepp::Action::Unhook => {
-                        let hook = hooks.pop().unwrap();
-                        dispatch_hook(hook, &mut terminal.lock().unwrap());
-                    }
-                    action => {
-                        terminal.lock().unwrap().apply(action);
-                    }
-                }
-                if let Some(request_resize) = host_resize.as_ref()
-                    && let Some((cols, rows)) = terminal.lock().unwrap().take_pending_host_resize()
-                {
-                    request_resize(cols, rows);
-                }
-            }
-            if terminal_batch_budget_exhausted(batch_start) {
-                hit_budget = true;
-                break;
-            }
-        }
-
-        if did_work && let Some(request_redraw) = startup_redraw.as_ref() {
-            request_redraw();
-        }
-        if did_work && let Some(notify_output) = output_ready.as_ref() {
-            notify_output();
-        }
-        if did_work && let Some(thread) = render_thread_handle.get() {
-            thread.unpark();
-        }
-
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-
-        if hit_budget {
-            thread::yield_now();
-            continue;
-        }
-
-        thread::park();
-        if stop.load(Ordering::Acquire) {
-            break;
-        }
-    }
-}
-
-const TERMINAL_BATCH_TIME_BUDGET: std::time::Duration = std::time::Duration::from_millis(2);
-
-fn terminal_batch_budget_exhausted(batch_start: std::time::Instant) -> bool {
-    batch_start.elapsed() >= TERMINAL_BATCH_TIME_BUDGET
-}
-
-fn apply_screen_palette(
-    screen: &mut Screen,
-    old_palette: &ColorPalette,
-    new_palette: &ColorPalette,
-) {
-    remap_screen_default_colors(screen, old_palette, new_palette);
-    screen.grid.default_fg = new_palette.fg;
-    screen.grid.default_bg = new_palette.bg;
-    if screen.fg == old_palette.fg {
-        screen.fg = new_palette.fg;
-    }
-    if screen.bg == old_palette.bg {
-        screen.bg = new_palette.bg;
-    }
-    if let Some(status) = screen.status_line.as_mut() {
-        if status.fg == old_palette.status_line_fg {
-            status.fg = new_palette.status_line_fg;
-        }
-        if status.bg == old_palette.status_line_bg {
-            status.bg = new_palette.status_line_bg;
-        }
-        for fg in &mut status.row.fg {
-            if *fg == old_palette.status_line_fg {
-                *fg = new_palette.status_line_fg;
-            }
-        }
-        for bg in &mut status.row.bg {
-            if *bg == old_palette.status_line_bg {
-                *bg = new_palette.status_line_bg;
-            }
-        }
-    }
-}
-
-fn sync_screen_erase_defaults(
-    screen: &mut Screen,
-    dec_color: &DecColorState,
-) {
-    screen.grid.default_bg = dec_color::erase_background_color(dec_color, screen.bg);
-}
-
-fn remap_screen_default_colors(
-    screen: &mut Screen,
-    old_palette: &ColorPalette,
-    new_palette: &ColorPalette,
-) {
-    for row in &mut screen.grid.rows {
-        for fg in &mut row.fg {
-            if *fg == old_palette.fg {
-                *fg = new_palette.fg;
-            }
-        }
-        for bg in &mut row.bg {
-            if *bg == old_palette.bg {
-                *bg = new_palette.bg;
-            }
-        }
-    }
-}
-
-// ---------------------------------------------------------------------------
-// Kitty graphics protocol handler
-// ---------------------------------------------------------------------------
-
-fn handle_kitty_graphics(
-    data: &[u8],
-    store: &mut image41::kitty::KittyImageStore,
-    chunked: &mut image41::kitty::ChunkedTransmission,
-    screen: &mut Screen,
-    viewport: &Viewport,
-    next_image_id: &mut u64,
-    cell_height: u32,
-    cell_width: u32,
-    c1_mode: C1Mode,
-    pending_output: &mut Vec<u8>,
-) {
-    // APC payload must start with 'G'.
-    if data.first() != Some(&b'G') {
-        return;
-    }
-
-    let cmd = image41::kitty::parse_command(&data[1..]);
-
-    // Feed into chunked accumulator. If more chunks expected, return early.
-    let cmd = match chunked.feed(cmd) {
-        Some(cmd) => cmd,
-        None => return,
-    };
-
-    match cmd.action {
-        b'q' => handle_kitty_query(&cmd, store, c1_mode, pending_output),
-        b'T' => handle_kitty_transmit_display(
-            &cmd,
-            store,
-            screen,
-            viewport,
-            next_image_id,
-            cell_height,
-            cell_width,
-            c1_mode,
-            pending_output,
-        ),
-        b't' => handle_kitty_transmit(&cmd, store, c1_mode, pending_output),
-        b'p' => handle_kitty_place(
-            &cmd,
-            store,
-            screen,
-            viewport,
-            next_image_id,
-            cell_height,
-            cell_width,
-            c1_mode,
-            pending_output,
-        ),
-        b'd' => handle_kitty_delete(&cmd, screen, store, cell_height),
-        _ => {}
-    }
-}
-
-/// Decode image data from a command's payload, handling direct, file, and
-/// temp-file transmission mediums.
-fn decode_kitty_image(cmd: &image41::kitty::KittyCommand) -> Option<image41::DecodedImage> {
-    match cmd.transmission {
-        b'f' => image41::kitty::decode_file_payload(cmd, &cmd.payload, false),
-        b't' => image41::kitty::decode_file_payload(cmd, &cmd.payload, true),
-        _ => image41::kitty::decode_payload(cmd, &cmd.payload),
-    }
-}
-
-/// Place an image on the grid at the cursor position.
-fn place_kitty_image(
-    image: image41::DecodedImage,
-    cmd: &image41::kitty::KittyCommand,
-    screen: &mut Screen,
-    viewport: &Viewport,
-    next_image_id: &mut u64,
-    cell_height: u32,
-    cell_width: u32,
-) {
-    // Apply source rectangle cropping.
-    let image = image41::kitty::crop_source_rect(image, cmd);
-
-    let id = *next_image_id;
-    *next_image_id += 1;
-
-    let row = screen::active_row_index(screen, viewport);
-
-    // Compute display size in pixels. `c=`/`r=` take precedence over the
-    // image's native pixel dimensions and drive both cursor advancement
-    // and the render-time quad scaling.
-    //
-    // If only one of `c` and `r` is given, preserve the source aspect ratio
-    // in the other dimension — this matches kitty's documented behaviour
-    // and is what `viu -w N` relies on for fitted previews.
-    let (display_width, display_height) = match (cmd.columns > 0, cmd.rows > 0) {
-        (true, true) => (cmd.columns * cell_width, cmd.rows * cell_height),
-        (true, false) => {
-            let w = cmd.columns * cell_width;
-            let h = if image.width > 0 {
-                (image.height as u64 * w as u64 / image.width as u64) as u32
-            } else {
-                image.height
-            };
-            (w, h)
-        }
-        (false, true) => {
-            let h = cmd.rows * cell_height;
-            let w = if image.height > 0 {
-                (image.width as u64 * h as u64 / image.height as u64) as u32
-            } else {
-                image.width
-            };
-            (w, h)
-        }
-        (false, false) => (image.width, image.height),
-    };
-
-    let image_rows = display_height.div_ceil(cell_height);
-
-    crate::image::remove_overlapping(
-        &mut screen.images,
-        row,
-        image_rows.max(1) as usize,
-        screen.cursor.col,
-        cell_height,
-    );
-
-    screen.images.insert(
-        id,
-        PlacedImage {
-            image,
-            id,
-            row,
-            col: screen.cursor.col,
-            display_width,
-            display_height,
-            placed_at: Instant::now(),
-        },
-    );
-
-    // Advance cursor past the image unless C=1.
-    if !cmd.no_move_cursor {
-        let advance_rows = image_rows;
-        for _ in 0..advance_rows {
-            screen.cursor.row += 1;
-            if screen.cursor.row >= viewport.rows {
-                screen.grid.push_visible_row(viewport);
-                screen.cursor.row = viewport.rows - 1;
-            }
-        }
-        screen.cursor.col = 0;
-    }
-}
-
-fn send_kitty_response(
-    cmd: &image41::kitty::KittyCommand,
-    image_id: u32,
-    ok: bool,
-    message: &str,
-    c1_mode: C1Mode,
-    pending_output: &mut Vec<u8>,
-) {
-    // q=1 suppresses OK responses, q=2 suppresses all.
-    if cmd.quiet >= 2 {
-        return;
-    }
-    if cmd.quiet >= 1 && ok {
-        return;
-    }
-    let status = if ok { "OK" } else { message };
-    conformance::write_apc(
-        pending_output,
-        c1_mode,
-        format_args!("Gi={image_id};{status}"),
-    );
-}
-
-fn handle_kitty_query(
-    cmd: &image41::kitty::KittyCommand,
-    store: &mut image41::kitty::KittyImageStore,
-    c1_mode: C1Mode,
-    pending_output: &mut Vec<u8>,
-) {
-    let id = store.resolve_id(cmd);
-    // Query just tests if the protocol is supported. Respond OK without
-    // storing anything.
-    send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
-}
-
-fn handle_kitty_transmit(
-    cmd: &image41::kitty::KittyCommand,
-    store: &mut image41::kitty::KittyImageStore,
-    c1_mode: C1Mode,
-    pending_output: &mut Vec<u8>,
-) {
-    let id = store.resolve_id(cmd);
-    match decode_kitty_image(cmd) {
-        Some(image) => {
-            store.store(id, image);
-            send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
-        }
-        None => {
-            send_kitty_response(cmd, id, false, "EINVAL", c1_mode, pending_output);
-        }
-    }
-}
-
-fn handle_kitty_transmit_display(
-    cmd: &image41::kitty::KittyCommand,
-    store: &mut image41::kitty::KittyImageStore,
-    screen: &mut Screen,
-    viewport: &Viewport,
-    next_image_id: &mut u64,
-    cell_height: u32,
-    cell_width: u32,
-    c1_mode: C1Mode,
-    pending_output: &mut Vec<u8>,
-) {
-    let id = store.resolve_id(cmd);
-    match decode_kitty_image(cmd) {
-        Some(image) => {
-            // Store for potential later re-placement.
-            store.store(id, image.clone());
-            place_kitty_image(
-                image,
-                cmd,
-                screen,
-                viewport,
-                next_image_id,
-                cell_height,
-                cell_width,
-            );
-            send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
-        }
-        None => {
-            send_kitty_response(cmd, id, false, "EINVAL", c1_mode, pending_output);
-        }
-    }
-}
-
-fn handle_kitty_place(
-    cmd: &image41::kitty::KittyCommand,
-    store: &mut image41::kitty::KittyImageStore,
-    screen: &mut Screen,
-    viewport: &Viewport,
-    next_image_id: &mut u64,
-    cell_height: u32,
-    cell_width: u32,
-    c1_mode: C1Mode,
-    pending_output: &mut Vec<u8>,
-) {
-    let id = store.resolve_id(cmd);
-    match store.get(id) {
-        Some(image) => {
-            let image = image.clone();
-            place_kitty_image(
-                image,
-                cmd,
-                screen,
-                viewport,
-                next_image_id,
-                cell_height,
-                cell_width,
-            );
-            send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
-        }
-        None => {
-            send_kitty_response(cmd, id, false, "ENOENT", c1_mode, pending_output);
-        }
-    }
-}
-
-fn handle_kitty_delete(
-    cmd: &image41::kitty::KittyCommand,
-    screen: &mut Screen,
-    store: &mut image41::kitty::KittyImageStore,
-    cell_height: u32,
-) {
-    let uppercase = cmd.delete.is_ascii_uppercase();
-    match cmd.delete.to_ascii_lowercase() {
-        b'a' | 0 => {
-            // Delete all visible placements.
-            screen.images.clear();
-            if uppercase {
-                store.clear();
-            }
-        }
-        b'i' => {
-            // Delete by image id.
-            let id = cmd.image_id;
-            if cmd.placement_id != 0 {
-                // Delete specific placement — we don't track placement ids on
-                // PlacedImage yet, so remove the first image with matching
-                // stored-image dimensions. For now, remove all with that
-                // stored-image id.
-                if let Some(stored) = store.get(id) {
-                    let (sw, sh) = (stored.width, stored.height);
-                    screen
-                        .images
-                        .retain(|_, img| img.image.width != sw || img.image.height != sh);
-                }
-            } else {
-                // Remove all placements of this image.
-                if let Some(stored) = store.get(id) {
-                    let (sw, sh) = (stored.width, stored.height);
-                    screen
-                        .images
-                        .retain(|_, img| img.image.width != sw || img.image.height != sh);
-                }
-            }
-            if uppercase {
-                store.remove(id);
-            }
-        }
-        b'c' => {
-            // Delete at cursor position.
-            let cursor_row = screen.grid.active_row_index(
-                &screen.cursor,
-                &Viewport {
-                    rows: screen.grid.rows.len() as u32,
-                    cols: 0,
-                    top: 0,
-                },
-            );
-            let cursor_col = screen.cursor.col;
-            screen.images.retain(|_, img| {
-                if img.col != cursor_col {
-                    return true;
-                }
-                let img_rows = img.image.height.div_ceil(cell_height).max(1) as usize;
-                let img_bottom = img.row + img_rows;
-                !(img.row <= cursor_row && cursor_row < img_bottom)
-            });
-        }
-        b'r' => {
-            // Delete by id range.
-            let lo = cmd.src_x; // x= is the lower bound
-            let hi = cmd.src_y; // y= is the upper bound
-            if let Some(lo_stored) = store.get(lo) {
-                let _ = lo_stored; // just checking existence
-            }
-            // Remove placements for images in the range (approximate: we
-            // don't track which stored image id each PlacedImage came from).
-            if uppercase {
-                store.remove_range(lo, hi);
-            }
-        }
-        _ => {}
-    }
-}
-
-// ---------------------------------------------------------------------------
-// iTerm2 graphics protocol handler (OSC 1337 ; File= / MultipartFile= / …)
-// ---------------------------------------------------------------------------
-
-/// True when an OSC 1337 subcommand (after the `1337;` prefix) is part of
-/// the iTerm2 inline-image protocol. OSC 1337 is also used by iTerm2 for
-/// shell integration, notifications, and other extensions — routing only
-/// the image subcommands keeps those out of this handler.
-fn is_iterm_image_cmd(rest: &[u8]) -> bool {
-    rest.starts_with(b"File=")
-        || rest.starts_with(b"MultipartFile=")
-        || rest.starts_with(b"FilePart=")
-        || rest == b"FileEnd"
-}
-
-/// Dispatch an iTerm2 graphics OSC 1337 subcommand. `rest` is the OSC
-/// payload with the leading `1337;` already consumed.
-fn handle_iterm_graphics(
-    rest: &[u8],
-    chunked: &mut image41::iterm::ChunkedTransmission,
-    screen: &mut Screen,
-    viewport: &Viewport,
-    next_image_id: &mut u64,
-    cell_height: u32,
-    cell_width: u32,
-) {
-    if let Some(cmd) = image41::iterm::parse_file(rest) {
-        if let Some(image) = image41::iterm::decode_payload(&cmd.payload) {
-            place_iterm_image(
-                cmd,
-                image,
-                screen,
-                viewport,
-                next_image_id,
-                cell_height,
-                cell_width,
-            );
-        }
-        return;
-    }
-    if let Some(header) = image41::iterm::parse_multipart_start(rest) {
-        chunked.begin(header);
-        return;
-    }
-    if let Some(chunk) = image41::iterm::parse_file_part(rest) {
-        chunked.push(chunk);
-        return;
-    }
-    if image41::iterm::is_file_end(rest)
-        && let Some(cmd) = chunked.finish()
-        && let Some(image) = image41::iterm::decode_payload(&cmd.payload)
-    {
-        place_iterm_image(
-            cmd,
-            image,
-            screen,
-            viewport,
-            next_image_id,
-            cell_height,
-            cell_width,
-        );
-    }
-}
-
-/// Place an iTerm2 image on the grid at the cursor position, resolving
-/// `width`/`height` (cells, pixels, percent, or auto) into final display
-/// pixels and advancing the cursor past the image unless `doNotMoveCursor`
-/// is set.
-fn place_iterm_image(
-    cmd: image41::iterm::ItermCommand,
-    image: image41::DecodedImage,
-    screen: &mut Screen,
-    viewport: &Viewport,
-    next_image_id: &mut u64,
-    cell_height: u32,
-    cell_width: u32,
-) {
-    // The spec default for `inline` is 0 ("download silently"). A terminal
-    // that can't offer a download UI has nothing useful to do with a hidden
-    // image — drop rather than silently render what the sender said not to.
-    if !cmd.inline {
-        return;
-    }
-
-    let viewport_px_w = viewport.cols * cell_width;
-    let viewport_px_h = viewport.rows * cell_height;
-
-    let w_given = !matches!(cmd.width, image41::iterm::Dimension::Auto);
-    let h_given = !matches!(cmd.height, image41::iterm::Dimension::Auto);
-
-    let mut display_width = cmd.width.to_pixels(cell_width, viewport_px_w, image.width);
-    let mut display_height = cmd
-        .height
-        .to_pixels(cell_height, viewport_px_h, image.height);
-
-    // When only one axis is specified and preserveAspectRatio is on,
-    // derive the other from the source image's aspect ratio. With both
-    // axes given, honour the sender verbatim (they asked for a stretch).
-    if cmd.preserve_aspect_ratio && w_given != h_given && image.width > 0 && image.height > 0 {
-        if w_given {
-            display_height =
-                (display_width as u64 * image.height as u64 / image.width as u64) as u32;
-        } else {
-            display_width =
-                (display_height as u64 * image.width as u64 / image.height as u64) as u32;
-        }
-    }
-
-    if display_width == 0 || display_height == 0 {
-        return;
-    }
-
-    let id = *next_image_id;
-    *next_image_id += 1;
-
-    let row = screen::active_row_index(screen, viewport);
-    let image_rows = display_height.div_ceil(cell_height);
-
-    crate::image::remove_overlapping(
-        &mut screen.images,
-        row,
-        image_rows.max(1) as usize,
-        screen.cursor.col,
-        cell_height,
-    );
-
-    screen.images.insert(
-        id,
-        PlacedImage {
-            image,
-            id,
-            row,
-            col: screen.cursor.col,
-            display_width,
-            display_height,
-            placed_at: Instant::now(),
-        },
-    );
-
-    if !cmd.do_not_move_cursor {
-        for _ in 0..image_rows {
-            screen.cursor.row += 1;
-            if screen.cursor.row >= viewport.rows {
-                screen.grid.push_visible_row(viewport);
-                screen.cursor.row = viewport.rows - 1;
-            }
-        }
-        screen.cursor.col = 0;
     }
 }
 
@@ -3957,18 +2517,18 @@ mod tests {
             &mut self,
             data: &[u8],
         ) {
-            let mut hooks: Vec<HookState> = vec![];
+            let mut hooks: Vec<dcs::HookState> = vec![];
             for action in self.parser.parse(data) {
                 match action {
                     Action::Hook {
                         params,
                         intermediates,
                         action,
-                    } => push_hook_state(&mut hooks, params, intermediates, action),
-                    Action::Put(chunk) => append_hook_bytes(&mut hooks, chunk),
+                    } => dcs::push_hook_state(&mut hooks, params, intermediates, action),
+                    Action::Put(chunk) => dcs::append_hook_bytes(&mut hooks, chunk),
                     Action::Unhook => {
                         let hook = hooks.pop().expect("hook bytes");
-                        dispatch_hook(hook, &mut self.inner);
+                        dcs::dispatch_hook(hook, &mut self.inner);
                     }
                     action => self.inner.apply(action),
                 }
@@ -5514,11 +4074,11 @@ mod tests {
     fn decrqss_reports_page_geometry_settings() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[36*|\x1b[72t\x1b[132$|");
-        handle_decrqss(b"t", &mut term.inner);
+        report::handle_decrqss(b"t", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r72t\x1b\\");
-        handle_decrqss(b"*|", &mut term.inner);
+        report::handle_decrqss(b"*|", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r36*|\x1b\\");
-        handle_decrqss(b"$|", &mut term.inner);
+        report::handle_decrqss(b"$|", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r132$|\x1b\\");
     }
 
@@ -5526,18 +4086,18 @@ mod tests {
     fn decrqss_reports_status_and_attr_change_state() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[2$~\x1b[1$}\x1b[2*x");
-        handle_decrqss(b"$~", &mut term.inner);
+        report::handle_decrqss(b"$~", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r2$~\x1b\\");
-        handle_decrqss(b"$}", &mut term.inner);
+        report::handle_decrqss(b"$}", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r1$}\x1b\\");
-        handle_decrqss(b"*x", &mut term.inner);
+        report::handle_decrqss(b"*x", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r2*x\x1b\\");
     }
 
     #[test]
     fn decrqss_reports_normal_text_color_assignment() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
-        handle_decrqss(b"1,|", &mut term.inner);
+        report::handle_decrqss(b"1,|", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r1;7;0,|\x1b\\");
     }
 
@@ -5545,7 +4105,7 @@ mod tests {
     fn decrqss_reports_window_frame_color_assignment() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[2;4;5,|");
-        handle_decrqss(b"2,|", &mut term.inner);
+        report::handle_decrqss(b"2,|", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r2;4;5,|\x1b\\");
     }
 
@@ -5553,7 +4113,7 @@ mod tests {
     fn decrqss_reports_alternate_text_color_assignment() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[13;4;5,}");
-        handle_decrqss(b"13,}", &mut term.inner);
+        report::handle_decrqss(b"13,}", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r13;4;5,}\x1b\\");
     }
 
@@ -5591,7 +4151,7 @@ mod tests {
         assert_eq!(term.active.grid.rows[0].fg[0], term.dec_color.table[4]);
         assert_eq!(term.active.grid.rows[0].bg[0], term.dec_color.table[7]);
 
-        handle_decrqss(b"1,|", &mut term.inner);
+        report::handle_decrqss(b"1,|", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r1;4;7,|\x1b\\");
     }
 
@@ -5827,7 +4387,7 @@ mod tests {
         term.process(b"\x1b[1;4;7,|\x1bP2$p4;2;8;9;10\x1b\\");
         term.process(b"\x1bc");
 
-        handle_decrqss(b"1,|", &mut term.inner);
+        report::handle_decrqss(b"1,|", &mut term.inner);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r1;7;0,|\x1b\\");
         assert_eq!(term.palette.fg, custom.fg);
         assert_eq!(term.palette.bg, custom.bg);
@@ -5929,7 +4489,7 @@ mod tests {
 
     #[test]
     fn terminal_batch_budget_trips_on_time_limit() {
-        let start = std::time::Instant::now() - TERMINAL_BATCH_TIME_BUDGET;
-        assert!(terminal_batch_budget_exhausted(start));
+        let start = std::time::Instant::now() - runtime::TERMINAL_BATCH_TIME_BUDGET;
+        assert!(runtime::terminal_batch_budget_exhausted(start));
     }
 }
