@@ -1,4 +1,5 @@
 #![allow(clippy::too_many_arguments)]
+#![allow(clippy::type_complexity)]
 
 #[macro_use]
 extern crate log;
@@ -1303,11 +1304,16 @@ impl TerminalThread {
         terminal: Arc<Mutex<Terminal>>,
         pty_reader: PtyReader,
         render_thread_handle: Arc<OnceLock<Thread>>,
-        tee_read: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>,
         startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
-        output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
-        host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
+        tee_read: Arc<dyn Fn(&[u8]) + Send + Sync>,
+        output_ready: Arc<dyn Fn() + Send + Sync>,
+        host_resize: Arc<dyn Fn(u32, u32) + Send + Sync>,
     ) {
+        if self.thread_handle.get().is_some() {
+            error!("terminal thread already running");
+            return;
+        }
+
         let stop = Arc::new(AtomicBool::new(false));
         let stop_ = stop.clone();
         let handle_ = self.thread_handle.clone();
@@ -1323,8 +1329,8 @@ impl TerminalThread {
                     pty_reader,
                     stop_,
                     render_thread_handle,
-                    tee_read,
                     startup_redraw,
+                    tee_read,
                     output_ready,
                     host_resize,
                 );

@@ -8,10 +8,10 @@ pub(crate) fn run_terminal_thread(
     mut pty_reader: PtyReader,
     stop: Arc<AtomicBool>,
     render_thread_handle: Arc<OnceLock<Thread>>,
-    tee_read: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>,
     startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
-    output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
-    host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
+    tee_read: Arc<dyn Fn(&[u8]) + Send + Sync>,
+    output_ready: Arc<dyn Fn() + Send + Sync>,
+    host_resize: Arc<dyn Fn(u32, u32) + Send + Sync>,
 ) {
     let mut parser = vtepp::Parser::new();
     let mut hooks: Vec<dcs::HookState> = vec![];
@@ -30,9 +30,7 @@ pub(crate) fn run_terminal_thread(
             did_work = true;
             let foreground_processes = pty_reader.foreground_processes();
             trace!("Read {n} bytes from PTY, foreground processes: {foreground_processes:?}");
-            if let Some(tee_read) = tee_read.as_ref() {
-                tee_read(&buf[..n]);
-            }
+            tee_read(&buf[..n]);
 
             terminal
                 .lock()
@@ -54,10 +52,8 @@ pub(crate) fn run_terminal_thread(
                         terminal.lock().unwrap().apply(action);
                     }
                 }
-                if let Some(request_resize) = host_resize.as_ref()
-                    && let Some((cols, rows)) = terminal.lock().unwrap().take_pending_host_resize()
-                {
-                    request_resize(cols, rows);
+                if let Some((cols, rows)) = terminal.lock().unwrap().take_pending_host_resize() {
+                    host_resize(cols, rows);
                 }
             }
             if terminal_batch_budget_exhausted(batch_start) {
@@ -69,8 +65,8 @@ pub(crate) fn run_terminal_thread(
         if did_work && let Some(request_redraw) = startup_redraw.as_ref() {
             request_redraw();
         }
-        if did_work && let Some(notify_output) = output_ready.as_ref() {
-            notify_output();
+        if did_work {
+            output_ready();
         }
         if did_work && let Some(thread) = render_thread_handle.get() {
             thread.unpark();

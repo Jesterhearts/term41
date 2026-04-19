@@ -816,18 +816,18 @@ impl RenderHost {
             terminal.clone(),
             pty_reader,
             self.render_thread_handle.clone(),
-            Some(Arc::new({
+            None,
+            Arc::new({
                 let recorder = recorder.clone();
                 move |bytes| recorder.write_chunk(bytes)
-            })),
-            None,
-            Some(Arc::new({
+            }),
+            Arc::new({
                 let proxy = self.proxy.clone();
                 move || {
                     let _ = proxy.send_event(AppEvent::FlushTerminalOutput(id));
                 }
-            })),
-            Some(Arc::new({
+            }),
+            Arc::new({
                 let proxy = self.proxy.clone();
                 move |cols, rows| {
                     let _ = proxy.send_event(AppEvent::RequestTerminalResize {
@@ -836,7 +836,7 @@ impl RenderHost {
                         rows,
                     });
                 }
-            })),
+            }),
         );
         let _ = self.proxy.send_event(AppEvent::RegisterInputEndpoint {
             tab_id: id,

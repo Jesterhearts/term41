@@ -1904,20 +1904,20 @@ fn main() {
         terminal.clone(),
         pty_reader,
         render_thread_handle.clone(),
-        Some(Arc::new({
-            let recorder = initial_recorder.clone();
-            move |bytes| recorder.write_chunk(bytes)
-        })),
         Some(Arc::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
         })),
-        Some(Arc::new({
+        Arc::new({
+            let recorder = initial_recorder.clone();
+            move |bytes| recorder.write_chunk(bytes)
+        }),
+        Arc::new({
             let proxy = proxy.clone();
             move || {
                 let _ = proxy.send_event(AppEvent::FlushTerminalOutput(TabId(0)));
             }
-        })),
-        Some(Arc::new({
+        }),
+        Arc::new({
             let proxy = proxy.clone();
             move |cols, rows| {
                 let _ = proxy.send_event(AppEvent::RequestTerminalResize {
@@ -1926,7 +1926,7 @@ fn main() {
                     rows,
                 });
             }
-        })),
+        }),
     );
 
     let input_state = Arc::new(Mutex::new(InputState {

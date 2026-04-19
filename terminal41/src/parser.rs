@@ -2538,10 +2538,8 @@ pub(super) fn csi_dispatch(
                 return;
             }
             match ps {
-                WINOP_TITLE_PUSH => {
-                    if ctx.title_stack.len() < 16 {
-                        ctx.title_stack.push(ctx.current_title.clone());
-                    }
+                WINOP_TITLE_PUSH if ctx.title_stack.len() < 16 => {
+                    ctx.title_stack.push(ctx.current_title.clone());
                 }
                 WINOP_TITLE_POP => {
                     if let Some(title) = ctx.title_stack.pop() {
