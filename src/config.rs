@@ -248,6 +248,12 @@ struct ConfigFile {
     #[serde(deserialize_with = "u32_opt")]
     #[serde(default)]
     scrollback_lines: Option<u32>,
+    /// When true, the alternate screen uses zero scrollback like a strict
+    /// xterm-style implementation. When false (the default), the alternate
+    /// screen gets the same scrollback budget as the primary screen.
+    #[serde(deserialize_with = "strict_altscreen_scrollback_opt")]
+    #[serde(default)]
+    strict_altscreen_scrollback: Option<bool>,
     /// Cursor shape: `block`, `underline`, or `beam`.
     #[serde(deserialize_with = "cursor_shape_opt")]
     #[serde(default)]
@@ -320,6 +326,7 @@ pub struct Config {
     pub fonts: Option<String>,
     pub font_size: f32,
     pub scrollback_lines: u32,
+    pub strict_altscreen_scrollback: bool,
     pub cursor_style: CursorStyle,
     pub keybindings: Keybindings,
     pub bell: BellMode,
@@ -348,6 +355,7 @@ impl Default for Config {
             fonts: None,
             font_size: 24.0,
             scrollback_lines: DEFAULT_SCROLLBACK,
+            strict_altscreen_scrollback: false,
             cursor_style: CursorStyle::default(),
             keybindings: Keybindings::defaults(),
             bell: BellMode::default(),
@@ -398,6 +406,7 @@ fn parse_config(
         fonts: file.fonts,
         font_size: file.font_size.unwrap_or(24.0).max(1.0),
         scrollback_lines: file.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
+        strict_altscreen_scrollback: file.strict_altscreen_scrollback.unwrap_or(false),
         cursor_style,
         keybindings,
         bell: file.bell.unwrap_or_default(),
@@ -593,6 +602,19 @@ where
     }
 }
 
+fn strict_altscreen_scrollback_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<bool>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse strict_altscreen_scrollback in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
 fn power_preference_opt<'de, D>(deserializer: D) -> Result<Option<PowerPreference>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -662,6 +684,16 @@ mod tests {
     #[test]
     fn gutter_honours_explicit_true() {
         assert!(parse("gutter = true").gutter);
+    }
+
+    #[test]
+    fn strict_altscreen_scrollback_defaults_to_false() {
+        assert!(!parse("").strict_altscreen_scrollback);
+    }
+
+    #[test]
+    fn strict_altscreen_scrollback_honours_explicit_true() {
+        assert!(parse("strict_altscreen_scrollback = true").strict_altscreen_scrollback);
     }
 
     #[test]

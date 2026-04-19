@@ -1587,6 +1587,7 @@ fn main() {
         INITIAL_COLS,
         INITIAL_ROWS,
         config.scrollback_lines,
+        config.strict_altscreen_scrollback,
         cell_height,
         cell_width,
         config.palette.clone(),

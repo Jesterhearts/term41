@@ -759,6 +759,7 @@ impl RenderHost {
             cols,
             rows,
             scrollback,
+            self.config.strict_altscreen_scrollback,
             self.font_system.cell_height,
             self.font_system.cell_width,
             self.config.palette.clone(),
@@ -902,12 +903,14 @@ impl RenderHost {
         for tab in &mut self.tabs {
             let mut terminal = tab.terminal.lock().unwrap();
             terminal.set_default_cursor_style(cfg.cursor_style);
-            terminal.set_scrollback_limit(cfg.scrollback_lines);
+            terminal.set_scrollback_policy(cfg.scrollback_lines, cfg.strict_altscreen_scrollback);
             terminal.set_palette(cfg.palette.clone());
         }
         self.config.keybindings = cfg.keybindings;
         self.sync_input_state();
         self.config.bell = cfg.bell;
+        self.config.scrollback_lines = cfg.scrollback_lines;
+        self.config.strict_altscreen_scrollback = cfg.strict_altscreen_scrollback;
         self.config.palette = cfg.palette.clone();
 
         if cfg.gutter != self.config.gutter {

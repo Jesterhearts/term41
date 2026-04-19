@@ -342,6 +342,7 @@ pub struct Terminal {
     /// column values. This field persists across `apply` calls so the state
     /// survives the per-action dispatch boundary.
     vt52_cursor_addr: Vt52CursorAddr,
+    strict_altscreen_scrollback: bool,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -355,6 +356,7 @@ impl Terminal {
         cols: u32,
         rows: u32,
         scrollback_limit: u32,
+        strict_altscreen_scrollback: bool,
         cell_height: u32,
         cell_width: u32,
         palette: ColorPalette,
@@ -369,13 +371,13 @@ impl Terminal {
                 palette.status_line_fg,
                 palette.status_line_bg,
             ),
-            // Stash starts as a blank alt screen (no scrollback). When the
-            // first ?1049h / ?47h arrives we simply swap `active` and
-            // `stash` — no lazy construction needed.
+            // Stash starts as a blank alt screen. By default it inherits the
+            // normal scrollback budget; `strict_altscreen_scrollback`
+            // forces the legacy zero-scrollback xterm-style policy.
             stash: Screen::new(
                 cols,
                 rows,
-                0,
+                alt_scrollback_limit(scrollback_limit, strict_altscreen_scrollback),
                 palette.fg,
                 palette.bg,
                 palette.status_line_fg,
@@ -407,6 +409,7 @@ impl Terminal {
             cell_width,
             palette,
             vt52_cursor_addr: Vt52CursorAddr::Idle,
+            strict_altscreen_scrollback,
         }
     }
 
@@ -448,12 +451,6 @@ impl Terminal {
         }
     }
 
-    /// Update the scrollback budget on the primary screen and immediately
-    /// trim any history that exceeds the new cap. Trimming on update (not
-    /// lazily on next push) makes the live-reload path feel responsive —
-    /// the user shrinks the limit, the unwanted history goes away on the
-    /// next render. The alt screen always has zero scrollback so its
-    /// budget never moves.
     pub fn set_cell_dimensions(
         &mut self,
         cell_width: u32,
@@ -463,34 +460,19 @@ impl Terminal {
         self.cell_height = cell_height;
     }
 
-    pub fn set_scrollback_limit(
+    /// Update the scrollback policy and immediately trim any history that
+    /// exceeds the new cap. Trimming on update (not lazily on next push)
+    /// makes the live-reload path feel responsive — the user shrinks the
+    /// limit, the unwanted history goes away on the next render.
+    pub fn set_scrollback_policy(
         &mut self,
         limit: u32,
+        strict_altscreen_scrollback: bool,
     ) {
-        let primary = if self.on_alt_screen {
-            &mut self.stash
-        } else {
-            &mut self.active
-        };
-        primary.grid.scrollback_limit = limit;
-
-        let max_rows = self.viewport.rows as usize + limit as usize;
-        let grid = &mut primary.grid;
-        let popped_before = grid.rows.len();
-        while grid.rows.len() > max_rows {
-            grid.rows.pop_front();
-            grid.total_popped += 1;
-        }
-        let popped = popped_before - grid.rows.len();
-        if popped > 0 {
-            // Sixel images anchored to popped rows must move with the
-            // surviving rows; mirrors the same fix-up `process` does
-            // after a row is pushed off the top.
-            primary.images.retain(|_, img| img.row >= popped);
-            for img in primary.images.values_mut() {
-                img.row -= popped;
-            }
-        }
+        self.strict_altscreen_scrollback = strict_altscreen_scrollback;
+        apply_scrollback_limit(&mut self.active, &self.viewport, limit);
+        let alt_limit = alt_scrollback_limit(limit, self.strict_altscreen_scrollback);
+        apply_scrollback_limit(&mut self.stash, &self.viewport, alt_limit);
     }
 
     /// Queue a focus-in / focus-out report onto `pending_output` if focus
@@ -1918,6 +1900,43 @@ impl Terminal {
     }
 }
 
+fn alt_scrollback_limit(
+    scrollback_limit: u32,
+    strict_altscreen_scrollback: bool,
+) -> u32 {
+    if strict_altscreen_scrollback {
+        0
+    } else {
+        scrollback_limit
+    }
+}
+
+fn apply_scrollback_limit(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    limit: u32,
+) {
+    screen.grid.scrollback_limit = limit;
+
+    let max_rows = viewport.rows as usize + limit as usize;
+    let grid = &mut screen.grid;
+    let popped_before = grid.rows.len();
+    while grid.rows.len() > max_rows {
+        grid.rows.pop_front();
+        grid.total_popped += 1;
+    }
+    let popped = popped_before - grid.rows.len();
+    if popped > 0 {
+        // Sixel images anchored to popped rows must move with the
+        // surviving rows; mirrors the same fix-up `process` does after a
+        // row is pushed off the top.
+        screen.images.retain(|_, img| img.row >= popped);
+        for img in screen.images.values_mut() {
+            img.row -= popped;
+        }
+    }
+}
+
 /// Handle to a running terminal thread. Signals the thread to stop on drop.
 pub struct TerminalThread {
     stop: Arc<AtomicBool>,
@@ -2925,6 +2944,29 @@ mod tests {
                     cols,
                     rows,
                     scrollback,
+                    false,
+                    cell_h,
+                    cell_w,
+                    ColorPalette::default(),
+                ),
+                parser: Parser::new(),
+            }
+        }
+
+        fn new_with_alt_scrollback_policy(
+            cols: u32,
+            rows: u32,
+            scrollback: u32,
+            strict_altscreen_scrollback: bool,
+            cell_h: u32,
+            cell_w: u32,
+        ) -> Self {
+            Self {
+                inner: Terminal::new(
+                    cols,
+                    rows,
+                    scrollback,
+                    strict_altscreen_scrollback,
                     cell_h,
                     cell_w,
                     ColorPalette::default(),
@@ -3080,11 +3122,21 @@ mod tests {
     }
 
     #[test]
-    fn alt_screen_has_no_scrollback() {
+    fn alt_screen_inherits_scrollback_by_default() {
         let mut term = TestTerm::new(8, 3, 100, 16, 8);
         term.process(b"\x1b[?1049h");
 
-        // Fill enough rows on alt to normally produce scrollback on primary.
+        for _ in 0..10 {
+            term.process(b"line\n");
+        }
+        assert!(term.active.grid.scrollback_len(&term.viewport) > 0);
+    }
+
+    #[test]
+    fn strict_alt_screen_has_no_scrollback() {
+        let mut term = TestTerm::new_with_alt_scrollback_policy(8, 3, 100, true, 16, 8);
+        term.process(b"\x1b[?1049h");
+
         for _ in 0..10 {
             term.process(b"line\n");
         }
@@ -3786,7 +3838,7 @@ mod tests {
         for i in 0..50u32 {
             term.process(format!("line{i}\n").as_bytes());
         }
-        term.set_scrollback_limit(5);
+        term.set_scrollback_policy(5, false);
         // Push more lines so the per-row trim path runs against the new limit.
         for i in 0..20u32 {
             term.process(format!("after{i}\n").as_bytes());
