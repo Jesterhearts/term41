@@ -19,6 +19,7 @@ mod grid;
 mod hyperlink;
 mod image;
 mod keyboard;
+mod lifecycle_ops;
 mod mode;
 mod mouse;
 mod osc;
@@ -653,23 +654,20 @@ impl Terminal {
         &mut self,
         focused: bool,
     ) {
-        if !self.modes.focus_reporting {
-            return;
-        }
-        // Per xterm: CSI I on focus gain, CSI O on focus loss.
-        conformance::write_csi(
+        lifecycle_ops::report_focus_change(
             &mut self.pending_output,
             self.modes.c1_mode,
-            format_args!("{}", if focused { 'I' } else { 'O' }),
+            self.modes.focus_reporting,
+            focused,
         );
     }
 
     pub fn total_rows(&self) -> u32 {
-        self.viewport.rows + screen::status_line_rows(&self.active)
+        lifecycle_ops::total_rows(&self.active, &self.viewport)
     }
 
     pub fn status_line_visible(&self) -> bool {
-        screen::status_line_visible(&self.active)
+        lifecycle_ops::status_line_visible(&self.active)
     }
 
     pub fn status_display_kind(&self) -> StatusDisplayKind {
@@ -677,7 +675,7 @@ impl Terminal {
     }
 
     pub fn status_line_row(&self) -> Option<&Row> {
-        self.active.status_line.as_ref().map(|status| &status.row)
+        lifecycle_ops::status_line_row(&self.active)
     }
 
     pub fn indicator_status_text(&self) -> Option<String> {
@@ -694,42 +692,32 @@ impl Terminal {
     }
 
     pub fn status_line_cursor_col(&self) -> Option<u32> {
-        (self.active.active_display == screen::ActiveDisplay::Status && self.active.cursor_visible)
-            .then_some(self.active.status_line.as_ref()?.cursor.col)
+        lifecycle_ops::status_line_cursor_col(&self.active)
     }
 
     pub fn set_default_status_display(
         &mut self,
         status_display: StatusDisplayKind,
     ) {
-        self.default_status_display = status_display;
-        let total_rows = self.total_rows();
-        let cols = self.viewport.cols;
-        self.viewport.rows = feature_ops::apply_status_display_mode(
+        lifecycle_ops::set_default_status_display(
             &mut self.active,
-            total_rows,
-            cols,
-            status_display,
-            &self.palette,
-        );
-        feature_ops::apply_status_display_mode(
             &mut self.stash,
-            total_rows,
-            cols,
-            status_display,
+            &mut self.viewport,
             &self.palette,
+            &mut self.default_status_display,
+            status_display,
         );
     }
 
     /// Drain bytes the terminal itself has queued for the PTY (e.g. OSC 52
     /// query responses). Called by the event loop after each `process` call.
     pub fn take_pending_output(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.pending_output)
+        lifecycle_ops::take_pending_output(&mut self.pending_output)
     }
 
     /// Returns true if the app has requested any mouse tracking mode.
     pub fn mouse_tracking_enabled(&self) -> bool {
-        !matches!(self.modes.mouse_tracking, MouseTracking::Off)
+        lifecycle_ops::mouse_tracking_enabled(&self.modes)
     }
 
     pub fn has_selection(&self) -> bool {
@@ -761,20 +749,17 @@ impl Terminal {
         row: u32,
         mods: MouseModifiers,
     ) -> bool {
-        if !should_report(self.modes.mouse_tracking, kind, button) {
-            return false;
-        }
-        encode_mouse_event(
+        lifecycle_ops::mouse_report(
+            &mut self.pending_output,
             self.modes.c1_mode,
+            self.modes.mouse_tracking,
             self.modes.mouse_encoding,
             kind,
             button,
-            col + 1,
-            row + 1,
+            col,
+            row,
             mods,
-            &mut self.pending_output,
-        );
-        true
+        )
     }
 
     /// Returns the visible row at the given screen position (0 = top of
@@ -809,37 +794,14 @@ impl Terminal {
         &mut self,
         lines: u32,
     ) -> u32 {
-        if screen::page_memory_active(&self.active) {
-            return 0;
-        }
-        let max = self.active.grid.scrollback_len(&self.viewport);
-        let delta = lines.min(max.saturating_sub(self.active.offset));
-        self.active.offset += delta;
-        delta
+        lifecycle_ops::scroll_viewport_up(&mut self.active, &self.viewport, lines)
     }
 
     /// Move the viewport to the previous OSC 133 prompt (above the current
     /// viewport top). No-op if none exists above or the active screen has
     /// no shell-integration marks.
     pub fn scroll_to_prev_prompt(&mut self) {
-        let top = selection::screen_row_to_absolute(&self.active, &self.viewport, 0);
-        // Iterate the grid directly rather than collecting: prompt rows
-        // are sparse, so walking the whole buffer once and taking the max
-        // matching index is cheaper than building a vec.
-        let popped = self.active.grid.total_popped as u64;
-        let target = self
-            .active
-            .grid
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.prompt_start)
-            .map(|(i, _)| popped + i as u64)
-            .filter(|&r| r < top)
-            .max();
-        if let Some(target) = target {
-            self.scroll_absolute_to_viewport_top(target);
-        }
+        lifecycle_ops::scroll_to_prev_prompt(&mut self.active, &self.viewport)
     }
 
     /// Move the viewport to the next OSC 133 prompt (below the current
@@ -848,48 +810,7 @@ impl Terminal {
     /// repeated presses at the live prompt are silent rather than
     /// flickering.
     pub fn scroll_to_next_prompt(&mut self) {
-        let top = selection::screen_row_to_absolute(&self.active, &self.viewport, 0);
-        let popped = self.active.grid.total_popped as u64;
-        let target = self
-            .active
-            .grid
-            .rows
-            .iter()
-            .enumerate()
-            .filter(|(_, r)| r.prompt_start)
-            .map(|(i, _)| popped + i as u64)
-            .find(|&r| r > top);
-        if let Some(target) = target {
-            self.scroll_absolute_to_viewport_top(target);
-        }
-    }
-
-    /// Adjust `offset` so `target_abs` lands at the top of the visible
-    /// viewport. If the target sits inside the live window the viewport
-    /// can't scroll further (`offset = 0`) and the target appears wherever
-    /// it naturally falls — typically a few rows down from the top.
-    fn scroll_absolute_to_viewport_top(
-        &mut self,
-        target_abs: u64,
-    ) {
-        if screen::page_memory_active(&self.active) {
-            return;
-        }
-        let popped = self.active.grid.total_popped as u64;
-        let Some(target_local) = target_abs.checked_sub(popped) else {
-            return;
-        };
-        let grid_len = self.active.grid.rows.len();
-        let rows = self.viewport.rows as usize;
-        if grid_len <= rows || (target_local as usize) >= grid_len {
-            self.active.offset = 0;
-            return;
-        }
-        let max_top = grid_len - rows;
-        let top = (target_local as usize).min(max_top);
-        let offset = (grid_len - rows - top) as u32;
-        let max_offset = self.active.grid.scrollback_len(&self.viewport);
-        self.active.offset = offset.min(max_offset);
+        lifecycle_ops::scroll_to_next_prompt(&mut self.active, &self.viewport)
     }
 
     /// Scroll the viewport down (toward live). Returns actual lines scrolled.
@@ -897,20 +818,12 @@ impl Terminal {
         &mut self,
         lines: u32,
     ) -> u32 {
-        if screen::page_memory_active(&self.active) {
-            return 0;
-        }
-        let delta = lines.min(self.active.offset);
-        self.active.offset -= delta;
-        delta
+        lifecycle_ops::scroll_viewport_down(&mut self.active, lines)
     }
 
     /// Reset viewport to the bottom (live terminal).
     pub fn reset_viewport(&mut self) {
-        if screen::page_memory_active(&self.active) {
-            return;
-        }
-        self.active.offset = 0;
+        lifecycle_ops::reset_viewport(&mut self.active)
     }
 
     /// Return images whose row range overlaps the current viewport, with
@@ -926,29 +839,7 @@ impl Terminal {
         &self,
         now: Instant,
     ) -> impl Iterator<Item = VisibleImage<'_>> {
-        let view = selection::active_viewport(&self.active, &self.viewport);
-        let viewport_top = view.top_index(self.active.grid.rows.len());
-        let viewport_bottom = viewport_top + view.rows as usize;
-        let cell_height = self.cell_height;
-
-        self.active.images.values().filter_map(move |img| {
-            let img_rows = img.display_height.div_ceil(cell_height).max(1) as usize;
-            let img_bottom = img.row + img_rows;
-            if img.row < viewport_bottom && img_bottom > viewport_top {
-                let elapsed = now.saturating_duration_since(img.placed_at);
-                Some(VisibleImage {
-                    image: &img.image,
-                    id: img.id,
-                    screen_row: img.row as i32 - viewport_top as i32,
-                    screen_col: img.col,
-                    display_width: img.display_width,
-                    display_height: img.display_height,
-                    frame_index: img.image.frame_at(elapsed),
-                })
-            } else {
-                None
-            }
-        })
+        lifecycle_ops::visible_images(&self.active, &self.viewport, self.cell_height, now)
     }
 
     pub fn resize(
@@ -956,63 +847,17 @@ impl Terminal {
         cols: u32,
         rows: u32,
     ) {
-        let old_cols = self.viewport.cols;
-        let old_active_rows = self.viewport.rows;
-        let old_total_rows = old_active_rows + screen::status_line_rows(&self.active);
-        let old_stash_rows = old_total_rows.saturating_sub(screen::status_line_rows(&self.stash));
-        let new_active_rows = rows.saturating_sub(screen::status_line_rows(&self.active));
-        let new_stash_rows = rows.saturating_sub(screen::status_line_rows(&self.stash));
-
-        // Keep both screens sized to the same physical terminal height so a
-        // swap after a resize doesn't leave either one outside the window.
-        resize_screen(
+        lifecycle_ops::resize(
             &mut self.active,
-            old_cols,
-            old_active_rows,
-            cols,
-            new_active_rows,
-        );
-        if screen::page_memory_active(&self.active)
-            && let Some(page_rows) = screen::page_rows(&self.active)
-        {
-            screen::resize_page_memory(
-                &mut self.active,
-                &Viewport {
-                    rows: new_active_rows,
-                    cols,
-                    top: 0,
-                },
-                page_rows,
-            );
-        }
-
-        resize_screen(
             &mut self.stash,
-            old_cols,
-            old_stash_rows,
+            &mut self.viewport,
             cols,
-            new_stash_rows,
-        );
-        if screen::page_memory_active(&self.stash)
-            && let Some(page_rows) = screen::page_rows(&self.stash)
-        {
-            screen::resize_page_memory(
-                &mut self.stash,
-                &Viewport {
-                    rows: new_stash_rows,
-                    cols,
-                    top: 0,
-                },
-                page_rows,
-            );
-        }
-
-        self.viewport.cols = cols;
-        self.viewport.rows = new_active_rows;
+            rows,
+        )
     }
 
     pub fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
-        self.pending_host_resize.take()
+        lifecycle_ops::take_pending_host_resize(&mut self.pending_host_resize)
     }
 
     /// Apply a single parsed VTE action to the terminal state. Called by the
@@ -1423,18 +1268,7 @@ impl Terminal {
         &mut self,
         popped_before: usize,
     ) {
-        // Use saturating_sub: a screen swap during this iteration can
-        // reset `total_popped` to the other grid's value, which would
-        // underflow an unchecked subtraction.
-        let newly_popped = self.active.grid.total_popped.saturating_sub(popped_before);
-        if newly_popped > 0 {
-            self.active.images.retain(|_, img| img.row >= newly_popped);
-            for img in self.active.images.values_mut() {
-                img.row -= newly_popped;
-            }
-            let min_abs = self.active.grid.total_popped as u64;
-            self.command_metas.retain(|&abs, _| abs >= min_abs);
-        }
+        lifecycle_ops::track_scroll(&mut self.active, &mut self.command_metas, popped_before)
     }
 }
 
