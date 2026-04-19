@@ -2980,14 +2980,13 @@ pub(super) fn esc_dispatch(
                 let bg = ctx.palette.bg;
                 for r in first_visible..ctx.screen.grid.rows.len() {
                     let row = &mut ctx.screen.grid.rows[r];
+                    row.clear(fg, bg);
+                    row.wrapped = false;
                     for cell in row.cells.iter_mut() {
                         *cell = e_cell.clone();
                     }
                     row.fg.fill(fg);
                     row.bg.fill(bg);
-                    row.attrs.fill(CellAttrs::default());
-                    row.underline.fill(UnderlineStyle::None);
-                    row.underline_color.fill(None);
                 }
                 // DECALN resets margins, origin mode, and homes the cursor
                 // per DEC spec. Without this, vttest's border drawing after

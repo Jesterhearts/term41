@@ -752,6 +752,25 @@ fn vttest_screen2_star_borders() {
     }
 }
 
+#[test]
+fn decaln_clears_row_wrap_and_line_attr_before_border_drawing() {
+    let mut t = VtTerm::new_80x24();
+
+    t.process(b"\x1b[23;1H\x1b#6");
+    t.terminal.active.grid.rows[22].wrapped = true;
+    assert_eq!(
+        t.terminal.active.grid.rows[22].line_attr,
+        LineAttr::DoubleWidth
+    );
+    assert!(t.terminal.active.grid.rows[22].wrapped);
+
+    t.process(b"\x1b#8");
+
+    assert_eq!(t.terminal.active.grid.rows[22].line_attr, LineAttr::Normal);
+    assert!(!t.terminal.active.grid.rows[22].wrapped);
+    assert_eq!(t.row_text(22), "E".repeat(80));
+}
+
 // ---------------------------------------------------------------------------
 // DEC line attributes (ESC # 3/4/5/6)
 // ---------------------------------------------------------------------------
