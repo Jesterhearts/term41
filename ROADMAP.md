@@ -1,38 +1,11 @@
 # VT420/VT520/VT525 Coverage Roadmap
 
-This document tracks the major DEC VT-family features that `term41` does not
-yet implement, based on the currently published VT420 and VT520/VT525 manuals.
+This document tracks the major DEC VT-family features that `term41` does not yet
+implement, based on the currently published VT420 and VT520/VT525 manuals.
 
 It is intentionally DEC-spec-focused. `term41` already implements a useful
-subset of VT220/VT420-style screen control plus modern xterm/kitty features,
-but it is still far from full VT420/VT520/VT525 coverage.
-
-## Scope
-
-This roadmap is derived from:
-
-- `README.md`
-- `terminal41/src/mode.rs`
-- `terminal41/src/screen.rs`
-- `terminal41/src/parser.rs`
-- `terminal41/src/lib.rs`
-- DEC VT420 programming summary and reference material
-- DEC VT520/VT525 programmer information
-
-The current implementation already covers:
-
-- Core cursor/screen movement and erase functions
-- Primary/alternate screens
-- Scroll regions and left/right margins
-- DECALN and DEC line attributes
-- A subset of VT52
-- DA1/DA2/DA3, DSR, DECRQM, part of DECRQSS
-- Sixel images
-- xterm mouse/focus/window-title features
-- kitty keyboard, kitty graphics, OSC 8/52/133/1337
-
-The missing items below are the major blockers for "supports the published VT
-specs" rather than "supports the subset most full-screen Unix apps care about."
+subset of VT220/VT420-style screen control plus modern xterm/kitty features, but
+it is still far from full VT420/VT520/VT525 coverage.
 
 ## Security Legend
 
@@ -51,27 +24,10 @@ emits input" risk are:
 - `DECDMAC` / `DECINVM` downloaded macros
 - `ENQ` / answerback and `DECAAM` auto-answerback
 
-I did not find a DEC control function in the manuals I checked that is
-literally named "unknown command echo". If that memory is accurate, it is
-likely referring to one of the features above, or to host-side shell behavior
-rather than a distinct DEC terminal primitive.
-
-## Priority 0: Security Policy Before Feature Work
-
-These guardrails should exist before implementing any of the `HIGH` items:
-
-- [ ] Add a config gate for host-programmable local-input features:
-  `allow_udk`, `allow_downloaded_macros`, `allow_answerback`, and
-  `allow_printer_control`, all defaulting to `false`.
-- [ ] Make dangerous features visibly discoverable at runtime:
-  mode indicator, log line, or one-shot warning when a host first attempts to
-  enable them.
-- [ ] Never let a remote escape sequence synthesize PTY input immediately unless
-  the spec explicitly requires it and the user opted in.
-- [ ] Put strict size, time, and allocation limits on any new DCS payloads
-  (especially DRCS / soft character downloads).
-- [ ] Keep parser state and "host may control local hardware / local keys" state
-  separate from ordinary screen emulation state.
+I did not find a DEC control function in the manuals I checked that is literally
+named "unknown command echo". If that memory is accurate, it is likely referring
+to one of the features above, or to host-side shell behavior rather than a
+distinct DEC terminal primitive.
 
 ## Priority 1: VT420 Core Gaps
 
@@ -131,7 +87,8 @@ Completed:
 - [x] DEC Supplemental / ISO Latin-1 style supplemental handling
 - [x] 94- and 96-character set designation
 - [x] locking-shift behavior across the full DEC model
-- [x] parser-aware UTF-8 vs 8-bit text-mode handling (`ESC % G` / `ESC % 8` / `ESC % @`)
+- [x] parser-aware UTF-8 vs 8-bit text-mode handling (`ESC % G` / `ESC % 8` /
+  `ESC % @`)
 - [x] raw 8-bit graphic-byte routing through GR
 
 Why it matters:
@@ -181,15 +138,17 @@ Implemented:
 - [x] `DECSLPP`
 - [x] `DECSCPP`
 - [x] `DECTABSR` / `DECRQPSR`
-- [x] page navigation / reporting (`NP`, `PP`, `PPA`, `PPR`, `PPB`, DECXCPR page)
+- [x] page navigation / reporting (`NP`, `PP`, `PPA`, `PPR`, `PPB`, DECXCPR
+  page)
 - [x] per-tab host-driven geometry requests wired through the window thread
-- [x] cross-page rectangular-area semantics for `DECCRA` source/destination pages
+- [x] cross-page rectangular-area semantics for `DECCRA` source/destination
+  pages
 
 Why it matters:
 
-- VT420 and later terminals define more than just viewport rows/cols. They
-  have page length, screen line count, and page-memory semantics that many
-  control functions reference.
+- VT420 and later terminals define more than just viewport rows/cols. They have
+  page length, screen line count, and page-memory semantics that many control
+  functions reference.
 
 Security:
 
@@ -207,8 +166,7 @@ Implemented:
 Why it matters:
 
 - `term41` now supports the full VT420 rectangular-area control family:
-  `DECERA`, `DECFRA`, `DECCRA`, `DECSERA`, `DECSACE`, `DECCARA`, and
-  `DECRARA`.
+  `DECERA`, `DECFRA`, `DECCRA`, `DECSERA`, `DECSACE`, `DECCARA`, and `DECRARA`.
 
 Security:
 
@@ -258,10 +216,10 @@ Why it matters:
 Security:
 
 - `HIGH`
-- A hostile host can redefine function keys so that a later local keypress
-  emits shell commands or control sequences into the session.
-- If implemented at all, UDK loading should be disabled by default and
-  surfaced prominently to the user.
+- A hostile host can redefine function keys so that a later local keypress emits
+  shell commands or control sequences into the session.
+- If implemented at all, UDK loading should be disabled by default and surfaced
+  prominently to the user.
 
 ### [x] 9. Downloaded macros (`DECDMAC`, `DECINVM`)
 
@@ -283,9 +241,9 @@ Why it matters:
 Security:
 
 - `HIGH`
-- Downloaded macros are effectively remote-programmed local actions. If the
-  user later invokes one, it can inject arbitrary text or escape sequences into
-  the active session.
+- Downloaded macros are effectively remote-programmed local actions. If the user
+  later invokes one, it can inject arbitrary text or escape sequences into the
+  active session.
 - This is one of the clearest shell-injection vectors in the DEC feature set.
 - `term41` therefore keeps the feature default-deny and only enables it for
   explicitly allowlisted programs, using kernel-backed foreground process-set
@@ -371,8 +329,8 @@ Missing:
 
 Why it matters:
 
-- VT420 and later hardware supported multi-session use cases that `term41`
-  does not model at all.
+- VT420 and later hardware supported multi-session use cases that `term41` does
+  not model at all.
 
 Security:
 
@@ -461,8 +419,8 @@ Security:
 
 ## Features That Should Probably Stay Disabled By Default
 
-Even if implemented for spec completeness, these should almost certainly be
-off unless the user explicitly enables them:
+Even if implemented for spec completeness, these should almost certainly be off
+unless the user explicitly enables them:
 
 - [ ] `DECUDK`
 - [ ] `DECDMAC` / `DECINVM`
@@ -470,31 +428,3 @@ off unless the user explicitly enables them:
 - [ ] autoprint / print-page / print-screen features
 - [ ] printer-to-host session features
 - [ ] any feature that reroutes data between sessions or external ports
-
-## Suggested Implementation Order
-
-1. [ ] Finish safe VT420 display-state work:
-   `DECSCL`, `S7C1T` / `S8C1T`, `DECSASD`, `DECSSDT`, `DECSNLS`, `DECSLPP`,
-   `DECSCPP`, `DECSERA`, `DECSACE`, `DECTST`, more `DECRQSS`.
-2. [ ] Build a real DEC character-set subsystem:
-   `DECNRCM`, `DECAUPSS` / `DECRQUPSS`, NRC sets, DEC Technical, supplemental
-   sets.
-3. [ ] Decide whether full page/session/printer behavior is actually in scope:
-   if yes, implement it as a separate subsystem rather than extending the
-   current single-screen xterm-like model ad hoc.
-4. [ ] Add dangerous local-programming features only behind explicit opt-in:
-   `DECUDK`, `DECDMAC`, answerback / auto-answerback, and printer/media-copy.
-5. [ ] Only after the above, chase VT520/VT525-specific desktop/session features.
-
-## Sources
-
-- VT420 Programming Summary:
-  https://vt100.net/docs/vt420-uu/chapter9.html
-- VT420 Programmer Reference Manual:
-  https://vt100.net/mirror/mds-199909/cd3/term/vt420rm2.pdf
-- VT520/VT525 Programmer Information:
-  https://vt100.net/dec/ek-vt520-rm.pdf
-- DECSSDT reference:
-  https://vt100.net/docs/vt510-rm/DECSSDT.html
-- DEC Technical Character Set notes:
-  https://vt100.net/charsets/technical.html
