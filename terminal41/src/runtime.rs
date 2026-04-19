@@ -8,6 +8,7 @@ pub(crate) fn run_terminal_thread(
     mut pty_reader: PtyReader,
     stop: Arc<AtomicBool>,
     render_thread_handle: Arc<OnceLock<Thread>>,
+    tee_read: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>,
     startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
     output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
     host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
@@ -29,6 +30,9 @@ pub(crate) fn run_terminal_thread(
             did_work = true;
             let foreground_processes = pty_reader.foreground_processes();
             trace!("Read {n} bytes from PTY, foreground processes: {foreground_processes:?}");
+            if let Some(tee_read) = tee_read.as_ref() {
+                tee_read(&buf[..n]);
+            }
 
             terminal
                 .lock()

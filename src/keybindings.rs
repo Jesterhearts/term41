@@ -62,6 +62,8 @@ pub enum Action {
     /// `background_image` from config (or none, if unset). Silent no-op
     /// when no pasted background exists.
     ClearPastedBackground,
+    /// Start or stop recording PTY output to a temporary `.rec` file.
+    ToggleOutputRecording,
 }
 
 /// One key, identified either by its winit `NamedKey` (Enter, F1, …) or by
@@ -169,6 +171,11 @@ impl Keybindings {
                     key: KeySpec::Named(NamedKey::Backspace),
                     mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
                     action: Action::ClearPastedBackground,
+                },
+                Keybinding {
+                    key: KeySpec::Char('r'),
+                    mods: ModifiersState::ALT | ModifiersState::SHIFT,
+                    action: Action::ToggleOutputRecording,
                 },
             ],
         }

@@ -75,6 +75,7 @@ shellexpand                    = "3.1.2"
 smol_str.workspace             = true
 softbuffer                     = "0.4.8"
 terminal41                     = { path = "terminal41" }
+time = { version = "0.3.47", features = ["formatting", "local-offset", "macros"] }
 toml                           = "1.1.2"
 tracing                        = "0.1.44"
 tracing-subscriber             = { version = "0.3.23", features = ["env-filter"] }

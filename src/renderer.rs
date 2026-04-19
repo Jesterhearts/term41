@@ -46,6 +46,7 @@ use crate::config::BellMode;
 use crate::config::Config;
 use crate::config::DEFAULT_SCROLLBACK;
 use crate::keybindings::Action;
+use crate::output_recording::RecorderControl;
 use crate::renderer::r#impl::PreparedRenderer;
 use crate::renderer::r#impl::Renderer;
 use crate::renderer::r#impl::TabInfo;
@@ -124,6 +125,11 @@ pub(crate) struct TabContextMenu {
     pub x: f32,
     /// Currently hovered menu-item index.
     pub hovered_item: Option<usize>,
+}
+
+#[derive(Clone)]
+pub(crate) struct RecordingPopup {
+    pub lines: Vec<String>,
 }
 
 fn resize_tab_to_grid(
@@ -520,6 +526,7 @@ impl RenderHost {
             Action::ClearPastedBackground => {
                 self.handle_clear_pasted_background();
             }
+            Action::ToggleOutputRecording => {}
         }
     }
 
@@ -801,6 +808,7 @@ impl RenderHost {
                 return;
             }
         };
+        let recorder = RecorderControl::new();
 
         let terminal = Arc::new(Mutex::new(terminal));
         terminal_thread.spawn(
@@ -808,6 +816,10 @@ impl RenderHost {
             terminal.clone(),
             pty_reader,
             self.render_thread_handle.clone(),
+            Some(Arc::new({
+                let recorder = recorder.clone();
+                move |bytes| recorder.write_chunk(bytes)
+            })),
             None,
             Some(Arc::new({
                 let proxy = self.proxy.clone();
@@ -830,6 +842,7 @@ impl RenderHost {
             tab_id: id,
             terminal: terminal.clone(),
             writer,
+            recorder,
         });
 
         self.tabs.push(Tab {
@@ -1071,15 +1084,17 @@ impl RenderHost {
             return;
         };
 
-        let (hovered_button, tab_context_menu, gutter_popup, preedit) = {
+        let (hovered_button, tab_context_menu, gutter_popup, recording_popup, preedit) = {
             let input_state = self.input_state.lock().unwrap();
             (
                 input_state.hovered_button,
                 input_state.tab_context_menu.clone(),
                 input_state.gutter_popup.clone(),
+                input_state.recording_popup.clone(),
                 input_state.preedit.clone(),
             )
         };
+        let recording_popup = recording_popup.map(|popup| RecordingPopup { lines: popup.lines });
 
         let controls = WindowControls {
             hovered: hovered_button,
@@ -1103,6 +1118,7 @@ impl RenderHost {
             &tab_infos,
             &controls,
             gutter_popup.as_ref(),
+            recording_popup.as_ref(),
             preedit.as_ref(),
         );
     }

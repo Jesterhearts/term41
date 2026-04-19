@@ -3,6 +3,7 @@
 
 mod config;
 mod keybindings;
+mod output_recording;
 mod renderer;
 
 use std::cell::RefCell;
@@ -57,6 +58,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoop;
+use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
 use winit::keyboard::KeyLocation;
@@ -69,6 +71,8 @@ use winit::window::WindowId;
 
 use crate::keybindings::Action;
 use crate::keybindings::Keybindings;
+use crate::output_recording::RecorderControl;
+use crate::output_recording::next_recording_path;
 use crate::renderer::PreeditState;
 use crate::renderer::RenderEvent;
 use crate::renderer::TabContextMenu;
@@ -119,9 +123,11 @@ enum AppEvent {
         tab_id: TabId,
         terminal: Arc<Mutex<Terminal>>,
         writer: PtyWriter,
+        recorder: RecorderControl,
     },
     RemoveInputEndpoint(TabId),
     SetActiveInputTab(Option<TabId>),
+    DismissRecordingPopup(u64),
 }
 
 struct Tab {
@@ -136,6 +142,17 @@ struct Tab {
 struct InputEndpoint {
     terminal: Arc<Mutex<Terminal>>,
     writer: RefCell<PtyWriter>,
+    recorder: RecorderControl,
+}
+
+#[derive(Clone)]
+struct RecordingPopupView {
+    lines: Vec<String>,
+}
+
+enum RecordingPopupState {
+    PendingStart { path: PathBuf },
+    Completed { token: u64 },
 }
 
 pub(crate) struct InputState {
@@ -147,6 +164,7 @@ pub(crate) struct InputState {
     hovered_button: Option<u8>,
     tab_context_menu: Option<TabContextMenu>,
     gutter_popup: Option<renderer::GutterPopup>,
+    recording_popup: Option<RecordingPopupView>,
     preedit: Option<PreeditState>,
 }
 
@@ -183,6 +201,9 @@ struct WindowHost {
     startup_background_source: Option<PathBuf>,
     startup_background_opacity: f32,
     render_thread_handle: Arc<OnceLock<std::thread::Thread>>,
+    event_proxy: EventLoopProxy<AppEvent>,
+    recording_popup: Option<RecordingPopupState>,
+    next_recording_popup_token: u64,
 }
 
 impl WindowHost {
@@ -273,11 +294,120 @@ impl WindowHost {
         self.input_state.lock().unwrap().gutter_popup = popup;
     }
 
-    fn notify_interaction_changed(&self) {
+    fn notify_interaction_changed(&mut self) {
+        let _ = self.event_tx.push(RenderEvent::None);
+        if let Some(thread) = self.render_thread_handle.get() {
+            thread.unpark();
+        }
         if self.startup_presenter.is_some()
             && let Some(window) = &self.window
         {
             window.request_redraw();
+        }
+    }
+
+    fn update_recording_popup_view(
+        &mut self,
+        popup: Option<RecordingPopupView>,
+    ) {
+        self.input_state.lock().unwrap().recording_popup = popup;
+        self.notify_interaction_changed();
+    }
+
+    fn show_recording_start_popup(
+        &mut self,
+        path: PathBuf,
+    ) {
+        let lines = vec![
+            "Output recording started.".to_string(),
+            format!("Recording to {}.", path.display()),
+            "Press enter to start recording.".to_string(),
+            "Escape to cancel.".to_string(),
+        ];
+        self.recording_popup = Some(RecordingPopupState::PendingStart { path });
+        self.update_recording_popup_view(Some(RecordingPopupView { lines }));
+    }
+
+    fn show_recording_completed_popup(
+        &mut self,
+        path: PathBuf,
+    ) {
+        let token = self.next_recording_popup_token;
+        self.next_recording_popup_token += 1;
+        self.recording_popup = Some(RecordingPopupState::Completed { token });
+        self.update_recording_popup_view(Some(RecordingPopupView {
+            lines: vec![format!("Recorded to {}.", path.display())],
+        }));
+        let proxy = self.event_proxy.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(3));
+            let _ = proxy.send_event(AppEvent::DismissRecordingPopup(token));
+        });
+    }
+
+    fn show_recording_error_popup(
+        &mut self,
+        error: std::io::Error,
+    ) {
+        let token = self.next_recording_popup_token;
+        self.next_recording_popup_token += 1;
+        self.recording_popup = Some(RecordingPopupState::Completed { token });
+        self.update_recording_popup_view(Some(RecordingPopupView {
+            lines: vec![
+                "Failed to start output recording.".to_string(),
+                error.to_string(),
+            ],
+        }));
+        let proxy = self.event_proxy.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(3));
+            let _ = proxy.send_event(AppEvent::DismissRecordingPopup(token));
+        });
+    }
+
+    fn dismiss_recording_popup(&mut self) {
+        self.recording_popup = None;
+        self.update_recording_popup_view(None);
+    }
+
+    fn handle_recording_popup_key(
+        &mut self,
+        key: &Key,
+    ) -> bool {
+        let Some(popup) = self.recording_popup.as_ref() else {
+            return false;
+        };
+        match popup {
+            RecordingPopupState::PendingStart { path } => match key {
+                Key::Named(NamedKey::Enter) => {
+                    let path = path.clone();
+                    let Some(target) = self.active_input_target() else {
+                        self.dismiss_recording_popup();
+                        return true;
+                    };
+                    match target.recorder.start(path.clone()) {
+                        Ok(()) => {
+                            self.dismiss_recording_popup();
+                        }
+                        Err(e) => {
+                            self.show_recording_error_popup(e);
+                        }
+                    }
+                    true
+                }
+                Key::Named(NamedKey::Escape) => {
+                    self.dismiss_recording_popup();
+                    true
+                }
+                _ => false,
+            },
+            RecordingPopupState::Completed { .. } => match key {
+                Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Escape) => {
+                    self.dismiss_recording_popup();
+                    true
+                }
+                _ => false,
+            },
         }
     }
 
@@ -325,8 +455,8 @@ impl WindowHost {
         key: &Key,
     ) {
         let shift = self.modifiers.shift_key();
-        let mut terminal = target.terminal.lock().unwrap();
-        let terminal = &mut *terminal;
+        let mut guard = target.terminal.lock().unwrap();
+        let terminal = &mut *guard;
         match key {
             Key::Named(NamedKey::Escape) => {
                 close_search(&mut terminal.search, &mut terminal.selection);
@@ -392,8 +522,8 @@ impl WindowHost {
                 true
             }
             Action::Copy => {
-                let mut terminal = target.terminal.lock().unwrap();
-                let terminal = &mut *terminal;
+                let mut guard = target.terminal.lock().unwrap();
+                let terminal = &mut *guard;
                 if terminal.has_selection() {
                     copy_selection(
                         &mut terminal.clipboard,
@@ -405,8 +535,8 @@ impl WindowHost {
                 true
             }
             Action::Paste => {
-                let mut terminal = target.terminal.lock().unwrap();
-                let terminal = &mut *terminal;
+                let mut guard = target.terminal.lock().unwrap();
+                let terminal = &mut *guard;
 
                 paste_from_clipboard(
                     &mut terminal.clipboard,
@@ -415,6 +545,7 @@ impl WindowHost {
                     terminal.modes.bracketed_paste,
                     ClipboardKind::Clipboard,
                 );
+                drop(guard);
                 self.flush_target_output(target);
                 true
             }
@@ -433,6 +564,16 @@ impl WindowHost {
             Action::OpenNewWindow => {
                 let cwd = target.terminal.lock().unwrap().current_directory.clone();
                 spawn_new_window(cwd);
+                true
+            }
+            Action::ToggleOutputRecording => {
+                if target.recorder.is_active() {
+                    if let Some(path) = target.recorder.stop() {
+                        self.show_recording_completed_popup(path);
+                    }
+                } else {
+                    self.show_recording_start_popup(next_recording_path());
+                }
                 true
             }
             Action::NewTab
@@ -457,6 +598,11 @@ impl WindowHost {
         let Some(active_tab_id) = self.active_input_tab else {
             return;
         };
+
+        if self.recording_popup.is_some() {
+            let _ = self.handle_recording_popup_key(&key);
+            return;
+        }
 
         if self.input_endpoints[&active_tab_id]
             .terminal
@@ -587,6 +733,9 @@ impl WindowHost {
         y: f64,
     ) {
         self.mouse_pos = (x, y);
+        if self.recording_popup.is_some() {
+            return;
+        }
 
         let hovered_button = self.window_button_at().map(|b| b as u8);
         self.update_hovered_button(hovered_button);
@@ -643,18 +792,20 @@ impl WindowHost {
         if self.left_drag_active
             && let Some(target) = self.active_input_target()
         {
-            let mut terminal = target.terminal.lock().unwrap();
-            let terminal = &mut *terminal;
-            if let Some(selection) = terminal.selection.as_ref()
-                && let Some(new_sel) = extend_selection(
-                    selection,
-                    &terminal.active,
-                    &terminal.viewport,
-                    cell.0,
-                    cell.1,
-                )
             {
-                terminal.selection = Some(new_sel);
+                let mut guard = target.terminal.lock().unwrap();
+                let terminal = &mut *guard;
+                if let Some(selection) = terminal.selection.as_ref()
+                    && let Some(new_sel) = extend_selection(
+                        selection,
+                        &terminal.active,
+                        &terminal.viewport,
+                        cell.0,
+                        cell.1,
+                    )
+                {
+                    terminal.selection = Some(new_sel);
+                }
             }
             self.notify_interaction_changed();
             return;
@@ -669,6 +820,9 @@ impl WindowHost {
         pressed: bool,
         button: MouseButton,
     ) {
+        if self.recording_popup.is_some() {
+            return;
+        }
         let term_button = match button {
             MouseButton::Left => TermMouseButton::Left,
             MouseButton::Middle => TermMouseButton::Middle,
@@ -855,8 +1009,8 @@ impl WindowHost {
             (MouseButton::Left, false) => {
                 self.left_drag_active = false;
                 if let Some(target) = self.active_input_target() {
-                    let mut terminal = target.terminal.lock().unwrap();
-                    let terminal = &mut *terminal;
+                    let mut guard = target.terminal.lock().unwrap();
+                    let terminal = &mut *guard;
                     if terminal.has_selection() {
                         copy_selection(
                             &mut terminal.clipboard,
@@ -872,8 +1026,8 @@ impl WindowHost {
             }
             (MouseButton::Right, true) => {
                 if let Some(target) = self.active_input_target() {
-                    let mut terminal = target.terminal.lock().unwrap();
-                    let terminal = &mut *terminal;
+                    let mut guard = target.terminal.lock().unwrap();
+                    let terminal = &mut *guard;
                     if terminal.has_selection() {
                         copy_selection(
                             &mut terminal.clipboard,
@@ -892,6 +1046,7 @@ impl WindowHost {
                             ClipboardKind::Clipboard,
                         );
                     }
+                    drop(guard);
                     self.flush_target_output(target);
                 }
                 self.notify_interaction_changed();
@@ -906,6 +1061,9 @@ impl WindowHost {
         raw_y: f64,
         pixels: bool,
     ) {
+        if self.recording_popup.is_some() {
+            return;
+        }
         self.close_gutter_popup();
         let (cell_w, cell_h, _, _) = self.layout_snapshot();
         let (x_lines, y_lines) = if pixels {
@@ -1398,12 +1556,14 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 tab_id,
                 terminal,
                 writer,
+                recorder,
             } => {
                 self.input_endpoints.insert(
                     tab_id,
                     InputEndpoint {
                         terminal,
                         writer: RefCell::new(writer),
+                        recorder,
                     },
                 );
             }
@@ -1414,6 +1574,15 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 self.active_input_tab = tab_id;
                 if let Some(tab_id) = tab_id {
                     self.request_window_size_for_tab(tab_id);
+                }
+            }
+            AppEvent::DismissRecordingPopup(token) => {
+                let dismiss = matches!(
+                    self.recording_popup,
+                    Some(RecordingPopupState::Completed { token: current }) if current == token
+                );
+                if dismiss {
+                    self.dismiss_recording_popup();
                 }
             }
         }
@@ -1714,6 +1883,7 @@ fn main() {
         )
         .expect("failed to spawn PTY")
     });
+    let initial_recorder = RecorderControl::new();
 
     let mut terminal = Terminal::new(
         INITIAL_COLS,
@@ -1734,6 +1904,10 @@ fn main() {
         terminal.clone(),
         pty_reader,
         render_thread_handle.clone(),
+        Some(Arc::new({
+            let recorder = initial_recorder.clone();
+            move |bytes| recorder.write_chunk(bytes)
+        })),
         Some(Arc::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
         })),
@@ -1768,6 +1942,7 @@ fn main() {
         hovered_button: None,
         tab_context_menu: None,
         gutter_popup: None,
+        recording_popup: None,
         preedit: None,
     }));
     let tab = Tab {
@@ -1786,6 +1961,7 @@ fn main() {
     let config_reload_ = config_reload.clone();
     let input_state_for_render = input_state.clone();
     let render_thread_handle_for_render = render_thread_handle.clone();
+    let render_proxy = proxy.clone();
     thread::Builder::new()
         .name("renderer".into())
         .spawn(move || {
@@ -1797,7 +1973,7 @@ fn main() {
                 child_exit_rx,
                 child_exit_tx,
                 config_reload_,
-                proxy,
+                render_proxy,
                 font_system,
                 tab,
                 config,
@@ -1823,6 +1999,7 @@ fn main() {
             InputEndpoint {
                 terminal: terminal.clone(),
                 writer: RefCell::new(pty_writer),
+                recorder: initial_recorder,
             },
         )]),
         active_input_tab: Some(TabId(0)),
@@ -1850,6 +2027,9 @@ fn main() {
         startup_background_source,
         startup_background_opacity,
         render_thread_handle,
+        event_proxy: proxy,
+        recording_popup: None,
+        next_recording_popup_token: 1,
     };
     event_loop.run_app(&mut host).expect("run event loop");
 }
