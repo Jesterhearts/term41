@@ -95,14 +95,16 @@ Security:
 
 - `LOW`
 
-### [ ] 2. Status-line model
+### [x] 2. Status-line model
 
-Missing:
+Completed:
 
-- [ ] `DECSASD`
-- [ ] `DECSSDT`
-- [ ] dedicated status-line storage and routing rules
-- [ ] host-writable status-line semantics
+- [x] `DECSASD`
+- [x] `DECSSDT`
+- [x] dedicated status-line storage and routing rules
+- [x] host-writable status-line semantics
+- [x] visually distinct renderer treatment with border, gutter marker, and
+  dedicated configurable colors
 
 Why it matters:
 
