@@ -25,6 +25,9 @@ impl ProgramAllowlist {
         if processes.is_empty() {
             return false;
         }
+
+        trace!("Checking allowlist {self:?} against foreground processes {processes:?}");
+
         match self {
             Self::DenyAll => false,
             Self::AllowAll => true,
@@ -40,6 +43,7 @@ fn program_matches(
     entry: &str,
     program: &ForegroundProgram,
 ) -> bool {
+    trace!("Matching program entry {entry:?} against foreground program {program:?}");
     if entry.contains('/') {
         program.exe_path == std::path::Path::new(entry)
     } else {

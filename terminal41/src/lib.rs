@@ -1,5 +1,8 @@
 #![allow(clippy::too_many_arguments)]
 
+#[macro_use]
+extern crate log;
+
 mod charset;
 mod color;
 mod conformance;
@@ -375,6 +378,7 @@ pub struct Terminal {
     strict_altscreen_scrollback: bool,
     feature_permissions: FeaturePermissions,
     foreground_processes: Option<ForegroundProcessSet>,
+    foreground_processes_logged: bool,
     macros: MacroStore,
     macro_invocation_depth: usize,
     drcs: DrcsStore,
@@ -455,6 +459,7 @@ impl Terminal {
             strict_altscreen_scrollback,
             feature_permissions,
             foreground_processes: None,
+            foreground_processes_logged: false,
             macros: MacroStore::default(),
             macro_invocation_depth: 0,
             drcs: DrcsStore::default(),
@@ -570,6 +575,10 @@ impl Terminal {
         &mut self,
         processes: Option<ForegroundProcessSet>,
     ) {
+        if !self.foreground_processes_logged || self.foreground_processes != processes {
+            log_foreground_process_probe(&self.feature_permissions, processes.as_ref());
+            self.foreground_processes_logged = true;
+        }
         self.foreground_processes = processes;
     }
 
@@ -2261,6 +2270,29 @@ fn running_command_text(term: &Terminal) -> Option<String> {
     (!flattened.is_empty()).then_some(flattened)
 }
 
+fn log_foreground_process_probe(
+    permissions: &FeaturePermissions,
+    processes: Option<&ForegroundProcessSet>,
+) {
+    let macro_state = if permissions.macros.allows_programs(processes) {
+        "allow"
+    } else {
+        "deny"
+    };
+    match processes {
+        Some(processes) if !processes.programs.is_empty() => {
+            let programs = processes
+                .programs
+                .iter()
+                .map(|program| program.exe_name.as_str())
+                .collect::<Vec<_>>()
+                .join(", ");
+            info!("Foreground PTY processes: [{programs}] macros={macro_state}");
+        }
+        _ => info!("Foreground PTY processes: [unresolved] macros={macro_state}"),
+    }
+}
+
 pub(crate) fn apply_status_display_mode(
     screen: &mut Screen,
     total_rows: u32,
@@ -2765,6 +2797,8 @@ pub fn run_terminal_thread(
             }
             did_work = true;
             let foreground_processes = pty_reader.foreground_processes();
+            trace!("Read {n} bytes from PTY, foreground processes: {foreground_processes:?}");
+
             terminal
                 .lock()
                 .unwrap()

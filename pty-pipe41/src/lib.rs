@@ -201,7 +201,16 @@ impl Pty {
         let reader = pair.master.try_clone_reader().map_err(io::Error::other)?;
         let writer = pair.master.take_writer().map_err(io::Error::other)?;
         #[cfg(unix)]
-        let foreground_probe = pair.master.as_raw_fd().and_then(ForegroundProbe::new);
+        let foreground_probe = pair
+            .master
+            .as_raw_fd()
+            .and_then(|fd| ForegroundProbe::new(fd, pair.master.tty_name()));
+        debug!(
+            "Spawned child with PID {:?}, PTY master fd {:?}, foreground probe: \
+             {foreground_probe:?}",
+            child.process_id(),
+            pair.master.as_raw_fd(),
+        );
 
         let (read_tx, rx) = cueue(MAX_BUFFER)?;
         let pending_read = Arc::new(AtomicBool::new(false));
@@ -317,33 +326,58 @@ fn pump_reader(
 }
 
 #[cfg(unix)]
+#[derive(Debug)]
 struct ForegroundProbe {
     master_fd: std::os::fd::OwnedFd,
+    tty_path: Option<PathBuf>,
     cached_pgrp: Option<libc::pid_t>,
     cached_processes: Option<ForegroundProcessSet>,
 }
 
 #[cfg(unix)]
 impl ForegroundProbe {
-    fn new(raw_fd: std::os::unix::io::RawFd) -> Option<Self> {
+    fn new(
+        raw_fd: std::os::unix::io::RawFd,
+        tty_path: Option<PathBuf>,
+    ) -> Option<Self> {
+        debug!(
+            "Creating ForegroundProbe for fd {raw_fd} (tty path: {:?})",
+            tty_path
+        );
+
         let dup_fd = unsafe { libc::dup(raw_fd) };
         (dup_fd >= 0).then(|| Self {
             // SAFETY: dup() returned a fresh owned fd on success.
             master_fd: unsafe { std::os::fd::OwnedFd::from_raw_fd(dup_fd) },
+            tty_path,
             cached_pgrp: None,
             cached_processes: None,
         })
     }
 
     fn resolve(&mut self) -> Option<ForegroundProcessSet> {
-        let pgrp = current_foreground_pgrp(self.master_fd.as_raw_fd())?;
-        if self.cached_pgrp == Some(pgrp) {
+        let maybe_pgrp = current_foreground_pgrp(self.master_fd.as_raw_fd()).or_else(|| {
+            self.tty_path
+                .as_ref()
+                .and_then(current_foreground_pgrp_from_tty_path)
+        });
+
+        trace!("ForegroundProbe: current foreground pgrp: {maybe_pgrp:?}");
+        let pgrp = maybe_pgrp?;
+
+        if self.cached_pgrp == Some(pgrp) && self.cached_processes.is_some() {
             return self.cached_processes.clone();
         }
-        let program = resolve_foreground_processes(pgrp);
-        self.cached_pgrp = Some(pgrp);
-        self.cached_processes = program.clone();
-        program
+        let processes = resolve_foreground_processes(pgrp);
+        if let Some(processes) = processes {
+            self.cached_pgrp = Some(pgrp);
+            self.cached_processes = Some(processes.clone());
+            Some(processes)
+        } else {
+            self.cached_pgrp = None;
+            self.cached_processes = None;
+            None
+        }
     }
 }
 
@@ -351,7 +385,10 @@ impl ForegroundProbe {
 fn current_foreground_pgrp(fd: std::os::unix::io::RawFd) -> Option<libc::pid_t> {
     match unsafe { libc::tcgetpgrp(fd) } {
         pid if pid > 0 => Some(pid),
-        _ => None,
+        e => {
+            trace!("tcgetpgrp failed with {e}");
+            None
+        }
     }
 }
 
@@ -360,20 +397,31 @@ fn resolve_foreground_processes(pgrp: libc::pid_t) -> Option<ForegroundProcessSe
     let mut programs = vec![];
     for entry in std::fs::read_dir("/proc").ok()? {
         let Ok(entry) = entry else {
+            trace!("Failed to read /proc entry: {entry:?}");
             continue;
         };
         let file_name = entry.file_name();
         let Ok(pid) = file_name.to_string_lossy().parse::<libc::pid_t>() else {
+            trace!("Non-numeric /proc entry: {file_name:?}");
             continue;
         };
         let Some(member_pgrp) = process_group_for_pid(pid) else {
+            trace!("Failed to get process group for PID {pid}");
             continue;
         };
         if member_pgrp != pgrp {
+            trace!("PID {pid} is in process group {member_pgrp}, not {pgrp}");
             continue;
         }
-        let exe = std::fs::read_link(format!("/proc/{pid}/exe")).ok()?;
-        let program = ForegroundProgram::from_exe_path(exe)?;
+        trace!("PID {pid} is in foreground process group {pgrp}");
+        let Some(exe) = std::fs::read_link(format!("/proc/{pid}/exe")).ok() else {
+            trace!("Failed to read /proc/{pid}/exe");
+            continue;
+        };
+        let Some(program) = ForegroundProgram::from_exe_path(exe) else {
+            trace!("Failed to parse executable path for PID {pid}");
+            continue;
+        };
         if !programs.contains(&program) {
             programs.push(program);
         }
@@ -381,12 +429,26 @@ fn resolve_foreground_processes(pgrp: libc::pid_t) -> Option<ForegroundProcessSe
     (!programs.is_empty()).then_some(ForegroundProcessSet { programs })
 }
 
+#[cfg(unix)]
+fn current_foreground_pgrp_from_tty_path(path: &std::path::PathBuf) -> Option<libc::pid_t> {
+    use std::os::fd::AsRawFd;
+
+    let tty = std::fs::OpenOptions::new().read(true).open(path).ok()?;
+    current_foreground_pgrp(tty.as_raw_fd())
+}
+
 #[cfg(target_os = "macos")]
 fn resolve_foreground_processes(pgrp: libc::pid_t) -> Option<ForegroundProcessSet> {
     let mut programs = vec![];
     for pid in list_process_group_members(pgrp)? {
-        let exe = executable_path_for_pid(pid)?;
-        let program = ForegroundProgram::from_exe_path(exe)?;
+        let Some(exe) = executable_path_for_pid(pid) else {
+            trace!("Failed to get executable path for PID {pid}");
+            continue;
+        };
+        let Some(program) = ForegroundProgram::from_exe_path(exe) else {
+            trace!("Failed to parse executable path for PID {pid}");
+            continue;
+        };
         if !programs.contains(&program) {
             programs.push(program);
         }
@@ -402,10 +464,27 @@ fn resolve_foreground_processes(_pgrp: libc::pid_t) -> Option<ForegroundProcessS
 #[cfg(target_os = "linux")]
 fn process_group_for_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
     let stat = std::fs::read_to_string(format!("/proc/{pid}/stat")).ok()?;
+    trace!("Read /proc/{pid}/stat: {stat}");
     let after_comm = stat.rsplit_once(") ")?.1;
     let mut fields = after_comm.split_ascii_whitespace();
     let _state = fields.next()?;
+    let _ppid = fields.next()?;
     fields.next()?.parse().ok()
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_group_parser_skips_ppid_field() {
+        let stat = "1234 (selftest41) S 4321 5678 5678 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
+        let after_comm = stat.rsplit_once(") ").unwrap().1;
+        let mut fields = after_comm.split_ascii_whitespace();
+        let _state = fields.next().unwrap();
+        let _ppid = fields.next().unwrap();
+        let pgrp: libc::pid_t = fields.next().unwrap().parse().unwrap();
+        assert_eq!(pgrp, 5678);
+    }
 }
 
 #[cfg(target_os = "macos")]

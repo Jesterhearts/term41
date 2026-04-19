@@ -3478,6 +3478,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "serde_ignored"
+version = "0.1.14"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "115dffd5f3853e06e746965a20dcbae6ee747ae30b543d91b0e089668bb07798"
+dependencies = [
+ "serde",
+ "serde_core",
+]
+
+[[package]]
 name = "serde_json"
 version = "1.0.149"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -3844,6 +3854,7 @@ dependencies = [
  "pollster",
  "pty-pipe41",
  "serde",
+ "serde_ignored",
  "shellexpand",
  "smol_str 0.3.6",
  "softbuffer",
@@ -3867,6 +3878,7 @@ dependencies = [
  "clip41",
  "font41",
  "image41",
+ "log",
  "palette",
  "percent-encoding",
  "pty-pipe41",

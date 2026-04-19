@@ -429,13 +429,16 @@ fn parse_config(
     contents: &str,
     source: &dyn std::fmt::Display,
 ) -> Config {
-    let file: ConfigFile = match toml::from_str(contents) {
-        Ok(f) => f,
+    let (file, ignored_keys) = match parse_config_file(contents) {
+        Ok(parsed) => parsed,
         Err(e) => {
             warn!("failed to parse {source}: {e}");
             return Config::default();
         }
     };
+    for key in ignored_keys {
+        warn!("ignored unknown config key in {source}: {key}");
+    }
 
     let cursor_style = build_cursor_style(file.cursor_shape, file.cursor_blink);
     let keybindings = build_keybindings(file.keybindings, source);
@@ -466,6 +469,22 @@ fn parse_config(
                 .unwrap_or_default(),
         },
     }
+}
+
+fn parse_config_file(contents: &str) -> Result<(ConfigFile, Vec<String>), toml::de::Error> {
+    let mut ignored = vec![];
+    let deserializer = toml::Deserializer::parse(contents)?;
+    let file = serde_ignored::deserialize(deserializer, |path| {
+        ignored.push(normalize_ignored_path(&path.to_string()));
+    })?;
+    Ok((file, ignored))
+}
+
+fn normalize_ignored_path(path: &str) -> String {
+    path.split('.')
+        .filter(|segment| *segment != "?")
+        .collect::<Vec<_>>()
+        .join(".")
 }
 
 /// Resolve `~` and `$VAR` / `${VAR}` references in a config-supplied
@@ -757,6 +776,10 @@ mod tests {
         parse_config(s, &"<test>")
     }
 
+    fn ignored_keys(s: &str) -> Vec<String> {
+        parse_config_file(s).expect("config parses").1
+    }
+
     #[test]
     fn gutter_defaults_to_enabled_when_absent() {
         assert!(parse("").gutter);
@@ -835,6 +858,22 @@ mod tests {
         // resets to defaults, and the default gutter state is on.
         let cfg = parse("gutter = \"yes-please\"");
         assert!(cfg.gutter);
+    }
+
+    #[test]
+    fn unknown_top_level_keys_are_reported() {
+        assert_eq!(
+            ignored_keys("allow_feature = true\n"),
+            vec!["allow_feature"]
+        );
+    }
+
+    #[test]
+    fn unknown_nested_keys_are_reported() {
+        assert_eq!(
+            ignored_keys("[allow_features]\nmacro = \"all\"\n"),
+            vec!["allow_features.macro"]
+        );
     }
 
     #[test]
