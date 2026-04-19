@@ -10,7 +10,8 @@ members = [
   "clip41",
   "font41",
   "image41",
-  "pty-pipe41", "selftest41",
+  "pty-pipe41",
+  "selftest41",
   "terminal41",
   "vte-mode41",
   "vtepp",
@@ -45,47 +46,47 @@ harness = false
 name    = "vte_parse"
 
 [dependencies]
-atomic-write-file    = "0.3.0"
-bitflags             = { workspace = true }
-bytemuck             = { version = "1.25.0", features = [
+atomic-write-file              = "0.3.0"
+bitflags.workspace             = true
+bytemuck                       = { version = "1.25.0", features = [
   "derive",
   "extern_crate_alloc"
 ] }
-clip41               = { workspace = true }
-cueue                = { workspace = true }
-dirs                 = "6.0.0"
-evictor              = "0.7.2"
-flate2               = { workspace = true }
-font41               = { workspace = true }
-fontdb               = "0.23.0"
-harfrust             = "0.6.0"
-image41              = { workspace = true }
-infer                = { workspace = true }
-log                  = { workspace = true }
-notify               = "8.2.0"
-open                 = "5.3.3"
-palette              = { workspace = true }
-png                  = { workspace = true }
-pollster             = "0.4.0"
-pty-pipe41           = { workspace = true }
-serde                = { workspace = true }
-serde_ignored = "0.1.14"
-shellexpand          = "3.1.2"
-smol_str             = { workspace = true }
-softbuffer           = "0.4.8"
-terminal41           = { path = "terminal41" }
-toml                 = "1.1.2"
-tracing              = "0.1.44"
-tracing-subscriber   = { version = "0.3.23", features = ["env-filter"] }
-unicode-segmentation = { workspace = true }
-unicode-width        = { workspace = true }
-vtepp                = { workspace = true }
-wgpu                 = { version = "29.0.1", default-features = false, features = [
+clip41.workspace               = true
+cueue.workspace                = true
+dirs                           = "6.0.0"
+evictor                        = "0.7.2"
+flate2.workspace               = true
+font41.workspace               = true
+fontdb                         = "0.23.0"
+harfrust                       = "0.6.0"
+image41.workspace              = true
+infer.workspace                = true
+log.workspace                  = true
+notify                         = "8.2.0"
+open                           = "5.3.3"
+palette.workspace              = true
+png.workspace                  = true
+pollster                       = "0.4.0"
+pty-pipe41.workspace           = true
+serde.workspace                = true
+serde_ignored                  = "0.1.14"
+shellexpand                    = "3.1.2"
+smol_str.workspace             = true
+softbuffer                     = "0.4.8"
+terminal41                     = { path = "terminal41" }
+toml                           = "1.1.2"
+tracing                        = "0.1.44"
+tracing-subscriber             = { version = "0.3.23", features = ["env-filter"] }
+unicode-segmentation.workspace = true
+unicode-width.workspace        = true
+vtepp.workspace                = true
+wgpu                           = { version = "29.0.1", default-features = false, features = [
   "gles",
   "serde",
   "wgsl"
 ] }
-winit                = "0.30.13"
+winit                          = "0.30.13"
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = [

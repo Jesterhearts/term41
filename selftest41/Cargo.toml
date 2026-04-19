@@ -1,11 +1,11 @@
 [package]
-name = "selftest41"
+name    = "selftest41"
 version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-crossterm = "0.29.0"
-ratatui = "0.30.0"
-rustix = { version = "1.1.4", features = ["event", "std"] }
+crossterm               = "0.29.0"
+ratatui                 = "0.30.0"
+rustix                  = { version = "1.1.4", features = ["event", "std"] }
 unicode-width.workspace = true
-vtepp.workspace = true
+vtepp.workspace         = true

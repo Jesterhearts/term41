@@ -4,7 +4,7 @@ version = "0.1.0"
 edition = "2024"
 
 [dependencies]
-cueue        = { workspace = true }
-libc = "0.2.185"
-log          = { workspace = true }
-portable-pty = "0.9.0"
+cueue.workspace = true
+libc            = "0.2.185"
+log.workspace   = true
+portable-pty    = "0.9.0"
