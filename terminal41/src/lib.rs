@@ -28,6 +28,7 @@ mod runtime;
 mod screen;
 mod search;
 pub mod selection;
+mod selection_ops;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -710,19 +711,6 @@ impl Terminal {
         );
     }
 
-    /// Translate a viewport-relative screen row to an absolute row index
-    /// (stable under scrollback trimming). `screen_row` is 0 at the top of
-    /// the visible area.
-    fn active_viewport(&self) -> Viewport {
-        let mut view = screen::screen_viewport(&self.active, &self.viewport);
-        if self.active.offset > 0 {
-            view.top = view
-                .top_index(self.active.grid.rows.len())
-                .saturating_sub(self.active.offset as usize);
-        }
-        view
-    }
-
     pub fn total_rows(&self) -> u32 {
         self.viewport.rows + screen::status_line_rows(&self.active)
     }
@@ -773,555 +761,6 @@ impl Terminal {
         );
     }
 
-    fn screen_row_to_absolute(
-        &self,
-        screen_row: u32,
-    ) -> u64 {
-        let base = self
-            .active_viewport()
-            .top_index(self.active.grid.rows.len());
-        (self.active.grid.total_popped + base + screen_row as usize) as u64
-    }
-
-    /// Convert an absolute row to an index into the grid's VecDeque.
-    /// Returns None if the row has already fallen off the top of scrollback.
-    fn absolute_row_to_local(
-        &self,
-        abs: u64,
-    ) -> Option<usize> {
-        let popped = self.active.grid.total_popped as u64;
-        if abs < popped {
-            return None;
-        }
-        let local = (abs - popped) as usize;
-        if local >= self.active.grid.rows.len() {
-            return None;
-        }
-        Some(local)
-    }
-
-    /// Begin a new selection rooted at `(col, screen_row)`. For Word/Line
-    /// modes the anchor and head snap to word/line boundaries immediately.
-    pub fn start_selection(
-        &mut self,
-        col: u32,
-        screen_row: u32,
-        mode: SelectionMode,
-    ) {
-        let abs_row = self.screen_row_to_absolute(screen_row);
-        let Some(local) = self.absolute_row_to_local(abs_row) else {
-            return;
-        };
-        let row = &self.active.grid.rows[local];
-        let origin = SelectionPoint { row: abs_row, col };
-
-        let (anchor, head) = match mode {
-            SelectionMode::Char => (origin, origin),
-            SelectionMode::Word => {
-                let (s, e) = expand_to_word(row, col);
-                (
-                    SelectionPoint {
-                        row: abs_row,
-                        col: s,
-                    },
-                    SelectionPoint {
-                        row: abs_row,
-                        col: e,
-                    },
-                )
-            }
-            SelectionMode::Line => {
-                let (s, e) = expand_to_line(row);
-                (
-                    SelectionPoint {
-                        row: abs_row,
-                        col: s,
-                    },
-                    SelectionPoint {
-                        row: abs_row,
-                        col: e,
-                    },
-                )
-            }
-        };
-        self.selection = Some(Selection {
-            anchor,
-            head,
-            mode,
-            origin,
-        });
-    }
-
-    /// Extend the current selection to `(col, screen_row)`. For Word/Line
-    /// selections both the anchor and head snap to word/line boundaries so
-    /// the live drag always covers whole words/lines, with the anchor
-    /// flipping between the two ends of the origin segment as the drag
-    /// direction changes.
-    pub fn extend_selection(
-        &mut self,
-        col: u32,
-        screen_row: u32,
-    ) {
-        let Some(sel) = self.selection.as_ref() else {
-            return;
-        };
-        let mode = sel.mode;
-        let origin = sel.origin;
-
-        let abs_row = self.screen_row_to_absolute(screen_row);
-        let Some(local) = self.absolute_row_to_local(abs_row) else {
-            return;
-        };
-        let Some(origin_local) = self.absolute_row_to_local(origin.row) else {
-            return;
-        };
-
-        let head_row = &self.active.grid.rows[local];
-        let origin_row = &self.active.grid.rows[origin_local];
-
-        let new_point = SelectionPoint { row: abs_row, col };
-        let forward = (new_point.row, new_point.col) >= (origin.row, origin.col);
-
-        let (anchor, head) = match mode {
-            SelectionMode::Char => (origin, new_point),
-            SelectionMode::Word => {
-                let (o_start, o_end) = expand_to_word(origin_row, origin.col);
-                let (h_start, h_end) = expand_to_word(head_row, col);
-                if forward {
-                    (
-                        SelectionPoint {
-                            row: origin.row,
-                            col: o_start,
-                        },
-                        SelectionPoint {
-                            row: abs_row,
-                            col: h_end,
-                        },
-                    )
-                } else {
-                    (
-                        SelectionPoint {
-                            row: origin.row,
-                            col: o_end,
-                        },
-                        SelectionPoint {
-                            row: abs_row,
-                            col: h_start,
-                        },
-                    )
-                }
-            }
-            SelectionMode::Line => {
-                let (o_start, o_end) = expand_to_line(origin_row);
-                let (h_start, h_end) = expand_to_line(head_row);
-                if forward {
-                    (
-                        SelectionPoint {
-                            row: origin.row,
-                            col: o_start,
-                        },
-                        SelectionPoint {
-                            row: abs_row,
-                            col: h_end,
-                        },
-                    )
-                } else {
-                    (
-                        SelectionPoint {
-                            row: origin.row,
-                            col: o_end,
-                        },
-                        SelectionPoint {
-                            row: abs_row,
-                            col: h_start,
-                        },
-                    )
-                }
-            }
-        };
-
-        let sel = self.selection.as_mut().unwrap();
-        sel.anchor = anchor;
-        sel.head = head;
-    }
-
-    /// Drop the current selection. Called when a click resolves to a
-    /// single cell with no drag, or after the selection has been copied.
-    pub fn clear_selection(&mut self) {
-        self.selection = None;
-    }
-
-    /// True when there is a selection with real content (at least one
-    /// cell). Used by right-click to choose between copy and paste.
-    pub fn has_selection(&self) -> bool {
-        self.selection.as_ref().is_some_and(|s| !s.is_empty())
-    }
-
-    /// Render-time query: is the given viewport cell currently highlighted?
-    pub fn is_cell_selected(
-        &self,
-        screen_row: u32,
-        screen_col: u32,
-    ) -> bool {
-        let Some(sel) = &self.selection else {
-            return false;
-        };
-        if sel.is_empty() {
-            return false;
-        }
-        let abs_row = self.screen_row_to_absolute(screen_row);
-        sel.contains(SelectionPoint {
-            row: abs_row,
-            col: screen_col,
-        })
-    }
-
-    /// Open the search bar. Clears any leftover query and matches so a
-    /// re-open starts from a clean slate.
-    pub fn open_search(&mut self) {
-        self.search.active = true;
-        self.search.query.clear();
-        self.search.matches.clear();
-        self.search.active_idx = 0;
-    }
-
-    /// Close the search bar and drop its state. If a match was focused at
-    /// close time, promote it to the active selection — users expect the
-    /// hit they just navigated to to stay visibly marked (and be ready
-    /// for `Ctrl+Shift+C`) once they leave the bar. When no match was
-    /// focused the existing selection, if any, stays put.
-    pub fn close_search(&mut self) {
-        if let Some(&active) = self.search.matches.get(self.search.active_idx) {
-            let anchor = SelectionPoint {
-                row: active.row,
-                col: active.start_col,
-            };
-            let head = SelectionPoint {
-                row: active.row,
-                col: active.end_col,
-            };
-            self.selection = Some(Selection {
-                anchor,
-                head,
-                mode: SelectionMode::Char,
-                origin: anchor,
-            });
-        }
-        self.search.active = false;
-        self.search.query.clear();
-        self.search.matches.clear();
-        self.search.active_idx = 0;
-    }
-
-    pub fn search_active(&self) -> bool {
-        self.search.active
-    }
-
-    /// Read-only view of search state, for the overlay renderer. `None`
-    /// when the bar isn't open — nothing for the host to draw.
-    pub fn search_state(&self) -> Option<&SearchState> {
-        if self.search.active {
-            Some(&self.search)
-        } else {
-            None
-        }
-    }
-
-    /// Append `s` to the current query and rescan. Intended for text input
-    /// events while the bar is open — multi-byte paste is fine, control
-    /// bytes and newlines aren't filtered here but the host only calls this
-    /// with printable input.
-    pub fn search_append(
-        &mut self,
-        s: &str,
-    ) {
-        if !self.search.active {
-            return;
-        }
-        self.search.query.push_str(s);
-        self.refresh_search();
-    }
-
-    /// Drop the last character of the query. No-op on empty query so the
-    /// host doesn't have to guard the keystroke.
-    pub fn search_backspace(&mut self) {
-        if !self.search.active {
-            return;
-        }
-        self.search.query.pop();
-        self.refresh_search();
-    }
-
-    /// Jump to the next match, wrapping from the last back to the first.
-    /// Scrolls the viewport so the new active match is visible.
-    pub fn search_next(&mut self) {
-        if !self.search.active || self.search.matches.is_empty() {
-            return;
-        }
-        self.search.active_idx = (self.search.active_idx + 1) % self.search.matches.len();
-        self.scroll_to_active_match();
-    }
-
-    /// Jump to the previous match, wrapping from the first to the last.
-    pub fn search_prev(&mut self) {
-        if !self.search.active || self.search.matches.is_empty() {
-            return;
-        }
-        let n = self.search.matches.len();
-        self.search.active_idx = (self.search.active_idx + n - 1) % n;
-        self.scroll_to_active_match();
-    }
-
-    /// Render-time query: should the cell at the given viewport position
-    /// be highlighted as a search match?
-    pub fn is_cell_match(
-        &self,
-        screen_row: u32,
-        screen_col: u32,
-    ) -> bool {
-        if !self.search.active || self.search.matches.is_empty() {
-            return false;
-        }
-        let abs_row = self.screen_row_to_absolute(screen_row);
-        self.search
-            .matches
-            .iter()
-            .any(|m| m.contains(abs_row, screen_col))
-    }
-
-    /// Render-time query: is the given viewport cell part of the *active*
-    /// match — the one `search_next`/`search_prev` just landed on? The
-    /// renderer paints these with a softer blend so the user can tell the
-    /// focused hit apart from the other inverted matches at a glance.
-    pub fn is_cell_active_match(
-        &self,
-        screen_row: u32,
-        screen_col: u32,
-    ) -> bool {
-        if !self.search.active {
-            return false;
-        }
-        let Some(active) = self.search.matches.get(self.search.active_idx) else {
-            return false;
-        };
-        let abs_row = self.screen_row_to_absolute(screen_row);
-        active.contains(abs_row, screen_col)
-    }
-
-    /// Rescan the grid for the current query and, after the match list
-    /// rebuilds, focus the first match at or after the current viewport —
-    /// the natural place a user expects their incremental-search cursor to
-    /// land. Called after every query edit.
-    fn refresh_search(&mut self) {
-        self.recompute_matches();
-        if self.search.matches.is_empty() {
-            self.search.active_idx = 0;
-            return;
-        }
-        let viewport_top = self.screen_row_to_absolute(0);
-        self.search.active_idx = self
-            .search
-            .matches
-            .iter()
-            .position(|m| m.row >= viewport_top)
-            .unwrap_or(0);
-        self.scroll_to_active_match();
-    }
-
-    /// Walk every row in the primary grid, concatenate its cells into a
-    /// byte string, and record every `match_indices` hit as a `MatchSpan`.
-    /// Matching is byte-literal so queries stay case-sensitive; wide-glyph
-    /// continuation cells contribute zero bytes and drop out of the mapping
-    /// naturally.
-    fn recompute_matches(&mut self) {
-        self.search.matches.clear();
-        if self.search.query.is_empty() {
-            return;
-        }
-        let q = self.search.query.as_str();
-        let popped = self.active.grid.total_popped as u64;
-        let mut text = String::new();
-        let mut cell_byte_starts: Vec<usize> = Vec::new();
-        for (local, row) in self.active.grid.rows.iter().enumerate() {
-            text.clear();
-            cell_byte_starts.clear();
-            cell_byte_starts.reserve(row.cells.len());
-            for cell in &row.cells {
-                cell_byte_starts.push(text.len());
-                text.push_str(cell);
-            }
-            if text.len() < q.len() {
-                continue;
-            }
-            let abs_row = popped + local as u64;
-            for (byte, _) in text.match_indices(q) {
-                let start_col = cell_byte_starts
-                    .partition_point(|&s| s <= byte)
-                    .saturating_sub(1) as u32;
-                let end_byte = byte + q.len();
-                let end_col = cell_byte_starts
-                    .partition_point(|&s| s < end_byte)
-                    .saturating_sub(1) as u32;
-                self.search.matches.push(MatchSpan {
-                    row: abs_row,
-                    start_col,
-                    end_col,
-                });
-            }
-        }
-    }
-
-    /// Move the viewport so the currently-focused match sits near the
-    /// middle of the screen. No-op when the match has already scrolled off
-    /// the front of scrollback (defensive — happens only if recompute
-    /// missed a trim).
-    fn scroll_to_active_match(&mut self) {
-        let Some(m) = self.search.matches.get(self.search.active_idx).copied() else {
-            return;
-        };
-        let popped = self.active.grid.total_popped as u64;
-        let Some(local) = m.row.checked_sub(popped) else {
-            return;
-        };
-        let local = local as usize;
-        let grid_len = self.active.grid.rows.len();
-        if local >= grid_len {
-            return;
-        }
-        let rows = self.viewport.rows as usize;
-        if grid_len <= rows {
-            self.active.offset = 0;
-            return;
-        }
-        let ideal_top = local.saturating_sub(rows / 2);
-        let max_top = grid_len - rows;
-        let top = ideal_top.min(max_top);
-        let offset = (grid_len - rows - top) as u32;
-        let max_offset = self.active.grid.scrollback_len(&self.viewport);
-        self.active.offset = offset.min(max_offset);
-    }
-
-    /// Extract selection text. Trailing padding spaces on intermediate /
-    /// line-mode rows are trimmed; soft-wrapped rows join without a
-    /// newline, hard-wrapped ones separate with `\n`.
-    pub fn selection_text(&self) -> Option<String> {
-        let sel = self.selection.as_ref()?;
-        if sel.is_empty() {
-            return None;
-        }
-        let (start, end) = sel.ordered();
-        let popped = self.active.grid.total_popped as u64;
-        let last_idx = self.active.grid.rows.len().saturating_sub(1);
-
-        let mut out = String::new();
-        for abs_row in start.row..=end.row {
-            let local = abs_row.checked_sub(popped)? as usize;
-            if local > last_idx {
-                break;
-            }
-            let row = &self.active.grid.rows[local];
-            let row_len_cols = row.cells.len() as u32;
-            if row_len_cols == 0 {
-                if abs_row < end.row && !row.wrapped {
-                    out.push('\n');
-                }
-                continue;
-            }
-
-            let (col_start, col_end, trim) = match sel.mode {
-                SelectionMode::Line => (0, row_len_cols - 1, true),
-                _ => {
-                    let is_first = abs_row == start.row;
-                    let is_last = abs_row == end.row;
-                    let cs = if is_first { start.col } else { 0 };
-                    let ce = if is_last { end.col } else { row_len_cols - 1 };
-                    let trim = !is_last;
-                    (cs, ce, trim)
-                }
-            };
-            let col_end = col_end.min(row_len_cols - 1);
-            if col_start > col_end {
-                if abs_row < end.row && !row.wrapped {
-                    out.push('\n');
-                }
-                continue;
-            }
-
-            let mut segment = String::new();
-            for cell in &row.cells[col_start as usize..=col_end as usize] {
-                segment.push_str(cell);
-            }
-            if trim {
-                out.push_str(segment.trim_end_matches(' '));
-            } else {
-                out.push_str(&segment);
-            }
-
-            if abs_row < end.row && !row.wrapped {
-                out.push('\n');
-            }
-        }
-
-        Some(out)
-    }
-
-    /// Copy the current selection to the given clipboard. No-op if empty.
-    /// Does not clear the selection — callers that want visual feedback
-    /// cleared invoke `clear_selection` explicitly.
-    pub fn copy_selection(
-        &mut self,
-        kind: ClipboardKind,
-    ) {
-        if let Some(text) = self.selection_text() {
-            self.clipboard.set(kind, &text);
-        }
-    }
-
-    /// Queue pasted text for delivery to the PTY. When the foreground app
-    /// has enabled bracketed paste (mode 2004) the text is wrapped in
-    /// start/end markers so the app can distinguish it from typed input and
-    /// skip auto-indent / command-execution heuristics. In either case the
-    /// paste-end marker is scrubbed from the interior of the payload so a
-    /// crafted clipboard can't break out of the bracket.
-    pub fn paste(
-        &mut self,
-        text: &str,
-    ) {
-        const PASTE_END: &str = "\x1b[201~";
-        if self.modes.bracketed_paste {
-            conformance::write_csi(
-                &mut self.pending_output,
-                self.modes.c1_mode,
-                format_args!("200~"),
-            );
-            for chunk in text.split(PASTE_END) {
-                self.pending_output.extend_from_slice(chunk.as_bytes());
-            }
-            conformance::write_csi(
-                &mut self.pending_output,
-                self.modes.c1_mode,
-                format_args!("201~"),
-            );
-        } else {
-            for chunk in text.split(PASTE_END) {
-                self.pending_output.extend_from_slice(chunk.as_bytes());
-            }
-        }
-    }
-
-    /// Read the given selection from the system clipboard and paste it.
-    /// No-op if the clipboard returned nothing (headless or empty).
-    pub fn paste_from_clipboard(
-        &mut self,
-        kind: ClipboardKind,
-    ) {
-        if let Some(text) = self.clipboard.get(kind)
-            && !text.is_empty()
-        {
-            self.paste(&text);
-        }
-    }
-
     /// Drain bytes the terminal itself has queued for the PTY (e.g. OSC 52
     /// query responses). Called by the event loop after each `process` call.
     pub fn take_pending_output(&mut self) -> Vec<u8> {
@@ -1369,8 +808,7 @@ impl Terminal {
         &self,
         screen_row: u32,
     ) -> &Row {
-        let base = self
-            .active_viewport()
+        let base = selection_ops::active_viewport(&self.active, &self.viewport)
             .top_index(self.active.grid.rows.len());
         &self.active.grid.rows[base + screen_row as usize]
     }
@@ -1409,7 +847,7 @@ impl Terminal {
     /// viewport top). No-op if none exists above or the active screen has
     /// no shell-integration marks.
     pub fn scroll_to_prev_prompt(&mut self) {
-        let top = self.screen_row_to_absolute(0);
+        let top = selection_ops::screen_row_to_absolute(&self.active, &self.viewport, 0);
         // Iterate the grid directly rather than collecting: prompt rows
         // are sparse, so walking the whole buffer once and taking the max
         // matching index is cheaper than building a vec.
@@ -1435,7 +873,7 @@ impl Terminal {
     /// repeated presses at the live prompt are silent rather than
     /// flickering.
     pub fn scroll_to_next_prompt(&mut self) {
-        let top = self.screen_row_to_absolute(0);
+        let top = selection_ops::screen_row_to_absolute(&self.active, &self.viewport, 0);
         let popped = self.active.grid.total_popped as u64;
         let target = self
             .active
@@ -1488,8 +926,7 @@ impl Terminal {
         &self,
         screen_row: u32,
     ) -> Option<u64> {
-        let base = self
-            .active_viewport()
+        let base = selection_ops::active_viewport(&self.active, &self.viewport)
             .top_index(self.active.grid.rows.len());
         let start = base + screen_row as usize;
         let popped = self.active.grid.total_popped as u64;
@@ -1675,8 +1112,7 @@ impl Terminal {
         if text.trim().is_empty() {
             return;
         }
-        let end_col = self
-            .absolute_row_to_local(end_row)
+        let end_col = selection_ops::absolute_row_to_local(&self.active, end_row)
             .map(|l| self.active.grid.rows[l].content_len().saturating_sub(1))
             .unwrap_or(0);
         let anchor = SelectionPoint {
@@ -1693,14 +1129,6 @@ impl Terminal {
             mode: SelectionMode::Char,
             origin: anchor,
         });
-    }
-
-    /// Copy arbitrary text to the system clipboard.
-    pub fn copy_to_clipboard(
-        &mut self,
-        text: &str,
-    ) {
-        self.clipboard.set(ClipboardKind::Clipboard, text);
     }
 
     /// Scroll the viewport down (toward live). Returns actual lines scrolled.
@@ -1737,7 +1165,7 @@ impl Terminal {
         &self,
         now: Instant,
     ) -> impl Iterator<Item = VisibleImage<'_>> {
-        let view = self.active_viewport();
+        let view = selection_ops::active_viewport(&self.active, &self.viewport);
         let viewport_top = view.top_index(self.active.grid.rows.len());
         let viewport_bottom = viewport_top + view.rows as usize;
         let cell_height = self.cell_height;
