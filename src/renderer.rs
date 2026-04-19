@@ -28,8 +28,11 @@ use terminal41::TerminalThread;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
+use winit::keyboard::KeyCode;
+use winit::keyboard::KeyLocation;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
+use winit::keyboard::PhysicalKey;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
@@ -1447,12 +1450,21 @@ fn kitty_encode_named(
 /// mod = 1 + Shift(1) + Alt(2) + Ctrl(4).
 pub(crate) fn legacy_encode_named(
     key: NamedKey,
+    location: KeyLocation,
     mods: ModifiersState,
     app_cursor_keys: bool,
     app_keypad: bool,
     c1_mode: C1Mode,
 ) -> Option<Vec<u8>> {
     let mod_param = legacy_modifier_param(mods);
+
+    if mod_param == 0
+        && app_keypad
+        && location == KeyLocation::Numpad
+        && let Some(ch) = application_keypad_final(key)
+    {
+        return Some(encode_ss3_bytes(ch, c1_mode));
+    }
 
     // Simple keys that don't take modifier parameters.
     if mod_param == 0 {
@@ -1468,13 +1480,6 @@ pub(crate) fn legacy_encode_named(
             return Some(bytes.to_vec());
         }
     }
-
-    // Note: DECKPAM (application keypad mode) would encode numpad keys as
-    // SS3 sequences, but winit's Key enum doesn't distinguish physical
-    // numpad keys from their main-keyboard equivalents, so we can't
-    // selectively encode them here. The app_keypad state is tracked for
-    // DECRQM queries and TUI library compatibility.
-    let _ = app_keypad;
 
     // Shift+Tab → CSI Z (backtab).
     if key == NamedKey::Tab && mods.shift_key() {
@@ -1562,6 +1567,85 @@ pub(crate) fn legacy_encode_named(
     }
 
     None
+}
+
+fn application_keypad_final(key: NamedKey) -> Option<char> {
+    match key {
+        NamedKey::Enter => Some('M'),
+        NamedKey::ArrowUp => Some('A'),
+        NamedKey::ArrowDown => Some('B'),
+        NamedKey::ArrowRight => Some('C'),
+        NamedKey::ArrowLeft => Some('D'),
+        NamedKey::PageUp => Some('I'),
+        NamedKey::PageDown => Some('G'),
+        NamedKey::Home => Some('H'),
+        NamedKey::End => Some('F'),
+        NamedKey::Insert => Some('L'),
+        NamedKey::Delete => Some('N'),
+        _ => None,
+    }
+}
+
+pub(crate) fn legacy_encode_numpad_character(
+    text: &str,
+    location: KeyLocation,
+    physical: PhysicalKey,
+    mods: ModifiersState,
+    app_keypad: bool,
+    c1_mode: C1Mode,
+) -> Option<Vec<u8>> {
+    if location != KeyLocation::Numpad || legacy_modifier_param(mods) != 0 {
+        return None;
+    }
+
+    let code = match physical {
+        PhysicalKey::Code(code) => code,
+        _ => return None,
+    };
+
+    if app_keypad {
+        let ch = match code {
+            KeyCode::Numpad0 => 'p',
+            KeyCode::Numpad1 => 'q',
+            KeyCode::Numpad2 => 'r',
+            KeyCode::Numpad3 => 's',
+            KeyCode::Numpad4 => 't',
+            KeyCode::Numpad5 => 'u',
+            KeyCode::Numpad6 => 'v',
+            KeyCode::Numpad7 => 'w',
+            KeyCode::Numpad8 => 'x',
+            KeyCode::Numpad9 => 'y',
+            KeyCode::NumpadDecimal => 'n',
+            KeyCode::NumpadComma => 'l',
+            KeyCode::NumpadDivide => 'o',
+            KeyCode::NumpadMultiply => 'j',
+            KeyCode::NumpadSubtract => 'm',
+            KeyCode::NumpadAdd => 'k',
+            _ => return None,
+        };
+        Some(encode_ss3_bytes(ch, c1_mode))
+    } else {
+        let bytes = match code {
+            KeyCode::Numpad0 => b"0".to_vec(),
+            KeyCode::Numpad1 => b"1".to_vec(),
+            KeyCode::Numpad2 => b"2".to_vec(),
+            KeyCode::Numpad3 => b"3".to_vec(),
+            KeyCode::Numpad4 => b"4".to_vec(),
+            KeyCode::Numpad5 => b"5".to_vec(),
+            KeyCode::Numpad6 => b"6".to_vec(),
+            KeyCode::Numpad7 => b"7".to_vec(),
+            KeyCode::Numpad8 => b"8".to_vec(),
+            KeyCode::Numpad9 => b"9".to_vec(),
+            KeyCode::NumpadDecimal => b".".to_vec(),
+            KeyCode::NumpadComma => b",".to_vec(),
+            KeyCode::NumpadDivide => b"/".to_vec(),
+            KeyCode::NumpadMultiply => b"*".to_vec(),
+            KeyCode::NumpadSubtract => b"-".to_vec(),
+            KeyCode::NumpadAdd => b"+".to_vec(),
+            _ => text.as_bytes().to_vec(),
+        };
+        Some(bytes)
+    }
 }
 
 /// Compute the xterm modifier parameter: 1 + (shift | alt | ctrl).
@@ -1789,6 +1873,7 @@ mod kitty_encode_tests {
     fn legacy_app_cursor_keys_use_8bit_ss3_when_requested() {
         let bytes = legacy_encode_named(
             NamedKey::ArrowUp,
+            KeyLocation::Standard,
             ModifiersState::empty(),
             true,
             false,
@@ -1796,5 +1881,47 @@ mod kitty_encode_tests {
         )
         .expect("encoded");
         assert_eq!(bytes, b"\x8fA");
+    }
+
+    #[test]
+    fn legacy_app_keypad_encodes_numpad_named_keys_as_ss3() {
+        let bytes = legacy_encode_named(
+            NamedKey::Enter,
+            KeyLocation::Numpad,
+            ModifiersState::empty(),
+            false,
+            true,
+            C1Mode::SevenBit,
+        )
+        .expect("encoded");
+        assert_eq!(bytes, b"\x1bOM");
+    }
+
+    #[test]
+    fn legacy_app_keypad_encodes_numpad_digits_as_ss3() {
+        let bytes = legacy_encode_numpad_character(
+            "7",
+            KeyLocation::Numpad,
+            PhysicalKey::Code(KeyCode::Numpad7),
+            ModifiersState::empty(),
+            true,
+            C1Mode::SevenBit,
+        )
+        .expect("encoded");
+        assert_eq!(bytes, b"\x1bOw");
+    }
+
+    #[test]
+    fn legacy_numeric_keypad_uses_physical_numpad_digit_even_if_logical_key_varies() {
+        let bytes = legacy_encode_numpad_character(
+            "Home",
+            KeyLocation::Numpad,
+            PhysicalKey::Code(KeyCode::Numpad7),
+            ModifiersState::empty(),
+            false,
+            C1Mode::SevenBit,
+        )
+        .expect("encoded");
+        assert_eq!(bytes, b"7");
     }
 }

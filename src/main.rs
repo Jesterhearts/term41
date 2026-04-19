@@ -42,8 +42,10 @@ use winit::event_loop::ControlFlow;
 use winit::event_loop::EventLoop;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
+use winit::keyboard::KeyLocation;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
+use winit::keyboard::PhysicalKey;
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::Window;
 use winit::window::WindowId;
@@ -59,6 +61,7 @@ use crate::renderer::ctrl_byte;
 use crate::renderer::kitty_encode_ime_commit;
 use crate::renderer::kitty_encode_input;
 use crate::renderer::legacy_encode_named;
+use crate::renderer::legacy_encode_numpad_character;
 
 #[macro_use]
 extern crate log;
@@ -388,6 +391,8 @@ impl WindowHost {
     fn handle_key_event(
         &mut self,
         key: Key,
+        location: KeyLocation,
+        physical: PhysicalKey,
     ) {
         if self.ime_preedit_active && matches!(key, Key::Character(_)) {
             return;
@@ -461,7 +466,16 @@ impl WindowHost {
 
         let bytes = match &key {
             Key::Character(c) => {
-                if self.modifiers.alt_key() {
+                if let Some(bytes) = legacy_encode_numpad_character(
+                    c,
+                    location,
+                    physical,
+                    self.modifiers,
+                    app_keypad,
+                    c1_mode,
+                ) {
+                    Some(bytes)
+                } else if self.modifiers.alt_key() {
                     let mut v = vec![0x1b];
                     v.extend_from_slice(c.as_bytes());
                     Some(v)
@@ -469,9 +483,14 @@ impl WindowHost {
                     Some(c.as_bytes().to_vec())
                 }
             }
-            Key::Named(named) => {
-                legacy_encode_named(*named, self.modifiers, app_cursor_keys, app_keypad, c1_mode)
-            }
+            Key::Named(named) => legacy_encode_named(
+                *named,
+                location,
+                self.modifiers,
+                app_cursor_keys,
+                app_keypad,
+                c1_mode,
+            ),
             _ => None,
         };
 
@@ -1410,7 +1429,9 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     return;
                 }
                 match &event.logical_key {
-                    Key::Character(_) | Key::Named(_) => self.handle_key_event(event.logical_key),
+                    Key::Character(_) | Key::Named(_) => {
+                        self.handle_key_event(event.logical_key, event.location, event.physical_key)
+                    }
                     _ => return,
                 }
                 return;

@@ -290,7 +290,8 @@ fn reset_all(
 ) {
     *fg = palette.fg;
     *bg = palette.bg;
-    *attrs = CellAttrs::default();
+    let protected = *attrs & CellAttrs::PROTECTED;
+    *attrs = protected;
     *underline = UnderlineStyle::None;
     *underline_color = None;
 }
@@ -720,6 +721,13 @@ mod tests {
         apply_with_attrs(b"\x1b[2;7m", &mut attrs);
         apply_with_attrs(b"\x1b[0m", &mut attrs);
         assert_eq!(attrs, CellAttrs::default());
+    }
+
+    #[test]
+    fn sgr_0_preserves_protected_attribute() {
+        let mut attrs = CellAttrs::PROTECTED | CellAttrs::REVERSE | CellAttrs::DIM;
+        apply_with_attrs(b"\x1b[0m", &mut attrs);
+        assert_eq!(attrs, CellAttrs::PROTECTED);
     }
 
     // -- strikethrough -------------------------------------------------------
