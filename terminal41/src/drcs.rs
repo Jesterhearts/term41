@@ -231,7 +231,7 @@ pub fn translate_byte(
             if !(0x21..=0x7E).contains(&byte) {
                 return None;
             }
-            byte - 0x21 + 1
+            byte - 0x21
         }
         CharsetSize::Cs96 => {
             if !(0x20..=0x7F).contains(&byte) {
@@ -420,7 +420,7 @@ fn start_index(
             if !(1..=94).contains(&pcn) {
                 return None;
             }
-            Some(pcn as usize)
+            Some((pcn - 1) as usize)
         }
         CharsetSize::Cs96 => (pcn <= 95).then_some(pcn as usize),
     }

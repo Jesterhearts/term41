@@ -1367,6 +1367,13 @@ mod tests {
     }
 
     #[test]
+    fn csi_space_intermediate_is_preserved_for_page_commands() {
+        assert_eq!(collect(b"\x1b[2 P"), vec![Owned::Csi(vec![b' '], 'P')]);
+        assert_eq!(collect(b"\x1b[3 Q"), vec![Owned::Csi(vec![b' '], 'Q')]);
+        assert_eq!(collect(b"\x1b[1 R"), vec![Owned::Csi(vec![b' '], 'R')]);
+    }
+
+    #[test]
     fn osc_payload_reused_across_sequences() {
         let out = osc_payloads(b"\x1b]1;one\x07\x1b]2;two\x07");
         assert_eq!(out, vec![b"1;one".to_vec(), b"2;two".to_vec()]);
