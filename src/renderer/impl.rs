@@ -467,8 +467,8 @@ struct ImageGeometry {
     indices: Vec<u32>,
 }
 
-#[derive(Default)]
 struct RenderGeometry {
+    clear_bg: Srgb<u8>,
     bg_vertices: Vec<BgVertex>,
     bg_indices: Vec<u32>,
     fg_vertices: Vec<FgVertex>,
@@ -477,6 +477,22 @@ struct RenderGeometry {
     overlay_bg_indices: Vec<u32>,
     overlay_fg_vertices: Vec<FgVertex>,
     overlay_fg_indices: Vec<u32>,
+}
+
+impl Default for RenderGeometry {
+    fn default() -> Self {
+        Self {
+            clear_bg: Srgb::new(0, 0, 0),
+            bg_vertices: Vec::new(),
+            bg_indices: Vec::new(),
+            fg_vertices: Vec::new(),
+            fg_indices: Vec::new(),
+            overlay_bg_vertices: Vec::new(),
+            overlay_bg_indices: Vec::new(),
+            overlay_fg_vertices: Vec::new(),
+            overlay_fg_indices: Vec::new(),
+        }
+    }
 }
 
 pub struct Renderer {
@@ -1263,7 +1279,10 @@ impl Renderer {
         preedit: Option<&crate::renderer::PreeditState>,
         layout: &FrameLayout,
     ) -> RenderGeometry {
-        let mut geometry = RenderGeometry::default();
+        let mut geometry = RenderGeometry {
+            clear_bg: snap.palette.bg,
+            ..RenderGeometry::default()
+        };
         let cursor_state = self.cursor_state_from_snapshot(snap);
         let popup_clip = self.popup_clip(gutter_popup, layout);
         let blink_off = (self.started.elapsed().as_millis() / 500) & 1 == 1;
@@ -1810,9 +1829,9 @@ impl Renderer {
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: 0.0,
-                            g: 0.0,
-                            b: 0.0,
+                            r: geometry.clear_bg.red as f64 / 255.0,
+                            g: geometry.clear_bg.green as f64 / 255.0,
+                            b: geometry.clear_bg.blue as f64 / 255.0,
                             a: self.bg_alpha as f64 / 255.0,
                         }),
                         store: wgpu::StoreOp::Store,
