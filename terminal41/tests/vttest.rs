@@ -862,3 +862,26 @@ fn vttest_double_height_row_keeps_line_attr_across_el2() {
         LineAttr::DoubleHeightBottom
     );
 }
+
+#[test]
+fn double_width_rows_use_half_width_cursor_addressing() {
+    let mut t = VtTerm::new_80x24();
+    t.process(b"\x1b[5;1H\x1b#6");
+    t.process(b"\x1b[5;40H");
+    assert_eq!(t.cursor(), (4, 39));
+
+    t.process(b"R");
+    assert_eq!(t.cell_char(4, 39), 'R');
+}
+
+#[test]
+fn ed2_clears_double_width_row_state() {
+    let mut t = VtTerm::new_80x24();
+    t.process(b"\x1b[5;1H\x1b#6wide");
+    assert_eq!(t.terminal.visible_row(4).line_attr, LineAttr::DoubleWidth);
+
+    t.process(b"\x1b[2J");
+
+    assert_eq!(t.terminal.visible_row(4).line_attr, LineAttr::Normal);
+    assert_eq!(t.row_text(4), " ".repeat(80));
+}

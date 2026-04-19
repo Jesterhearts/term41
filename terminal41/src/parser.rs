@@ -113,6 +113,67 @@ static ASCII_CELLS: LazyLock<[SmolStr; 95]> = LazyLock::new(|| {
     })
 });
 
+fn line_attr_display_cols(
+    line_attr: LineAttr,
+    viewport: &Viewport,
+) -> u32 {
+    match line_attr {
+        LineAttr::Normal => viewport.cols,
+        LineAttr::DoubleWidth | LineAttr::DoubleHeightTop | LineAttr::DoubleHeightBottom => {
+            (viewport.cols / 2).max(1)
+        }
+    }
+}
+
+fn visible_row_index(
+    screen: &Screen,
+    viewport: &Viewport,
+    row: u32,
+) -> usize {
+    if screen::page_memory_active(screen) {
+        viewport.top_index(screen.grid.rows.len()) + row as usize
+    } else {
+        screen
+            .grid
+            .rows
+            .len()
+            .saturating_sub(viewport.rows as usize)
+            + row as usize
+    }
+}
+
+fn row_display_cols(
+    screen: &Screen,
+    viewport: &Viewport,
+    row: u32,
+) -> u32 {
+    let row_index = visible_row_index(screen, viewport, row);
+    let line_attr = screen
+        .grid
+        .rows
+        .get(row_index)
+        .map(|row| row.line_attr)
+        .unwrap_or(LineAttr::Normal);
+    line_attr_display_cols(line_attr, viewport)
+}
+
+fn current_row_display_cols(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> u32 {
+    row_display_cols(screen, viewport, screen.cursor.row)
+}
+
+fn clamp_cursor_to_row_width(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    let cols = current_row_display_cols(screen, viewport);
+    if screen.cursor.col >= cols {
+        screen.cursor.col = cols.saturating_sub(1);
+    }
+}
+
 /// Sentinel for the second (and beyond) cell of a wide glyph. Distinct from
 /// the default blank (`" "`) so neighbour cleanup can tell them apart.
 fn continuation_cell() -> SmolStr {
@@ -742,20 +803,21 @@ pub(super) fn put_ascii_run(
 
     let mut i = 0;
     while i < run.len() {
+        let cols = current_row_display_cols(screen, viewport);
         // Pre-wrap: a cursor parked past the last column wraps before
         // writing when DECAWM is on. When off, clamp to the last column
         // so subsequent writes overwrite in place.
-        if screen.cursor.col >= viewport.cols {
+        if screen.cursor.col >= cols {
             if screen.autowrap {
                 soft_wrap(screen, viewport);
             } else {
-                screen.cursor.col = viewport.cols - 1;
+                screen.cursor.col = cols - 1;
             }
         }
 
         let r = screen::active_row_index(screen, viewport);
         let col = screen.cursor.col as usize;
-        let remaining_cols = (viewport.cols - screen.cursor.col) as usize;
+        let remaining_cols = (cols - screen.cursor.col) as usize;
         let chunk_len = (run.len() - i).min(remaining_cols);
 
         // IRM: shift existing content right before overwriting.
@@ -821,14 +883,15 @@ pub(super) fn put_char(
     screen.charset.single_shift = None;
 
     let width = raw_width.max(1);
+    let cols = current_row_display_cols(screen, viewport);
 
     // Soft-wrap when the incoming cluster (possibly wide) would overhang the
     // right edge. When DECAWM is off, clamp instead of wrapping.
-    if screen.cursor.col + width as u32 > viewport.cols {
+    if screen.cursor.col + width as u32 > cols {
         if screen.autowrap {
             soft_wrap(screen, viewport);
         } else {
-            screen.cursor.col = viewport.cols.saturating_sub(width as u32);
+            screen.cursor.col = cols.saturating_sub(width as u32);
         }
     }
 
@@ -1428,9 +1491,7 @@ pub(super) fn execute(
     // Cancel pending wrap for control characters that affect cursor
     // position. Without this, a BS/TAB/CR/LF after writing the last
     // column would see cursor.col == viewport.cols (one past the edge).
-    if screen.cursor.col >= viewport.cols {
-        screen.cursor.col = viewport.cols - 1;
-    }
+    clamp_cursor_to_row_width(screen, viewport);
 
     match byte {
         // LF, VT, FF all perform the same index-down operation. VT and FF
@@ -1455,6 +1516,7 @@ pub(super) fn execute(
                 }
             } else if screen.cursor.row < viewport.rows - 1 {
                 screen.cursor.row += 1;
+                clamp_cursor_to_row_width(screen, viewport);
             }
         }
         b'\r' => {
@@ -1464,7 +1526,8 @@ pub(super) fn execute(
             screen.cursor.col = screen.cursor.col.saturating_sub(1);
         }
         b'\t' => {
-            screen.cursor.col = next_tab_stop(&screen.tab_stops, screen.cursor.col, viewport.cols);
+            let cols = current_row_display_cols(screen, viewport);
+            screen.cursor.col = next_tab_stop(&screen.tab_stops, screen.cursor.col, cols);
         }
         SO => {
             // Shift Out: invoke G1 into GL.
@@ -1492,9 +1555,7 @@ pub(super) fn csi_dispatch(
     // cursor.col sits at viewport.cols (one past the right edge). Any CSI
     // sequence — cursor movement, erase, DSR report, even SGR — cancels
     // this state so the cursor reports and behaves as if on the last column.
-    if ctx.screen.cursor.col >= ctx.viewport.cols {
-        ctx.screen.cursor.col = ctx.viewport.cols - 1;
-    }
+    clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
 
     // -- Sequences that carry intermediates ----------------------------------
 
@@ -2545,7 +2606,6 @@ pub(super) fn csi_dispatch(
     let viewport = screen::screen_viewport(screen, ctx.viewport);
     let viewport = &viewport;
     let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
-    let cursor = &mut screen.cursor;
 
     match action {
         'A' => {
@@ -2555,7 +2615,8 @@ pub(super) fn csi_dispatch(
             } else {
                 0
             };
-            cursor.row = cursor.row.saturating_sub(n).max(top);
+            screen.cursor.row = screen.cursor.row.saturating_sub(n).max(top);
+            clamp_cursor_to_row_width(screen, viewport);
         }
         'B' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
@@ -2564,38 +2625,41 @@ pub(super) fn csi_dispatch(
             } else {
                 viewport.rows - 1
             };
-            cursor.row = (cursor.row + n).min(bottom);
+            screen.cursor.row = (screen.cursor.row + n).min(bottom);
+            clamp_cursor_to_row_width(screen, viewport);
         }
         'C' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            cursor.col = (cursor.col + n).min(viewport.cols - 1);
+            let cols = current_row_display_cols(screen, viewport);
+            screen.cursor.col = (screen.cursor.col + n).min(cols - 1);
         }
         'D' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            cursor.col = cursor.col.saturating_sub(n);
+            screen.cursor.col = screen.cursor.col.saturating_sub(n);
         }
         // CNL — Cursor Next Line. Move down Ps lines and to column 1.
         'E' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            cursor.row = (cursor.row + n).min(viewport.rows - 1);
-            cursor.col = 0;
+            screen.cursor.row = (screen.cursor.row + n).min(viewport.rows - 1);
+            screen.cursor.col = 0;
         }
         // CPL — Cursor Previous Line. Move up Ps lines and to column 1.
         'F' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            cursor.row = cursor.row.saturating_sub(n);
-            cursor.col = 0;
+            screen.cursor.row = screen.cursor.row.saturating_sub(n);
+            screen.cursor.col = 0;
         }
         'H' | 'f' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             let col = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
-            if screen.origin_mode {
-                cursor.row = (screen.scroll_top + row).min(screen.scroll_bottom);
-                cursor.col = col.min(viewport.cols - 1);
+            let target_row = if screen.origin_mode {
+                (screen.scroll_top + row).min(screen.scroll_bottom)
             } else {
-                cursor.row = row.min(viewport.rows - 1);
-                cursor.col = col.min(viewport.cols - 1);
-            }
+                row.min(viewport.rows - 1)
+            };
+            let cols = row_display_cols(screen, viewport, target_row);
+            screen.cursor.row = target_row;
+            screen.cursor.col = col.min(cols - 1);
         }
         'J' => {
             let mode = p.first().copied().unwrap_or(0);
@@ -2619,20 +2683,23 @@ pub(super) fn csi_dispatch(
         'd' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
             if screen.origin_mode {
-                cursor.row = (screen.scroll_top + row).min(screen.scroll_bottom);
+                screen.cursor.row = (screen.scroll_top + row).min(screen.scroll_bottom);
             } else {
-                cursor.row = row.min(viewport.rows - 1);
+                screen.cursor.row = row.min(viewport.rows - 1);
             }
+            clamp_cursor_to_row_width(screen, viewport);
         }
         // CHA — Cursor Horizontal Absolute. HPA (`) is an alias.
         'G' | '`' => {
             let col = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
-            cursor.col = col.min(viewport.cols - 1);
+            let cols = current_row_display_cols(screen, viewport);
+            screen.cursor.col = col.min(cols - 1);
         }
         // HPR — Horizontal Position Relative. Alias for CUF (C).
         'a' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            cursor.col = (cursor.col + n).min(viewport.cols - 1);
+            let cols = current_row_display_cols(screen, viewport);
+            screen.cursor.col = (screen.cursor.col + n).min(cols - 1);
         }
         // VPR — Vertical Position Relative. Alias for CUD (B).
         'e' => {
@@ -2642,12 +2709,13 @@ pub(super) fn csi_dispatch(
             } else {
                 viewport.rows - 1
             };
-            cursor.row = (cursor.row + n).min(bottom);
+            screen.cursor.row = (screen.cursor.row + n).min(bottom);
+            clamp_cursor_to_row_width(screen, viewport);
         }
         'L' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            if cursor.row >= screen.scroll_top && cursor.row <= screen.scroll_bottom {
-                let top = cursor.row;
+            if screen.cursor.row >= screen.scroll_top && screen.cursor.row <= screen.scroll_bottom {
+                let top = screen.cursor.row;
                 if ctx.modes.declrmm {
                     screen.grid.scroll_down_in_rect(
                         viewport,
@@ -2670,8 +2738,8 @@ pub(super) fn csi_dispatch(
         }
         'M' => {
             let n = p.first().copied().unwrap_or(1).max(1) as u32;
-            if cursor.row >= screen.scroll_top && cursor.row <= screen.scroll_bottom {
-                let top = cursor.row;
+            if screen.cursor.row >= screen.scroll_top && screen.cursor.row <= screen.scroll_bottom {
+                let top = screen.cursor.row;
                 if ctx.modes.declrmm {
                     screen.grid.scroll_up_in_rect(
                         viewport,
@@ -2791,15 +2859,16 @@ pub(super) fn csi_dispatch(
         // CHT — Cursor Forward Tabulation. Advance Ps tab stops.
         'I' => {
             let n = p.first().copied().unwrap_or(1).max(1);
+            let cols = current_row_display_cols(screen, viewport);
             for _ in 0..n {
-                cursor.col = next_tab_stop(&screen.tab_stops, cursor.col, viewport.cols);
+                screen.cursor.col = next_tab_stop(&screen.tab_stops, screen.cursor.col, cols);
             }
         }
         // CBT — Cursor Backward Tabulation. Move back Ps tab stops.
         'Z' => {
             let n = p.first().copied().unwrap_or(1).max(1);
             for _ in 0..n {
-                cursor.col = prev_tab_stop(&screen.tab_stops, cursor.col);
+                screen.cursor.col = prev_tab_stop(&screen.tab_stops, screen.cursor.col);
             }
         }
         // TBC — Tab Clear.
@@ -2807,7 +2876,7 @@ pub(super) fn csi_dispatch(
             let ps = p.first().copied().unwrap_or(0);
             match ps {
                 TBC_CURRENT => {
-                    let col = cursor.col as usize;
+                    let col = screen.cursor.col as usize;
                     if col < screen.tab_stops.len() {
                         screen.tab_stops[col] = false;
                     }
@@ -2849,20 +2918,22 @@ pub(super) fn esc_dispatch(
     // byte space with ANSI SCS, so we must gate on vt52_mode *first*.
     if ctx.modes.vt52_mode && intermediates.is_empty() {
         // Cancel pending wrap before any cursor-moving sequence.
-        if ctx.screen.cursor.col >= ctx.viewport.cols {
-            ctx.screen.cursor.col = ctx.viewport.cols.saturating_sub(1);
-        }
+        clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
         match byte {
             // ESC A — cursor up (no scroll).
             b'A' => {
                 ctx.screen.cursor.row = ctx.screen.cursor.row.saturating_sub(1);
+                clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
             }
             // ESC B — cursor down (no scroll).
             b'B' if ctx.screen.cursor.row + 1 < ctx.viewport.rows => {
                 ctx.screen.cursor.row += 1;
+                clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
             }
             // ESC C — cursor right (no scroll).
-            b'C' if ctx.screen.cursor.col + 1 < ctx.viewport.cols => {
+            b'C' if ctx.screen.cursor.col + 1
+                < current_row_display_cols(ctx.screen, ctx.viewport) =>
+            {
                 ctx.screen.cursor.col += 1;
             }
             // ESC D — cursor left (no scroll).
@@ -3018,6 +3089,9 @@ pub(super) fn esc_dispatch(
                         b'5' => LineAttr::Normal,
                         _ => LineAttr::DoubleWidth, // b'6'
                     };
+                    if ctx.screen.cursor.row as usize + visible_start == abs_row {
+                        clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
+                    }
                 }
             }
             _ => {}
@@ -3030,9 +3104,7 @@ pub(super) fn esc_dispatch(
     }
 
     // Cancel pending wrap before ESC sequences that move the cursor.
-    if ctx.screen.cursor.col >= ctx.viewport.cols {
-        ctx.screen.cursor.col = ctx.viewport.cols - 1;
-    }
+    clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
 
     match byte {
         b'7' => screen::save_cursor_slot(ctx.screen),
@@ -3058,6 +3130,7 @@ pub(super) fn esc_dispatch(
                 }
             } else if ctx.screen.cursor.row < viewport.rows - 1 {
                 ctx.screen.cursor.row += 1;
+                clamp_cursor_to_row_width(ctx.screen, viewport);
             }
         }
         // NEL — Next Line. Move to column 0 of the next line; scroll if
@@ -3083,6 +3156,7 @@ pub(super) fn esc_dispatch(
             } else if ctx.screen.cursor.row < viewport.rows - 1 {
                 ctx.screen.cursor.row += 1;
             }
+            clamp_cursor_to_row_width(ctx.screen, viewport);
         }
         b'H' => {
             // HTS — set a tab stop at the current cursor column.
@@ -3143,7 +3217,7 @@ pub(super) fn esc_dispatch(
         // DECFI — Forward Index. Scroll region left if at right margin, else
         // move cursor right.
         b'9' => {
-            if ctx.screen.cursor.col >= ctx.viewport.cols - 1 {
+            if ctx.screen.cursor.col >= current_row_display_cols(ctx.screen, ctx.viewport) - 1 {
                 ctx.screen.grid.scroll_left(
                     ctx.viewport,
                     ctx.screen.scroll_top,

@@ -12,6 +12,11 @@ use crate::image::shift_in_region;
 use crate::row::LineAttr;
 use crate::row::Row;
 
+fn reset_row_after_full_clear(row: &mut Row) {
+    row.wrapped = false;
+    row.line_attr = LineAttr::Normal;
+}
+
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
     pub col: u32,
@@ -119,6 +124,7 @@ impl Grid {
             2 => {
                 for r in first_visible..self.rows.len() {
                     self.rows[r].clear(self.default_fg, self.default_bg);
+                    reset_row_after_full_clear(&mut self.rows[r]);
                 }
                 clear_in_range(images, first_visible, self.rows.len());
             }
