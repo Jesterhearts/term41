@@ -1,5 +1,10 @@
+use font41::attrs::CellAttrs;
+use font41::attrs::UnderlineStyle;
 use palette::Srgb;
+use smol_str::SmolStrBuilder;
 use terminal41::ColorPalette;
+use terminal41::LineAttr;
+use unicode_segmentation::UnicodeSegmentation;
 
 use crate::renderer::BUTTON_CELLS;
 use crate::renderer::BUTTONS_REGION_CELLS;
@@ -36,6 +41,35 @@ pub(crate) struct PaintedCell {
     pub fg: Srgb<u8>,
     pub base_fg: Srgb<u8>,
     pub fill_bg: Option<Srgb<u8>>,
+}
+
+pub(crate) fn status_line_label_row(
+    text: &str,
+    palette: &ColorPalette,
+) -> RowSnapshot {
+    let len = text.graphemes(true).count();
+    RowSnapshot {
+        line_attr: LineAttr::Normal,
+        fg: vec![palette.status_line_fg; len],
+        bg: vec![palette.status_line_bg; len],
+        attrs: vec![CellAttrs::default(); len],
+        selected: vec![false; len],
+        matched: vec![false; len],
+        active_match: vec![false; len],
+        cells: text
+            .graphemes(true)
+            .map(|g| {
+                let mut builder = SmolStrBuilder::new();
+                builder.push_str(g);
+                builder.finish()
+            })
+            .collect(),
+        exit_status: None,
+        has_link: vec![false; len],
+        underline: vec![UnderlineStyle::None; len],
+        underline_color: vec![None; len],
+        prompt_start: false,
+    }
 }
 
 pub(crate) fn build_tab_bar_plan(
@@ -179,5 +213,3 @@ fn truncate_label(
         .chain(std::iter::once(ellipsis))
         .collect()
 }
-
-use unicode_segmentation::UnicodeSegmentation;

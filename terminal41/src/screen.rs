@@ -200,6 +200,8 @@ impl Screen {
         scrollback_limit: u32,
         fg: Srgb<u8>,
         bg: Srgb<u8>,
+        _status_fg: Srgb<u8>,
+        _status_bg: Srgb<u8>,
     ) -> Self {
         let mut grid_rows = VecDeque::with_capacity(rows as usize + scrollback_limit as usize);
         for _ in 0..rows {
@@ -261,10 +263,12 @@ pub(super) fn status_line_rows(screen: &Screen) -> u32 {
 pub(super) fn ensure_status_line(
     screen: &mut Screen,
     cols: u32,
+    fg: Srgb<u8>,
+    bg: Srgb<u8>,
 ) -> &mut StatusLine {
-    screen.status_line.get_or_insert_with(|| {
-        StatusLine::new(cols, screen.grid.default_fg, screen.grid.default_bg)
-    })
+    screen
+        .status_line
+        .get_or_insert_with(|| StatusLine::new(cols, fg, bg))
 }
 
 pub(super) fn resize_status_line(
@@ -274,9 +278,7 @@ pub(super) fn resize_status_line(
     let Some(status) = screen.status_line.as_mut() else {
         return;
     };
-    status
-        .row
-        .resize(cols, screen.grid.default_fg, screen.grid.default_bg);
+    status.row.resize(cols, status.fg, status.bg);
     status.cursor.col = status.cursor.col.min(cols.saturating_sub(1));
 }
 
@@ -284,6 +286,8 @@ pub(super) fn set_status_display(
     screen: &mut Screen,
     cols: u32,
     status_display: StatusDisplayKind,
+    status_fg: Srgb<u8>,
+    status_bg: Srgb<u8>,
 ) {
     screen.status_display = status_display;
     match status_display {
@@ -293,7 +297,9 @@ pub(super) fn set_status_display(
         }
         StatusDisplayKind::Indicator | StatusDisplayKind::HostWritable => {
             resize_status_line(screen, cols);
-            let _ = ensure_status_line(screen, cols);
+            let status = ensure_status_line(screen, cols, status_fg, status_bg);
+            status.fg = status_fg;
+            status.bg = status_bg;
             if status_display != StatusDisplayKind::HostWritable
                 && screen.active_display == ActiveDisplay::Status
             {

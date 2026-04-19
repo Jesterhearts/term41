@@ -360,11 +360,27 @@ impl Terminal {
         palette: ColorPalette,
     ) -> Self {
         Self {
-            active: Screen::new(cols, rows, scrollback_limit, palette.fg, palette.bg),
+            active: Screen::new(
+                cols,
+                rows,
+                scrollback_limit,
+                palette.fg,
+                palette.bg,
+                palette.status_line_fg,
+                palette.status_line_bg,
+            ),
             // Stash starts as a blank alt screen (no scrollback). When the
             // first ?1049h / ?47h arrives we simply swap `active` and
             // `stash` — no lazy construction needed.
-            stash: Screen::new(cols, rows, 0, palette.fg, palette.bg),
+            stash: Screen::new(
+                cols,
+                rows,
+                0,
+                palette.fg,
+                palette.bg,
+                palette.status_line_fg,
+                palette.status_line_bg,
+            ),
             viewport: Viewport { rows, cols, top: 0 },
             on_alt_screen: false,
             cell_height,
@@ -517,6 +533,11 @@ impl Terminal {
 
     pub fn status_line_row(&self) -> Option<&Row> {
         self.active.status_line.as_ref().map(|status| &status.row)
+    }
+
+    pub fn status_line_cursor_col(&self) -> Option<u32> {
+        (self.active.active_display == screen::ActiveDisplay::Status && self.active.cursor_visible)
+            .then_some(self.active.status_line.as_ref()?.cursor.col)
     }
 
     fn screen_row_to_absolute(
@@ -2335,6 +2356,24 @@ fn apply_screen_palette(
     if screen.bg == old_palette.bg {
         screen.bg = new_palette.bg;
     }
+    if let Some(status) = screen.status_line.as_mut() {
+        if status.fg == old_palette.status_line_fg {
+            status.fg = new_palette.status_line_fg;
+        }
+        if status.bg == old_palette.status_line_bg {
+            status.bg = new_palette.status_line_bg;
+        }
+        for fg in &mut status.row.fg {
+            if *fg == old_palette.status_line_fg {
+                *fg = new_palette.status_line_fg;
+            }
+        }
+        for bg in &mut status.row.bg {
+            if *bg == old_palette.status_line_bg {
+                *bg = new_palette.status_line_bg;
+            }
+        }
+    }
 }
 
 fn remap_screen_default_colors(
@@ -3795,6 +3834,23 @@ mod tests {
         term.set_palette(new);
 
         assert_eq!(term.active.grid.rows[0].fg[0], old_fg);
+    }
+
+    #[test]
+    fn set_palette_updates_status_line_defaults_and_existing_default_cells() {
+        let mut term = TestTerm::new(8, 4, 10, 16, 8);
+        term.process(b"\x1b[2$~\x1b[1$}status");
+        let mut new = term.palette.clone();
+        new.status_line_fg = Srgb::new(90, 100, 110);
+        new.status_line_bg = Srgb::new(20, 30, 40);
+
+        term.set_palette(new.clone());
+
+        let status = term.active.status_line.as_ref().expect("status line");
+        assert_eq!(status.fg, new.status_line_fg);
+        assert_eq!(status.bg, new.status_line_bg);
+        assert_eq!(status.row.fg[0], new.status_line_fg);
+        assert_eq!(status.row.bg[0], new.status_line_bg);
     }
 
     // ---- OSC 133 shell integration + prompt navigation ----

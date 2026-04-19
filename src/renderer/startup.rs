@@ -29,6 +29,7 @@ use crate::renderer::r#impl::collect_row_glyphs;
 use crate::renderer::r#impl::snapshot_terminal;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::resolve_painted_cell;
+use crate::renderer::paint::status_line_label_row;
 
 type StartupGlyphKey = (usize, u16, u8, bool);
 
@@ -166,6 +167,16 @@ impl StartupPresenter {
                 tab_bar_h,
             );
         }
+        paint_status_line_chrome(
+            &mut self.font_system,
+            &snap,
+            buffer.as_mut(),
+            width,
+            height,
+            gutter_w,
+            cell_h,
+            tab_bar_h,
+        );
 
         let block_cursor = match snap.cursor_style.shape {
             CursorShape::Block => snap.cursor,
@@ -471,6 +482,35 @@ fn paint_row_backgrounds(
             fill_rect(buffer, width, height, x, y, cell_w, cell_h, pack_rgb(bg));
         }
     }
+}
+
+fn paint_status_line_chrome(
+    font_system: &mut FontSystem,
+    snap: &TermSnapshot,
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    gutter_w: i32,
+    cell_h: i32,
+    tab_bar_h: i32,
+) {
+    let Some(row) = snap.status_line_row else {
+        return;
+    };
+    let y = tab_bar_h + row as i32 * cell_h;
+    let color = pack_rgb(snap.palette.status_line_fg);
+    let total_w = gutter_w + snap.viewport_cols as i32 * font_system.cell_width as i32;
+    fill_rect(buffer, width, height, 0, y, total_w, 1, color);
+    fill_rect(buffer, width, height, 0, y + cell_h - 1, total_w, 1, color);
+    fill_rect(buffer, width, height, 0, y, 1, cell_h, color);
+    fill_rect(buffer, width, height, total_w - 1, y, 1, cell_h, color);
+
+    if gutter_w <= 0 {
+        return;
+    }
+    let row = status_line_label_row("⟫", &snap.palette);
+    let x = ((gutter_w - font_system.cell_width as i32) / 2).max(0) as f32;
+    paint_shaped_label(font_system, snap, buffer, width, height, &row, x, y as f32);
 }
 
 fn load_cached_background(path: &PathBuf) -> Option<CachedBackground> {

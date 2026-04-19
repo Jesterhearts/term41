@@ -72,6 +72,8 @@ struct ColorsConfig {
     primary: Option<PrimaryColors>,
     /// `[colors.selection]` — selection highlight colors.
     selection: Option<SelectionColors>,
+    /// `[colors.status_line]` — DEC status line default colors.
+    status_line: Option<StatusLineColors>,
     /// `[colors.normal]` — the 8 standard ANSI colors.
     normal: Option<AnsiColors>,
     /// `[colors.bright]` — the 8 bright ANSI colors.
@@ -91,6 +93,12 @@ struct SelectionColors {
 }
 
 #[derive(Deserialize, Default)]
+struct StatusLineColors {
+    foreground: Option<String>,
+    background: Option<String>,
+}
+
+#[derive(Deserialize, Default)]
 struct AnsiColors {
     black: Option<String>,
     red: Option<String>,
@@ -100,6 +108,23 @@ struct AnsiColors {
     magenta: Option<String>,
     cyan: Option<String>,
     white: Option<String>,
+}
+
+fn blend_colors(
+    a: Srgb<u8>,
+    b: Srgb<u8>,
+    t: f32,
+) -> Srgb<u8> {
+    let lerp = |x: u8, y: u8| -> u8 {
+        (x as f32 + (y as f32 - x as f32) * t)
+            .clamp(0.0, 255.0)
+            .round() as u8
+    };
+    Srgb::new(
+        lerp(a.red, b.red),
+        lerp(a.green, b.green),
+        lerp(a.blue, b.blue),
+    )
 }
 
 /// Try to parse a hex color, logging a warning on failure and returning the
@@ -135,6 +160,19 @@ fn build_palette(colors: Option<ColorsConfig>) -> ColorPalette {
     if let Some(ref p) = c.primary {
         pal.fg = parse_color_or_default(&p.foreground, pal.fg, "colors.primary.foreground");
         pal.bg = parse_color_or_default(&p.background, pal.bg, "colors.primary.background");
+    }
+
+    if let Some(ref status) = c.status_line {
+        pal.status_line_fg =
+            parse_color_or_default(&status.foreground, pal.fg, "colors.status_line.foreground");
+        pal.status_line_bg = parse_color_or_default(
+            &status.background,
+            blend_colors(pal.bg, pal.status_line_fg, 0.25),
+            "colors.status_line.background",
+        );
+    } else {
+        pal.status_line_fg = pal.fg;
+        pal.status_line_bg = blend_colors(pal.bg, pal.status_line_fg, 0.25);
     }
 
     pal.cursor = c.cursor.as_ref().and_then(|s| {
@@ -706,10 +744,44 @@ mod tests {
         let cfg = parse("");
         assert_eq!(cfg.palette.fg, Srgb::new(204, 204, 204));
         assert_eq!(cfg.palette.bg, Srgb::new(0, 0, 0));
+        assert_eq!(cfg.palette.status_line_fg, cfg.palette.fg);
+        assert_eq!(
+            cfg.palette.status_line_bg,
+            blend_colors(cfg.palette.bg, cfg.palette.fg, 0.25)
+        );
         assert!(cfg.palette.cursor.is_none());
         assert!(cfg.palette.selection_bg.is_none());
         // Default ANSI red
         assert_eq!(cfg.palette.ansi[1], Srgb::new(205, 0, 0));
+    }
+
+    #[test]
+    fn status_line_palette_defaults_to_blended_background() {
+        let cfg = parse(
+            r##"
+[colors.primary]
+foreground = "#f0f0f0"
+background = "#101820"
+"##,
+        );
+        assert_eq!(cfg.palette.status_line_fg, cfg.palette.fg);
+        assert_eq!(
+            cfg.palette.status_line_bg,
+            blend_colors(cfg.palette.bg, cfg.palette.status_line_fg, 0.25)
+        );
+    }
+
+    #[test]
+    fn status_line_palette_overrides_parse() {
+        let cfg = parse(
+            r##"
+[colors.status_line]
+foreground = "#123456"
+background = "#654321"
+"##,
+        );
+        assert_eq!(cfg.palette.status_line_fg, Srgb::new(0x12, 0x34, 0x56));
+        assert_eq!(cfg.palette.status_line_bg, Srgb::new(0x65, 0x43, 0x21));
     }
 
     #[test]

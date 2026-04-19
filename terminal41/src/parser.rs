@@ -346,6 +346,9 @@ fn status_line_csi_dispatch(
     let cursor = &mut status.cursor;
 
     if intermediates.is_empty() && action == 'm' {
+        let mut palette = ctx.palette.clone();
+        palette.fg = palette.status_line_fg;
+        palette.bg = palette.status_line_bg;
         apply_sgr(
             &mut status.fg,
             &mut status.bg,
@@ -353,7 +356,7 @@ fn status_line_csi_dispatch(
             &mut status.underline,
             &mut status.underline_color,
             params,
-            ctx.palette,
+            &palette,
         );
         return true;
     }
@@ -1433,7 +1436,13 @@ pub(super) fn csi_dispatch(
             2 => StatusDisplayKind::HostWritable,
             _ => StatusDisplayKind::None,
         };
-        screen::set_status_display(ctx.screen, ctx.viewport.cols, status_display);
+        screen::set_status_display(
+            ctx.screen,
+            ctx.viewport.cols,
+            status_display,
+            ctx.palette.status_line_fg,
+            ctx.palette.status_line_bg,
+        );
         let new_rows = total_rows.saturating_sub(screen::status_line_rows(ctx.screen));
         if new_rows != old_rows {
             let old_cols = ctx.viewport.cols;
@@ -2954,6 +2963,8 @@ mod tests {
             100,
             color::default_fg(),
             color::default_bg(),
+            color::default_fg(),
+            color::default_bg(),
         );
         let viewport = Viewport {
             rows: TEST_ROWS,
@@ -2977,6 +2988,8 @@ mod tests {
             viewport.cols,
             viewport.rows,
             0,
+            color::default_fg(),
+            color::default_bg(),
             color::default_fg(),
             color::default_bg(),
         );
@@ -3878,6 +3891,8 @@ mod tests {
             0,
             color::default_fg(),
             color::default_bg(),
+            color::default_fg(),
+            color::default_bg(),
         );
         let mut on_alt_screen = false;
         let mut modes = TerminalModes::new();
@@ -4220,6 +4235,8 @@ mod tests {
             100,
             color::default_fg(),
             color::default_bg(),
+            color::default_fg(),
+            color::default_bg(),
         );
         let mut viewport = Viewport {
             rows: TEST_ROWS,
@@ -4238,6 +4255,8 @@ mod tests {
             screen_cols,
             TEST_ROWS,
             100,
+            color::default_fg(),
+            color::default_bg(),
             color::default_fg(),
             color::default_bg(),
         );
@@ -4575,6 +4594,8 @@ mod tests {
             viewport.cols,
             viewport.rows,
             0,
+            color::default_fg(),
+            color::default_bg(),
             color::default_fg(),
             color::default_bg(),
         );

@@ -86,6 +86,10 @@ pub struct ColorPalette {
     pub fg: Srgb<u8>,
     /// Default background (SGR 49 / row clear / wallpaper transparency).
     pub bg: Srgb<u8>,
+    /// Default foreground for the DEC status line.
+    pub status_line_fg: Srgb<u8>,
+    /// Default background for the DEC status line.
+    pub status_line_bg: Srgb<u8>,
     /// Cursor color. `None` = use cell foreground (current behavior).
     pub cursor: Option<Srgb<u8>>,
     /// Selection background. `None` = invert (current behavior).
@@ -98,9 +102,13 @@ pub struct ColorPalette {
 
 impl Default for ColorPalette {
     fn default() -> Self {
+        let fg = default_fg();
+        let bg = default_bg();
         Self {
-            fg: default_fg(),
-            bg: default_bg(),
+            fg,
+            bg,
+            status_line_fg: fg,
+            status_line_bg: blend_colors(bg, fg, 0.25),
             cursor: None,
             selection_bg: None,
             selection_fg: None,
@@ -129,6 +137,23 @@ const DEFAULT_ANSI_COLORS: [Srgb<u8>; 16] = [
     Srgb::new(0, 255, 255),   // 14 bright cyan     rgb(0, 255, 255)
     Srgb::new(255, 255, 255), // 15 bright white    rgb(255, 255, 255)
 ];
+
+pub fn blend_colors(
+    a: Srgb<u8>,
+    b: Srgb<u8>,
+    t: f32,
+) -> Srgb<u8> {
+    let lerp = |x: u8, y: u8| -> u8 {
+        (x as f32 + (y as f32 - x as f32) * t)
+            .clamp(0.0, 255.0)
+            .round() as u8
+    };
+    Srgb::new(
+        lerp(a.red, b.red),
+        lerp(a.green, b.green),
+        lerp(a.blue, b.blue),
+    )
+}
 
 /// Look up a 256-color palette index using the given [`ColorPalette`] for
 /// indices 0–15 and the computed cube/grayscale ramp for 16–255.
