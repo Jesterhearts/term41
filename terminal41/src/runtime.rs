@@ -8,10 +8,10 @@ pub(crate) fn run_terminal_thread(
     mut pty_reader: PtyReader,
     stop: Arc<AtomicBool>,
     render_thread_handle: Arc<OnceLock<Thread>>,
-    startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
-    tee_read: Arc<dyn Fn(&[u8]) + Send + Sync>,
-    output_ready: Arc<dyn Fn() + Send + Sync>,
-    host_resize: Arc<dyn Fn(u32, u32) + Send + Sync>,
+    startup_redraw: Option<Box<dyn Fn() + Send + Sync>>,
+    tee_read: Box<dyn Fn(&[u8]) + Send + Sync>,
+    output_ready: Box<dyn Fn() + Send + Sync>,
+    host_resize: Box<dyn Fn(u32, u32) + Send + Sync>,
 ) {
     let mut parser = vtepp::Parser::new();
     let mut hooks: Vec<dcs::HookState> = vec![];

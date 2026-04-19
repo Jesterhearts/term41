@@ -1904,20 +1904,20 @@ fn main() {
         terminal.clone(),
         pty_reader,
         render_thread_handle.clone(),
-        Some(Arc::new(move || {
+        Some(Box::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
         })),
-        Arc::new({
+        Box::new({
             let recorder = initial_recorder.clone();
             move |bytes| recorder.write_chunk(bytes)
         }),
-        Arc::new({
+        Box::new({
             let proxy = proxy.clone();
             move || {
                 let _ = proxy.send_event(AppEvent::FlushTerminalOutput(TabId(0)));
             }
         }),
-        Arc::new({
+        Box::new({
             let proxy = proxy.clone();
             move |cols, rows| {
                 let _ = proxy.send_event(AppEvent::RequestTerminalResize {

@@ -817,17 +817,17 @@ impl RenderHost {
             pty_reader,
             self.render_thread_handle.clone(),
             None,
-            Arc::new({
+            Box::new({
                 let recorder = recorder.clone();
                 move |bytes| recorder.write_chunk(bytes)
             }),
-            Arc::new({
+            Box::new({
                 let proxy = self.proxy.clone();
                 move || {
                     let _ = proxy.send_event(AppEvent::FlushTerminalOutput(id));
                 }
             }),
-            Arc::new({
+            Box::new({
                 let proxy = self.proxy.clone();
                 move |cols, rows| {
                     let _ = proxy.send_event(AppEvent::RequestTerminalResize {
