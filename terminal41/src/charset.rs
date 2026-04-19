@@ -178,6 +178,81 @@ pub fn parse_designation(
     Some((slot, charset))
 }
 
+pub fn charset_from_designator(
+    designator: &[u8],
+    size: CharsetSize,
+) -> Option<CharacterSet> {
+    match (size, designator) {
+        (CharsetSize::Cs94, b"B") => Some(CharacterSet::Ascii),
+        (CharsetSize::Cs94, b"0") => Some(CharacterSet::DecSpecialGraphics),
+        (CharsetSize::Cs94, b">") => Some(CharacterSet::DecTechnical),
+        (CharsetSize::Cs94, b"<") => Some(CharacterSet::UserPreferredSupplemental),
+        (CharsetSize::Cs94, b"A") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::British,
+        )),
+        (CharsetSize::Cs94, b"4") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::Dutch,
+        )),
+        (CharsetSize::Cs94, b"5" | b"C") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::Finnish,
+        )),
+        (CharsetSize::Cs94, b"R") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::French,
+        )),
+        (CharsetSize::Cs94, b"Q" | b"9") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::FrenchCanadian,
+        )),
+        (CharsetSize::Cs94, b"K") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::German,
+        )),
+        (CharsetSize::Cs94, b"Y") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::Italian,
+        )),
+        (CharsetSize::Cs94, b"`" | b"E" | b"6") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::NorwegianDanish,
+        )),
+        (CharsetSize::Cs94, b"Z") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::Spanish,
+        )),
+        (CharsetSize::Cs94, b"7" | b"H") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::Swedish,
+        )),
+        (CharsetSize::Cs94, b"=") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::Swiss,
+        )),
+        (CharsetSize::Cs94, b"%5") => Some(CharacterSet::DecSupplemental),
+        (CharsetSize::Cs94, b"%6") => Some(CharacterSet::NationalReplacement(
+            NationalReplacementSet::Portuguese,
+        )),
+        (CharsetSize::Cs96, b"A") => Some(CharacterSet::IsoLatin1Supplemental),
+        _ => None,
+    }
+}
+
+pub fn designator_for_charset(charset: CharacterSet) -> Option<&'static [u8]> {
+    match charset {
+        CharacterSet::Ascii => Some(b"B"),
+        CharacterSet::DecSpecialGraphics => Some(b"0"),
+        CharacterSet::DecTechnical => Some(b">"),
+        CharacterSet::DecSupplemental => Some(b"%5"),
+        CharacterSet::IsoLatin1Supplemental => Some(b"A"),
+        CharacterSet::UserPreferredSupplemental => Some(b"<"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::British) => Some(b"A"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::Dutch) => Some(b"4"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::Finnish) => Some(b"C"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::French) => Some(b"R"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::FrenchCanadian) => Some(b"Q"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::German) => Some(b"K"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::Italian) => Some(b"Y"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::NorwegianDanish) => Some(b"E"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::Portuguese) => Some(b"%6"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::Spanish) => Some(b"Z"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::Swedish) => Some(b"H"),
+        CharacterSet::NationalReplacement(NationalReplacementSet::Swiss) => Some(b"="),
+        CharacterSet::Drcs(_, _) => None,
+    }
+}
+
 pub fn slot_for_intermediates(intermediates: &[u8]) -> Option<GraphicSetSlot> {
     let (&slot_byte, _) = intermediates.split_first()?;
     slot_for_byte(slot_byte)

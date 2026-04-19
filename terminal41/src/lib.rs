@@ -2528,6 +2528,14 @@ fn handle_decrqss(
                 );
             }
         }
+        // DECSACE — report attribute-change extent.
+        b"*x" => {
+            let ps = match terminal.active.attr_change_extent {
+                grid::AttrChangeExtent::Stream => 1,
+                grid::AttrChangeExtent::Rectangle => 2,
+            };
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}*x"));
+        }
         // DECSCUSR — report cursor style.
         b" q" => {
             let ps = match (terminal.cursor_style.shape, terminal.cursor_style.blink) {
@@ -2539,6 +2547,23 @@ fn handle_decrqss(
                 (cursor::CursorShape::Beam, false) => 6,
             };
             conformance::write_dcs(out, c1_mode, format_args!("1$r{ps} q"));
+        }
+        // DECSASD — report active display target.
+        b"$}" => {
+            let ps = match terminal.active.active_display {
+                screen::ActiveDisplay::Main => 0,
+                screen::ActiveDisplay::Status => 1,
+            };
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}$}}"));
+        }
+        // DECSSDT — report status line kind.
+        b"$~" => {
+            let ps = match terminal.active.status_display {
+                screen::StatusDisplayKind::None => 0,
+                screen::StatusDisplayKind::Indicator => 1,
+                screen::StatusDisplayKind::HostWritable => 2,
+            };
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}$~"));
         }
         // DECAC / DECATC — report current VT525 color assignments.
         [item @ b'0'..=b'9', b',', kind @ (b'|' | b'}')] => {
@@ -2583,6 +2608,331 @@ fn handle_decrqss(
             conformance::write_dcs(out, c1_mode, format_args!("0$r"));
         }
     }
+}
+
+fn current_page_number(screen: &Screen) -> u32 {
+    screen
+        .page_memory
+        .as_ref()
+        .map(|page| page.active_page + 1)
+        .unwrap_or(1)
+}
+
+fn encode_report_byte(bits: u8) -> char {
+    char::from(0x40 | (bits & 0x1f))
+}
+
+fn decode_report_byte(byte: u8) -> Option<u8> {
+    (0x40..=0x5f).contains(&byte).then_some(byte & 0x1f)
+}
+
+fn encode_srend(screen: &Screen) -> String {
+    let mut bits = 0u8;
+    if screen.attrs.contains(font41::attrs::CellAttrs::BOLD) {
+        bits |= 1;
+    }
+    if screen.underline != font41::attrs::UnderlineStyle::None {
+        bits |= 2;
+    }
+    if screen
+        .attrs
+        .intersects(font41::attrs::CellAttrs::BLINK | font41::attrs::CellAttrs::RAPID_BLINK)
+    {
+        bits |= 4;
+    }
+    if screen.attrs.contains(font41::attrs::CellAttrs::REVERSE) {
+        bits |= 8;
+    }
+    encode_report_byte(bits).to_string()
+}
+
+fn encode_satt(screen: &Screen) -> String {
+    let bits = if screen.attrs.contains(font41::attrs::CellAttrs::PROTECTED) {
+        1
+    } else {
+        0
+    };
+    encode_report_byte(bits).to_string()
+}
+
+fn encode_sflag(
+    screen: &Screen,
+    _modes: &TerminalModes,
+) -> String {
+    let mut bits = 0u8;
+    if screen.origin_mode {
+        bits |= 1;
+    }
+    match screen.charset.single_shift {
+        Some(charset::GraphicSetSlot::G2) => bits |= 2,
+        Some(charset::GraphicSetSlot::G3) => bits |= 4,
+        _ => {}
+    }
+    encode_report_byte(bits).to_string()
+}
+
+fn charset_size_bit(charset: charset::CharacterSet) -> u8 {
+    match charset {
+        charset::CharacterSet::IsoLatin1Supplemental
+        | charset::CharacterSet::Drcs(_, drcs::CharsetSize::Cs96) => 1,
+        _ => 0,
+    }
+}
+
+fn encode_scss(screen: &Screen) -> String {
+    let bits = charset_size_bit(screen.charset.designated(charset::GraphicSetSlot::G0))
+        | (charset_size_bit(screen.charset.designated(charset::GraphicSetSlot::G1)) << 1)
+        | (charset_size_bit(screen.charset.designated(charset::GraphicSetSlot::G2)) << 2)
+        | (charset_size_bit(screen.charset.designated(charset::GraphicSetSlot::G3)) << 3);
+    encode_report_byte(bits).to_string()
+}
+
+fn charset_designator_bytes(
+    charset: charset::CharacterSet,
+    drcs: &DrcsStore,
+) -> Option<Vec<u8>> {
+    match charset {
+        charset::CharacterSet::Drcs(buffer_id, _) => drcs
+            .designation_for_buffer(buffer_id)
+            .map(|bytes| bytes.to_vec()),
+        charset => charset::designator_for_charset(charset).map(|bytes| bytes.to_vec()),
+    }
+}
+
+fn encode_sdesig(
+    screen: &Screen,
+    drcs: &DrcsStore,
+) -> Option<String> {
+    let mut data = vec![];
+    for slot in [
+        charset::GraphicSetSlot::G0,
+        charset::GraphicSetSlot::G1,
+        charset::GraphicSetSlot::G2,
+        charset::GraphicSetSlot::G3,
+    ] {
+        data.extend(charset_designator_bytes(
+            screen.charset.designated(slot),
+            drcs,
+        )?);
+    }
+    String::from_utf8(data).ok()
+}
+
+pub(crate) fn deccir_report(
+    screen: &Screen,
+    viewport: &Viewport,
+    modes: &TerminalModes,
+    drcs: &DrcsStore,
+) -> Option<String> {
+    let row = screen.cursor.row.min(viewport.rows.saturating_sub(1)) + 1;
+    let col = screen.cursor.col.min(viewport.cols.saturating_sub(1)) + 1;
+    let pgl = screen.charset.gl_slot() as u8;
+    let pgr = screen.charset.gr_slot() as u8;
+    let sdesig = encode_sdesig(screen, drcs)?;
+    Some(format!(
+        "{row};{col};{};{};{};{};{pgl};{pgr};{};{sdesig}",
+        current_page_number(screen),
+        encode_srend(screen),
+        encode_satt(screen),
+        encode_sflag(screen, modes),
+        encode_scss(screen),
+    ))
+}
+
+pub(crate) fn dectabsr_report(screen: &Screen) -> String {
+    screen
+        .tab_stops
+        .iter()
+        .enumerate()
+        .filter_map(|(idx, &set)| set.then_some((idx + 1).to_string()))
+        .collect::<Vec<_>>()
+        .join(";")
+}
+
+fn parse_deccir_designators(mut bytes: &[u8]) -> Option<[Vec<u8>; 4]> {
+    let mut parsed: [Vec<u8>; 4] = std::array::from_fn(|_| Vec::new());
+    for slot in &mut parsed {
+        while slot.len() < 2 && matches!(bytes.first(), Some(0x20..=0x2f)) {
+            slot.push(bytes[0]);
+            bytes = &bytes[1..];
+        }
+        let final_byte = *bytes.first()?;
+        if !(0x30..=0x7e).contains(&final_byte) {
+            return None;
+        }
+        slot.push(final_byte);
+        bytes = &bytes[1..];
+    }
+    bytes.is_empty().then_some(parsed)
+}
+
+fn decode_charset_sizes(bytes: &[u8]) -> Option<[drcs::CharsetSize; 4]> {
+    let bits = decode_report_byte(*bytes.first()?)?;
+    Some(std::array::from_fn(|idx| {
+        if bits & (1 << idx) != 0 {
+            drcs::CharsetSize::Cs96
+        } else {
+            drcs::CharsetSize::Cs94
+        }
+    }))
+}
+
+fn restore_deccir(
+    payload: &[u8],
+    screen: &mut Screen,
+    viewport: &Viewport,
+    _modes: &mut TerminalModes,
+    drcs: &DrcsStore,
+) -> bool {
+    let Ok(text) = std::str::from_utf8(payload) else {
+        return false;
+    };
+    let mut fields = text.split(';');
+    let Some(row) = fields.next().and_then(|s| s.parse::<u32>().ok()) else {
+        return false;
+    };
+    let Some(col) = fields.next().and_then(|s| s.parse::<u32>().ok()) else {
+        return false;
+    };
+    let page = fields
+        .next()
+        .and_then(|s| s.parse::<u32>().ok())
+        .unwrap_or(1)
+        .max(1);
+    let Some(srend) = fields.next().map(str::as_bytes) else {
+        return false;
+    };
+    let Some(satt) = fields.next().map(str::as_bytes) else {
+        return false;
+    };
+    let Some(sflag) = fields.next().map(str::as_bytes) else {
+        return false;
+    };
+    let Some(pgl) = fields.next().and_then(|s| s.parse::<u8>().ok()) else {
+        return false;
+    };
+    let Some(pgr) = fields.next().and_then(|s| s.parse::<u8>().ok()) else {
+        return false;
+    };
+    let Some(scss) = fields.next().map(str::as_bytes) else {
+        return false;
+    };
+    let Some(sdesig) = fields.next().map(str::as_bytes) else {
+        return false;
+    };
+    if fields.next().is_some() {
+        return false;
+    }
+
+    if let Some(page_memory) = screen.page_memory.as_mut() {
+        page_memory.active_page = page
+            .saturating_sub(1)
+            .min(page_memory.page_count().saturating_sub(1));
+    }
+    screen.cursor.row = row.saturating_sub(1).min(viewport.rows.saturating_sub(1));
+    screen.cursor.col = col.saturating_sub(1).min(viewport.cols.saturating_sub(1));
+
+    let srend_bits = decode_report_byte(*srend.first().unwrap_or(&0x40)).unwrap_or(0);
+    screen.attrs.remove(
+        font41::attrs::CellAttrs::BOLD
+            | font41::attrs::CellAttrs::BLINK
+            | font41::attrs::CellAttrs::RAPID_BLINK
+            | font41::attrs::CellAttrs::REVERSE,
+    );
+    if srend_bits & 1 != 0 {
+        screen.attrs.insert(font41::attrs::CellAttrs::BOLD);
+    }
+    if srend_bits & 2 != 0 {
+        screen.underline = font41::attrs::UnderlineStyle::Single;
+    } else {
+        screen.underline = font41::attrs::UnderlineStyle::None;
+    }
+    if srend_bits & 4 != 0 {
+        screen.attrs.insert(font41::attrs::CellAttrs::BLINK);
+    }
+    if srend_bits & 8 != 0 {
+        screen.attrs.insert(font41::attrs::CellAttrs::REVERSE);
+    }
+
+    let satt_bits = decode_report_byte(*satt.first().unwrap_or(&0x40)).unwrap_or(0);
+    if satt_bits & 1 != 0 {
+        screen.attrs.insert(font41::attrs::CellAttrs::PROTECTED);
+    } else {
+        screen.attrs.remove(font41::attrs::CellAttrs::PROTECTED);
+    }
+
+    let sflag_bits = decode_report_byte(*sflag.first().unwrap_or(&0x40)).unwrap_or(0);
+    screen.origin_mode = sflag_bits & 1 != 0;
+    screen.charset.single_shift = match sflag_bits & 0b110 {
+        0b010 => Some(charset::GraphicSetSlot::G2),
+        0b100 => Some(charset::GraphicSetSlot::G3),
+        _ => None,
+    };
+
+    let gl = match pgl {
+        0 => charset::GraphicSetSlot::G0,
+        1 => charset::GraphicSetSlot::G1,
+        2 => charset::GraphicSetSlot::G2,
+        3 => charset::GraphicSetSlot::G3,
+        _ => return false,
+    };
+    let gr = match pgr {
+        0 => charset::GraphicSetSlot::G0,
+        1 => charset::GraphicSetSlot::G1,
+        2 => charset::GraphicSetSlot::G2,
+        3 => charset::GraphicSetSlot::G3,
+        _ => return false,
+    };
+    let sizes = match decode_charset_sizes(scss) {
+        Some(sizes) => sizes,
+        None => return false,
+    };
+    let designators = match parse_deccir_designators(sdesig) {
+        Some(designators) => designators,
+        None => return false,
+    };
+    for (slot, (size, designator)) in [
+        charset::GraphicSetSlot::G0,
+        charset::GraphicSetSlot::G1,
+        charset::GraphicSetSlot::G2,
+        charset::GraphicSetSlot::G3,
+    ]
+    .into_iter()
+    .zip(sizes.into_iter().zip(designators.into_iter()))
+    {
+        let charset = charset::charset_from_designator(&designator, size)
+            .or_else(|| drcs.charset_for_designator(&designator));
+        let Some(charset) = charset else {
+            return false;
+        };
+        screen.charset.designate(slot, charset);
+    }
+    screen.charset.set_gl(gl);
+    screen.charset.set_gr(gr);
+    true
+}
+
+fn restore_dectabsr(
+    payload: &[u8],
+    screen: &mut Screen,
+) -> bool {
+    screen.tab_stops.fill(false);
+    if payload.is_empty() {
+        return true;
+    }
+    let Ok(text) = std::str::from_utf8(payload) else {
+        return false;
+    };
+    for part in text.split(';') {
+        let Some(col) = part.parse::<usize>().ok() else {
+            return false;
+        };
+        let idx = col.saturating_sub(1);
+        if idx < screen.tab_stops.len() {
+            screen.tab_stops[idx] = true;
+        }
+    }
+    true
 }
 
 /// This lets tmux and neovim discover features like truecolor, styled
@@ -2753,6 +3103,27 @@ fn handle_dcs(
     } else if action == '{' && intermediates.is_empty() {
         let flat_params: Vec<u16> = params.iter().flat_map(|g| g.iter().copied()).collect();
         terminal.drcs.define(&flat_params, payload);
+    } else if action == 't' && intermediates == b"$" {
+        let ps = params
+            .iter()
+            .next()
+            .and_then(|group| group.first().copied())
+            .unwrap_or(0);
+        match ps {
+            1 => {
+                restore_deccir(
+                    payload,
+                    &mut terminal.active,
+                    &terminal.viewport,
+                    &mut terminal.modes,
+                    &terminal.drcs,
+                );
+            }
+            2 => {
+                restore_dectabsr(payload, &mut terminal.active);
+            }
+            _ => {}
+        }
     } else if action == 'p' && intermediates == b"$" {
         let ps = params
             .iter()
@@ -5061,6 +5432,18 @@ mod tests {
     }
 
     #[test]
+    fn decrqss_reports_status_and_attr_change_state() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[2$~\x1b[1$}\x1b[2*x");
+        handle_decrqss(b"$~", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r2$~\x1b\\");
+        handle_decrqss(b"$}", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r1$}\x1b\\");
+        handle_decrqss(b"*x", &mut term.inner);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r2*x\x1b\\");
+    }
+
+    #[test]
     fn decrqss_reports_normal_text_color_assignment() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         handle_decrqss(b"1,|", &mut term.inner);
@@ -5189,6 +5572,69 @@ mod tests {
         assert_eq!(term.take_pending_host_resize(), Some((80, 36)));
         term.process(b"\x1b[132$|");
         assert_eq!(term.take_pending_host_resize(), Some((132, 36)));
+    }
+
+    #[test]
+    fn decrsps_restores_tab_stops() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b[3g");
+        term.process(b"\x1bP2$t4;9\x1b\\");
+        assert!(term.active.tab_stops[3]);
+        assert!(term.active.tab_stops[8]);
+        assert!(!term.active.tab_stops[7]);
+    }
+
+    #[test]
+    fn decrqpsr_reports_cursor_information() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b[?6h\x1b(0\x0e\x1b[1;4m");
+        term.process(b"\x1b[2;3H");
+        term.process(b"\x1b[1$w");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1bP1$u2;3;1;C;@;A;1;2;@;0B%5%5\x1b\\"
+        );
+    }
+
+    #[test]
+    fn decrsps_restores_cursor_information() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1bP1$t2;3;1;C;A;A;1;2;@;0B%5%5\x1b\\");
+
+        assert_eq!(term.active.cursor.row, 1);
+        assert_eq!(term.active.cursor.col, 2);
+        assert!(term.active.attrs.contains(font41::attrs::CellAttrs::BOLD));
+        assert_eq!(term.active.underline, font41::attrs::UnderlineStyle::Single);
+        assert!(
+            term.active
+                .attrs
+                .contains(font41::attrs::CellAttrs::PROTECTED)
+        );
+        assert!(term.active.origin_mode);
+        assert_eq!(term.active.charset.gl_slot(), charset::GraphicSetSlot::G1);
+        assert_eq!(term.active.charset.gr_slot(), charset::GraphicSetSlot::G2);
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G0),
+            charset::CharacterSet::DecSpecialGraphics
+        );
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G1),
+            charset::CharacterSet::Ascii
+        );
+        assert_eq!(
+            term.active.charset.designated(charset::GraphicSetSlot::G2),
+            charset::CharacterSet::DecSupplemental
+        );
+    }
+
+    #[test]
+    fn decrqm_reports_permanent_mode_states() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b[10$p\x1b[20$p\x1b[?60$p");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1b[10;4$y\x1b[20;2$y\x1b[?60;4$y"
+        );
     }
 
     // ---- RIS (ESC c) ----

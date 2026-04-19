@@ -74,6 +74,36 @@ impl Store {
         self.render_glyphs.clone()
     }
 
+    pub fn designation_for_buffer(
+        &self,
+        buffer_id: u8,
+    ) -> Option<&[u8]> {
+        self.buffers
+            .get(buffer_id as usize)
+            .and_then(|buffer| buffer.as_ref())
+            .map(|buffer| buffer.designator.as_slice())
+    }
+
+    pub fn charset_for_designator(
+        &self,
+        designator: &[u8],
+    ) -> Option<CharacterSet> {
+        let mut best: Option<(u64, CharacterSet)> = None;
+        for (idx, buffer) in self.buffers.iter().enumerate() {
+            let Some(buffer) = buffer else {
+                continue;
+            };
+            if buffer.designator != designator {
+                continue;
+            }
+            let charset = CharacterSet::Drcs(idx as u8, buffer.charset_size);
+            if best.is_none_or(|(serial, _)| buffer.serial > serial) {
+                best = Some((buffer.serial, charset));
+            }
+        }
+        best.map(|(_, charset)| charset)
+    }
+
     pub fn lookup_designation(
         &self,
         intermediates: &[u8],

@@ -1292,6 +1292,7 @@ fn query_private_mode(
                 2
             }
         }
+        60 => 4,
         mode::BRACKETED_PASTE => {
             if ctx.modes.bracketed_paste {
                 1
@@ -1827,6 +1828,14 @@ pub(super) fn csi_dispatch(
                         2
                     }
                 }
+                mode::LNM => {
+                    if ctx.modes.newline_mode {
+                        1
+                    } else {
+                        2
+                    }
+                }
+                1 | 5 | 7 | 10 | 11 | 13 | 14 | 15 | 16 | 17 | 18 | 19 => 4,
                 _ => 0,
             }
         };
@@ -1917,20 +1926,27 @@ pub(super) fn csi_dispatch(
             .next()
             .and_then(|g| g.first().copied())
             .unwrap_or(0);
-        if ps == 2 {
-            let stops = ctx
-                .screen
-                .tab_stops
-                .iter()
-                .enumerate()
-                .filter_map(|(idx, &set)| set.then_some((idx + 1).to_string()))
-                .collect::<Vec<_>>()
-                .join(";");
-            conformance::write_dcs(
-                ctx.pending_output,
-                ctx.modes.c1_mode,
-                format_args!("2$u{stops}"),
-            );
+        match ps {
+            1 => {
+                if let Some(report) =
+                    crate::deccir_report(ctx.screen, ctx.viewport, ctx.modes, ctx.drcs)
+                {
+                    conformance::write_dcs(
+                        ctx.pending_output,
+                        ctx.modes.c1_mode,
+                        format_args!("1$u{report}"),
+                    );
+                }
+            }
+            2 => {
+                let stops = crate::dectabsr_report(ctx.screen);
+                conformance::write_dcs(
+                    ctx.pending_output,
+                    ctx.modes.c1_mode,
+                    format_args!("2$u{stops}"),
+                );
+            }
+            _ => {}
         }
         return;
     }
