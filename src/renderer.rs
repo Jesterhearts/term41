@@ -15,6 +15,7 @@ use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread::Thread;
 use std::time::Duration;
+use std::time::Instant;
 
 use clip41::Clipboard;
 use font41::FontSystem;
@@ -293,14 +294,17 @@ impl RenderHost {
         self.window_size = (initial_size.width, initial_size.height);
         self.handle_resize(initial_size.width, initial_size.height);
 
+        let mut last_frame_time = Instant::now();
+
         // Phase 2: frame loop.
         loop {
             if !first_frame {
-                match self.next_render_wait() {
+                match self.next_render_wait(last_frame_time.elapsed()) {
                     Some(duration) => std::thread::park_timeout(duration),
                     None => std::thread::park(),
                 }
             }
+            last_frame_time = Instant::now();
             first_frame = false;
 
             // Batch-drain all pending input events from the window thread.
@@ -388,12 +392,15 @@ impl RenderHost {
         std::process::exit(0);
     }
 
-    fn next_render_wait(&self) -> Option<Duration> {
+    fn next_render_wait(
+        &self,
+        last_frame_duration: Duration,
+    ) -> Option<Duration> {
         let Some(renderer) = self.renderer.as_ref() else {
             return Some(Duration::ZERO);
         };
         if renderer.has_animated_background() || renderer.visual_bell_active() {
-            return Some(FRAME_DURATION);
+            return Some(FRAME_DURATION.saturating_sub(last_frame_duration));
         }
         let tab = self.active_tab()?;
         let terminal = tab.terminal.lock().unwrap();
@@ -401,7 +408,7 @@ impl RenderHost {
             && terminal.active.cursor_visible
             && terminal.cursor_style.blink
         {
-            Some(r#impl::CURSOR_BLINK_HALF_PERIOD)
+            Some(r#impl::CURSOR_BLINK_HALF_PERIOD.saturating_sub(last_frame_duration))
         } else {
             None
         }
