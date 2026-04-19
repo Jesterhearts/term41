@@ -129,7 +129,7 @@ fn decode_repeat_sequence(payload: &[u8]) -> Option<(Vec<u8>, usize)> {
         .position(|&b| b == b';')
         .map(|idx| body_start + idx)?;
     let body = &payload[body_start..body_end];
-    if body.len() % 2 != 0 {
+    if !body.len().is_multiple_of(2) {
         return None;
     }
     let mut decoded = Vec::with_capacity(body.len() / 2 * count);
