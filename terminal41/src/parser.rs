@@ -704,29 +704,9 @@ fn csi_dispatch_quote_intermediate(
             } else {
                 C1Mode::SevenBit
             };
-            let mut esc_ctx = EscContext {
-                screen: ctx.screen,
-                stash: ctx.stash,
-                viewport: ctx.viewport,
-                on_alt_screen: ctx.on_alt_screen,
-                modes: ctx.modes,
-                kitty_keyboard: ctx.kitty_keyboard,
-                cursor_style: ctx.cursor_style,
-                current_title: ctx.current_title,
-                title_stack: ctx.title_stack,
-                saved_modes: ctx.saved_modes,
-                current_prompt_row: ctx.current_prompt_row,
-                bell_pending: ctx.bell_pending,
-                palette: ctx.palette,
-                base_palette: ctx.base_palette,
-                default_status_display: ctx.default_status_display,
-                pending_output: ctx.pending_output,
-                vt52_cursor_addr: ctx.vt52_cursor_addr,
-                macros: ctx.macros,
-                dec_color: ctx.dec_color,
-                drcs: ctx.drcs,
-            };
-            apply_hard_reset(&mut esc_ctx, level, c1_mode);
+            ctx.modes.conformance_level = level;
+            ctx.modes.c1_mode = c1_mode;
+            ctx.modes.vt52_mode = false;
             true
         }
         'q' => {

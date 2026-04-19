@@ -1303,6 +1303,7 @@ impl TerminalThread {
         terminal: Arc<Mutex<Terminal>>,
         pty_reader: PtyReader,
         render_thread_handle: Arc<OnceLock<Thread>>,
+        tee_read: Option<Arc<dyn Fn(&[u8]) + Send + Sync>>,
         startup_redraw: Option<Arc<dyn Fn() + Send + Sync>>,
         output_ready: Option<Arc<dyn Fn() + Send + Sync>>,
         host_resize: Option<Arc<dyn Fn(u32, u32) + Send + Sync>>,
@@ -1322,6 +1323,7 @@ impl TerminalThread {
                     pty_reader,
                     stop_,
                     render_thread_handle,
+                    tee_read,
                     startup_redraw,
                     output_ready,
                     host_resize,
@@ -2955,17 +2957,21 @@ mod tests {
     }
 
     #[test]
-    fn decscl_level1_changes_da1_prefix_and_resets_screen() {
+    fn decscl_level1_changes_da1_prefix_without_resetting_screen() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"hello\x1b[?1004h\x1b[61\"p");
         assert_eq!(term.modes.conformance_level, ConformanceLevel::Level1);
         assert_eq!(term.modes.c1_mode, C1Mode::SevenBit);
-        assert!(!term.modes.focus_reporting);
+        assert!(term.modes.focus_reporting);
         term.process(b"\x1b[c");
         assert_eq!(term.take_pending_output(), b"\x1b[?61;7;21;22;28;29c");
-        for r in term.active.grid.rows.iter().rev().take(3) {
-            assert_eq!(r.content_len(), 0);
-        }
+        let row_text: String = term
+            .visible_row(0)
+            .cells
+            .iter()
+            .map(|c| c.as_str())
+            .collect();
+        assert!(row_text.starts_with("hello"), "row text was {row_text:?}");
     }
 
     #[test]
