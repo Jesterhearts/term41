@@ -88,7 +88,7 @@ pub fn rasterize(
     let Some(glyphs) = glyphs else {
         return empty();
     };
-    let Some(glyph) = glyphs.get(&(geometry, glyph_id)) else {
+    let Some(glyph) = resolve_glyph(&glyphs, geometry, glyph_id) else {
         return empty();
     };
 
@@ -134,6 +134,64 @@ pub fn rasterize(
     }
 }
 
+fn resolve_glyph(
+    glyphs: &GlyphMap,
+    geometry: GeometryClass,
+    glyph_id: u16,
+) -> Option<&GlyphDef> {
+    glyphs
+        .get(&(geometry, glyph_id))
+        .or_else(|| fallback_glyph(glyphs, geometry, glyph_id))
+}
+
+fn fallback_glyph(
+    glyphs: &GlyphMap,
+    requested: GeometryClass,
+    glyph_id: u16,
+) -> Option<&GlyphDef> {
+    let requested_cols = geometry_cols(requested);
+    let requested_lines = geometry_lines(requested);
+    glyphs
+        .iter()
+        .filter(|((geometry, id), _)| *id == glyph_id && geometry_cols(*geometry) == requested_cols)
+        .min_by_key(|((geometry, _), _)| {
+            let candidate_lines = geometry_lines(*geometry);
+            requested_lines.abs_diff(candidate_lines)
+        })
+        .map(|(_, glyph)| glyph)
+        .or_else(|| {
+            glyphs
+                .iter()
+                .filter(|((_, id), _)| *id == glyph_id)
+                .min_by_key(|((geometry, _), _)| {
+                    let col_penalty = if geometry_cols(*geometry) == requested_cols {
+                        0
+                    } else {
+                        1000
+                    };
+                    col_penalty + requested_lines.abs_diff(geometry_lines(*geometry))
+                })
+                .map(|(_, glyph)| glyph)
+        })
+}
+
+fn geometry_cols(geometry: GeometryClass) -> u32 {
+    match geometry {
+        GeometryClass::Col80Line24 | GeometryClass::Col80Line36 | GeometryClass::Col80Line48 => 80,
+        GeometryClass::Col132Line24 | GeometryClass::Col132Line36 | GeometryClass::Col132Line48 => {
+            132
+        }
+    }
+}
+
+fn geometry_lines(geometry: GeometryClass) -> u32 {
+    match geometry {
+        GeometryClass::Col80Line24 | GeometryClass::Col132Line24 => 24,
+        GeometryClass::Col80Line36 | GeometryClass::Col132Line36 => 36,
+        GeometryClass::Col80Line48 | GeometryClass::Col132Line48 => 48,
+    }
+}
+
 fn empty() -> RasterizedGlyph {
     RasterizedGlyph {
         bitmap: vec![],
@@ -142,5 +200,58 @@ fn empty() -> RasterizedGlyph {
         bearing_x: 0,
         bearing_y: 0,
         is_color: false,
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn single_pixel_glyph(glyph_id: u16) -> GlyphDef {
+        GlyphDef {
+            glyph_id,
+            width: 1,
+            height: 1,
+            full_cell: false,
+            pixels: vec![1],
+        }
+    }
+
+    #[test]
+    fn rasterize_falls_back_to_same_column_geometry() {
+        let glyph_id = 7;
+        let glyphs: GlyphMap = Arc::new(HashMap::from([(
+            (GeometryClass::Col80Line24, glyph_id),
+            single_pixel_glyph(glyph_id),
+        )]));
+        let _guard = set_context(Some(GeometryClass::Col80Line48), Some(glyphs));
+        let raster = rasterize(glyph_id, 10, 8);
+        assert!(raster.width > 0);
+        assert!(raster.height > 0);
+        assert!(raster.bitmap.iter().any(|&b| b != 0));
+    }
+
+    #[test]
+    fn rasterize_prefers_matching_column_family() {
+        let glyph_id = 9;
+        let glyphs: GlyphMap = Arc::new(HashMap::from([
+            (
+                (GeometryClass::Col80Line24, glyph_id),
+                GlyphDef {
+                    pixels: vec![1],
+                    ..single_pixel_glyph(glyph_id)
+                },
+            ),
+            (
+                (GeometryClass::Col132Line48, glyph_id),
+                GlyphDef {
+                    pixels: vec![0],
+                    ..single_pixel_glyph(glyph_id)
+                },
+            ),
+        ]));
+        let _guard = set_context(Some(GeometryClass::Col80Line48), Some(glyphs));
+        let raster = rasterize(glyph_id, 10, 8);
+        assert!(raster.bitmap.iter().any(|&b| b != 0));
     }
 }
