@@ -173,6 +173,25 @@ pub struct TerminalMetadata {
     pub command_metas: HashMap<u64, CommandMeta>,
 }
 
+/// Security-sensitive protocol state and VT extension storage.
+#[derive(Debug, Default)]
+pub struct TerminalProtocolState {
+    /// Host-configured permission gates for optional terminal features.
+    pub feature_permissions: FeaturePermissions,
+    /// Best-effort snapshot of the PTY foreground process set used for
+    /// allowlist checks on security-sensitive extensions.
+    pub foreground_processes: Option<ForegroundProcessSet>,
+    /// Suppresses duplicate foreground-process log spam until the process
+    /// set changes.
+    foreground_processes_logged: bool,
+    /// VT420 macro definitions accumulated from DECDMAC / related controls.
+    pub macros: MacroStore,
+    /// Tracks nested macro expansion depth to prevent runaway recursion.
+    pub macro_invocation_depth: usize,
+    /// Soft character-set storage for DRCS loads and reports.
+    pub drcs: DrcsStore,
+}
+
 /// State machine for absorbing the two parameter bytes of a VT52
 /// `ESC Y Pr Pc` direct cursor address. The bytes arrive as separate
 /// parser actions after the `EscDispatch { byte: 'Y' }` is handled.
@@ -362,12 +381,7 @@ pub struct Terminal {
     vt52_cursor_addr: Vt52CursorAddr,
     default_status_display: StatusDisplayKind,
     strict_altscreen_scrollback: bool,
-    feature_permissions: FeaturePermissions,
-    foreground_processes: Option<ForegroundProcessSet>,
-    foreground_processes_logged: bool,
-    macros: MacroStore,
-    macro_invocation_depth: usize,
-    drcs: DrcsStore,
+    pub(crate) protocol: TerminalProtocolState,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -437,12 +451,10 @@ impl Terminal {
             vt52_cursor_addr: Vt52CursorAddr::Idle,
             default_status_display,
             strict_altscreen_scrollback,
-            feature_permissions,
-            foreground_processes: None,
-            foreground_processes_logged: false,
-            macros: MacroStore::default(),
-            macro_invocation_depth: 0,
-            drcs: DrcsStore::default(),
+            protocol: TerminalProtocolState {
+                feature_permissions,
+                ..TerminalProtocolState::default()
+            },
         };
         terminal.set_default_status_display(default_status_display);
         terminal
@@ -544,7 +556,7 @@ impl Terminal {
         &mut self,
         permissions: FeaturePermissions,
     ) {
-        self.feature_permissions = permissions;
+        self.protocol.feature_permissions = permissions;
     }
 
     pub fn dec_color_state(&self) -> &DecColorState {
@@ -555,21 +567,26 @@ impl Terminal {
         &mut self,
         processes: Option<ForegroundProcessSet>,
     ) {
-        if !self.foreground_processes_logged || self.foreground_processes != processes {
-            feature::log_foreground_process_probe(&self.feature_permissions, processes.as_ref());
-            self.foreground_processes_logged = true;
+        if !self.protocol.foreground_processes_logged
+            || self.protocol.foreground_processes != processes
+        {
+            feature::log_foreground_process_probe(
+                &self.protocol.feature_permissions,
+                processes.as_ref(),
+            );
+            self.protocol.foreground_processes_logged = true;
         }
-        self.foreground_processes = processes;
+        self.protocol.foreground_processes = processes;
     }
 
     pub fn drcs_render_glyphs(&self) -> font41::DrcsGlyphMap {
-        feature::drcs_render_glyphs(&self.drcs)
+        feature::drcs_render_glyphs(&self.protocol.drcs)
     }
 
     pub fn macro_feature_enabled(&self) -> bool {
         feature::macro_feature_enabled(
-            &self.feature_permissions,
-            self.foreground_processes.as_ref(),
+            &self.protocol.feature_permissions,
+            self.protocol.foreground_processes.as_ref(),
         )
     }
 
@@ -580,7 +597,7 @@ impl Terminal {
     ) {
         feature::define_macro(
             self.macro_feature_enabled(),
-            &mut self.macros,
+            &mut self.protocol.macros,
             params,
             payload,
         );
@@ -592,15 +609,15 @@ impl Terminal {
     ) {
         let Some(bytes) = feature::invoke_macro(
             self.macro_feature_enabled(),
-            &self.macros,
-            self.macro_invocation_depth,
+            &self.protocol.macros,
+            self.protocol.macro_invocation_depth,
             id,
         ) else {
             return;
         };
-        self.macro_invocation_depth += 1;
+        self.protocol.macro_invocation_depth += 1;
         feature::apply_macro_bytes(self, &bytes);
-        self.macro_invocation_depth -= 1;
+        self.protocol.macro_invocation_depth -= 1;
     }
 
     pub fn set_cell_dimensions(
@@ -1102,11 +1119,11 @@ impl Terminal {
                     current_prompt_row: &mut self.metadata.current_prompt_row,
                     bell_pending: &mut self.output.bell_pending,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
-                    macros: &mut self.macros,
+                    macros: &mut self.protocol.macros,
                     dec_color: &mut self.dec_color,
-                    feature_permissions: &self.feature_permissions,
-                    foreground_processes: &self.foreground_processes,
-                    drcs: &mut self.drcs,
+                    feature_permissions: &self.protocol.feature_permissions,
+                    foreground_processes: &self.protocol.foreground_processes,
+                    drcs: &mut self.protocol.drcs,
                 };
                 csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
             }
@@ -1132,9 +1149,9 @@ impl Terminal {
                     default_status_display: &mut self.default_status_display,
                     pending_output: &mut self.output.pending_output,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
-                    macros: &mut self.macros,
+                    macros: &mut self.protocol.macros,
                     dec_color: &mut self.dec_color,
-                    drcs: &mut self.drcs,
+                    drcs: &mut self.protocol.drcs,
                 };
                 esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
             }

@@ -103,7 +103,7 @@ fn handle_dcs(
         }
     } else if action == '{' && intermediates.is_empty() {
         let flat_params: Vec<u16> = params.iter().flat_map(|g| g.iter().copied()).collect();
-        terminal.drcs.define(&flat_params, payload);
+        terminal.protocol.drcs.define(&flat_params, payload);
     } else if action == 't' && intermediates == b"$" {
         let ps = params
             .iter()
@@ -117,7 +117,7 @@ fn handle_dcs(
                     &mut terminal.active,
                     &terminal.viewport,
                     &mut terminal.modes,
-                    &terminal.drcs,
+                    &terminal.protocol.drcs,
                 );
             }
             2 => {
