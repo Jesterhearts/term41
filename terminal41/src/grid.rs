@@ -806,7 +806,7 @@ impl Grid {
     }
 
     /// Apply SGR attribute changes to a rectangular region (DECCARA,
-    /// `CSI $ t`). Coordinates are 0-based, viewport-relative, inclusive.
+    /// `CSI $ r`). Coordinates are 0-based, viewport-relative, inclusive.
     pub(super) fn change_attrs_rect(
         &mut self,
         viewport: &Viewport,
@@ -849,7 +849,7 @@ impl Grid {
     }
 
     /// Reverse (toggle) SGR attributes in a rectangular region (DECRARA,
-    /// `CSI $ r`). Coordinates are 0-based, viewport-relative, inclusive.
+    /// `CSI $ t`). Coordinates are 0-based, viewport-relative, inclusive.
     pub(super) fn reverse_attrs_rect(
         &mut self,
         viewport: &Viewport,
