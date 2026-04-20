@@ -3,6 +3,7 @@
 //! Covers:
 //! - Block Elements (U+2580–U+259F) — halves, eighths, quadrants, shades
 //! - Braille Patterns (U+2800–U+28FF) — all 256 8-dot combinations
+//! - Light box-drawing junctions used by DEC Special Graphics
 //! - Symbols for Legacy Computing sextants (U+1FB00–U+1FB3B)
 //! - SFLC smooth-mosaic wedge/triangle shapes (U+1FB3C–U+1FB67)
 //! - SFLC block diagonal quarter/three-quarter fills (U+1FB68–U+1FB6F)
@@ -56,6 +57,8 @@ pub fn encode_single(cell: &str) -> Option<u16> {
 fn encode(c: char) -> Option<u16> {
     let cp = c as u32;
     match cp {
+        0x2500 | 0x2502 | 0x250C | 0x2510 | 0x2514 | 0x2518 | 0x251C | 0x2524 | 0x252C | 0x2534
+        | 0x253C => Some(cp as u16),
         0x2580..=0x259F | 0x2800..=0x28FF => Some(cp as u16),
         // SFLC ranges fit into u16 after subtracting 0x10000 (max is 0xFBAF,
         // disjoint from both BMP ranges above). 0x1FB81 is excluded because
@@ -93,6 +96,8 @@ pub fn rasterize(
     let mut alpha = vec![0u8; w * h];
 
     match decode(glyph_id) {
+        cp @ (0x2500 | 0x2502 | 0x250C | 0x2510 | 0x2514 | 0x2518 | 0x251C | 0x2524 | 0x252C
+        | 0x2534 | 0x253C) => draw_box_drawing(cp, &mut alpha, w, h),
         cp @ 0x2580..=0x259F => draw_block_element(cp, &mut alpha, w, h),
         cp @ 0x2800..=0x28FF => draw_braille(cp, &mut alpha, w, h),
         cp @ 0x1FB00..=0x1FB3B => draw_sextant(cp, &mut alpha, w, h),
@@ -134,6 +139,81 @@ fn empty() -> RasterizedGlyph {
 }
 
 // --- Fill primitives -------------------------------------------------------
+
+fn line_thickness(
+    w: usize,
+    h: usize,
+) -> usize {
+    (w.min(h) / 8).max(1)
+}
+
+fn center_span(
+    total: usize,
+    thickness: usize,
+) -> (usize, usize) {
+    let start = total.saturating_sub(thickness) / 2;
+    (start, (start + thickness).min(total))
+}
+
+fn draw_box_drawing(
+    cp: u32,
+    alpha: &mut [u8],
+    w: usize,
+    h: usize,
+) {
+    let thickness = line_thickness(w, h);
+    let (vx0, vx1) = center_span(w, thickness);
+    let (hy0, hy1) = center_span(h, thickness);
+
+    let draw_h_left = |alpha: &mut [u8]| fill_rect(alpha, w, h, 0, hy0, vx1, hy1);
+    let draw_h_right = |alpha: &mut [u8]| fill_rect(alpha, w, h, vx0, hy0, w, hy1);
+    let draw_h_full = |alpha: &mut [u8]| fill_rect(alpha, w, h, 0, hy0, w, hy1);
+    let draw_v_top = |alpha: &mut [u8]| fill_rect(alpha, w, h, vx0, 0, vx1, hy1);
+    let draw_v_bottom = |alpha: &mut [u8]| fill_rect(alpha, w, h, vx0, hy0, vx1, h);
+    let draw_v_full = |alpha: &mut [u8]| fill_rect(alpha, w, h, vx0, 0, vx1, h);
+
+    match cp {
+        0x2500 => draw_h_full(alpha),
+        0x2502 => draw_v_full(alpha),
+        0x250C => {
+            draw_h_right(alpha);
+            draw_v_bottom(alpha);
+        }
+        0x2510 => {
+            draw_h_left(alpha);
+            draw_v_bottom(alpha);
+        }
+        0x2514 => {
+            draw_h_right(alpha);
+            draw_v_top(alpha);
+        }
+        0x2518 => {
+            draw_h_left(alpha);
+            draw_v_top(alpha);
+        }
+        0x251C => {
+            draw_h_right(alpha);
+            draw_v_full(alpha);
+        }
+        0x2524 => {
+            draw_h_left(alpha);
+            draw_v_full(alpha);
+        }
+        0x252C => {
+            draw_h_full(alpha);
+            draw_v_bottom(alpha);
+        }
+        0x2534 => {
+            draw_h_full(alpha);
+            draw_v_top(alpha);
+        }
+        0x253C => {
+            draw_h_full(alpha);
+            draw_v_full(alpha);
+        }
+        _ => {}
+    }
+}
 
 fn fill_rect(
     alpha: &mut [u8],
@@ -1305,5 +1385,31 @@ mod tests {
         assert!(solid > 0, "missing solid region");
         assert!(shade > 0, "missing shade region");
         assert_eq!(solid + shade, (w * h) as usize, "gaps in coverage");
+    }
+
+    #[test]
+    fn box_vertical_line_touches_top_and_bottom_edges() {
+        let w = 16u32;
+        let h = 24u32;
+        let g = rasterize(0x2502, w, h, 20.0);
+        let mid_x = (w / 2) as usize;
+        assert!(
+            g.bitmap[mid_x * 4 + 3] > 0,
+            "vertical line missing at top edge"
+        );
+        let bottom = (((h - 1) * w + w / 2) * 4 + 3) as usize;
+        assert!(g.bitmap[bottom] > 0, "vertical line missing at bottom edge");
+    }
+
+    #[test]
+    fn box_top_right_corner_connects_left_and_down() {
+        let w = 16u32;
+        let h = 24u32;
+        let g = rasterize(0x2510, w, h, 20.0);
+        let mid_y = (h / 2) as usize;
+        let left = (mid_y * w as usize) * 4 + 3;
+        let down = ((mid_y * w as usize + (w / 2) as usize) * 4 + 3) as usize;
+        assert!(g.bitmap[left] > 0, "corner missing horizontal arm");
+        assert!(g.bitmap[down] > 0, "corner missing vertical arm");
     }
 }

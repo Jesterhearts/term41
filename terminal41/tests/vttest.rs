@@ -864,6 +864,43 @@ fn vttest_double_height_row_keeps_line_attr_across_el2() {
 }
 
 #[test]
+fn vttest_double_size_box_keeps_right_border_after_inner_text() {
+    let mut t = VtTerm::new_80x24();
+    t.process(
+        b"\r\n\x1b[1;1H\x1b[3g\
+\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\
+\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\
+\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\
+\x1b[8C\x1bH\x1b[8C\x1bH\x1b[?3l\x1b[2J\x1b(0\x1b)B\x0f\
+\x1b[8;1H\x1b#3lqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqk\
+\x1b[9;1H\x1b#4lqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqk\
+\x1b[10;1H\x1b#3x\t\t\t\t\tx\
+\x1b[11;1H\x1b#4x\t\t\t\t\tx\
+\x1b[12;1H\x1b#3x\t\t\t\t\tx\
+\x1b[13;1H\x1b#4x\t\t\t\t\tx\
+\x1b)0\x1b(B\x0e\
+\x1b[14;1H\x1b#3x                                      x\
+\x1b[15;1H\x1b#4x                                      x\
+\x1b[16;1H\x1b#3mqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqj\
+\x1b[17;1H\x1b#4mqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqj\
+\x1b(B\x1b)B\x0f\x1b[1;5m\
+\x1b[12;3H* The mad programmer strikes again * \
+\x1b[13;3H\t\x1b[6D* The mad programmer strikes again*\
+\x1b[0m",
+    );
+
+    for row in 7..=16u32 {
+        let right_edge = t.cell_char(row, 39);
+        let expected = match row {
+            7 | 8 => '┐',
+            15 | 16 => '┘',
+            _ => '│',
+        };
+        assert_eq!(right_edge, expected, "row {row} wrong right edge");
+    }
+}
+
+#[test]
 fn double_width_rows_use_half_width_cursor_addressing() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[5;1H\x1b#6");
