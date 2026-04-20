@@ -96,6 +96,8 @@ use crate::dec::color::effective_palette;
 use crate::dec::color::rebase_theme_entries;
 use crate::dec::color::report_color_table;
 use crate::dec::color::restore_color_table;
+use crate::osc::handle_osc;
+use crate::parser::csi_dispatch;
 use crate::selection::Selection;
 use crate::selection::search::SearchState;
 
@@ -649,36 +651,36 @@ impl Terminal {
                 intermediates,
                 action,
             } => {
-                dispatch::apply_csi(
-                    &mut self.active,
-                    &mut self.stash,
-                    &mut self.viewport,
-                    &mut self.on_alt_screen,
-                    &mut self.modes,
-                    &mut self.kitty_keyboard,
-                    &mut self.output.pending_output,
-                    &mut self.output.pending_host_resize,
-                    &mut self.cursor_style,
-                    self.cell_width,
-                    self.cell_height,
-                    &mut self.palette,
-                    &self.base_palette,
-                    &mut self.dec_color,
-                    &mut self.default_status_display,
-                    &mut self.metadata.title_stack,
-                    &mut self.metadata.current_title,
-                    &mut self.saved_private_modes,
-                    &mut self.metadata.current_prompt_row,
-                    &mut self.output.bell_pending,
-                    &mut self.vt52_cursor_addr,
-                    &mut self.protocol.macros,
-                    &self.protocol.feature_permissions,
-                    &self.protocol.foreground_processes,
-                    &mut self.protocol.drcs,
-                    &params,
-                    intermediates.as_slice(),
-                    action,
-                );
+                csi_dispatch()
+                    .params(&params)
+                    .intermediates(intermediates.as_slice())
+                    .action(action)
+                    .screen(&mut self.active)
+                    .stash(&mut self.stash)
+                    .viewport(&mut self.viewport)
+                    .on_alt_screen(&mut self.on_alt_screen)
+                    .modes(&mut self.modes)
+                    .kitty_keyboard(&mut self.kitty_keyboard)
+                    .pending_output(&mut self.output.pending_output)
+                    .pending_resize(&mut self.output.pending_host_resize)
+                    .cursor_style(&mut self.cursor_style)
+                    .cell_width(self.cell_width)
+                    .cell_height(self.cell_height)
+                    .default_status_display(&mut self.default_status_display)
+                    .title_stack(&mut self.metadata.title_stack)
+                    .current_title(&mut self.metadata.current_title)
+                    .saved_modes(&mut self.saved_private_modes)
+                    .current_prompt_row(&mut self.metadata.current_prompt_row)
+                    .bell_pending(&mut self.output.bell_pending)
+                    .vt52_cursor_addr(&mut self.vt52_cursor_addr)
+                    .macros(&mut self.protocol.macros)
+                    .feature_permissions(&self.protocol.feature_permissions)
+                    .foreground_processes(&self.protocol.foreground_processes)
+                    .drcs(&mut self.protocol.drcs)
+                    .palette(&mut self.palette)
+                    .base_palette(&self.base_palette)
+                    .dec_color(&mut self.dec_color)
+                    .call();
                 dispatch::PendingApplication::None
             }
             DecodedAction::Esc {
@@ -712,22 +714,23 @@ impl Terminal {
                 dispatch::PendingApplication::None
             }
             DecodedAction::Osc(data) => {
-                dispatch::apply_osc(
-                    &mut self.clipboard,
-                    &mut self.output.pending_output,
-                    self.modes.c1_mode,
-                    &mut self.metadata.current_directory,
-                    &mut self.hyperlinks,
-                    &mut self.active,
-                    &self.viewport,
-                    &mut self.metadata.current_title,
-                    &mut self.metadata.current_prompt_row,
-                    &mut self.metadata.command_metas,
-                    &self.palette,
-                    self.cell_width,
-                    self.cell_height,
-                    &data,
-                );
+                handle_osc()
+                    .payload(&data)
+                    .clipboard(&mut self.clipboard)
+                    .pending_output(&mut self.output.pending_output)
+                    .c1_mode(self.modes.c1_mode)
+                    .current_directory(&mut self.metadata.current_directory)
+                    .hyperlinks(&mut self.hyperlinks)
+                    .active_screen(&mut self.active)
+                    .viewport(&self.viewport)
+                    .current_title(&mut self.metadata.current_title)
+                    .current_prompt_row(&mut self.metadata.current_prompt_row)
+                    .command_metas(&mut self.metadata.command_metas)
+                    .palette(&self.palette)
+                    .cell_width(self.cell_width)
+                    .cell_height(self.cell_height)
+                    .call();
+
                 dispatch::PendingApplication::None
             }
             DecodedAction::ItermGraphics(data) => {

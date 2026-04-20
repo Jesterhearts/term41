@@ -36,37 +36,6 @@ const OSC_RESET_CURSOR_COLOR: u16 = 112;
 const OSC_SHELL_INTEGRATION: u16 = 133;
 const OSC_ITERM2: u16 = 1337;
 
-/// Bundles the bits of [`Terminal`](super::Terminal) state that OSC handlers
-/// are allowed to read or mutate. Passing a single context keeps the call
-/// signature stable as new OSC commands (8 hyperlinks, 7 cwd, 0/2 title, 4
-/// palette, …) get wired in.
-///
-/// `active_screen` is handed in whole (rather than borrowing its individual
-/// fields) so handlers that need both the grid and the cursor — like OSC 133
-/// shell integration — don't have to juggle multiple simultaneous borrows.
-pub(super) struct OscContext<'a> {
-    pub clipboard: &'a mut Clipboard,
-    pub pending_output: &'a mut Vec<u8>,
-    pub c1_mode: C1Mode,
-    pub current_directory: &'a mut Option<PathBuf>,
-    pub hyperlinks: &'a mut HyperlinkRegistry,
-    pub active_screen: &'a mut Screen,
-    pub viewport: &'a Viewport,
-    pub current_title: &'a mut Option<String>,
-    /// Absolute row index of the most recent OSC 133 `A` (prompt start).
-    /// An `OSC 133 D` stamps its exit code onto this row's exit_status so
-    /// the mark sits next to the prompt, not the end-of-output. `None`
-    /// before the first prompt and after the prompt row scrolls off the
-    /// front of scrollback.
-    pub current_prompt_row: &'a mut Option<u64>,
-    /// Per-prompt metadata: command column (from B), output row (from C),
-    /// and timestamps for duration calculation.
-    pub command_metas: &'a mut HashMap<u64, CommandMeta>,
-    pub palette: &'a color::ColorPalette,
-    pub cell_width: u32,
-    pub cell_height: u32,
-}
-
 /// Split an OSC payload into its numeric command prefix and the remainder.
 ///
 /// OSC commands have the shape `cmd;args`; when no semicolon is present the
@@ -117,9 +86,29 @@ fn decode_osc52(data: &[u8]) -> Option<Vec<u8>> {
 /// Dispatch an OSC payload to the appropriate handler. Unrecognised commands
 /// are silently dropped — that's the standard behavior and avoids spurious
 /// noise from apps probing for terminal features.
+#[bon::builder]
 pub(super) fn handle_osc(
     payload: &[u8],
-    ctx: &mut OscContext<'_>,
+    clipboard: &mut Clipboard,
+    pending_output: &mut Vec<u8>,
+    c1_mode: C1Mode,
+    current_directory: &mut Option<PathBuf>,
+    hyperlinks: &mut HyperlinkRegistry,
+    active_screen: &mut Screen,
+    viewport: &Viewport,
+    current_title: &mut Option<String>,
+    /// Absolute row index of the most recent OSC 133 `A` (prompt start).
+    /// An `OSC 133 D` stamps its exit code onto this row's exit_status so
+    /// the mark sits next to the prompt, not the end-of-output. `None`
+    /// before the first prompt and after the prompt row scrolls off the
+    /// front of scrollback.
+    current_prompt_row: &mut Option<u64>,
+    /// Per-prompt metadata: command column (from B), output row (from C),
+    /// and timestamps for duration calculation.
+    command_metas: &mut HashMap<u64, CommandMeta>,
+    palette: &color::ColorPalette,
+    cell_width: u32,
+    cell_height: u32,
 ) {
     let (cmd_bytes, rest) = split_osc(payload);
 
@@ -133,50 +122,46 @@ pub(super) fn handle_osc(
         // OSC 0 sets icon name + window title; OSC 2 sets just the window
         // title. We don't have a separate icon-name surface, so both feed
         // the same field. OSC 1 (icon name only) is intentionally ignored.
-        Some(OSC_SET_ICON_AND_TITLE) | Some(OSC_SET_TITLE) => {
-            handle_osc_title(rest, ctx.current_title)
-        }
-        Some(OSC_SET_DIRECTORY) => handle_osc_7(rest, ctx.current_directory),
-        Some(OSC_HYPERLINK) => handle_osc_8(
-            rest,
-            ctx.hyperlinks,
-            &mut ctx.active_screen.current_hyperlink,
-        ),
-        Some(OSC_PALETTE_COLOR) => handle_osc_4(rest, ctx.palette, ctx.c1_mode, ctx.pending_output),
+        Some(OSC_SET_ICON_AND_TITLE) | Some(OSC_SET_TITLE) => handle_osc_title(rest, current_title),
+        Some(OSC_SET_DIRECTORY) => handle_osc_7(rest, current_directory),
+        Some(OSC_HYPERLINK) => handle_osc_8(rest, hyperlinks, &mut active_screen.current_hyperlink),
+        Some(OSC_PALETTE_COLOR) => handle_osc_4(rest, palette, c1_mode, pending_output),
         Some(OSC_FG_COLOR) => handle_osc_color_query(
             rest,
             OSC_FG_COLOR as u8,
-            ctx.palette.fg,
-            ctx.c1_mode,
-            ctx.pending_output,
+            palette.fg,
+            c1_mode,
+            pending_output,
         ),
         Some(OSC_BG_COLOR) => handle_osc_color_query(
             rest,
             OSC_BG_COLOR as u8,
-            ctx.palette.bg,
-            ctx.c1_mode,
-            ctx.pending_output,
+            palette.bg,
+            c1_mode,
+            pending_output,
         ),
-        Some(OSC_CURSOR_COLOR) => handle_osc_cursor_color_query(rest, ctx),
-        Some(OSC_CLIPBOARD) => handle_osc_52(rest, ctx.clipboard, ctx.c1_mode, ctx.pending_output),
+        Some(OSC_CURSOR_COLOR) => {
+            handle_osc_cursor_color_query(rest, palette, c1_mode, pending_output)
+        }
+        Some(OSC_CLIPBOARD) => handle_osc_52(rest, clipboard, c1_mode, pending_output),
         // Reset palette/fg/bg/cursor color. Accepted but currently no-op —
         // the palette is immutable at this level.
         Some(OSC_RESET_PALETTE | OSC_RESET_FG | OSC_RESET_BG | OSC_RESET_CURSOR_COLOR) => {}
         Some(OSC_SHELL_INTEGRATION) => handle_osc_133(
             rest,
-            ctx.active_screen,
-            ctx.viewport,
-            ctx.current_prompt_row,
-            ctx.command_metas,
+            active_screen,
+            viewport,
+            current_prompt_row,
+            command_metas,
         ),
         // iTerm2 proprietary commands. Image commands (File=, MultipartFile=,
         // etc.) are routed separately in terminal.rs. ReportCellSize gets a
         // reply; other non-image commands are silently accepted as no-ops.
         Some(OSC_ITERM2) if rest.starts_with(b"ReportCellSize") => {
             conformance::write_osc(
-                ctx.pending_output,
-                ctx.c1_mode,
-                format_args!("1337;ReportCellSize={};{}", ctx.cell_height, ctx.cell_width),
+                pending_output,
+                c1_mode,
+                format_args!("1337;ReportCellSize={};{}", cell_height, cell_width),
             );
         }
         Some(OSC_ITERM2) => {}
@@ -363,14 +348,16 @@ fn handle_osc_color_query(
 /// cursor color is set, the default foreground is reported (matching xterm).
 fn handle_osc_cursor_color_query(
     rest: &[u8],
-    ctx: &mut OscContext<'_>,
+    palette: &color::ColorPalette,
+    c1_mode: C1Mode,
+    pending_output: &mut Vec<u8>,
 ) {
     if rest != b"?" {
         return;
     }
-    let c = ctx.palette.cursor.unwrap_or(ctx.palette.fg);
+    let c = palette.cursor.unwrap_or(palette.fg);
     let reply = rgb_reply(c.red, c.green, c.blue);
-    conformance::write_osc(ctx.pending_output, ctx.c1_mode, format_args!("12;{reply}"));
+    conformance::write_osc(pending_output, c1_mode, format_args!("12;{reply}"));
 }
 
 /// OSC 4;N;? — query the Nth entry of the 256-color palette. The response
@@ -580,22 +567,22 @@ mod tests {
             &mut self,
             payload: &[u8],
         ) {
-            let mut ctx = OscContext {
-                clipboard: &mut self.clipboard,
-                pending_output: &mut self.pending,
-                c1_mode: C1Mode::SevenBit,
-                current_directory: &mut self.cwd,
-                hyperlinks: &mut self.registry,
-                active_screen: &mut self.screen,
-                viewport: &self.viewport,
-                current_title: &mut self.title,
-                current_prompt_row: &mut self.prompt_row,
-                command_metas: &mut self.command_metas,
-                palette: &self.palette,
-                cell_width: 8,
-                cell_height: 16,
-            };
-            handle_osc(payload, &mut ctx);
+            handle_osc()
+                .payload(payload)
+                .clipboard(&mut self.clipboard)
+                .pending_output(&mut self.pending)
+                .c1_mode(C1Mode::SevenBit)
+                .current_directory(&mut self.cwd)
+                .hyperlinks(&mut self.registry)
+                .active_screen(&mut self.screen)
+                .viewport(&self.viewport)
+                .current_title(&mut self.title)
+                .current_prompt_row(&mut self.prompt_row)
+                .command_metas(&mut self.command_metas)
+                .palette(&self.palette)
+                .cell_width(8)
+                .cell_height(16)
+                .call();
         }
     }
 

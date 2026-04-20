@@ -629,13 +629,14 @@ impl WindowHost {
             return;
         }
 
-        if {
+        let res = {
             let terminal = self.input_endpoints[&active_tab_id]
                 .terminal
                 .lock()
                 .unwrap();
             search_active(&terminal.search)
-        } {
+        };
+        if res {
             let target = &self.input_endpoints[&active_tab_id];
             self.handle_search_key(target, &key);
             self.notify_interaction_changed();

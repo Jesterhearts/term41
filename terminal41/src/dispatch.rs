@@ -22,12 +22,7 @@ use crate::dec_assign_alternate_text_color;
 use crate::dec_select_lookup_table;
 use crate::graphics;
 use crate::io::keyboard::KittyKeyboardState;
-use crate::osc::OscContext;
-use crate::osc::handle_osc;
-use crate::parser;
-use crate::parser::CsiContext;
 use crate::parser::EscContext;
-use crate::parser::csi_dispatch;
 use crate::parser::esc_dispatch;
 use crate::parser::execute;
 use crate::parser::execute_status;
@@ -295,68 +290,6 @@ pub(super) fn apply_special_csi(
     }
 }
 
-pub(super) fn apply_csi(
-    screen: &mut Screen,
-    stash: &mut Screen,
-    viewport: &mut Viewport,
-    on_alt_screen: &mut bool,
-    modes: &mut TerminalModes,
-    kitty_keyboard: &mut KittyKeyboardState,
-    pending_output: &mut Vec<u8>,
-    pending_resize: &mut Option<(u32, u32)>,
-    cursor_style: &mut CursorStyle,
-    cell_width: u32,
-    cell_height: u32,
-    palette: &mut ColorPalette,
-    base_palette: &ColorPalette,
-    dec_color: &mut DecColorState,
-    default_status_display: &mut StatusDisplayKind,
-    title_stack: &mut Vec<Option<String>>,
-    current_title: &mut Option<String>,
-    saved_modes: &mut HashMap<u16, bool>,
-    current_prompt_row: &mut Option<u64>,
-    bell_pending: &mut bool,
-    vt52_cursor_addr: &mut Vt52CursorAddr,
-    macros: &mut crate::dec::r#macro::MacroStore,
-    feature_permissions: &FeaturePermissions,
-    foreground_processes: &Option<ForegroundProcessSet>,
-    drcs: &mut crate::drcs::Store,
-    params: &Params,
-    intermediates: &[u8],
-    action: char,
-) {
-    let mut ctx = CsiContext {
-        screen,
-        stash,
-        viewport,
-        on_alt_screen,
-        modes,
-        kitty_keyboard,
-        pending_output,
-        pending_resize,
-        cursor_style,
-        cell_width,
-        cell_height,
-        colors: parser::PaletteContext {
-            palette,
-            base_palette,
-            dec_color,
-        },
-        default_status_display,
-        title_stack,
-        current_title,
-        saved_modes,
-        current_prompt_row,
-        bell_pending,
-        vt52_cursor_addr,
-        macros,
-        feature_permissions,
-        foreground_processes,
-        drcs,
-    };
-    csi_dispatch(&mut ctx, params, intermediates, action);
-}
-
 pub(super) fn apply_esc(
     screen: &mut Screen,
     stash: &mut Screen,
@@ -394,11 +327,9 @@ pub(super) fn apply_esc(
         saved_modes,
         current_prompt_row,
         bell_pending,
-        colors: parser::PaletteContext {
-            palette,
-            base_palette,
-            dec_color,
-        },
+        palette,
+        base_palette,
+        dec_color,
         default_status_display,
         pending_output,
         vt52_cursor_addr,
@@ -406,40 +337,6 @@ pub(super) fn apply_esc(
         drcs,
     };
     esc_dispatch(&mut ctx, intermediates, byte);
-}
-
-pub(super) fn apply_osc(
-    clipboard: &mut clip41::Clipboard,
-    pending_output: &mut Vec<u8>,
-    c1_mode: C1Mode,
-    current_directory: &mut Option<std::path::PathBuf>,
-    hyperlinks: &mut crate::screen::hyperlink::HyperlinkRegistry,
-    active_screen: &mut Screen,
-    viewport: &Viewport,
-    current_title: &mut Option<String>,
-    current_prompt_row: &mut Option<u64>,
-    command_metas: &mut HashMap<u64, crate::CommandMeta>,
-    palette: &ColorPalette,
-    cell_width: u32,
-    cell_height: u32,
-    data: &[u8],
-) {
-    let mut ctx = OscContext {
-        clipboard,
-        pending_output,
-        c1_mode,
-        current_directory,
-        hyperlinks,
-        active_screen,
-        viewport,
-        current_title,
-        current_prompt_row,
-        command_metas,
-        palette,
-        cell_width,
-        cell_height,
-    };
-    handle_osc(data, &mut ctx);
 }
 
 pub(super) fn apply_iterm_graphics(

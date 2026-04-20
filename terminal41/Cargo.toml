@@ -6,6 +6,9 @@ edition = "2024"
 [dependencies]
 base64.workspace        = true
 bitflags.workspace      = true
+bon                     = { version = "3.9.1", default-features = false, features = [
+  "std"
+] }
 clip41.workspace        = true
 font41.workspace        = true
 image41.workspace       = true
