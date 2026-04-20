@@ -261,7 +261,6 @@ impl Background {
         None
     }
 
-    #[allow(clippy::too_many_arguments)]
     fn build(
         device: &wgpu::Device,
         queue: &wgpu::Queue,
