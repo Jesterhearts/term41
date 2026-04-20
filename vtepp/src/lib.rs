@@ -1247,6 +1247,10 @@ impl<'a> Iterator for ParseIter<'a> {
 }
 
 impl<'a> ParseIter<'a> {
+    pub fn tell(&self) -> usize {
+        self.pos
+    }
+
     fn convert_raw(
         &self,
         raw: RawAction,

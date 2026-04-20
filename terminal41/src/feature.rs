@@ -5,9 +5,7 @@ use crate::ColorPalette;
 use crate::DrcsStore;
 use crate::Screen;
 use crate::StatusDisplayKind;
-use crate::Terminal;
 use crate::Viewport;
-use crate::dcs;
 use crate::dec::r#macro::MAX_MACRO_INVOCATION_DEPTH;
 use crate::dec::r#macro::MacroEncoding;
 use crate::dec::r#macro::MacroStore;
@@ -137,32 +135,6 @@ pub(crate) fn invoke_macro(
         return None;
     }
     macros.get(id).map(ToOwned::to_owned)
-}
-
-pub(crate) fn apply_macro_bytes(
-    terminal: &mut Terminal,
-    bytes: &[u8],
-) {
-    let mut parser = vtepp::Parser::new();
-    let mut hooks: Vec<dcs::HookState> = vec![];
-
-    for action in parser.parse(bytes) {
-        match action {
-            vtepp::Action::Hook {
-                params,
-                intermediates,
-                action,
-            } => dcs::push_hook_state(&mut hooks, params, intermediates, action),
-            vtepp::Action::Put(chunk) => dcs::append_hook_bytes(&mut hooks, chunk),
-            vtepp::Action::Unhook => {
-                let Some(hook) = hooks.pop() else {
-                    continue;
-                };
-                dcs::dispatch_hook(hook, terminal);
-            }
-            action => terminal.apply(action),
-        }
-    }
 }
 
 pub(crate) fn drcs_render_glyphs(drcs: &DrcsStore) -> font41::DrcsGlyphMap {

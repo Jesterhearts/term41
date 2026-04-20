@@ -87,6 +87,11 @@ pub(super) enum DecodedAction<'a> {
     KittyGraphics(Vec<u8>),
 }
 
+pub(crate) enum PendingApplication {
+    None,
+    Bytes(Vec<u8>),
+}
+
 pub(super) fn decode_action<'a>(
     vt52_mode: bool,
     vt52_cursor_addr: &mut Vt52CursorAddr,
@@ -228,7 +233,7 @@ pub(super) fn apply_execute(
 pub(super) fn apply_special_csi(
     terminal: &mut Terminal,
     special: SpecialCsi,
-) {
+) -> PendingApplication {
     match special {
         SpecialCsi::InvokeMacro(id) => invoke_macro(terminal, id),
         SpecialCsi::AssignDecColor { item, fg, bg } => {
@@ -242,12 +247,15 @@ pub(super) fn apply_special_csi(
                 fg,
                 bg,
             );
+            PendingApplication::None
         }
         SpecialCsi::AssignDecAlternateTextColor { item, fg, bg } => {
             dec_assign_alternate_text_color(&mut terminal.dec_color, item, fg, bg);
+            PendingApplication::None
         }
         SpecialCsi::SelectDecLookupTable(selection) => {
             dec_select_lookup_table(&mut terminal.dec_color, selection);
+            PendingApplication::None
         }
         SpecialCsi::ReportTerminalState => {
             write_terminal_state_report(
@@ -255,6 +263,7 @@ pub(super) fn apply_special_csi(
                 &mut terminal.output.pending_output,
                 terminal.modes.c1_mode,
             );
+            PendingApplication::None
         }
         SpecialCsi::ReportColorTable(space) => {
             write_color_table_report(
@@ -263,6 +272,7 @@ pub(super) fn apply_special_csi(
                 terminal.modes.c1_mode,
                 space,
             );
+            PendingApplication::None
         }
     }
 }
@@ -615,7 +625,7 @@ fn apply_dec_color_defaults(
 fn invoke_macro(
     terminal: &mut Terminal,
     id: u16,
-) {
+) -> PendingApplication {
     let enabled = crate::feature::macro_feature_enabled(
         &terminal.protocol.feature_permissions,
         terminal.protocol.foreground_processes.as_ref(),
@@ -626,11 +636,9 @@ fn invoke_macro(
         terminal.protocol.macro_invocation_depth,
         id,
     ) else {
-        return;
+        return PendingApplication::None;
     };
-    terminal.protocol.macro_invocation_depth += 1;
-    crate::feature::apply_macro_bytes(terminal, &bytes);
-    terminal.protocol.macro_invocation_depth -= 1;
+    PendingApplication::Bytes(bytes)
 }
 
 fn first_param(params: Params) -> u16 {

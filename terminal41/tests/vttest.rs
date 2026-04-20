@@ -1,15 +1,15 @@
 //! Integration tests that simulate vttest sequences through the full
-//! `Terminal::apply` path. Each test constructs a 80x24 terminal with
-//! a persistent VTE parser, feeds escape sequences, and inspects the
-//! grid to verify correct behavior.
+//! terminal byte-processing pipeline. Each test constructs an 80x24
+//! terminal with a persistent `TerminalProcessor`, feeds escape
+//! sequences, and inspects the grid to verify correct behavior.
 
 use terminal41::ColorPalette;
 use terminal41::FeaturePermissions;
 use terminal41::LineAttr;
 use terminal41::Terminal;
+use terminal41::TerminalProcessor;
 use terminal41::host;
 use terminal41::view;
-use vtepp::Parser;
 
 // ---------------------------------------------------------------------------
 // Test harness
@@ -17,7 +17,7 @@ use vtepp::Parser;
 
 struct VtTerm {
     terminal: Terminal,
-    parser: Parser,
+    processor: TerminalProcessor,
 }
 
 impl VtTerm {
@@ -37,7 +37,7 @@ impl VtTerm {
                 8,
                 ColorPalette::default(),
             ),
-            parser: Parser::new(),
+            processor: TerminalProcessor::new(),
         }
     }
 
@@ -49,9 +49,7 @@ impl VtTerm {
         &mut self,
         data: &[u8],
     ) {
-        for action in self.parser.parse(data) {
-            self.terminal.apply(action);
-        }
+        self.processor.process_bytes(&mut self.terminal, data);
     }
 
     fn pending_output(&mut self) -> Vec<u8> {

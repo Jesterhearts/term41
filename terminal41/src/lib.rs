@@ -21,6 +21,7 @@ mod lifecycle_ops;
 mod mode;
 mod osc;
 mod parser;
+mod processing;
 pub mod prompt;
 mod report;
 mod runtime;
@@ -79,6 +80,7 @@ pub use self::io::mouse::MouseModifiers;
 pub use self::io::mouse::MouseTracking;
 use self::io::mouse::encode_mouse_event;
 use self::io::mouse::should_report;
+pub use self::processing::TerminalProcessor;
 pub(crate) use self::report::deccir_report;
 pub(crate) use self::report::dectabsr_report;
 pub use self::screen::Screen;
@@ -543,158 +545,189 @@ impl Terminal {
     ///
     /// Hook/Put/Unhook (DCS accumulation) are handled by the terminal thread
     /// directly and should not be passed here.
-    pub fn apply(
+    #[must_use]
+    fn apply(
         &mut self,
         action: Action<'_>,
-    ) {
-        let popped_before: usize = self.active.grid.total_popped;
+    ) -> dispatch::PendingApplication {
         match dispatch::decode_action(self.modes.vt52_mode, &mut self.vt52_cursor_addr, action) {
-            DecodedAction::Ignore => {}
+            DecodedAction::Ignore => dispatch::PendingApplication::None,
             DecodedAction::Vt52CursorPosition {
                 row,
                 col,
                 trailing_ascii,
-            } => dispatch::apply_vt52_cursor_position(
-                &mut self.active,
-                &self.viewport,
-                self.modes.insert_mode,
-                row,
-                col,
-                trailing_ascii,
-            ),
-            DecodedAction::PrintAscii(run) => dispatch::apply_ascii_run(
-                &mut self.active,
-                &self.viewport,
-                self.modes.insert_mode,
-                run,
-            ),
-            DecodedAction::PrintText(run) => dispatch::apply_text_run(
-                &mut self.active,
-                &self.viewport,
-                self.modes.insert_mode,
-                run,
-            ),
-            DecodedAction::Print(text) => dispatch::apply_printable(
-                &mut self.active,
-                &self.viewport,
-                self.modes.insert_mode,
-                text,
-            ),
-            DecodedAction::Print8Bit(byte) => dispatch::apply_8bit_byte(
-                &mut self.active,
-                &self.viewport,
-                self.modes.insert_mode,
-                byte,
-            ),
-            DecodedAction::Execute(byte) => dispatch::apply_execute(
-                &mut self.active,
-                &self.viewport,
-                &mut self.output.bell_pending,
-                self.modes.newline_mode,
-                byte,
-            ),
+            } => {
+                dispatch::apply_vt52_cursor_position(
+                    &mut self.active,
+                    &self.viewport,
+                    self.modes.insert_mode,
+                    row,
+                    col,
+                    trailing_ascii,
+                );
+                dispatch::PendingApplication::None
+            }
+            DecodedAction::PrintAscii(run) => {
+                dispatch::apply_ascii_run(
+                    &mut self.active,
+                    &self.viewport,
+                    self.modes.insert_mode,
+                    run,
+                );
+                dispatch::PendingApplication::None
+            }
+            DecodedAction::PrintText(run) => {
+                dispatch::apply_text_run(
+                    &mut self.active,
+                    &self.viewport,
+                    self.modes.insert_mode,
+                    run,
+                );
+                dispatch::PendingApplication::None
+            }
+            DecodedAction::Print(text) => {
+                dispatch::apply_printable(
+                    &mut self.active,
+                    &self.viewport,
+                    self.modes.insert_mode,
+                    text,
+                );
+                dispatch::PendingApplication::None
+            }
+            DecodedAction::Print8Bit(byte) => {
+                dispatch::apply_8bit_byte(
+                    &mut self.active,
+                    &self.viewport,
+                    self.modes.insert_mode,
+                    byte,
+                );
+                dispatch::PendingApplication::None
+            }
+            DecodedAction::Execute(byte) => {
+                dispatch::apply_execute(
+                    &mut self.active,
+                    &self.viewport,
+                    &mut self.output.bell_pending,
+                    self.modes.newline_mode,
+                    byte,
+                );
+                dispatch::PendingApplication::None
+            }
             DecodedAction::SpecialCsi(special) => dispatch::apply_special_csi(self, special),
             DecodedAction::Csi {
                 params,
                 intermediates,
                 action,
-            } => dispatch::apply_csi(
-                &mut self.active,
-                &mut self.stash,
-                &mut self.viewport,
-                &mut self.on_alt_screen,
-                &mut self.modes,
-                &mut self.kitty_keyboard,
-                &mut self.output.pending_output,
-                &mut self.output.pending_host_resize,
-                &mut self.cursor_style,
-                self.cell_width,
-                self.cell_height,
-                &mut self.palette,
-                &self.base_palette,
-                &mut self.dec_color,
-                &mut self.default_status_display,
-                &mut self.metadata.title_stack,
-                &mut self.metadata.current_title,
-                &mut self.saved_private_modes,
-                &mut self.metadata.current_prompt_row,
-                &mut self.output.bell_pending,
-                &mut self.vt52_cursor_addr,
-                &mut self.protocol.macros,
-                &self.protocol.feature_permissions,
-                &self.protocol.foreground_processes,
-                &mut self.protocol.drcs,
-                &params,
-                intermediates.as_slice(),
-                action,
-            ),
+            } => {
+                dispatch::apply_csi(
+                    &mut self.active,
+                    &mut self.stash,
+                    &mut self.viewport,
+                    &mut self.on_alt_screen,
+                    &mut self.modes,
+                    &mut self.kitty_keyboard,
+                    &mut self.output.pending_output,
+                    &mut self.output.pending_host_resize,
+                    &mut self.cursor_style,
+                    self.cell_width,
+                    self.cell_height,
+                    &mut self.palette,
+                    &self.base_palette,
+                    &mut self.dec_color,
+                    &mut self.default_status_display,
+                    &mut self.metadata.title_stack,
+                    &mut self.metadata.current_title,
+                    &mut self.saved_private_modes,
+                    &mut self.metadata.current_prompt_row,
+                    &mut self.output.bell_pending,
+                    &mut self.vt52_cursor_addr,
+                    &mut self.protocol.macros,
+                    &self.protocol.feature_permissions,
+                    &self.protocol.foreground_processes,
+                    &mut self.protocol.drcs,
+                    &params,
+                    intermediates.as_slice(),
+                    action,
+                );
+                dispatch::PendingApplication::None
+            }
             DecodedAction::Esc {
                 intermediates,
                 byte,
-            } => dispatch::apply_esc(
-                &mut self.active,
-                &mut self.stash,
-                &mut self.viewport,
-                &mut self.on_alt_screen,
-                &mut self.modes,
-                &mut self.kitty_keyboard,
-                &mut self.cursor_style,
-                &mut self.metadata.current_title,
-                &mut self.metadata.title_stack,
-                &mut self.saved_private_modes,
-                &mut self.metadata.current_prompt_row,
-                &mut self.output.bell_pending,
-                &mut self.palette,
-                &self.base_palette,
-                &mut self.dec_color,
-                &mut self.default_status_display,
-                &mut self.output.pending_output,
-                &mut self.vt52_cursor_addr,
-                &mut self.protocol.macros,
-                &mut self.protocol.drcs,
-                intermediates.as_slice(),
-                byte,
-            ),
-            DecodedAction::Osc(data) => dispatch::apply_osc(
-                &mut self.clipboard,
-                &mut self.output.pending_output,
-                self.modes.c1_mode,
-                &mut self.metadata.current_directory,
-                &mut self.hyperlinks,
-                &mut self.active,
-                &self.viewport,
-                &mut self.metadata.current_title,
-                &mut self.metadata.current_prompt_row,
-                &mut self.metadata.command_metas,
-                &self.palette,
-                self.cell_width,
-                self.cell_height,
-                &data,
-            ),
-            DecodedAction::ItermGraphics(data) => dispatch::apply_iterm_graphics(
-                &mut self.images.iterm_chunked,
-                &mut self.active,
-                &self.viewport,
-                &mut self.images.next_image_id,
-                self.cell_height,
-                self.cell_width,
-                &data,
-            ),
-            DecodedAction::KittyGraphics(data) => dispatch::apply_kitty_graphics(
-                &mut self.images.kitty_images,
-                &mut self.images.kitty_chunked,
-                &mut self.active,
-                &self.viewport,
-                &mut self.images.next_image_id,
-                self.cell_height,
-                self.cell_width,
-                self.modes.c1_mode,
-                &mut self.output.pending_output,
-                &data,
-            ),
+            } => {
+                dispatch::apply_esc(
+                    &mut self.active,
+                    &mut self.stash,
+                    &mut self.viewport,
+                    &mut self.on_alt_screen,
+                    &mut self.modes,
+                    &mut self.kitty_keyboard,
+                    &mut self.cursor_style,
+                    &mut self.metadata.current_title,
+                    &mut self.metadata.title_stack,
+                    &mut self.saved_private_modes,
+                    &mut self.metadata.current_prompt_row,
+                    &mut self.output.bell_pending,
+                    &mut self.palette,
+                    &self.base_palette,
+                    &mut self.dec_color,
+                    &mut self.default_status_display,
+                    &mut self.output.pending_output,
+                    &mut self.vt52_cursor_addr,
+                    &mut self.protocol.macros,
+                    &mut self.protocol.drcs,
+                    intermediates.as_slice(),
+                    byte,
+                );
+                dispatch::PendingApplication::None
+            }
+            DecodedAction::Osc(data) => {
+                dispatch::apply_osc(
+                    &mut self.clipboard,
+                    &mut self.output.pending_output,
+                    self.modes.c1_mode,
+                    &mut self.metadata.current_directory,
+                    &mut self.hyperlinks,
+                    &mut self.active,
+                    &self.viewport,
+                    &mut self.metadata.current_title,
+                    &mut self.metadata.current_prompt_row,
+                    &mut self.metadata.command_metas,
+                    &self.palette,
+                    self.cell_width,
+                    self.cell_height,
+                    &data,
+                );
+                dispatch::PendingApplication::None
+            }
+            DecodedAction::ItermGraphics(data) => {
+                dispatch::apply_iterm_graphics(
+                    &mut self.images.iterm_chunked,
+                    &mut self.active,
+                    &self.viewport,
+                    &mut self.images.next_image_id,
+                    self.cell_height,
+                    self.cell_width,
+                    &data,
+                );
+                dispatch::PendingApplication::None
+            }
+            DecodedAction::KittyGraphics(data) => {
+                dispatch::apply_kitty_graphics(
+                    &mut self.images.kitty_images,
+                    &mut self.images.kitty_chunked,
+                    &mut self.active,
+                    &self.viewport,
+                    &mut self.images.next_image_id,
+                    self.cell_height,
+                    self.cell_width,
+                    self.modes.c1_mode,
+                    &mut self.output.pending_output,
+                    &data,
+                );
+                dispatch::PendingApplication::None
+            }
         }
-
-        self.track_scroll(popped_before);
     }
 
     /// Place a fully-decoded sixel image at the current cursor position.
@@ -841,19 +874,18 @@ mod tests {
     use clip41::ClipboardKind;
     use palette::Srgb;
     use pty_pipe41::ForegroundProgram;
-    use vtepp::Parser;
 
     use super::*;
     use crate::io::clipboard::paste;
     use crate::io::clipboard::paste_from_clipboard;
     use crate::selection::SelectionMode;
 
-    /// Test wrapper that bundles a `Terminal` with its own `Parser` so tests
-    /// can call `.process()` the same way as before the parser was extracted.
+    /// Test wrapper that bundles a `Terminal` with a byte processor so tests
+    /// can drive the same top-level input pipeline as production.
     /// Deref/DerefMut coerce to `&Terminal`/`&mut Terminal` transparently.
     struct TestTerm {
         inner: Terminal,
-        parser: Parser,
+        processor: TerminalProcessor,
     }
 
     impl TestTerm {
@@ -876,7 +908,7 @@ mod tests {
                     cell_w,
                     ColorPalette::default(),
                 ),
-                parser: Parser::new(),
+                processor: TerminalProcessor::new(),
             }
         }
 
@@ -900,7 +932,7 @@ mod tests {
                     cell_w,
                     ColorPalette::default(),
                 ),
-                parser: Parser::new(),
+                processor: TerminalProcessor::new(),
             }
         }
 
@@ -908,22 +940,7 @@ mod tests {
             &mut self,
             data: &[u8],
         ) {
-            let mut hooks: Vec<dcs::HookState> = vec![];
-            for action in self.parser.parse(data) {
-                match action {
-                    Action::Hook {
-                        params,
-                        intermediates,
-                        action,
-                    } => dcs::push_hook_state(&mut hooks, params, intermediates, action),
-                    Action::Put(chunk) => dcs::append_hook_bytes(&mut hooks, chunk),
-                    Action::Unhook => {
-                        let hook = hooks.pop().expect("hook bytes");
-                        dcs::dispatch_hook(hook, &mut self.inner);
-                    }
-                    action => self.inner.apply(action),
-                }
-            }
+            self.processor.process_bytes(&mut self.inner, data);
         }
 
         fn set_foreground_programs(

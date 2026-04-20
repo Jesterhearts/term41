@@ -3607,7 +3607,6 @@ mod preedit_tests {
     use terminal41::ColorPalette;
     use terminal41::FeaturePermissions;
     use terminal41::StatusDisplayKind;
-    use vtepp::Parser;
 
     use super::byte_range_to_char_range;
     use super::collect_row_glyphs;
@@ -3625,7 +3624,7 @@ mod preedit_tests {
             8,
             ColorPalette::default(),
         );
-        let mut parser = Parser::new();
+        let mut processor = terminal41::TerminalProcessor::new();
         let data = b"\r\n\x1b[1;1H\x1b[3g\
 \x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\
 \x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\
@@ -3646,9 +3645,7 @@ mod preedit_tests {
 \x1b[12;3H* The mad programmer strikes again * \
 \x1b[13;3H\t\x1b[6D* The mad programmer strikes again*\
 \x1b[0m";
-        for action in parser.parse(data) {
-            terminal.apply(action);
-        }
+        processor.process_bytes(&mut terminal, data);
         terminal
     }
 

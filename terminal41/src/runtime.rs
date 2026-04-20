@@ -13,8 +13,7 @@ pub(crate) fn run_terminal_thread(
     output_ready: Box<dyn Fn() + Send + Sync>,
     host_resize: Box<dyn Fn(u32, u32) + Send + Sync>,
 ) {
-    let mut parser = vtepp::Parser::new();
-    let mut hooks: Vec<dcs::HookState> = vec![];
+    let mut processor = TerminalProcessor::new();
     let mut buf = [0u8; MAX_READ_CHUNK];
 
     loop {
@@ -32,29 +31,11 @@ pub(crate) fn run_terminal_thread(
             trace!("Read {n} bytes from PTY, foreground processes: {foreground_processes:?}");
             tee_read(&buf[..n]);
 
-            settings::set_foreground_processes(
-                &mut terminal.lock().unwrap().protocol,
-                foreground_processes,
-            );
-            for action in parser.parse(&buf[..n]) {
-                match action {
-                    vtepp::Action::Hook {
-                        params,
-                        intermediates,
-                        action,
-                    } => dcs::push_hook_state(&mut hooks, params, intermediates, action),
-                    vtepp::Action::Put(bytes) => dcs::append_hook_bytes(&mut hooks, bytes),
-                    vtepp::Action::Unhook => {
-                        let hook = hooks.pop().unwrap();
-                        dcs::dispatch_hook(hook, &mut terminal.lock().unwrap());
-                    }
-                    action => {
-                        terminal.lock().unwrap().apply(action);
-                    }
-                }
-                if let Some((cols, rows)) =
-                    host::take_pending_host_resize(&mut terminal.lock().unwrap().output)
-                {
+            {
+                let mut terminal = terminal.lock().unwrap();
+                settings::set_foreground_processes(&mut terminal.protocol, foreground_processes);
+                processor.process_bytes(&mut terminal, &buf[..n]);
+                if let Some((cols, rows)) = host::take_pending_host_resize(&mut terminal.output) {
                     host_resize(cols, rows);
                 }
             }
