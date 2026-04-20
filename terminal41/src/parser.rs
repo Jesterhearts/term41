@@ -869,6 +869,29 @@ fn csi_dispatch_amp_intermediate(
     true
 }
 
+fn csi_dispatch_plus_intermediate(
+    ctx: &mut CsiContext<'_>,
+    params: &Params,
+    action: char,
+) -> bool {
+    if action != 'p' {
+        return false;
+    }
+    let confirmation_param = params
+        .iter()
+        .next()
+        .and_then(|group| group.first().copied());
+    apply_hard_reset_from_csi(ctx, ConformanceLevel::Level4, C1Mode::SevenBit);
+    if let Some(pr) = confirmation_param {
+        conformance::write_csi(
+            ctx.pending_output,
+            ctx.modes.c1_mode,
+            format_args!("{pr}*q"),
+        );
+    }
+    true
+}
+
 // C0 control bytes (ECMA-48 / ASCII).
 const NUL: u8 = 0x00;
 const BEL: u8 = 0x07;
@@ -1003,6 +1026,36 @@ fn apply_hard_reset_state(
 
 fn apply_hard_reset(
     ctx: &mut EscContext<'_>,
+    conformance_level: ConformanceLevel,
+    c1_mode: C1Mode,
+) {
+    apply_hard_reset_state(
+        ctx.screen,
+        ctx.stash,
+        ctx.viewport,
+        ctx.on_alt_screen,
+        ctx.modes,
+        ctx.kitty_keyboard,
+        ctx.cursor_style,
+        ctx.current_title,
+        ctx.title_stack,
+        ctx.saved_modes,
+        ctx.current_prompt_row,
+        ctx.bell_pending,
+        ctx.vt52_cursor_addr,
+        ctx.palette,
+        ctx.base_palette,
+        ctx.default_status_display,
+        ctx.dec_color,
+        ctx.macros,
+        ctx.drcs,
+        conformance_level,
+        c1_mode,
+    );
+}
+
+fn apply_hard_reset_from_csi(
+    ctx: &mut CsiContext<'_>,
     conformance_level: ConformanceLevel,
     c1_mode: C1Mode,
 ) {
@@ -2397,6 +2450,9 @@ pub(super) fn csi_dispatch(
             return;
         }
         b"&" if csi_dispatch_amp_intermediate(ctx, action) => {
+            return;
+        }
+        b"+" if csi_dispatch_plus_intermediate(ctx, params, action) => {
             return;
         }
         b">" | b"<" | b"="
@@ -4203,6 +4259,36 @@ mod tests {
             .map(|s| s.as_str().to_owned())
             .collect();
         assert_eq!(before, after);
+    }
+
+    // -- DECSR / DECSRC (CSI Pr + p / CSI Pr * q) -------------------------
+
+    #[test]
+    fn decsr_resets_screen_and_reports_confirmation() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"Hello\x1b[?7l", &mut screen, &mut viewport);
+        assert!(!screen.autowrap);
+        let out = feed_with_output(b"\x1b[123+p", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1b[123*q");
+        assert!(screen.autowrap);
+        let row = &screen.grid.rows[screen::active_row_index(&screen, &viewport)];
+        assert_eq!(row.cells[0].as_str(), " ");
+        assert_eq!(screen.cursor.row, 0);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    #[test]
+    fn decsr_without_parameter_does_not_report_confirmation() {
+        let (mut screen, mut viewport) = setup();
+        let out = feed_with_output(b"\x1b[+p", &mut screen, &mut viewport);
+        assert!(out.is_empty());
+    }
+
+    #[test]
+    fn decsr_confirmation_uses_reset_c1_mode() {
+        let (mut screen, mut viewport) = setup();
+        let out = feed_with_output(b"\x1b[64;2\"p\x1b[9+p", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1b[9*q");
     }
 
     // -- DECRQM (CSI ? Ps $ p) -----------------------------------------------

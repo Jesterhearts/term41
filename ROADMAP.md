@@ -172,12 +172,12 @@ Security:
 
 - `LOW`
 
-### [ ] 7. Reset, test, and state-report families
+### [x] 7. Reset, test, and state-report families
 
 Missing or incomplete:
 
 - [x] `DECTST`
-- [ ] `DECSR` / `DECSRC`
+- [x] `DECSR` / `DECSRC`
 - [x] `DECRPM`
 - [x] broader `DECRQSS`
 - [x] `DECRQPSR` / `DECCIR`
@@ -188,7 +188,9 @@ Why it matters:
 
 - A complete VT420/VT520 implementation needs more than DA/DSR. DEC terminals
   expose richer report, restore, and self-test behavior.
-- The remaining gap in this family is narrow now: `DECSR` / `DECSRC`.
+- `term41` now covers the VT420 reset/test/state-report family: `DECTST`,
+  `DECSR` / `DECSRC`, `DECRPM`, broader `DECRQSS`, `DECRQPSR` / `DECCIR`,
+  `DECRQTSR` / `DECRSTS`, and `DECRSPS`.
 
 Security:
 
