@@ -19,6 +19,7 @@ pub enum DemoId {
     Sgr,
     Charset,
     Drcs,
+    SixelLifecycle,
     LineAttrs,
     Tabs,
     CursorMarginsEdit,
@@ -36,6 +37,7 @@ pub enum DemoId {
 }
 
 const DRCS_SAMPLE_SCRIPT: &str = include_str!("../resources/icon.drcs");
+const SIXEL_SAMPLE: &str = include_str!("../resources/icon.six");
 const DEMO_STEP_PAUSE: Duration = Duration::from_millis(1200);
 
 type ReadReplyFn<'a> = dyn FnMut(Duration) -> io::Result<Vec<u8>> + 'a;
@@ -76,6 +78,14 @@ pub fn catalog() -> Vec<Demo> {
             summary: "Downloads a bundled soft character icon and prints it.",
             detail: "Exercises DECDLD plus SCS designation for downloadable soft characters.",
             id: DemoId::Drcs,
+        },
+        Demo {
+            title: "Sixel Lifecycle",
+            summary: "Draws a bundled sixel image, then exercises clear, alt-screen, and reset \
+                      cleanup.",
+            detail: "Exercises whether sixel images survive the transitions they should and get \
+                     dropped by the ones that are supposed to clear them.",
+            id: DemoId::SixelLifecycle,
         },
         Demo {
             title: "DEC Line Attributes",
@@ -190,6 +200,7 @@ pub fn run_demo(
         DemoId::Sgr => run_sgr_demo(out),
         DemoId::Charset => run_charset_demo(out),
         DemoId::Drcs => run_drcs_demo(out),
+        DemoId::SixelLifecycle => run_sixel_lifecycle_demo(out),
         DemoId::LineAttrs => run_line_attrs_demo(out),
         DemoId::Tabs => run_tabs_demo(out),
         DemoId::CursorMarginsEdit => run_cursor_margins_edit_demo(out),
@@ -442,6 +453,62 @@ fn run_charset_demo(out: &mut impl Write) -> io::Result<()> {
 fn run_drcs_demo(out: &mut impl Write) -> io::Result<()> {
     heading(out, "DRCS Soft Characters")?;
     write!(out, "{}", normalized_drcs_script(DRCS_SAMPLE_SCRIPT))?;
+    Ok(())
+}
+
+fn run_sixel_lifecycle_demo(out: &mut impl Write) -> io::Result<()> {
+    heading(out, "Sixel Lifecycle")?;
+    line(
+        out,
+        "Drawing the bundled sixel on the primary screen first.",
+    )?;
+    write!(out, "\x1b[4;4H{sixel}", sixel = SIXEL_SAMPLE)?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Switching to the alternate screen. Returning should restore the primary-screen image.",
+    )?;
+    present_step(out)?;
+    write!(out, "\x1b[?1049h")?;
+    write!(out, "\x1b[2J\x1b[H")?;
+    line(
+        out,
+        "The primary-screen sixel should be hidden while alt-screen content is active.",
+    )?;
+    present_step(out)?;
+    write!(out, "\x1b[?1049l")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "ED 2 should clear both the visible text and the sixel image.",
+    )?;
+    present_step(out)?;
+    clear_visible_screen(out)?;
+    heading(out, "Sixel Lifecycle")?;
+    line(
+        out,
+        "If ED 2 worked correctly, the earlier sixel should now be gone.",
+    )?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Redrawing the image now so RIS can prove it also drops sixels.",
+    )?;
+    write!(out, "\x1b[7;4H{sixel}", sixel = SIXEL_SAMPLE)?;
+    present_step(out)?;
+    write!(out, "\x1bc")?;
+    heading(out, "Sixel Lifecycle")?;
+    line(
+        out,
+        "RIS completed. The sixel should be gone and the terminal should be back in default state.",
+    )?;
+    out.flush()?;
     Ok(())
 }
 
