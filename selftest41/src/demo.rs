@@ -19,7 +19,10 @@ pub enum DemoId {
     Charset,
     Drcs,
     LineAttrs,
+    CursorMarginsEdit,
     Rectangles,
+    AltScreen,
+    OscShell,
     Vt525Color,
     StatusLine,
     Macros,
@@ -75,10 +78,31 @@ pub fn catalog() -> Vec<Demo> {
             id: DemoId::LineAttrs,
         },
         Demo {
+            title: "Cursor, Margins & Edit",
+            summary: "DECOM, DECLRMM, tab stops, IRM, ICH/DCH, and IL/DL.",
+            detail: "Exercises cursor-addressing modes, left/right margins, hardware tab stops, \
+                     insert mode, and editing controls on a live grid.",
+            id: DemoId::CursorMarginsEdit,
+        },
+        Demo {
             title: "Rectangular Ops",
             summary: "DECERA, DECFRA, DECCRA, DECSERA, DECCARA, DECRARA, and DECSACE.",
             detail: "Exercises the full VT420 rectangular-area family with visible mutations.",
             id: DemoId::Rectangles,
+        },
+        Demo {
+            title: "Primary vs Alt Screen",
+            summary: "Uses ?1049 to switch screens and shows state surviving the round-trip.",
+            detail: "Exercises primary/alternate screen separation, saved cursor behavior, and \
+                     visible content restoration.",
+            id: DemoId::AltScreen,
+        },
+        Demo {
+            title: "OSC & Shell Integration",
+            summary: "OSC 0/2 titles, OSC 7 cwd tracking, OSC 8 hyperlinks, and OSC 52 query.",
+            detail: "Exercises the OSC surfaces term41 supports without depending on the GUI \
+                     codepath.",
+            id: DemoId::OscShell,
         },
         Demo {
             title: "VT525 Colors",
@@ -131,7 +155,10 @@ pub fn run_demo(
         DemoId::Charset => run_charset_demo(out),
         DemoId::Drcs => run_drcs_demo(out),
         DemoId::LineAttrs => run_line_attrs_demo(out),
+        DemoId::CursorMarginsEdit => run_cursor_margins_edit_demo(out),
         DemoId::Rectangles => run_rectangles_demo(out),
+        DemoId::AltScreen => run_alt_screen_demo(out),
+        DemoId::OscShell => run_osc_shell_demo(out, read_reply),
         DemoId::Vt525Color => run_vt525_color_demo(out),
         DemoId::StatusLine => run_status_line_demo(out),
         DemoId::Macros => run_macro_demo(out, capabilities),
@@ -380,6 +407,36 @@ fn run_line_attrs_demo(out: &mut impl Write) -> io::Result<()> {
     Ok(())
 }
 
+fn run_cursor_margins_edit_demo(out: &mut impl Write) -> io::Result<()> {
+    heading(out, "Cursor, Margins & Edit Controls")?;
+    line(out, "Setting tab stop at column 12, then using CHT/CBT.")?;
+    write!(out, "\x1b[1;12H\x1bH")?;
+    write!(out, "\x1b[2;1Htab:\t<- HTS target")?;
+    write!(out, "\x1b[2;18H\x1b[1Z<- CBT")?;
+    blank(out)?;
+    line(out, "Testing insert mode and character insert/delete.")?;
+    write!(out, "\x1b[4;1Habcdef")?;
+    write!(out, "\x1b[4;3H\x1b[4hX\x1b[4l")?;
+    write!(out, "\x1b[5;1H123456")?;
+    write!(out, "\x1b[5;3H\x1b[2@<<\x1b[2P")?;
+    blank(out)?;
+    line(
+        out,
+        "Testing scroll region, origin mode, and left/right margins.",
+    )?;
+    write!(out, "\x1b[7;16r\x1b[?6h")?;
+    write!(out, "\x1b[1;1Horigin-relative top of region")?;
+    write!(out, "\x1b[?69h\x1b[10;30s")?;
+    write!(out, "\x1b[9;1Hleft/right margin mode active")?;
+    write!(out, "\x1b[10;1Hinside margins only")?;
+    write!(out, "\x1b[11;1Hline a\r\nline b\r\nline c")?;
+    write!(out, "\x1b[11;1H\x1b[1Linserted line")?;
+    write!(out, "\x1b[13;1H\x1b[1M")?;
+    write!(out, "\x1b[r\x1b[?6l\x1b[?69l")?;
+    out.flush()?;
+    Ok(())
+}
+
 fn run_rectangles_demo(out: &mut impl Write) -> io::Result<()> {
     heading(out, "VT420 Rectangular Operations")?;
     line(
@@ -396,6 +453,54 @@ fn run_rectangles_demo(out: &mut impl Write) -> io::Result<()> {
     write!(out, "\x1b[5;32;14;57;1;1;10;5;1$v")?;
     write!(out, "\x1b[1*x\x1b[5;32;14;57;1$r")?;
     out.flush()?;
+    Ok(())
+}
+
+fn run_alt_screen_demo(out: &mut impl Write) -> io::Result<()> {
+    heading(out, "Primary vs Alternate Screen")?;
+    line(
+        out,
+        "This text is on the primary screen before entering ?1049.",
+    )?;
+    write!(out, "\x1b7")?;
+    write!(out, "\r\nSwitching to alternate screen now...\r\n")?;
+    write!(out, "\x1b[?1049h")?;
+    write!(out, "\x1b[2J\x1b[H")?;
+    line(
+        out,
+        "Alternate screen content should replace the primary surface.",
+    )?;
+    line(out, "Returning to primary should restore the earlier text.")?;
+    write!(out, "\r\n\x1b[?1049l")?;
+    write!(out, "\r\nBack on the primary screen after 1049l.")?;
+    out.flush()?;
+    Ok(())
+}
+
+fn run_osc_shell_demo(
+    out: &mut impl Write,
+    read_reply: &mut ReadReplyFn<'_>,
+) -> io::Result<()> {
+    heading(out, "OSC & Shell Integration")?;
+    line(
+        out,
+        "Setting title via OSC 0 / OSC 2, then opening a hyperlink span.",
+    )?;
+    write!(out, "\x1b]0;selftest41 osc title\x07")?;
+    write!(out, "\x1b]2;selftest41 osc icon+title\x07")?;
+    write!(out, "\x1b]7;file://localhost/tmp/selftest41/demo\x07")?;
+    write!(out, "\x1b]8;;https://vt100.net/\x07")?;
+    line(out, "Clickable OSC 8 hyperlink to vt100.net")?;
+    write!(out, "\x1b]8;;\x07")?;
+    blank(out)?;
+    line(out, "Querying OSC 52 clipboard readback support.")?;
+    query_and_print(
+        out,
+        read_reply,
+        "  OSC 52 ?",
+        b"\x1b]52;c;?\x07",
+        Duration::from_millis(200),
+    )?;
     Ok(())
 }
 
