@@ -7,6 +7,7 @@ use terminal41::ColorPalette;
 use terminal41::FeaturePermissions;
 use terminal41::LineAttr;
 use terminal41::Terminal;
+use terminal41::view;
 use vtepp::Parser;
 
 // ---------------------------------------------------------------------------
@@ -60,7 +61,7 @@ impl VtTerm {
         &self,
         row: u32,
     ) -> String {
-        let r = self.terminal.visible_row(row);
+        let r = self.visible_row(row);
         let mut s = String::new();
         for cell in &r.cells {
             s.push_str(cell);
@@ -73,8 +74,15 @@ impl VtTerm {
         row: u32,
         col: u32,
     ) -> char {
-        let r = self.terminal.visible_row(row);
+        let r = self.visible_row(row);
         r.cells[col as usize].as_str().chars().next().unwrap_or(' ')
+    }
+
+    fn visible_row(
+        &self,
+        row: u32,
+    ) -> &terminal41::Row {
+        view::visible_row(&self.terminal.active, &self.terminal.viewport, row)
     }
 
     fn cursor(&self) -> (u32, u32) {
@@ -797,16 +805,10 @@ fn dec_line_attrs_set_and_clear() {
     // Row 5: reset to normal via ESC#5
     t.process(b"\x1b[6;1H\x1b#5");
 
-    assert_eq!(t.terminal.visible_row(2).line_attr, LineAttr::DoubleWidth);
-    assert_eq!(
-        t.terminal.visible_row(3).line_attr,
-        LineAttr::DoubleHeightTop
-    );
-    assert_eq!(
-        t.terminal.visible_row(4).line_attr,
-        LineAttr::DoubleHeightBottom
-    );
-    assert_eq!(t.terminal.visible_row(5).line_attr, LineAttr::Normal);
+    assert_eq!(t.visible_row(2).line_attr, LineAttr::DoubleWidth);
+    assert_eq!(t.visible_row(3).line_attr, LineAttr::DoubleHeightTop);
+    assert_eq!(t.visible_row(4).line_attr, LineAttr::DoubleHeightBottom);
+    assert_eq!(t.visible_row(5).line_attr, LineAttr::Normal);
 }
 
 /// ESC#3 on the top row followed immediately by ESC#4 on the next row
@@ -819,12 +821,12 @@ fn dec_double_height_pair_survives_write() {
     t.process(b"\x1b[5;1HThis is a Double-width-and-height line\x1b#4");
 
     assert_eq!(
-        t.terminal.visible_row(3).line_attr,
+        t.visible_row(3).line_attr,
         LineAttr::DoubleHeightTop,
         "row 3 should be DoubleHeightTop"
     );
     assert_eq!(
-        t.terminal.visible_row(4).line_attr,
+        t.visible_row(4).line_attr,
         LineAttr::DoubleHeightBottom,
         "row 4 should be DoubleHeightBottom"
     );
@@ -838,22 +840,10 @@ fn consecutive_double_height_pairs_keep_top_and_bottom_attrs() {
     t.process(b"\x1b[7;1HThis is another such line\x1b#3");
     t.process(b"\x1b[8;1HThis is another such line\x1b#4");
 
-    assert_eq!(
-        t.terminal.visible_row(3).line_attr,
-        LineAttr::DoubleHeightTop
-    );
-    assert_eq!(
-        t.terminal.visible_row(4).line_attr,
-        LineAttr::DoubleHeightBottom
-    );
-    assert_eq!(
-        t.terminal.visible_row(6).line_attr,
-        LineAttr::DoubleHeightTop
-    );
-    assert_eq!(
-        t.terminal.visible_row(7).line_attr,
-        LineAttr::DoubleHeightBottom
-    );
+    assert_eq!(t.visible_row(3).line_attr, LineAttr::DoubleHeightTop);
+    assert_eq!(t.visible_row(4).line_attr, LineAttr::DoubleHeightBottom);
+    assert_eq!(t.visible_row(6).line_attr, LineAttr::DoubleHeightTop);
+    assert_eq!(t.visible_row(7).line_attr, LineAttr::DoubleHeightBottom);
 }
 
 #[test]
@@ -862,14 +852,8 @@ fn vttest_double_height_row_keeps_line_attr_across_el2() {
     t.process(b"\x1b[14;2H\x1b#6\x1b#5\x1b#4\x1b#3\x1b[2KThis is another such line");
     t.process(b"\x1b[15;2H\x1b#6\x1b#5\x1b#3\x1b#4This is another such line");
 
-    assert_eq!(
-        t.terminal.visible_row(13).line_attr,
-        LineAttr::DoubleHeightTop
-    );
-    assert_eq!(
-        t.terminal.visible_row(14).line_attr,
-        LineAttr::DoubleHeightBottom
-    );
+    assert_eq!(t.visible_row(13).line_attr, LineAttr::DoubleHeightTop);
+    assert_eq!(t.visible_row(14).line_attr, LineAttr::DoubleHeightBottom);
 }
 
 #[test]
@@ -924,10 +908,10 @@ fn double_width_rows_use_half_width_cursor_addressing() {
 fn ed2_clears_double_width_row_state() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[5;1H\x1b#6wide");
-    assert_eq!(t.terminal.visible_row(4).line_attr, LineAttr::DoubleWidth);
+    assert_eq!(t.visible_row(4).line_attr, LineAttr::DoubleWidth);
 
     t.process(b"\x1b[2J");
 
-    assert_eq!(t.terminal.visible_row(4).line_attr, LineAttr::Normal);
+    assert_eq!(t.visible_row(4).line_attr, LineAttr::Normal);
     assert_eq!(t.row_text(4), " ".repeat(80));
 }

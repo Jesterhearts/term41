@@ -24,6 +24,7 @@ mod report;
 mod runtime;
 mod screen;
 pub mod selection;
+pub mod view;
 
 use std::collections::HashMap;
 use std::path::PathBuf;
@@ -630,6 +631,14 @@ impl Terminal {
         self.cell_height = cell_height;
     }
 
+    pub fn cell_width(&self) -> u32 {
+        self.cell_width
+    }
+
+    pub fn cell_height(&self) -> u32 {
+        self.cell_height
+    }
+
     /// Update the scrollback policy and immediately trim any history that
     /// exceeds the new cap. Trimming on update (not lazily on next push)
     /// makes the live-reload path feel responsive — the user shrinks the
@@ -657,39 +666,6 @@ impl Terminal {
             self.modes.focus_reporting,
             focused,
         );
-    }
-
-    pub fn total_rows(&self) -> u32 {
-        lifecycle_ops::total_rows(&self.active, &self.viewport)
-    }
-
-    pub fn status_line_visible(&self) -> bool {
-        lifecycle_ops::status_line_visible(&self.active)
-    }
-
-    pub fn status_display_kind(&self) -> StatusDisplayKind {
-        self.active.status_display
-    }
-
-    pub fn status_line_row(&self) -> Option<&Row> {
-        lifecycle_ops::status_line_row(&self.active)
-    }
-
-    pub fn indicator_status_text(&self) -> Option<String> {
-        (self.active.status_display == StatusDisplayKind::Indicator)
-            .then(|| {
-                prompt::format_indicator_status(
-                    self.metadata.current_directory.as_deref(),
-                    self.metadata.current_prompt_row,
-                    &self.metadata.command_metas,
-                    &self.active,
-                )
-            })
-            .filter(|text| !text.is_empty())
-    }
-
-    pub fn status_line_cursor_col(&self) -> Option<u32> {
-        lifecycle_ops::status_line_cursor_col(&self.active)
     }
 
     pub fn set_default_status_display(
@@ -757,86 +733,6 @@ impl Terminal {
             row,
             mods,
         )
-    }
-
-    /// Returns the visible row at the given screen position (0 = top of
-    /// viewport).
-    pub fn visible_row(
-        &self,
-        screen_row: u32,
-    ) -> &Row {
-        let base = selection::active_viewport(&self.active, &self.viewport)
-            .top_index(self.active.grid.rows.len());
-        &self.active.grid.rows[base + screen_row as usize]
-    }
-
-    /// Resolve the hyperlink target at the given viewport cell, or `None`
-    /// when the cell is not part of an OSC 8 span. Used by the click handler
-    /// to decide whether Ctrl+click should open something.
-    pub fn hyperlink_at(
-        &self,
-        screen_row: u32,
-        screen_col: u32,
-    ) -> Option<&str> {
-        if screen_row >= self.viewport.rows || screen_col >= self.viewport.cols {
-            return None;
-        }
-        let row = self.visible_row(screen_row);
-        let id = row.links.get(screen_col as usize).copied().flatten()?;
-        self.hyperlinks.get(id)
-    }
-
-    /// Scroll the viewport up (into history). Returns actual lines scrolled.
-    pub fn scroll_viewport_up(
-        &mut self,
-        lines: u32,
-    ) -> u32 {
-        lifecycle_ops::scroll_viewport_up(&mut self.active, &self.viewport, lines)
-    }
-
-    /// Move the viewport to the previous OSC 133 prompt (above the current
-    /// viewport top). No-op if none exists above or the active screen has
-    /// no shell-integration marks.
-    pub fn scroll_to_prev_prompt(&mut self) {
-        lifecycle_ops::scroll_to_prev_prompt(&mut self.active, &self.viewport)
-    }
-
-    /// Move the viewport to the next OSC 133 prompt (below the current
-    /// viewport top). No-op if none exists below — importantly, this
-    /// includes the case where the user is at the most recent prompt, so
-    /// repeated presses at the live prompt are silent rather than
-    /// flickering.
-    pub fn scroll_to_next_prompt(&mut self) {
-        lifecycle_ops::scroll_to_next_prompt(&mut self.active, &self.viewport)
-    }
-
-    /// Scroll the viewport down (toward live). Returns actual lines scrolled.
-    pub fn scroll_viewport_down(
-        &mut self,
-        lines: u32,
-    ) -> u32 {
-        lifecycle_ops::scroll_viewport_down(&mut self.active, lines)
-    }
-
-    /// Reset viewport to the bottom (live terminal).
-    pub fn reset_viewport(&mut self) {
-        lifecycle_ops::reset_viewport(&mut self.active)
-    }
-
-    /// Return images whose row range overlaps the current viewport, with
-    /// screen-relative row/col positions. `screen_row` is negative when the
-    /// image's top edge is above the viewport so the renderer can offset the
-    /// quad upward and let the GPU clip to the visible portion.
-    ///
-    /// `now` anchors the animation clock: each animated image's frame index
-    /// is chosen from `now - placed_at`. Passing the same `now` to every
-    /// visible image in a render pass keeps the whole frame temporally
-    /// consistent.
-    pub fn visible_images(
-        &self,
-        now: Instant,
-    ) -> impl Iterator<Item = VisibleImage<'_>> {
-        lifecycle_ops::visible_images(&self.active, &self.viewport, self.cell_height, now)
     }
 
     pub fn resize(
@@ -1481,6 +1377,113 @@ mod tests {
     impl std::ops::DerefMut for TestTerm {
         fn deref_mut(&mut self) -> &mut Terminal {
             &mut self.inner
+        }
+    }
+
+    trait ViewTestExt {
+        fn total_rows(&self) -> u32;
+        fn status_line_visible(&self) -> bool;
+        fn status_line_row(&self) -> Option<&Row>;
+        fn indicator_status_text(&self) -> Option<String>;
+        fn visible_row(
+            &self,
+            row: u32,
+        ) -> &Row;
+        fn hyperlink_at(
+            &self,
+            row: u32,
+            col: u32,
+        ) -> Option<&str>;
+        fn scroll_to_prev_prompt(&mut self);
+        fn scroll_to_next_prompt(&mut self);
+    }
+
+    impl ViewTestExt for Terminal {
+        fn total_rows(&self) -> u32 {
+            view::total_rows(&self.active, &self.viewport)
+        }
+
+        fn status_line_visible(&self) -> bool {
+            view::status_line_visible(&self.active)
+        }
+
+        fn status_line_row(&self) -> Option<&Row> {
+            view::status_line_row(&self.active)
+        }
+
+        fn indicator_status_text(&self) -> Option<String> {
+            view::indicator_status_text(&self.metadata, &self.active)
+        }
+
+        fn visible_row(
+            &self,
+            row: u32,
+        ) -> &Row {
+            view::visible_row(&self.active, &self.viewport, row)
+        }
+
+        fn hyperlink_at(
+            &self,
+            row: u32,
+            col: u32,
+        ) -> Option<&str> {
+            view::hyperlink_at(&self.active, &self.viewport, &self.hyperlinks, row, col)
+        }
+
+        fn scroll_to_prev_prompt(&mut self) {
+            let viewport = self.viewport;
+            view::scroll_to_prev_prompt(&mut self.active, &viewport)
+        }
+
+        fn scroll_to_next_prompt(&mut self) {
+            let viewport = self.viewport;
+            view::scroll_to_next_prompt(&mut self.active, &viewport)
+        }
+    }
+
+    impl<T> ViewTestExt for T
+    where
+        T: std::ops::Deref<Target = Terminal> + std::ops::DerefMut<Target = Terminal>,
+    {
+        fn total_rows(&self) -> u32 {
+            view::total_rows(&self.active, &self.viewport)
+        }
+
+        fn status_line_visible(&self) -> bool {
+            view::status_line_visible(&self.active)
+        }
+
+        fn status_line_row(&self) -> Option<&Row> {
+            view::status_line_row(&self.active)
+        }
+
+        fn indicator_status_text(&self) -> Option<String> {
+            view::indicator_status_text(&self.metadata, &self.active)
+        }
+
+        fn visible_row(
+            &self,
+            row: u32,
+        ) -> &Row {
+            view::visible_row(&self.active, &self.viewport, row)
+        }
+
+        fn hyperlink_at(
+            &self,
+            row: u32,
+            col: u32,
+        ) -> Option<&str> {
+            view::hyperlink_at(&self.active, &self.viewport, &self.hyperlinks, row, col)
+        }
+
+        fn scroll_to_prev_prompt(&mut self) {
+            let viewport = self.viewport;
+            view::scroll_to_prev_prompt(&mut self.active, &viewport)
+        }
+
+        fn scroll_to_next_prompt(&mut self) {
+            let viewport = self.viewport;
+            view::scroll_to_next_prompt(&mut self.active, &viewport)
         }
     }
 

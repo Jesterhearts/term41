@@ -18,6 +18,7 @@ use terminal41::selection::is_cell_active_match;
 use terminal41::selection::is_cell_match;
 use terminal41::selection::is_cell_selected;
 use terminal41::selection::search_state;
+use terminal41::view;
 use unicode_segmentation::UnicodeSegmentation;
 use wgpu::PowerPreference;
 use wgpu::util::DeviceExt;
@@ -461,14 +462,15 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
     let vp_rows = terminal.viewport.rows;
     let vp_cols = terminal.viewport.cols;
     let search_active = terminal.search_active();
-    let status_line_row = terminal.status_line_row().map(|_| vp_rows);
+    let status_line_row = view::status_line_row(&terminal.active).map(|_| vp_rows);
 
-    let mut rows = Vec::with_capacity(terminal.total_rows() as usize);
+    let mut rows =
+        Vec::with_capacity(view::total_rows(&terminal.active, &terminal.viewport) as usize);
     for row in 0..vp_rows {
         // When the search bar is open it overlays the last row, so we
         // still snapshot it (the bg still renders) but the caller can
         // decide to skip fg glyphs.
-        let grid_row = terminal.visible_row(row);
+        let grid_row = view::visible_row(&terminal.active, &terminal.viewport, row);
         let is_double = !matches!(grid_row.line_attr, LineAttr::Normal);
         let cols = if is_double { vp_cols / 2 } else { vp_cols };
 
@@ -529,7 +531,7 @@ pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
     });
 
     let cursor = if terminal.active.offset == 0 && terminal.active.cursor_visible {
-        if let Some(col) = terminal.status_line_cursor_col() {
+        if let Some(col) = view::status_line_cursor_col(&terminal.active) {
             Some((vp_rows, col))
         } else {
             Some((terminal.active.cursor.row, terminal.active.cursor.col))
@@ -558,10 +560,10 @@ fn snapshot_status_line_row(
     terminal: &Terminal,
     vp_cols: u32,
 ) -> Option<RowSnapshot> {
-    if let Some(text) = terminal.indicator_status_text() {
+    if let Some(text) = view::indicator_status_text(&terminal.metadata, &terminal.active) {
         return Some(status_line_text_row(&text, vp_cols, &terminal.palette));
     }
-    let grid_row = terminal.status_line_row()?;
+    let grid_row = view::status_line_row(&terminal.active)?;
     Some(RowSnapshot {
         cells: grid_row.cells.clone(),
         attrs: grid_row.attrs.clone(),
@@ -1363,7 +1365,12 @@ impl Renderer {
     ) -> ImageGeometry {
         let mut geometry = ImageGeometry::default();
         let now = std::time::Instant::now();
-        for vis in terminal.visible_images(now) {
+        for vis in view::visible_images(
+            &terminal.active,
+            &terminal.viewport,
+            terminal.cell_height(),
+            now,
+        ) {
             let entry = match self.image_atlas.ensure_cached(
                 &self.queue,
                 vis.id,

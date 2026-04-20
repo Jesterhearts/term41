@@ -49,6 +49,7 @@ use terminal41::selection::search_backspace;
 use terminal41::selection::search_step_next;
 use terminal41::selection::search_step_prev;
 use terminal41::selection::start_selection;
+use terminal41::view;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::Ime;
@@ -262,7 +263,10 @@ impl WindowHost {
             return;
         };
         let terminal = endpoint.terminal.lock().unwrap();
-        self.request_window_grid_size(terminal.viewport.cols, terminal.total_rows());
+        self.request_window_grid_size(
+            terminal.viewport.cols,
+            view::total_rows(&terminal.active, &terminal.viewport),
+        );
     }
 
     fn update_preedit(
@@ -420,7 +424,7 @@ impl WindowHost {
             return;
         }
         let _ = target.writer.borrow_mut().write(&pending);
-        target.terminal.lock().unwrap().reset_viewport();
+        view::reset_viewport(&mut target.terminal.lock().unwrap().active);
     }
 
     fn flush_tab_output(
@@ -512,13 +516,13 @@ impl WindowHost {
             Action::ScrollPageUp => {
                 let mut terminal = target.terminal.lock().unwrap();
                 let rows = terminal.viewport.rows;
-                terminal.scroll_viewport_up(rows);
+                view::scroll_viewport_up(&mut terminal.active, &terminal.viewport, rows);
                 true
             }
             Action::ScrollPageDown => {
                 let mut terminal = target.terminal.lock().unwrap();
                 let rows = terminal.viewport.rows;
-                terminal.scroll_viewport_down(rows);
+                view::scroll_viewport_down(&mut terminal.active, rows);
                 true
             }
             Action::Copy => {
@@ -554,11 +558,13 @@ impl WindowHost {
                 true
             }
             Action::ScrollPrevPrompt => {
-                target.terminal.lock().unwrap().scroll_to_prev_prompt();
+                let mut terminal = target.terminal.lock().unwrap();
+                view::scroll_to_prev_prompt(&mut terminal.active, &terminal.viewport);
                 true
             }
             Action::ScrollNextPrompt => {
-                target.terminal.lock().unwrap().scroll_to_next_prompt();
+                let mut terminal = target.terminal.lock().unwrap();
+                view::scroll_to_next_prompt(&mut terminal.active, &terminal.viewport);
                 true
             }
             Action::OpenNewWindow => {
@@ -638,7 +644,7 @@ impl WindowHost {
             (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
         };
         if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags, c1_mode) {
-            target.terminal.lock().unwrap().reset_viewport();
+            view::reset_viewport(&mut target.terminal.lock().unwrap().active);
             let _ = target.writer.borrow_mut().write(&bytes);
             self.notify_interaction_changed();
             return;
@@ -652,7 +658,7 @@ impl WindowHost {
             };
 
             if let Some(byte) = byte {
-                target.terminal.lock().unwrap().reset_viewport();
+                view::reset_viewport(&mut target.terminal.lock().unwrap().active);
                 if self.modifiers.alt_key() {
                     let _ = target.writer.borrow_mut().write(&[0x1b, byte]);
                 } else {
@@ -703,7 +709,7 @@ impl WindowHost {
         };
 
         if let Some(bytes) = bytes {
-            target.terminal.lock().unwrap().reset_viewport();
+            view::reset_viewport(&mut target.terminal.lock().unwrap().active);
             let _ = target.writer.borrow_mut().write(&bytes);
             self.notify_interaction_changed();
         }
@@ -728,7 +734,7 @@ impl WindowHost {
         } else {
             text.as_bytes().to_vec()
         };
-        target.terminal.lock().unwrap().reset_viewport();
+        view::reset_viewport(&mut target.terminal.lock().unwrap().active);
         let _ = target.writer.borrow_mut().write(&bytes);
         self.notify_interaction_changed();
     }
@@ -982,12 +988,10 @@ impl WindowHost {
                 if self.modifiers.control_key()
                     && let Some(target) = self.active_input_target()
                 {
-                    let url = target
-                        .terminal
-                        .lock()
-                        .unwrap()
-                        .hyperlink_at(row, col)
-                        .map(str::to_owned);
+                    let url = target.terminal.lock().unwrap();
+                    let url =
+                        view::hyperlink_at(&url.active, &url.viewport, &url.hyperlinks, row, col)
+                            .map(str::to_owned);
                     if let Some(url) = url {
                         if let Err(e) = open::that_detached(&url) {
                             warn!("failed to open hyperlink {url:?}: {e}");
@@ -1043,7 +1047,7 @@ impl WindowHost {
                         );
                         terminal.selection = None;
                     } else {
-                        terminal.reset_viewport();
+                        view::reset_viewport(&mut terminal.active);
                         paste_from_clipboard(
                             &mut terminal.clipboard,
                             &mut terminal.output.pending_output,
@@ -1137,9 +1141,13 @@ impl WindowHost {
         if let Some(target) = self.active_input_target() {
             let mut terminal = target.terminal.lock().unwrap();
             if y_lines < 0 {
-                terminal.scroll_viewport_up(y_lines.unsigned_abs());
+                view::scroll_viewport_up(
+                    &mut terminal.active,
+                    &terminal.viewport,
+                    y_lines.unsigned_abs(),
+                );
             } else if y_lines > 0 {
-                terminal.scroll_viewport_down(y_lines as u32);
+                view::scroll_viewport_down(&mut terminal.active, y_lines as u32);
             }
         }
         self.notify_interaction_changed();
@@ -1223,7 +1231,7 @@ impl WindowHost {
                 ) {
                     let cmd = cmd.trim().to_owned();
                     terminal.selection = None;
-                    terminal.reset_viewport();
+                    view::reset_viewport(&mut terminal.active);
                     paste(
                         &mut terminal.output.pending_output,
                         terminal.modes.c1_mode,
