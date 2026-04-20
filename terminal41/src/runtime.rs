@@ -52,7 +52,9 @@ pub(crate) fn run_terminal_thread(
                         terminal.lock().unwrap().apply(action);
                     }
                 }
-                if let Some((cols, rows)) = terminal.lock().unwrap().take_pending_host_resize() {
+                if let Some((cols, rows)) =
+                    host::take_pending_host_resize(&mut terminal.lock().unwrap().output)
+                {
                     host_resize(cols, rows);
                 }
             }

@@ -1,21 +1,5 @@
 use super::*;
 
-pub(crate) fn report_focus_change(
-    pending_output: &mut Vec<u8>,
-    c1_mode: C1Mode,
-    focus_reporting: bool,
-    focused: bool,
-) {
-    if !focus_reporting {
-        return;
-    }
-    conformance::write_csi(
-        pending_output,
-        c1_mode,
-        format_args!("{}", if focused { 'I' } else { 'O' }),
-    );
-}
-
 pub(crate) fn total_rows(
     screen: &Screen,
     viewport: &Viewport,
@@ -50,41 +34,6 @@ pub(crate) fn set_default_status_display(
     viewport.rows =
         feature::apply_status_display_mode(active, total_rows, cols, status_display, palette);
     feature::apply_status_display_mode(stash, total_rows, cols, status_display, palette);
-}
-
-pub(crate) fn take_pending_output(pending_output: &mut Vec<u8>) -> Vec<u8> {
-    std::mem::take(pending_output)
-}
-
-pub(crate) fn mouse_tracking_enabled(modes: &TerminalModes) -> bool {
-    !matches!(modes.mouse_tracking, MouseTracking::Off)
-}
-
-pub(crate) fn mouse_report(
-    pending_output: &mut Vec<u8>,
-    c1_mode: C1Mode,
-    mouse_tracking: MouseTracking,
-    mouse_encoding: MouseEncoding,
-    kind: MouseEventKind,
-    button: MouseButton,
-    col: u32,
-    row: u32,
-    mods: MouseModifiers,
-) -> bool {
-    if !should_report(mouse_tracking, kind, button) {
-        return false;
-    }
-    encode_mouse_event(
-        c1_mode,
-        mouse_encoding,
-        kind,
-        button,
-        col + 1,
-        row + 1,
-        mods,
-        pending_output,
-    );
-    true
 }
 
 pub(crate) fn scroll_viewport_up(
@@ -260,12 +209,6 @@ pub(crate) fn resize(
 
     viewport.cols = cols;
     viewport.rows = new_active_rows;
-}
-
-pub(crate) fn take_pending_host_resize(
-    pending_host_resize: &mut Option<(u32, u32)>
-) -> Option<(u32, u32)> {
-    pending_host_resize.take()
 }
 
 pub(crate) fn track_scroll(

@@ -373,6 +373,17 @@ pub fn close_search(
     search.active_idx = 0;
 }
 
+pub fn open_search(search: &mut SearchState) {
+    search.active = true;
+    search.query.clear();
+    search.matches.clear();
+    search.active_idx = 0;
+}
+
+pub fn search_active(search: &SearchState) -> bool {
+    search.active
+}
+
 pub fn search_state(search: &SearchState) -> Option<&SearchState> {
     if search.active { Some(search) } else { None }
 }

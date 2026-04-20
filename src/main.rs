@@ -31,6 +31,7 @@ use terminal41::MouseEventKind;
 use terminal41::MouseModifiers;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
+use terminal41::host;
 use terminal41::io::clipboard::copy_to_clipboard;
 use terminal41::io::clipboard::paste;
 use terminal41::io::clipboard::paste_from_clipboard;
@@ -44,6 +45,8 @@ use terminal41::selection::SelectionMode;
 use terminal41::selection::close_search;
 use terminal41::selection::copy_selection;
 use terminal41::selection::extend_selection;
+use terminal41::selection::open_search;
+use terminal41::selection::search_active;
 use terminal41::selection::search_append;
 use terminal41::selection::search_backspace;
 use terminal41::selection::search_step_next;
@@ -419,7 +422,7 @@ impl WindowHost {
         &self,
         target: &InputEndpoint,
     ) {
-        let pending = target.terminal.lock().unwrap().take_pending_output();
+        let pending = host::take_pending_output(&mut target.terminal.lock().unwrap().output);
         if pending.is_empty() {
             return;
         }
@@ -434,7 +437,7 @@ impl WindowHost {
         let Some(target) = self.input_endpoints.get(&tab_id) else {
             return;
         };
-        let pending = target.terminal.lock().unwrap().take_pending_output();
+        let pending = host::take_pending_output(&mut target.terminal.lock().unwrap().output);
         if pending.is_empty() {
             return;
         }
@@ -445,11 +448,17 @@ impl WindowHost {
         &mut self,
         focused: bool,
     ) {
-        let Some(target) = self.active_input_target() else {
-            return;
-        };
-        target.terminal.lock().unwrap().report_focus_change(focused);
-        self.flush_target_output(target);
+        {
+            let Some(target) = self.active_input_target() else {
+                return;
+            };
+            let mut terminal = target.terminal.lock().unwrap();
+            let c1_mode = terminal.modes.c1_mode;
+            let focus_reporting = terminal.modes.focus_reporting;
+            host::report_focus_change(&mut terminal.output, c1_mode, focus_reporting, focused);
+            drop(terminal);
+            self.flush_target_output(target);
+        }
         self.notify_interaction_changed();
     }
 
@@ -516,7 +525,8 @@ impl WindowHost {
             Action::ScrollPageUp => {
                 let mut terminal = target.terminal.lock().unwrap();
                 let rows = terminal.viewport.rows;
-                view::scroll_viewport_up(&mut terminal.active, &terminal.viewport, rows);
+                let viewport = terminal.viewport;
+                view::scroll_viewport_up(&mut terminal.active, &viewport, rows);
                 true
             }
             Action::ScrollPageDown => {
@@ -554,17 +564,19 @@ impl WindowHost {
                 true
             }
             Action::OpenSearch => {
-                target.terminal.lock().unwrap().open_search();
+                open_search(&mut target.terminal.lock().unwrap().search);
                 true
             }
             Action::ScrollPrevPrompt => {
                 let mut terminal = target.terminal.lock().unwrap();
-                view::scroll_to_prev_prompt(&mut terminal.active, &terminal.viewport);
+                let viewport = terminal.viewport;
+                view::scroll_to_prev_prompt(&mut terminal.active, &viewport);
                 true
             }
             Action::ScrollNextPrompt => {
                 let mut terminal = target.terminal.lock().unwrap();
-                view::scroll_to_next_prompt(&mut terminal.active, &terminal.viewport);
+                let viewport = terminal.viewport;
+                view::scroll_to_next_prompt(&mut terminal.active, &viewport);
                 true
             }
             Action::OpenNewWindow => {
@@ -616,12 +628,13 @@ impl WindowHost {
             return;
         }
 
-        if self.input_endpoints[&active_tab_id]
-            .terminal
-            .lock()
-            .unwrap()
-            .search_active()
-        {
+        if {
+            let terminal = self.input_endpoints[&active_tab_id]
+                .terminal
+                .lock()
+                .unwrap();
+            search_active(&terminal.search)
+        } {
             let target = &self.input_endpoints[&active_tab_id];
             self.handle_search_key(target, &key);
             self.notify_interaction_changed();
@@ -789,13 +802,22 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            target.terminal.lock().unwrap().mouse_report(
+            let mut terminal = target.terminal.lock().unwrap();
+            let c1_mode = terminal.modes.c1_mode;
+            let mouse_tracking = terminal.modes.mouse_tracking;
+            let mouse_encoding = terminal.modes.mouse_encoding;
+            host::mouse_report(
+                &mut terminal.output,
+                c1_mode,
+                mouse_tracking,
+                mouse_encoding,
                 MouseEventKind::Motion,
                 self.mouse_buttons.primary_held(),
                 cell.0,
                 cell.1,
                 self.mouse_modifiers(),
             );
+            drop(terminal);
             self.flush_target_output(target);
             self.notify_interaction_changed();
             return;
@@ -970,13 +992,22 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            target.terminal.lock().unwrap().mouse_report(
+            let mut terminal = target.terminal.lock().unwrap();
+            let c1_mode = terminal.modes.c1_mode;
+            let mouse_tracking = terminal.modes.mouse_tracking;
+            let mouse_encoding = terminal.modes.mouse_encoding;
+            host::mouse_report(
+                &mut terminal.output,
+                c1_mode,
+                mouse_tracking,
+                mouse_encoding,
                 kind,
                 term_button,
                 col,
                 row,
                 self.mouse_modifiers(),
             );
+            drop(terminal);
             self.flush_target_output(target);
             self.notify_interaction_changed();
             return;
@@ -1090,9 +1121,16 @@ impl WindowHost {
                 return;
             };
             let mut terminal = target.terminal.lock().unwrap();
+            let c1_mode = terminal.modes.c1_mode;
+            let mouse_tracking = terminal.modes.mouse_tracking;
+            let mouse_encoding = terminal.modes.mouse_encoding;
             if y_lines < 0 {
                 for _ in 0..y_lines.unsigned_abs() {
-                    terminal.mouse_report(
+                    host::mouse_report(
+                        &mut terminal.output,
+                        c1_mode,
+                        mouse_tracking,
+                        mouse_encoding,
                         MouseEventKind::Press,
                         TermMouseButton::WheelUp,
                         col,
@@ -1102,7 +1140,11 @@ impl WindowHost {
                 }
             } else if y_lines > 0 {
                 for _ in 0..y_lines as u32 {
-                    terminal.mouse_report(
+                    host::mouse_report(
+                        &mut terminal.output,
+                        c1_mode,
+                        mouse_tracking,
+                        mouse_encoding,
                         MouseEventKind::Press,
                         TermMouseButton::WheelDown,
                         col,
@@ -1113,7 +1155,11 @@ impl WindowHost {
             }
             if x_lines < 0 {
                 for _ in 0..x_lines.unsigned_abs() {
-                    terminal.mouse_report(
+                    host::mouse_report(
+                        &mut terminal.output,
+                        c1_mode,
+                        mouse_tracking,
+                        mouse_encoding,
                         MouseEventKind::Press,
                         TermMouseButton::WheelLeft,
                         col,
@@ -1123,7 +1169,11 @@ impl WindowHost {
                 }
             } else if x_lines > 0 {
                 for _ in 0..x_lines as u32 {
-                    terminal.mouse_report(
+                    host::mouse_report(
+                        &mut terminal.output,
+                        c1_mode,
+                        mouse_tracking,
+                        mouse_encoding,
                         MouseEventKind::Press,
                         TermMouseButton::WheelRight,
                         col,
@@ -1141,11 +1191,8 @@ impl WindowHost {
         if let Some(target) = self.active_input_target() {
             let mut terminal = target.terminal.lock().unwrap();
             if y_lines < 0 {
-                view::scroll_viewport_up(
-                    &mut terminal.active,
-                    &terminal.viewport,
-                    y_lines.unsigned_abs(),
-                );
+                let viewport = terminal.viewport;
+                view::scroll_viewport_up(&mut terminal.active, &viewport, y_lines.unsigned_abs());
             } else if y_lines > 0 {
                 view::scroll_viewport_down(&mut terminal.active, y_lines as u32);
             }
@@ -1291,7 +1338,8 @@ impl WindowHost {
 
     fn forward_mouse_to_app(&self) -> bool {
         self.active_input_target().is_some_and(|target| {
-            target.terminal.lock().unwrap().mouse_tracking_enabled() && !self.modifiers.shift_key()
+            host::mouse_tracking_enabled(target.terminal.lock().unwrap().modes.mouse_tracking)
+                && !self.modifiers.shift_key()
         })
     }
 

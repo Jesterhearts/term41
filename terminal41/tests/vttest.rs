@@ -7,6 +7,7 @@ use terminal41::ColorPalette;
 use terminal41::FeaturePermissions;
 use terminal41::LineAttr;
 use terminal41::Terminal;
+use terminal41::host;
 use terminal41::view;
 use vtepp::Parser;
 
@@ -54,7 +55,7 @@ impl VtTerm {
     }
 
     fn pending_output(&mut self) -> Vec<u8> {
-        self.terminal.take_pending_output()
+        host::take_pending_output(&mut self.terminal.output)
     }
 
     fn row_text(

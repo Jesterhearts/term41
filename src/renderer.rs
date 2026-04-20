@@ -25,6 +25,7 @@ use terminal41::KittyFlags;
 use terminal41::KittyKeys;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
+use terminal41::host;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
@@ -1041,11 +1042,8 @@ impl RenderHost {
             .position(|t| t.id == self.active_tab_id)
             .expect("active tab must exist");
 
-        let synced = self.tabs[active_idx]
-            .terminal
-            .lock()
-            .unwrap()
-            .is_synchronized_update_active();
+        let synced = self.tabs[active_idx].terminal.lock().unwrap();
+        let synced = host::synchronized_update_active(synced.modes.synchronized_update_since);
         if synced {
             return;
         }
@@ -1159,7 +1157,7 @@ impl RenderHost {
 
     fn dispatch_bell(&mut self) {
         if let Some(tab) = self.active_tab_mut()
-            && !tab.terminal.lock().unwrap().take_bell_pending()
+            && !host::take_bell_pending(&mut tab.terminal.lock().unwrap().output)
         {
             return;
         }

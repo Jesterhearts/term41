@@ -17,6 +17,7 @@ use terminal41::Terminal;
 use terminal41::selection::is_cell_active_match;
 use terminal41::selection::is_cell_match;
 use terminal41::selection::is_cell_selected;
+use terminal41::selection::search_active;
 use terminal41::selection::search_state;
 use terminal41::view;
 use unicode_segmentation::UnicodeSegmentation;
@@ -461,7 +462,7 @@ pub struct TermSnapshot {
 pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
     let vp_rows = terminal.viewport.rows;
     let vp_cols = terminal.viewport.cols;
-    let search_active = terminal.search_active();
+    let search_active = search_active(&terminal.search);
     let status_line_row = view::status_line_row(&terminal.active).map(|_| vp_rows);
 
     let mut rows =

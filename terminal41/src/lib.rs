@@ -13,6 +13,7 @@ mod dec;
 mod drcs;
 mod feature;
 mod graphics;
+pub mod host;
 mod image;
 pub mod io;
 mod lifecycle_ops;
@@ -462,23 +463,6 @@ impl Terminal {
         terminal
     }
 
-    /// Returns `true` when the foreground app has opened a synchronized
-    /// output window (mode 2026) that has not yet been closed or timed out.
-    /// The host should skip rendering while this returns `true` so partial
-    /// frames (e.g. mid-scroll, mid-reflow) are never presented.
-    pub fn is_synchronized_update_active(&self) -> bool {
-        self.modes
-            .synchronized_update_since
-            .is_some_and(|start| start.elapsed() < SYNCHRONIZED_UPDATE_TIMEOUT)
-    }
-
-    /// Drain the bell flag. Returns `true` exactly when at least one BEL
-    /// has arrived since the last call, leaving the flag cleared so the
-    /// next frame starts fresh.
-    pub fn take_bell_pending(&mut self) -> bool {
-        std::mem::replace(&mut self.output.bell_pending, false)
-    }
-
     /// Override the default cursor style. Called once at startup so the
     /// user's `config.toml` preference takes effect before any DECSCUSR
     /// arrives from the shell.
@@ -654,20 +638,6 @@ impl Terminal {
         feature::apply_scrollback_limit(&mut self.stash, &self.viewport, alt_limit);
     }
 
-    /// Queue a focus-in / focus-out report onto `pending_output` if focus
-    /// reporting is currently enabled. Safe to call unconditionally.
-    pub fn report_focus_change(
-        &mut self,
-        focused: bool,
-    ) {
-        lifecycle_ops::report_focus_change(
-            &mut self.output.pending_output,
-            self.modes.c1_mode,
-            self.modes.focus_reporting,
-            focused,
-        );
-    }
-
     pub fn set_default_status_display(
         &mut self,
         status_display: StatusDisplayKind,
@@ -682,57 +652,8 @@ impl Terminal {
         );
     }
 
-    /// Drain bytes the terminal itself has queued for the PTY (e.g. OSC 52
-    /// query responses). Called by the event loop after each `process` call.
-    pub fn take_pending_output(&mut self) -> Vec<u8> {
-        lifecycle_ops::take_pending_output(&mut self.output.pending_output)
-    }
-
-    /// Returns true if the app has requested any mouse tracking mode.
-    pub fn mouse_tracking_enabled(&self) -> bool {
-        lifecycle_ops::mouse_tracking_enabled(&self.modes)
-    }
-
     pub fn has_selection(&self) -> bool {
         self.selection.as_ref().is_some_and(|s| !s.is_empty())
-    }
-
-    pub fn open_search(&mut self) {
-        self.search.active = true;
-        self.search.query.clear();
-        self.search.matches.clear();
-        self.search.active_idx = 0;
-    }
-
-    pub fn search_active(&self) -> bool {
-        self.search.active
-    }
-
-    /// Report a mouse event to the foreground app. Returns true if an event
-    /// was emitted, false if the current tracking mode suppressed it (so the
-    /// caller knows it can handle the event locally instead — e.g. for
-    /// scrollback on wheel when tracking is off).
-    ///
-    /// `col` and `row` are 0-based cell coordinates within the viewport.
-    pub fn mouse_report(
-        &mut self,
-        kind: MouseEventKind,
-        button: MouseButton,
-        col: u32,
-        row: u32,
-        mods: MouseModifiers,
-    ) -> bool {
-        lifecycle_ops::mouse_report(
-            &mut self.output.pending_output,
-            self.modes.c1_mode,
-            self.modes.mouse_tracking,
-            self.modes.mouse_encoding,
-            kind,
-            button,
-            col,
-            row,
-            mods,
-        )
     }
 
     pub fn resize(
@@ -747,10 +668,6 @@ impl Terminal {
             cols,
             rows,
         )
-    }
-
-    pub fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
-        lifecycle_ops::take_pending_host_resize(&mut self.output.pending_host_resize)
     }
 
     /// Apply a single parsed VTE action to the terminal state. Called by the
@@ -1396,6 +1313,24 @@ mod tests {
         ) -> Option<&str>;
         fn scroll_to_prev_prompt(&mut self);
         fn scroll_to_next_prompt(&mut self);
+        fn is_synchronized_update_active(&self) -> bool;
+        fn take_bell_pending(&mut self) -> bool;
+        fn report_focus_change(
+            &mut self,
+            focused: bool,
+        );
+        fn take_pending_output(&mut self) -> Vec<u8>;
+        fn open_search(&mut self);
+        fn search_active(&self) -> bool;
+        fn mouse_report(
+            &mut self,
+            kind: MouseEventKind,
+            button: MouseButton,
+            col: u32,
+            row: u32,
+            mods: MouseModifiers,
+        ) -> bool;
+        fn take_pending_host_resize(&mut self) -> Option<(u32, u32)>;
     }
 
     impl ViewTestExt for Terminal {
@@ -1438,6 +1373,63 @@ mod tests {
         fn scroll_to_next_prompt(&mut self) {
             let viewport = self.viewport;
             view::scroll_to_next_prompt(&mut self.active, &viewport)
+        }
+
+        fn is_synchronized_update_active(&self) -> bool {
+            host::synchronized_update_active(self.modes.synchronized_update_since)
+        }
+
+        fn take_bell_pending(&mut self) -> bool {
+            host::take_bell_pending(&mut self.output)
+        }
+
+        fn report_focus_change(
+            &mut self,
+            focused: bool,
+        ) {
+            let c1_mode = self.modes.c1_mode;
+            let focus_reporting = self.modes.focus_reporting;
+            host::report_focus_change(&mut self.output, c1_mode, focus_reporting, focused)
+        }
+
+        fn take_pending_output(&mut self) -> Vec<u8> {
+            host::take_pending_output(&mut self.output)
+        }
+
+        fn open_search(&mut self) {
+            selection::open_search(&mut self.search)
+        }
+
+        fn search_active(&self) -> bool {
+            selection::search_active(&self.search)
+        }
+
+        fn mouse_report(
+            &mut self,
+            kind: MouseEventKind,
+            button: MouseButton,
+            col: u32,
+            row: u32,
+            mods: MouseModifiers,
+        ) -> bool {
+            let c1_mode = self.modes.c1_mode;
+            let mouse_tracking = self.modes.mouse_tracking;
+            let mouse_encoding = self.modes.mouse_encoding;
+            host::mouse_report(
+                &mut self.output,
+                c1_mode,
+                mouse_tracking,
+                mouse_encoding,
+                kind,
+                button,
+                col,
+                row,
+                mods,
+            )
+        }
+
+        fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
+            host::take_pending_host_resize(&mut self.output)
         }
     }
 
@@ -1484,6 +1476,63 @@ mod tests {
         fn scroll_to_next_prompt(&mut self) {
             let viewport = self.viewport;
             view::scroll_to_next_prompt(&mut self.active, &viewport)
+        }
+
+        fn is_synchronized_update_active(&self) -> bool {
+            host::synchronized_update_active(self.modes.synchronized_update_since)
+        }
+
+        fn take_bell_pending(&mut self) -> bool {
+            host::take_bell_pending(&mut self.output)
+        }
+
+        fn report_focus_change(
+            &mut self,
+            focused: bool,
+        ) {
+            let c1_mode = self.modes.c1_mode;
+            let focus_reporting = self.modes.focus_reporting;
+            host::report_focus_change(&mut self.output, c1_mode, focus_reporting, focused)
+        }
+
+        fn take_pending_output(&mut self) -> Vec<u8> {
+            host::take_pending_output(&mut self.output)
+        }
+
+        fn open_search(&mut self) {
+            selection::open_search(&mut self.search)
+        }
+
+        fn search_active(&self) -> bool {
+            selection::search_active(&self.search)
+        }
+
+        fn mouse_report(
+            &mut self,
+            kind: MouseEventKind,
+            button: MouseButton,
+            col: u32,
+            row: u32,
+            mods: MouseModifiers,
+        ) -> bool {
+            let c1_mode = self.modes.c1_mode;
+            let mouse_tracking = self.modes.mouse_tracking;
+            let mouse_encoding = self.modes.mouse_encoding;
+            host::mouse_report(
+                &mut self.output,
+                c1_mode,
+                mouse_tracking,
+                mouse_encoding,
+                kind,
+                button,
+                col,
+                row,
+                mods,
+            )
+        }
+
+        fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
+            host::take_pending_host_resize(&mut self.output)
         }
     }
 
