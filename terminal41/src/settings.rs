@@ -1,4 +1,6 @@
 use super::*;
+use crate::screen::palette_sync::apply_screen_palette;
+use crate::screen::palette_sync::sync_screen_erase_defaults;
 
 pub fn set_default_cursor_style(
     cursor_style: &mut CursorStyle,
