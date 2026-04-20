@@ -79,6 +79,9 @@ impl TerminalSession {
         demo_id: DemoId,
         capabilities: &CapabilityReport,
     ) -> io::Result<()> {
+        if demo_id == DemoId::PasteFocus {
+            return self.run_paste_focus_demo();
+        }
         self.suspend_tui()?;
         {
             let out = self.terminal.backend_mut();
@@ -89,6 +92,41 @@ impl TerminalSession {
         {
             let out = self.terminal.backend_mut();
             write!(out, "\x1bc")?;
+            out.flush()?;
+        }
+        self.resume_tui()
+    }
+
+    fn run_paste_focus_demo(&mut self) -> io::Result<()> {
+        self.suspend_tui()?;
+        {
+            let out = self.terminal.backend_mut();
+            render_paste_focus_demo(out, &[])?;
+            write!(out, "\x1b[?1004h\x1b[?2004h")?;
+            out.flush()?;
+        }
+
+        let mut chunks = Vec::new();
+        loop {
+            let bytes = read_reply_bytes(Duration::from_millis(250))?;
+            if !bytes.is_empty() {
+                if bytes == b"q" || bytes == b"Q" {
+                    break;
+                }
+                chunks.push(demo::format_bytes(&bytes));
+                if chunks.len() > 12 {
+                    let excess = chunks.len() - 12;
+                    chunks.drain(0..excess);
+                }
+                let out = self.terminal.backend_mut();
+                render_paste_focus_demo(out, &chunks)?;
+                out.flush()?;
+            }
+        }
+
+        {
+            let out = self.terminal.backend_mut();
+            write!(out, "\x1b[?2004l\x1b[?1004l\x1bc")?;
             out.flush()?;
         }
         self.resume_tui()
@@ -177,6 +215,32 @@ fn wait_for_keypress() -> io::Result<()> {
             _ => {}
         }
     }
+}
+
+fn render_paste_focus_demo(
+    out: &mut impl Write,
+    chunks: &[String],
+) -> io::Result<()> {
+    demo::clear_visible_screen(out)?;
+    write!(out, "\x1b[1mPaste & Focus\x1b[0m\r\n\r\n")?;
+    write!(
+        out,
+        "Focus reporting and bracketed paste are now enabled.\r\n"
+    )?;
+    write!(
+        out,
+        "Paste text, switch focus away and back, then inspect the raw bytes below.\r\n"
+    )?;
+    write!(out, "Press q to return to selftest41.\r\n\r\n")?;
+    write!(out, "Recent input chunks:\r\n")?;
+    if chunks.is_empty() {
+        write!(out, "  <nothing captured yet>\r\n")?;
+    } else {
+        for chunk in chunks {
+            write!(out, "  {chunk}\r\n")?;
+        }
+    }
+    Ok(())
 }
 
 fn collect_reply_bytes(

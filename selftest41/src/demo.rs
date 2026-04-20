@@ -22,6 +22,7 @@ pub enum DemoId {
     LineAttrs,
     CursorMarginsEdit,
     EraseProtection,
+    PasteFocus,
     Rectangles,
     AltScreen,
     OscShell,
@@ -93,6 +94,13 @@ pub fn catalog() -> Vec<Demo> {
             detail: "Shows the difference between normal erase and selective erase by mixing \
                      protected and unprotected text on the same rows.",
             id: DemoId::EraseProtection,
+        },
+        Demo {
+            title: "Paste & Focus",
+            summary: "Bracketed paste and focus in/out reporting, with raw byte capture.",
+            detail: "Enables focus reporting and bracketed paste, then shows the exact bytes \
+                     received from the terminal as you paste or switch focus.",
+            id: DemoId::PasteFocus,
         },
         Demo {
             title: "Rectangular Ops",
@@ -167,6 +175,7 @@ pub fn run_demo(
         DemoId::LineAttrs => run_line_attrs_demo(out),
         DemoId::CursorMarginsEdit => run_cursor_margins_edit_demo(out),
         DemoId::EraseProtection => run_erase_protection_demo(out),
+        DemoId::PasteFocus => run_paste_focus_placeholder(out),
         DemoId::Rectangles => run_rectangles_demo(out),
         DemoId::AltScreen => run_alt_screen_demo(out),
         DemoId::OscShell => run_osc_shell_demo(out, read_reply),
@@ -185,6 +194,10 @@ pub fn run_demo(
 
 fn clear_screen(out: &mut impl Write) -> io::Result<()> {
     write!(out, "\x1b[0m\x1b[2J\x1b[H\x1b[?25l")
+}
+
+pub(crate) fn clear_visible_screen(out: &mut impl Write) -> io::Result<()> {
+    write!(out, "\x1b[0m\x1b[2J\x1b[H")
 }
 
 fn heading(
@@ -233,6 +246,10 @@ fn format_reply(bytes: &[u8]) -> String {
         out.push_str(&ascii_escape(byte));
     }
     out
+}
+
+pub(crate) fn format_bytes(bytes: &[u8]) -> String {
+    format_reply(bytes)
 }
 
 fn ascii_escape(byte: u8) -> String {
@@ -503,6 +520,15 @@ fn run_erase_protection_demo(out: &mut impl Write) -> io::Result<()> {
     write!(out, "\x1b[5;1H")?;
     out.write_all(b"\x1b[?1J")?;
     out.flush()?;
+    Ok(())
+}
+
+fn run_paste_focus_placeholder(out: &mut impl Write) -> io::Result<()> {
+    heading(out, "Paste & Focus")?;
+    line(
+        out,
+        "This demo is handled by terminal_io because it needs a live raw-byte capture loop.",
+    )?;
     Ok(())
 }
 
