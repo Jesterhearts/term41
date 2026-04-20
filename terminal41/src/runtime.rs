@@ -32,10 +32,10 @@ pub(crate) fn run_terminal_thread(
             trace!("Read {n} bytes from PTY, foreground processes: {foreground_processes:?}");
             tee_read(&buf[..n]);
 
-            terminal
-                .lock()
-                .unwrap()
-                .set_foreground_processes(foreground_processes);
+            settings::set_foreground_processes(
+                &mut terminal.lock().unwrap().protocol,
+                foreground_processes,
+            );
             for action in parser.parse(&buf[..n]) {
                 match action {
                     vtepp::Action::Hook {

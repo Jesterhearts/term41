@@ -52,6 +52,7 @@ use terminal41::selection::search_backspace;
 use terminal41::selection::search_step_next;
 use terminal41::selection::search_step_prev;
 use terminal41::selection::start_selection;
+use terminal41::settings;
 use terminal41::view;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
@@ -1958,7 +1959,7 @@ fn main() {
         cell_width,
         config.palette.clone(),
     );
-    terminal.set_default_cursor_style(config.cursor_style);
+    settings::set_default_cursor_style(&mut terminal.cursor_style, config.cursor_style);
     let terminal = Arc::new(Mutex::new(terminal));
 
     terminal_thread.spawn(

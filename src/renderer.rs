@@ -26,6 +26,7 @@ use terminal41::KittyKeys;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
 use terminal41::host;
+use terminal41::settings;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
@@ -791,7 +792,10 @@ impl RenderHost {
             self.config.palette.clone(),
         );
         if let Some(tab) = self.active_tab() {
-            terminal.set_default_cursor_style(tab.terminal.lock().unwrap().cursor_style);
+            settings::set_default_cursor_style(
+                &mut terminal.cursor_style,
+                tab.terminal.lock().unwrap().cursor_style,
+            );
         }
 
         let terminal_thread = TerminalThread::new();
@@ -935,11 +939,46 @@ impl RenderHost {
 
         for tab in &mut self.tabs {
             let mut terminal = tab.terminal.lock().unwrap();
-            terminal.set_default_cursor_style(cfg.cursor_style);
-            terminal.set_default_status_display(cfg.status_line.display_kind());
-            terminal.set_scrollback_policy(cfg.scrollback_lines, cfg.strict_altscreen_scrollback);
-            terminal.set_feature_permissions(cfg.feature_permissions.clone());
-            terminal.set_palette(cfg.palette.clone());
+            let terminal = &mut *terminal;
+            let terminal41::Terminal {
+                active,
+                stash,
+                viewport,
+                cursor_style,
+                palette,
+                base_palette,
+                dec_color,
+                default_status_display,
+                strict_altscreen_scrollback,
+                protocol,
+                ..
+            } = terminal;
+            settings::set_default_cursor_style(cursor_style, cfg.cursor_style);
+            settings::set_default_status_display(
+                active,
+                stash,
+                viewport,
+                palette,
+                default_status_display,
+                cfg.status_line.display_kind(),
+            );
+            settings::set_scrollback_policy(
+                active,
+                stash,
+                viewport,
+                strict_altscreen_scrollback,
+                cfg.scrollback_lines,
+                cfg.strict_altscreen_scrollback,
+            );
+            settings::set_feature_permissions(protocol, cfg.feature_permissions.clone());
+            settings::set_palette(
+                active,
+                stash,
+                palette,
+                base_palette,
+                dec_color,
+                cfg.palette.clone(),
+            );
         }
         self.config.keybindings = cfg.keybindings;
         self.sync_input_state();
@@ -978,8 +1017,18 @@ impl RenderHost {
             }
             for tab in &self.tabs {
                 let mut terminal = tab.terminal.lock().unwrap();
-                terminal
-                    .set_cell_dimensions(self.font_system.cell_width, self.font_system.cell_height);
+                let terminal = &mut *terminal;
+                let terminal41::Terminal {
+                    cell_width,
+                    cell_height,
+                    ..
+                } = terminal;
+                settings::set_cell_dimensions(
+                    cell_width,
+                    cell_height,
+                    self.font_system.cell_width,
+                    self.font_system.cell_height,
+                );
             }
             self.recalculate_grid_size();
             self.config.fonts = cfg.fonts.clone();

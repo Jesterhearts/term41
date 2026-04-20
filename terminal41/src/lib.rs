@@ -25,6 +25,7 @@ mod report;
 mod runtime;
 mod screen;
 pub mod selection;
+pub mod settings;
 pub mod view;
 
 use std::collections::HashMap;
@@ -324,10 +325,10 @@ pub struct Terminal {
     pub on_alt_screen: bool,
 
     /// Cell height in pixels, used to convert sixel image pixel height to rows.
-    cell_height: u32,
+    pub cell_height: u32,
     /// Cell width in pixels. Stored for kitty display-sizing (`c=`/`r=` keys)
     /// once that path is wired up.
-    cell_width: u32,
+    pub cell_width: u32,
 
     /// System clipboard gateway. Shared between OSC 52 and mouse-driven
     /// copy/paste paths.
@@ -377,17 +378,17 @@ pub struct Terminal {
     /// Runtime color palette. Stored here so SGR resets, OSC color queries,
     /// and the renderer can all resolve themed colors.
     pub palette: ColorPalette,
-    base_palette: ColorPalette,
-    dec_color: DecColorState,
+    pub base_palette: ColorPalette,
+    pub dec_color: DecColorState,
 
     /// State machine for the VT52 `ESC Y Pr Pc` direct cursor address. After
     /// `ESC Y` is dispatched, the next 1–2 byte actions carry the row and
     /// column values. This field persists across `apply` calls so the state
     /// survives the per-action dispatch boundary.
     vt52_cursor_addr: Vt52CursorAddr,
-    default_status_display: StatusDisplayKind,
-    strict_altscreen_scrollback: bool,
-    pub(crate) protocol: TerminalProtocolState,
+    pub default_status_display: StatusDisplayKind,
+    pub strict_altscreen_scrollback: bool,
+    pub protocol: TerminalProtocolState,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -459,32 +460,23 @@ impl Terminal {
                 ..TerminalProtocolState::default()
             },
         };
-        terminal.set_default_status_display(default_status_display);
+        let Terminal {
+            active,
+            stash,
+            viewport,
+            palette,
+            default_status_display: current_default_status_display,
+            ..
+        } = &mut terminal;
+        settings::set_default_status_display(
+            active,
+            stash,
+            viewport,
+            palette,
+            current_default_status_display,
+            default_status_display,
+        );
         terminal
-    }
-
-    /// Override the default cursor style. Called once at startup so the
-    /// user's `config.toml` preference takes effect before any DECSCUSR
-    /// arrives from the shell.
-    pub fn set_default_cursor_style(
-        &mut self,
-        style: CursorStyle,
-    ) {
-        self.cursor_style = style;
-    }
-
-    pub fn set_palette(
-        &mut self,
-        palette: ColorPalette,
-    ) {
-        let old_palette = self.palette.clone();
-        rebase_theme_entries(&mut self.dec_color, &self.base_palette, &palette);
-        self.base_palette = palette;
-        self.palette = effective_palette(&self.base_palette, &self.dec_color);
-        for screen in [&mut self.active, &mut self.stash] {
-            apply_screen_palette(screen, &old_palette, &self.palette);
-            sync_screen_erase_defaults(screen, &self.dec_color);
-        }
     }
 
     fn assign_dec_color(
@@ -538,31 +530,8 @@ impl Terminal {
         }
     }
 
-    pub fn set_feature_permissions(
-        &mut self,
-        permissions: FeaturePermissions,
-    ) {
-        self.protocol.feature_permissions = permissions;
-    }
-
     pub fn dec_color_state(&self) -> &DecColorState {
         &self.dec_color
-    }
-
-    pub fn set_foreground_processes(
-        &mut self,
-        processes: Option<ForegroundProcessSet>,
-    ) {
-        if !self.protocol.foreground_processes_logged
-            || self.protocol.foreground_processes != processes
-        {
-            feature::log_foreground_process_probe(
-                &self.protocol.feature_permissions,
-                processes.as_ref(),
-            );
-            self.protocol.foreground_processes_logged = true;
-        }
-        self.protocol.foreground_processes = processes;
     }
 
     pub fn drcs_render_glyphs(&self) -> font41::DrcsGlyphMap {
@@ -606,50 +575,12 @@ impl Terminal {
         self.protocol.macro_invocation_depth -= 1;
     }
 
-    pub fn set_cell_dimensions(
-        &mut self,
-        cell_width: u32,
-        cell_height: u32,
-    ) {
-        self.cell_width = cell_width;
-        self.cell_height = cell_height;
-    }
-
     pub fn cell_width(&self) -> u32 {
         self.cell_width
     }
 
     pub fn cell_height(&self) -> u32 {
         self.cell_height
-    }
-
-    /// Update the scrollback policy and immediately trim any history that
-    /// exceeds the new cap. Trimming on update (not lazily on next push)
-    /// makes the live-reload path feel responsive — the user shrinks the
-    /// limit, the unwanted history goes away on the next render.
-    pub fn set_scrollback_policy(
-        &mut self,
-        limit: u32,
-        strict_altscreen_scrollback: bool,
-    ) {
-        self.strict_altscreen_scrollback = strict_altscreen_scrollback;
-        feature::apply_scrollback_limit(&mut self.active, &self.viewport, limit);
-        let alt_limit = feature::alt_scrollback_limit(limit, self.strict_altscreen_scrollback);
-        feature::apply_scrollback_limit(&mut self.stash, &self.viewport, alt_limit);
-    }
-
-    pub fn set_default_status_display(
-        &mut self,
-        status_display: StatusDisplayKind,
-    ) {
-        lifecycle_ops::set_default_status_display(
-            &mut self.active,
-            &mut self.stash,
-            &mut self.viewport,
-            &self.palette,
-            &mut self.default_status_display,
-            status_display,
-        );
     }
 
     pub fn has_selection(&self) -> bool {
@@ -1331,6 +1262,31 @@ mod tests {
             mods: MouseModifiers,
         ) -> bool;
         fn take_pending_host_resize(&mut self) -> Option<(u32, u32)>;
+        fn set_default_cursor_style(
+            &mut self,
+            style: CursorStyle,
+        );
+        fn set_palette(
+            &mut self,
+            palette: ColorPalette,
+        );
+        fn set_feature_permissions(
+            &mut self,
+            permissions: FeaturePermissions,
+        );
+        fn set_foreground_processes(
+            &mut self,
+            processes: Option<ForegroundProcessSet>,
+        );
+        fn set_scrollback_policy(
+            &mut self,
+            limit: u32,
+            strict_altscreen_scrollback: bool,
+        );
+        fn set_default_status_display(
+            &mut self,
+            status_display: StatusDisplayKind,
+        );
     }
 
     impl ViewTestExt for Terminal {
@@ -1430,6 +1386,93 @@ mod tests {
 
         fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
             host::take_pending_host_resize(&mut self.output)
+        }
+
+        fn set_default_cursor_style(
+            &mut self,
+            style: CursorStyle,
+        ) {
+            settings::set_default_cursor_style(&mut self.cursor_style, style)
+        }
+
+        fn set_palette(
+            &mut self,
+            palette: ColorPalette,
+        ) {
+            let Terminal {
+                active,
+                stash,
+                palette: current_palette,
+                base_palette,
+                dec_color,
+                ..
+            } = self;
+            settings::set_palette(
+                active,
+                stash,
+                current_palette,
+                base_palette,
+                dec_color,
+                palette,
+            )
+        }
+
+        fn set_feature_permissions(
+            &mut self,
+            permissions: FeaturePermissions,
+        ) {
+            settings::set_feature_permissions(&mut self.protocol, permissions)
+        }
+
+        fn set_foreground_processes(
+            &mut self,
+            processes: Option<ForegroundProcessSet>,
+        ) {
+            settings::set_foreground_processes(&mut self.protocol, processes)
+        }
+
+        fn set_scrollback_policy(
+            &mut self,
+            limit: u32,
+            strict_altscreen_scrollback: bool,
+        ) {
+            let Terminal {
+                active,
+                stash,
+                viewport,
+                strict_altscreen_scrollback: strict_flag,
+                ..
+            } = self;
+            settings::set_scrollback_policy(
+                active,
+                stash,
+                viewport,
+                strict_flag,
+                limit,
+                strict_altscreen_scrollback,
+            )
+        }
+
+        fn set_default_status_display(
+            &mut self,
+            status_display: StatusDisplayKind,
+        ) {
+            let Terminal {
+                active,
+                stash,
+                viewport,
+                palette,
+                default_status_display,
+                ..
+            } = self;
+            settings::set_default_status_display(
+                active,
+                stash,
+                viewport,
+                palette,
+                default_status_display,
+                status_display,
+            )
         }
     }
 
@@ -1533,6 +1576,93 @@ mod tests {
 
         fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
             host::take_pending_host_resize(&mut self.output)
+        }
+
+        fn set_default_cursor_style(
+            &mut self,
+            style: CursorStyle,
+        ) {
+            settings::set_default_cursor_style(&mut self.cursor_style, style)
+        }
+
+        fn set_palette(
+            &mut self,
+            palette: ColorPalette,
+        ) {
+            let Terminal {
+                active,
+                stash,
+                palette: current_palette,
+                base_palette,
+                dec_color,
+                ..
+            } = &mut **self;
+            settings::set_palette(
+                active,
+                stash,
+                current_palette,
+                base_palette,
+                dec_color,
+                palette,
+            )
+        }
+
+        fn set_feature_permissions(
+            &mut self,
+            permissions: FeaturePermissions,
+        ) {
+            settings::set_feature_permissions(&mut self.protocol, permissions)
+        }
+
+        fn set_foreground_processes(
+            &mut self,
+            processes: Option<ForegroundProcessSet>,
+        ) {
+            settings::set_foreground_processes(&mut self.protocol, processes)
+        }
+
+        fn set_scrollback_policy(
+            &mut self,
+            limit: u32,
+            strict_altscreen_scrollback: bool,
+        ) {
+            let Terminal {
+                active,
+                stash,
+                viewport,
+                strict_altscreen_scrollback: strict_flag,
+                ..
+            } = &mut **self;
+            settings::set_scrollback_policy(
+                active,
+                stash,
+                viewport,
+                strict_flag,
+                limit,
+                strict_altscreen_scrollback,
+            )
+        }
+
+        fn set_default_status_display(
+            &mut self,
+            status_display: StatusDisplayKind,
+        ) {
+            let Terminal {
+                active,
+                stash,
+                viewport,
+                palette,
+                default_status_display,
+                ..
+            } = &mut **self;
+            settings::set_default_status_display(
+                active,
+                stash,
+                viewport,
+                palette,
+                default_status_display,
+                status_display,
+            )
         }
     }
 
