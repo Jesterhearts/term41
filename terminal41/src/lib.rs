@@ -33,7 +33,6 @@ pub mod view;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -43,6 +42,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clip41::Clipboard;
+use parking_lot::Mutex;
 use pty_pipe41::ForegroundProcessSet;
 use pty_pipe41::MAX_READ_CHUNK;
 use pty_pipe41::PtyReader;
@@ -850,8 +850,7 @@ impl TerminalThread {
             return;
         }
 
-        let stop = Arc::new(AtomicBool::new(false));
-        let stop_ = stop.clone();
+        let stop = self.stop.clone();
         let handle_ = self.thread_handle.clone();
 
         thread::Builder::new()
@@ -863,7 +862,7 @@ impl TerminalThread {
                 runtime::run_terminal_thread(
                     terminal,
                     pty_reader,
-                    stop_,
+                    stop,
                     render_thread_handle,
                     startup_redraw,
                     tee_read,

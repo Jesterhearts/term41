@@ -1,7 +1,6 @@
 use std::num::NonZeroU64;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::MutexGuard;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -14,6 +13,7 @@ use terminal41::ColorPalette;
 use terminal41::CursorShape;
 use terminal41::LineAttr;
 use terminal41::Terminal;
+use terminal41::VisibleImage;
 use terminal41::selection::is_cell_active_match;
 use terminal41::selection::is_cell_match;
 use terminal41::selection::is_cell_selected;
@@ -1319,7 +1319,7 @@ impl Renderer {
         &mut self,
         acquired: (wgpu::SurfaceTexture, wgpu::TextureView),
         font_system: &mut FontSystem,
-        terminal: MutexGuard<'_, Terminal>,
+        visible_images: &[VisibleImage],
         snap: &TermSnapshot,
         tabs: &[TabInfo],
         controls: &WindowControls,
@@ -1328,8 +1328,7 @@ impl Renderer {
         preedit: Option<&crate::renderer::PreeditState>,
     ) {
         let layout = self.frame_layout(font_system, tabs);
-        let image_geometry = self.build_image_geometry(&terminal, &layout);
-        drop(terminal);
+        let image_geometry = self.build_image_geometry(visible_images, &layout);
         let geometry = self.build_render_geometry(
             font_system,
             snap,
@@ -1361,22 +1360,16 @@ impl Renderer {
 
     fn build_image_geometry(
         &mut self,
-        terminal: &Terminal,
+        visible_images: &[VisibleImage],
         layout: &FrameLayout,
     ) -> ImageGeometry {
         let mut geometry = ImageGeometry::default();
-        let now = std::time::Instant::now();
-        for vis in view::visible_images(
-            &terminal.active,
-            &terminal.viewport,
-            terminal.cell_height(),
-            now,
-        ) {
+        for vis in visible_images {
             let entry = match self.image_atlas.ensure_cached(
                 &self.queue,
                 vis.id,
                 vis.frame_index,
-                vis.image,
+                &vis.image,
             ) {
                 Some(e) => e,
                 None => continue,

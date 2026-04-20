@@ -133,12 +133,12 @@ pub(crate) fn reset_viewport(screen: &mut Screen) {
     screen.offset = 0;
 }
 
-pub(crate) fn visible_images<'a>(
-    screen: &'a Screen,
+pub(crate) fn visible_images(
+    screen: &Screen,
     viewport: &Viewport,
     cell_height: u32,
     now: Instant,
-) -> impl Iterator<Item = VisibleImage<'a>> {
+) -> impl Iterator<Item = VisibleImage> {
     let view = selection::active_viewport(screen, viewport);
     let viewport_top = view.top_index(screen.grid.rows.len());
     let viewport_bottom = viewport_top + view.rows as usize;
@@ -149,7 +149,7 @@ pub(crate) fn visible_images<'a>(
         if img.row < viewport_bottom && img_bottom > viewport_top {
             let elapsed = now.saturating_duration_since(img.placed_at);
             Some(VisibleImage {
-                image: &img.image,
+                image: img.image.clone(),
                 id: img.id,
                 screen_row: img.row as i32 - viewport_top as i32,
                 screen_col: img.col,

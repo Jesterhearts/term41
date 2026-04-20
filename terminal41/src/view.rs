@@ -115,11 +115,11 @@ pub fn reset_viewport(screen: &mut Screen) {
 }
 
 /// Iterate the images whose row range overlaps the current viewport.
-pub fn visible_images<'a>(
-    screen: &'a Screen,
+pub fn visible_images(
+    screen: &Screen,
     viewport: &Viewport,
     cell_height: u32,
     now: Instant,
-) -> impl Iterator<Item = VisibleImage<'a>> {
+) -> impl Iterator<Item = VisibleImage> {
     lifecycle_ops::visible_images(screen, viewport, cell_height, now)
 }

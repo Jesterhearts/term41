@@ -313,7 +313,7 @@ pub fn decode(data: &[u8]) -> Option<DecodedImage> {
     Some(DecodedImage {
         width,
         height,
-        frames,
+        frames: frames.into(),
     })
 }
 
@@ -584,7 +584,7 @@ mod tests {
         assert_eq!((img.width, img.height), (2, 1));
         assert_eq!(img.frames.len(), 2);
         // Each frame's GCE delay was 10 centiseconds = 100ms.
-        for f in &img.frames {
+        for f in img.frames.iter() {
             assert_eq!(f.delay, Duration::from_millis(100));
             // 2 pixels × 4 bytes (RGBA).
             assert_eq!(f.pixels.len(), 8);

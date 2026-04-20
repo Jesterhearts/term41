@@ -32,6 +32,7 @@ palette              = { version = "0.7.6", default-features = false, features =
   "named_from_str",
   "std",
 ] }
+parking_lot          = { version = "0.12.5" }
 png                  = "0.18.1"
 pty-pipe41           = { path = "pty-pipe41" }
 serde                = { version = "1.0.228", features = ["derive"] }
@@ -64,8 +65,9 @@ image41.workspace              = true
 infer.workspace                = true
 log.workspace                  = true
 notify                         = "8.2.0"
-open                           = "5.3.3"
+open                           = "5.3.4"
 palette.workspace              = true
+parking_lot.workspace          = true
 png.workspace                  = true
 pollster                       = "0.4.0"
 pty-pipe41.workspace           = true
@@ -100,6 +102,7 @@ criterion = { version = "0.8.2", default-features = false, features = [
 
 [features]
 default              = ["ffmpeg", "wayland-data-control"]
+deadlock-detection   = ["parking_lot/deadlock_detection"]
 # Pulls in ffmpeg-next so image protocols can decode formats outside the
 # built-in PNG path (animated GIF is the motivating case). Requires the
 # libav* dev packages on the host; leave off for lightweight builds.

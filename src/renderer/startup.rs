@@ -110,7 +110,7 @@ impl StartupPresenter {
         }
 
         let (title, snap, pending) = {
-            let mut terminal = target.terminal.lock().unwrap();
+            let mut terminal = target.terminal.lock();
             let title = terminal
                 .metadata
                 .current_title
@@ -522,7 +522,7 @@ fn paint_status_line_chrome(
 fn load_cached_background(path: &PathBuf) -> Option<CachedBackground> {
     let bytes = std::fs::read(path).ok()?;
     let decoded = decode_image(&bytes)?;
-    let frame = decoded.frames.into_iter().next()?;
+    let frame = decoded.frames.first()?.clone();
     Some(CachedBackground {
         width: decoded.width,
         height: decoded.height,

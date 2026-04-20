@@ -10,7 +10,6 @@ use std::cell::RefCell;
 use std::collections::HashMap;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -22,6 +21,7 @@ use std::time::Instant;
 use clip41::ClipboardKind;
 use config::Config;
 use font41::FontSystem;
+use parking_lot::Mutex;
 use pty_pipe41::Pty;
 use pty_pipe41::PtyWriter;
 use renderer::RenderHost;
@@ -228,7 +228,7 @@ impl WindowHost {
     }
 
     fn layout_snapshot(&self) -> (u32, u32, u32, usize) {
-        let state = self.input_state.lock().unwrap();
+        let state = self.input_state.lock();
         (
             state.cell_width,
             state.cell_height,
@@ -238,7 +238,7 @@ impl WindowHost {
     }
 
     fn keybindings(&self) -> Keybindings {
-        self.input_state.lock().unwrap().keybindings.clone()
+        self.input_state.lock().keybindings.clone()
     }
 
     fn request_window_grid_size(
@@ -266,7 +266,7 @@ impl WindowHost {
         let Some(endpoint) = self.input_endpoints.get(&tab_id) else {
             return;
         };
-        let terminal = endpoint.terminal.lock().unwrap();
+        let terminal = endpoint.terminal.lock();
         self.request_window_grid_size(
             terminal.viewport.cols,
             view::total_rows(&terminal.active, &terminal.viewport),
@@ -277,7 +277,7 @@ impl WindowHost {
         &mut self,
         preedit: Option<PreeditState>,
     ) {
-        self.input_state.lock().unwrap().preedit = preedit;
+        self.input_state.lock().preedit = preedit;
         self.notify_interaction_changed();
     }
 
@@ -285,21 +285,21 @@ impl WindowHost {
         &mut self,
         hovered_button: Option<u8>,
     ) {
-        self.input_state.lock().unwrap().hovered_button = hovered_button;
+        self.input_state.lock().hovered_button = hovered_button;
     }
 
     fn update_tab_context_menu(
         &mut self,
         menu: Option<TabContextMenu>,
     ) {
-        self.input_state.lock().unwrap().tab_context_menu = menu;
+        self.input_state.lock().tab_context_menu = menu;
     }
 
     fn update_gutter_popup(
         &mut self,
         popup: Option<renderer::GutterPopup>,
     ) {
-        self.input_state.lock().unwrap().gutter_popup = popup;
+        self.input_state.lock().gutter_popup = popup;
     }
 
     fn notify_interaction_changed(&mut self) {
@@ -318,7 +318,7 @@ impl WindowHost {
         &mut self,
         popup: Option<RecordingPopupView>,
     ) {
-        self.input_state.lock().unwrap().recording_popup = popup;
+        self.input_state.lock().recording_popup = popup;
         self.notify_interaction_changed();
     }
 
@@ -423,12 +423,12 @@ impl WindowHost {
         &self,
         target: &InputEndpoint,
     ) {
-        let pending = host::take_pending_output(&mut target.terminal.lock().unwrap().output);
+        let pending = host::take_pending_output(&mut target.terminal.lock().output);
         if pending.is_empty() {
             return;
         }
         let _ = target.writer.borrow_mut().write(&pending);
-        view::reset_viewport(&mut target.terminal.lock().unwrap().active);
+        view::reset_viewport(&mut target.terminal.lock().active);
     }
 
     fn flush_tab_output(
@@ -438,7 +438,7 @@ impl WindowHost {
         let Some(target) = self.input_endpoints.get(&tab_id) else {
             return;
         };
-        let pending = host::take_pending_output(&mut target.terminal.lock().unwrap().output);
+        let pending = host::take_pending_output(&mut target.terminal.lock().output);
         if pending.is_empty() {
             return;
         }
@@ -453,7 +453,7 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let mut terminal = target.terminal.lock().unwrap();
+            let mut terminal = target.terminal.lock();
             let c1_mode = terminal.modes.c1_mode;
             let focus_reporting = terminal.modes.focus_reporting;
             host::report_focus_change(&mut terminal.output, c1_mode, focus_reporting, focused);
@@ -469,7 +469,7 @@ impl WindowHost {
         key: &Key,
     ) {
         let shift = self.modifiers.shift_key();
-        let mut guard = target.terminal.lock().unwrap();
+        let mut guard = target.terminal.lock();
         let terminal = &mut *guard;
         match key {
             Key::Named(NamedKey::Escape) => {
@@ -524,20 +524,20 @@ impl WindowHost {
         };
         match action {
             Action::ScrollPageUp => {
-                let mut terminal = target.terminal.lock().unwrap();
+                let mut terminal = target.terminal.lock();
                 let rows = terminal.viewport.rows;
                 let viewport = terminal.viewport;
                 view::scroll_viewport_up(&mut terminal.active, &viewport, rows);
                 true
             }
             Action::ScrollPageDown => {
-                let mut terminal = target.terminal.lock().unwrap();
+                let mut terminal = target.terminal.lock();
                 let rows = terminal.viewport.rows;
                 view::scroll_viewport_down(&mut terminal.active, rows);
                 true
             }
             Action::Copy => {
-                let mut guard = target.terminal.lock().unwrap();
+                let mut guard = target.terminal.lock();
                 let terminal = &mut *guard;
                 if terminal.has_selection() {
                     copy_selection(
@@ -550,7 +550,7 @@ impl WindowHost {
                 true
             }
             Action::Paste => {
-                let mut guard = target.terminal.lock().unwrap();
+                let mut guard = target.terminal.lock();
                 let terminal = &mut *guard;
 
                 paste_from_clipboard(
@@ -565,29 +565,23 @@ impl WindowHost {
                 true
             }
             Action::OpenSearch => {
-                open_search(&mut target.terminal.lock().unwrap().search);
+                open_search(&mut target.terminal.lock().search);
                 true
             }
             Action::ScrollPrevPrompt => {
-                let mut terminal = target.terminal.lock().unwrap();
+                let mut terminal = target.terminal.lock();
                 let viewport = terminal.viewport;
                 view::scroll_to_prev_prompt(&mut terminal.active, &viewport);
                 true
             }
             Action::ScrollNextPrompt => {
-                let mut terminal = target.terminal.lock().unwrap();
+                let mut terminal = target.terminal.lock();
                 let viewport = terminal.viewport;
                 view::scroll_to_next_prompt(&mut terminal.active, &viewport);
                 true
             }
             Action::OpenNewWindow => {
-                let cwd = target
-                    .terminal
-                    .lock()
-                    .unwrap()
-                    .metadata
-                    .current_directory
-                    .clone();
+                let cwd = target.terminal.lock().metadata.current_directory.clone();
                 spawn_new_window(cwd);
                 true
             }
@@ -630,10 +624,7 @@ impl WindowHost {
         }
 
         let res = {
-            let terminal = self.input_endpoints[&active_tab_id]
-                .terminal
-                .lock()
-                .unwrap();
+            let terminal = self.input_endpoints[&active_tab_id].terminal.lock();
             search_active(&terminal.search)
         };
         if res {
@@ -655,11 +646,11 @@ impl WindowHost {
         let target = &self.input_endpoints[&active_tab_id];
 
         let (kitty_flags, c1_mode) = {
-            let terminal = target.terminal.lock().unwrap();
+            let terminal = target.terminal.lock();
             (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
         };
         if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags, c1_mode) {
-            view::reset_viewport(&mut target.terminal.lock().unwrap().active);
+            view::reset_viewport(&mut target.terminal.lock().active);
             let _ = target.writer.borrow_mut().write(&bytes);
             self.notify_interaction_changed();
             return;
@@ -673,7 +664,7 @@ impl WindowHost {
             };
 
             if let Some(byte) = byte {
-                view::reset_viewport(&mut target.terminal.lock().unwrap().active);
+                view::reset_viewport(&mut target.terminal.lock().active);
                 if self.modifiers.alt_key() {
                     let _ = target.writer.borrow_mut().write(&[0x1b, byte]);
                 } else {
@@ -685,7 +676,7 @@ impl WindowHost {
         }
 
         let (app_cursor_keys, app_keypad, c1_mode) = {
-            let terminal = target.terminal.lock().unwrap();
+            let terminal = target.terminal.lock();
             (
                 terminal.active.app_cursor_keys,
                 terminal.active.app_keypad,
@@ -724,7 +715,7 @@ impl WindowHost {
         };
 
         if let Some(bytes) = bytes {
-            view::reset_viewport(&mut target.terminal.lock().unwrap().active);
+            view::reset_viewport(&mut target.terminal.lock().active);
             let _ = target.writer.borrow_mut().write(&bytes);
             self.notify_interaction_changed();
         }
@@ -741,7 +732,7 @@ impl WindowHost {
             return;
         };
         let (flags, c1_mode) = {
-            let terminal = target.terminal.lock().unwrap();
+            let terminal = target.terminal.lock();
             (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
         };
         let bytes = if flags.contains(terminal41::KittyFlags::REPORT_ASSOCIATED_TEXT) {
@@ -749,7 +740,7 @@ impl WindowHost {
         } else {
             text.as_bytes().to_vec()
         };
-        view::reset_viewport(&mut target.terminal.lock().unwrap().active);
+        view::reset_viewport(&mut target.terminal.lock().active);
         let _ = target.writer.borrow_mut().write(&bytes);
         self.notify_interaction_changed();
     }
@@ -769,7 +760,7 @@ impl WindowHost {
 
         let hovered_menu_item = self.tab_menu_item_at(x, y).map(|(_, idx)| idx);
         {
-            let mut state = self.input_state.lock().unwrap();
+            let mut state = self.input_state.lock();
             if let Some(menu) = state.tab_context_menu.as_mut() {
                 menu.hovered_item = hovered_menu_item;
             }
@@ -804,7 +795,7 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let mut terminal = target.terminal.lock().unwrap();
+            let mut terminal = target.terminal.lock();
             let c1_mode = terminal.modes.c1_mode;
             let mouse_tracking = terminal.modes.mouse_tracking;
             let mouse_encoding = terminal.modes.mouse_encoding;
@@ -829,7 +820,7 @@ impl WindowHost {
             && let Some(target) = self.active_input_target()
         {
             {
-                let mut guard = target.terminal.lock().unwrap();
+                let mut guard = target.terminal.lock();
                 let terminal = &mut *guard;
                 if let Some(selection) = terminal.selection.as_ref()
                     && let Some(new_sel) = extend_selection(
@@ -927,7 +918,7 @@ impl WindowHost {
         }
 
         if pressed && button == MouseButton::Right && self.is_in_tab_bar() {
-            let has_menu = self.input_state.lock().unwrap().tab_context_menu.is_some();
+            let has_menu = self.input_state.lock().tab_context_menu.is_some();
             if has_menu {
                 self.update_tab_context_menu(None);
                 if let Some(w) = &self.window {
@@ -949,7 +940,7 @@ impl WindowHost {
 
         if pressed
             && button == MouseButton::Left
-            && self.input_state.lock().unwrap().tab_context_menu.is_some()
+            && self.input_state.lock().tab_context_menu.is_some()
         {
             if let Some((action, _)) = self.tab_menu_item_at(self.mouse_pos.0, self.mouse_pos.1) {
                 self.execute_tab_menu_action(action);
@@ -959,9 +950,7 @@ impl WindowHost {
             return;
         }
 
-        if pressed
-            && button == MouseButton::Left
-            && self.input_state.lock().unwrap().gutter_popup.is_some()
+        if pressed && button == MouseButton::Left && self.input_state.lock().gutter_popup.is_some()
         {
             if let Some(item) = self.popup_item_at(self.mouse_pos.0, self.mouse_pos.1) {
                 self.execute_popup_action(item);
@@ -994,7 +983,7 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let mut terminal = target.terminal.lock().unwrap();
+            let mut terminal = target.terminal.lock();
             let c1_mode = terminal.modes.c1_mode;
             let mouse_tracking = terminal.modes.mouse_tracking;
             let mouse_encoding = terminal.modes.mouse_encoding;
@@ -1021,7 +1010,7 @@ impl WindowHost {
                 if self.modifiers.control_key()
                     && let Some(target) = self.active_input_target()
                 {
-                    let url = target.terminal.lock().unwrap();
+                    let url = target.terminal.lock();
                     let url =
                         view::hyperlink_at(&url.active, &url.viewport, &url.hyperlinks, row, col)
                             .map(str::to_owned);
@@ -1041,7 +1030,7 @@ impl WindowHost {
                     _ => SelectionMode::Char,
                 };
                 if let Some(target) = self.active_input_target() {
-                    let mut target = target.terminal.lock().unwrap();
+                    let mut target = target.terminal.lock();
                     let target = &mut *target;
                     target.selection =
                         start_selection(&target.active, &target.viewport, col, row, mode);
@@ -1052,7 +1041,7 @@ impl WindowHost {
             (MouseButton::Left, false) => {
                 self.left_drag_active = false;
                 if let Some(target) = self.active_input_target() {
-                    let mut guard = target.terminal.lock().unwrap();
+                    let mut guard = target.terminal.lock();
                     let terminal = &mut *guard;
                     if terminal.has_selection() {
                         copy_selection(
@@ -1069,7 +1058,7 @@ impl WindowHost {
             }
             (MouseButton::Right, true) => {
                 if let Some(target) = self.active_input_target() {
-                    let mut guard = target.terminal.lock().unwrap();
+                    let mut guard = target.terminal.lock();
                     let terminal = &mut *guard;
                     if terminal.has_selection() {
                         copy_selection(
@@ -1122,7 +1111,7 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let mut terminal = target.terminal.lock().unwrap();
+            let mut terminal = target.terminal.lock();
             let c1_mode = terminal.modes.c1_mode;
             let mouse_tracking = terminal.modes.mouse_tracking;
             let mouse_encoding = terminal.modes.mouse_encoding;
@@ -1191,7 +1180,7 @@ impl WindowHost {
         }
 
         if let Some(target) = self.active_input_target() {
-            let mut terminal = target.terminal.lock().unwrap();
+            let mut terminal = target.terminal.lock();
             if y_lines < 0 {
                 let viewport = terminal.viewport;
                 view::scroll_viewport_up(&mut terminal.active, &viewport, y_lines.unsigned_abs());
@@ -1214,15 +1203,9 @@ impl WindowHost {
     }
 
     fn close_gutter_popup(&mut self) {
-        let had_popup = self
-            .input_state
-            .lock()
-            .unwrap()
-            .gutter_popup
-            .take()
-            .is_some();
+        let had_popup = self.input_state.lock().gutter_popup.take().is_some();
         if had_popup && let Some(target) = self.active_input_target() {
-            target.terminal.lock().unwrap().selection = None;
+            target.terminal.lock().selection = None;
         }
     }
 
@@ -1233,7 +1216,7 @@ impl WindowHost {
         let Some(target) = self.active_input_target() else {
             return;
         };
-        let mut guard = target.terminal.lock().unwrap();
+        let mut guard = target.terminal.lock();
         let terminal = &mut *guard;
         let Some(prompt_abs) =
             find_prompt_for_screen_row(&terminal.active, &terminal.viewport, screen_row)
@@ -1262,7 +1245,7 @@ impl WindowHost {
         &mut self,
         item_idx: usize,
     ) {
-        let popup = self.input_state.lock().unwrap().gutter_popup.take();
+        let popup = self.input_state.lock().gutter_popup.take();
         let Some(popup) = popup else {
             return;
         };
@@ -1271,7 +1254,7 @@ impl WindowHost {
         };
         match item_idx {
             0 => {
-                let mut guard = target.terminal.lock().unwrap();
+                let mut guard = target.terminal.lock();
                 let terminal = &mut *guard;
                 if let Some(cmd) = command_text_at(
                     popup.prompt_abs_row,
@@ -1292,7 +1275,7 @@ impl WindowHost {
                 self.flush_target_output(target);
             }
             1 => {
-                let mut guard = target.terminal.lock().unwrap();
+                let mut guard = target.terminal.lock();
                 let terminal = &mut *guard;
                 if let Some(text) = command_text_at(
                     popup.prompt_abs_row,
@@ -1304,7 +1287,7 @@ impl WindowHost {
                 terminal.selection = None;
             }
             2 => {
-                let mut terminal = target.terminal.lock().unwrap();
+                let mut terminal = target.terminal.lock();
                 if let Some(text) = command_and_output_text_at(
                     popup.prompt_abs_row,
                     &terminal.metadata.command_metas,
@@ -1315,7 +1298,7 @@ impl WindowHost {
                 terminal.selection = None;
             }
             3 => {
-                let mut terminal = target.terminal.lock().unwrap();
+                let mut terminal = target.terminal.lock();
                 if let Some(text) = output_text_at(
                     popup.prompt_abs_row,
                     &terminal.metadata.command_metas,
@@ -1340,7 +1323,7 @@ impl WindowHost {
 
     fn forward_mouse_to_app(&self) -> bool {
         self.active_input_target().is_some_and(|target| {
-            host::mouse_tracking_enabled(target.terminal.lock().unwrap().modes.mouse_tracking)
+            host::mouse_tracking_enabled(target.terminal.lock().modes.mouse_tracking)
                 && !self.modifiers.shift_key()
         })
     }
@@ -1373,7 +1356,7 @@ impl WindowHost {
         let Some(target) = self.active_input_target() else {
             return (0, 0);
         };
-        let terminal = target.terminal.lock().unwrap();
+        let terminal = target.terminal.lock();
         let cols = terminal.viewport.cols.saturating_sub(1);
         let rows = terminal.viewport.rows.saturating_sub(1);
         ((x / cell_w).min(cols), (y / cell_h).min(rows))
@@ -1461,7 +1444,7 @@ impl WindowHost {
         mx: f64,
         my: f64,
     ) -> Option<(TabMenuActionLocal, usize)> {
-        let state = self.input_state.lock().unwrap();
+        let state = self.input_state.lock();
         let menu = state.tab_context_menu.as_ref()?;
         let pw = state.cell_width as f32 * TAB_MENU_WIDTH_CELLS;
         let ph = 3.0 * state.cell_height as f32;
@@ -1492,7 +1475,7 @@ impl WindowHost {
         x: f64,
         y: f64,
     ) -> Option<usize> {
-        let state = self.input_state.lock().unwrap();
+        let state = self.input_state.lock();
         popup_item_at(
             state.gutter_popup.as_ref(),
             x,
@@ -1878,6 +1861,30 @@ fn main() {
         .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
         .with_span_events(FmtSpan::CLOSE)
         .init();
+
+    #[cfg(feature = "deadlock-detection")]
+    {
+        use parking_lot::deadlock;
+
+        thread::spawn(move || {
+            loop {
+                thread::sleep(Duration::from_secs(10));
+                let deadlocks = deadlock::check_deadlock();
+                if deadlocks.is_empty() {
+                    continue;
+                }
+
+                error!("{} deadlocks detected", deadlocks.len());
+                for (i, threads) in deadlocks.iter().enumerate() {
+                    error!("Deadlock #{}", i);
+                    for t in threads {
+                        error!("Thread Id {:#?}", t.thread_id());
+                        error!("{:#?}", t.backtrace());
+                    }
+                }
+            }
+        });
+    }
 
     let command = parse_command_args();
 

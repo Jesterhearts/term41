@@ -8,7 +8,6 @@ pub(crate) mod startup;
 
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::atomic::Ordering;
@@ -19,6 +18,7 @@ use std::time::Instant;
 
 use clip41::Clipboard;
 use font41::FontSystem;
+use parking_lot::Mutex;
 use pty_pipe41::Pty;
 use terminal41::C1Mode;
 use terminal41::KittyFlags;
@@ -140,7 +140,7 @@ fn resize_tab_to_grid(
     rows: u32,
 ) {
     let pty_rows = {
-        let mut terminal = tab.terminal.lock().unwrap();
+        let mut terminal = tab.terminal.lock();
         terminal.resize(cols, rows);
         terminal.viewport.rows
     };
@@ -414,7 +414,7 @@ impl RenderHost {
             return Some(FRAME_DURATION.saturating_sub(last_frame_duration));
         }
         let tab = self.active_tab()?;
-        let terminal = tab.terminal.lock().unwrap();
+        let terminal = tab.terminal.lock();
         if terminal.active.offset == 0
             && terminal.active.cursor_visible
             && terminal.cursor_style.blink
@@ -459,7 +459,7 @@ impl RenderHost {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let terminal = tab.terminal.lock().unwrap();
+        let terminal = tab.terminal.lock();
         // The compositor doesn't care about IME positioning when the user
         // has scrolled away from live output, and we don't want to signal
         // one — clear it so the popup doesn't stick to stale coordinates.
@@ -754,12 +754,7 @@ impl RenderHost {
         self.next_tab_id += 1;
 
         let cwd = if let Some(tab) = self.active_tab() {
-            tab.terminal
-                .lock()
-                .unwrap()
-                .metadata
-                .current_directory
-                .clone()
+            tab.terminal.lock().metadata.current_directory.clone()
         } else {
             Default::default()
         };
@@ -776,7 +771,7 @@ impl RenderHost {
         };
 
         let scrollback = if let Some(tab) = self.active_tab() {
-            tab.terminal.lock().unwrap().active.grid.scrollback_limit
+            tab.terminal.lock().active.grid.scrollback_limit
         } else {
             DEFAULT_SCROLLBACK
         };
@@ -794,7 +789,7 @@ impl RenderHost {
         if let Some(tab) = self.active_tab() {
             settings::set_default_cursor_style(
                 &mut terminal.cursor_style,
-                tab.terminal.lock().unwrap().cursor_style,
+                tab.terminal.lock().cursor_style,
             );
         }
 
@@ -938,7 +933,7 @@ impl RenderHost {
         let cfg = crate::config::load_from(path);
 
         for tab in &mut self.tabs {
-            let mut terminal = tab.terminal.lock().unwrap();
+            let mut terminal = tab.terminal.lock();
             let terminal = &mut *terminal;
             let terminal41::Terminal {
                 active,
@@ -1016,7 +1011,7 @@ impl RenderHost {
                 renderer.reset_glyph_atlas();
             }
             for tab in &self.tabs {
-                let mut terminal = tab.terminal.lock().unwrap();
+                let mut terminal = tab.terminal.lock();
                 let terminal = &mut *terminal;
                 let terminal41::Terminal {
                     cell_width,
@@ -1091,10 +1086,12 @@ impl RenderHost {
             .position(|t| t.id == self.active_tab_id)
             .expect("active tab must exist");
 
-        let synced = self.tabs[active_idx].terminal.lock().unwrap();
-        let synced = host::synchronized_update_active(synced.modes.synchronized_update_since);
-        if synced {
-            return;
+        {
+            let guard = self.tabs[active_idx].terminal.lock();
+            let synced = host::synchronized_update_active(guard.modes.synchronized_update_since);
+            if synced {
+                return;
+            }
         }
 
         // Collect owned tab titles under brief per-tab locks before
@@ -1107,7 +1104,6 @@ impl RenderHost {
                     let title = t
                         .terminal
                         .lock()
-                        .unwrap()
                         .metadata
                         .current_title
                         .clone()
@@ -1138,7 +1134,7 @@ impl RenderHost {
         };
 
         let (hovered_button, tab_context_menu, gutter_popup, recording_popup, preedit) = {
-            let input_state = self.input_state.lock().unwrap();
+            let input_state = self.input_state.lock();
             (
                 input_state.hovered_button,
                 input_state.tab_context_menu.clone(),
@@ -1157,16 +1153,23 @@ impl RenderHost {
 
         // Snapshot terminal state under a brief lock, then release it so
         // the terminal thread can continue processing PTY data while the
-        // renderer does shaping and glyph caching.
-        let (term, snap) = {
-            let terminal = self.tabs[active_idx].terminal.lock().unwrap();
+        // renderer does shaping, glyph caching, and image-atlas work.
+        let (snap, visible_images) = {
+            let terminal = self.tabs[active_idx].terminal.lock();
             let snap = r#impl::snapshot_terminal(&terminal);
-            (terminal, snap)
+            let visible_images = terminal41::view::visible_images(
+                &terminal.active,
+                &terminal.viewport,
+                terminal.cell_height(),
+                Instant::now(),
+            )
+            .collect::<Vec<_>>();
+            (snap, visible_images)
         };
         renderer.render(
             acquired,
             &mut self.font_system,
-            term,
+            &visible_images,
             &snap,
             &tab_infos,
             &controls,
@@ -1180,7 +1183,7 @@ impl RenderHost {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let base = tab.terminal.lock().unwrap().metadata.current_title.clone();
+        let base = tab.terminal.lock().metadata.current_title.clone();
         let want = if self.tabs.len() > 1 {
             let idx = self
                 .tabs
@@ -1206,7 +1209,7 @@ impl RenderHost {
 
     fn dispatch_bell(&mut self) {
         if let Some(tab) = self.active_tab_mut()
-            && !host::take_bell_pending(&mut tab.terminal.lock().unwrap().output)
+            && !host::take_bell_pending(&mut tab.terminal.lock().output)
         {
             return;
         }
@@ -1224,7 +1227,7 @@ impl RenderHost {
     }
 
     fn sync_input_state(&mut self) {
-        let mut input_state = self.input_state.lock().unwrap();
+        let mut input_state = self.input_state.lock();
         input_state.keybindings = self.config.keybindings.clone();
         input_state.tab_count = self.tabs.len();
         input_state.cell_width = self.font_system.cell_width;

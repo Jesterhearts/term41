@@ -4,8 +4,8 @@ use std::io::BufWriter;
 use std::io::Write;
 use std::path::PathBuf;
 use std::sync::Arc;
-use std::sync::Mutex;
 
+use parking_lot::Mutex;
 use time::OffsetDateTime;
 use time::format_description::FormatItem;
 use time::macros::format_description;
@@ -35,7 +35,7 @@ impl RecorderControl {
     }
 
     pub(crate) fn is_active(&self) -> bool {
-        self.state.lock().unwrap().active.is_some()
+        self.state.lock().active.is_some()
     }
 
     pub(crate) fn start(
@@ -47,7 +47,7 @@ impl RecorderControl {
             .ok_or_else(|| io::Error::other("recording path has no parent"))?;
         std::fs::create_dir_all(parent)?;
         let file = File::options().create_new(true).write(true).open(&path)?;
-        self.state.lock().unwrap().active = Some(ActiveRecorder {
+        self.state.lock().active = Some(ActiveRecorder {
             path,
             file: BufWriter::new(file),
         });
@@ -55,7 +55,7 @@ impl RecorderControl {
     }
 
     pub(crate) fn stop(&self) -> Option<PathBuf> {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let mut active = state.active.take()?;
         if let Err(e) = active.file.flush() {
             warn!("failed to flush recording {}: {e}", active.path.display());
@@ -67,7 +67,7 @@ impl RecorderControl {
         &self,
         bytes: &[u8],
     ) {
-        let mut state = self.state.lock().unwrap();
+        let mut state = self.state.lock();
         let Some(active) = state.active.as_mut() else {
             return;
         };

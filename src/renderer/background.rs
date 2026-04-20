@@ -166,7 +166,7 @@ impl Background {
                 return None;
             }
         };
-        let first = image.frames.into_iter().next()?;
+        let first = image.frames.first()?.clone();
         Some(Self::build(
             device,
             queue,

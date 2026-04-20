@@ -27,9 +27,9 @@ pub struct PlacedImage {
     pub placed_at: Instant,
 }
 
-/// A reference to an image visible in the current viewport.
-pub struct VisibleImage<'a> {
-    pub image: &'a DecodedImage,
+/// A snapshot of an image visible in the current viewport.
+pub struct VisibleImage {
+    pub image: DecodedImage,
     pub id: u64,
     /// Row of the image's top edge relative to the top of the viewport.
     /// Negative when the image's top is scrolled above the viewport; the

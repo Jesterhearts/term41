@@ -472,21 +472,6 @@ fn process_group_for_pid(pid: libc::pid_t) -> Option<libc::pid_t> {
     fields.next()?.parse().ok()
 }
 
-#[cfg(test)]
-mod tests {
-    #[cfg(target_os = "linux")]
-    #[test]
-    fn process_group_parser_skips_ppid_field() {
-        let stat = "1234 (selftest41) S 4321 5678 5678 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
-        let after_comm = stat.rsplit_once(") ").unwrap().1;
-        let mut fields = after_comm.split_ascii_whitespace();
-        let _state = fields.next().unwrap();
-        let _ppid = fields.next().unwrap();
-        let pgrp: libc::pid_t = fields.next().unwrap().parse().unwrap();
-        assert_eq!(pgrp, 5678);
-    }
-}
-
 #[cfg(target_os = "macos")]
 fn list_process_group_members(pgrp: libc::pid_t) -> Option<Vec<libc::pid_t>> {
     let count = unsafe { libc::proc_listpgrppids(pgrp, std::ptr::null_mut(), 0) };
@@ -520,4 +505,19 @@ fn executable_path_for_pid(pid: libc::pid_t) -> Option<PathBuf> {
     }
     path.truncate(written as usize);
     Some(PathBuf::from(std::ffi::OsString::from_vec(path)))
+}
+
+#[cfg(test)]
+mod tests {
+    #[cfg(target_os = "linux")]
+    #[test]
+    fn process_group_parser_skips_ppid_field() {
+        let stat = "1234 (selftest41) S 4321 5678 5678 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0 0";
+        let after_comm = stat.rsplit_once(") ").unwrap().1;
+        let mut fields = after_comm.split_ascii_whitespace();
+        let _state = fields.next().unwrap();
+        let _ppid = fields.next().unwrap();
+        let pgrp: libc::pid_t = fields.next().unwrap().parse().unwrap();
+        assert_eq!(pgrp, 5678);
+    }
 }

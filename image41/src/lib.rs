@@ -7,6 +7,7 @@ pub mod sixel;
 #[cfg(feature = "ffmpeg")]
 pub mod ffmpeg_decoder;
 
+use std::sync::Arc;
 use std::time::Duration;
 
 #[macro_use]
@@ -27,7 +28,7 @@ pub struct Frame {
 pub struct DecodedImage {
     pub width: u32,
     pub height: u32,
-    pub frames: Vec<Frame>,
+    pub frames: Arc<[Frame]>,
 }
 
 impl DecodedImage {
@@ -41,10 +42,10 @@ impl DecodedImage {
         Self {
             width,
             height,
-            frames: vec![Frame {
+            frames: Arc::from([Frame {
                 pixels,
                 delay: Duration::ZERO,
-            }],
+            }]),
         }
     }
 
@@ -187,7 +188,7 @@ mod tests {
         let img = DecodedImage {
             width: 1,
             height: 1,
-            frames: vec![frame(100), frame(200), frame(50)],
+            frames: vec![frame(100), frame(200), frame(50)].into(),
         };
         // Cycle = 350ms. Frame boundaries at [0..100), [100..300), [300..350).
         assert_eq!(img.frame_at(Duration::from_millis(0)), 0);
@@ -203,7 +204,7 @@ mod tests {
         let img = DecodedImage {
             width: 1,
             height: 1,
-            frames: vec![frame(100), frame(100)],
+            frames: vec![frame(100), frame(100)].into(),
         };
         // Cycle = 200ms. Elapsed 450ms → phase 50ms → frame 0.
         assert_eq!(img.frame_at(Duration::from_millis(450)), 0);
@@ -216,7 +217,7 @@ mod tests {
         let img = DecodedImage {
             width: 1,
             height: 1,
-            frames: vec![frame(0), frame(0)],
+            frames: vec![frame(0), frame(0)].into(),
         };
         // Every frame having zero delay would divide-by-zero if we tried
         // modulo. `frame_at` has to be defensive and pick a stable frame.

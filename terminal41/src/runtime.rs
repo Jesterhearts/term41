@@ -31,13 +31,14 @@ pub(crate) fn run_terminal_thread(
             trace!("Read {n} bytes from PTY, foreground processes: {foreground_processes:?}");
             tee_read(&buf[..n]);
 
-            {
-                let mut terminal = terminal.lock().unwrap();
+            let pending_host_resize = {
+                let mut terminal = terminal.lock();
                 settings::set_foreground_processes(&mut terminal.protocol, foreground_processes);
                 processor.process_bytes(&mut terminal, &buf[..n]);
-                if let Some((cols, rows)) = host::take_pending_host_resize(&mut terminal.output) {
-                    host_resize(cols, rows);
-                }
+                host::take_pending_host_resize(&mut terminal.output)
+            };
+            if let Some((cols, rows)) = pending_host_resize {
+                host_resize(cols, rows);
             }
             if terminal_batch_budget_exhausted(batch_start) {
                 hit_budget = true;
