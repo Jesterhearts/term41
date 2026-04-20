@@ -10,6 +10,7 @@ mod conformance;
 mod cursor;
 mod dcs;
 mod dec;
+mod dispatch;
 mod drcs;
 mod feature;
 mod graphics;
@@ -61,6 +62,8 @@ pub use self::dec::color::select_lookup_table as dec_select_lookup_table;
 pub use self::dec::color::state_from_palette as dec_color_state_from_palette;
 pub use self::dec::color::table_color as dec_table_color;
 use self::dec::r#macro::MacroStore;
+use self::dispatch::DecodedAction;
+use self::dispatch::SpecialCsi;
 use self::drcs::Store as DrcsStore;
 pub use self::feature::FeaturePermissions;
 pub use self::feature::ProgramAllowlist;
@@ -612,237 +615,79 @@ impl Terminal {
         action: Action<'_>,
     ) {
         let popped_before: usize = self.active.grid.total_popped;
-
-        // VT52 ESC Y direct cursor address: absorb the two parameter bytes that
-        // follow the EscDispatch. They arrive as PrintAscii or Execute actions
-        // because vtepp is still in ANSI ground state; we intercept them here
-        // before the normal dispatch so they are not printed as characters.
-        if self.vt52_cursor_addr != Vt52CursorAddr::Idle {
-            let byte_opt: Option<u8> = match &action {
-                Action::PrintAscii(run) => run.first().copied(),
-                Action::Execute(b) => Some(*b),
-                _ => None,
-            };
-
-            match (self.vt52_cursor_addr, byte_opt) {
-                (Vt52CursorAddr::AwaitingRow, Some(b)) => {
-                    self.vt52_cursor_addr = Vt52CursorAddr::AwaitingCol(b.saturating_sub(0x20));
-
-                    // The two bytes may arrive batched in one PrintAscii run.
-                    // If so, consume the second byte (col) immediately and
-                    // then fall through to process any remaining bytes normally.
-                    if let Action::PrintAscii(run) = &action
-                        && run.len() >= 2
-                    {
-                        let col = run[1].saturating_sub(0x20) as u32;
-                        let row = b.saturating_sub(0x20) as u32;
-                        self.active.cursor.row = row.min(self.viewport.rows.saturating_sub(1));
-                        self.active.cursor.col = col.min(self.viewport.cols.saturating_sub(1));
-                        self.vt52_cursor_addr = Vt52CursorAddr::Idle;
-                        // Any bytes after the two position bytes are normal text.
-                        if run.len() > 2 {
-                            let view = screen::screen_viewport(&self.active, &self.viewport);
-                            put_ascii_run(
-                                &mut self.active,
-                                &view,
-                                &run[2..],
-                                self.modes.insert_mode,
-                            );
-                        }
-                        self.track_scroll(popped_before);
-                        return;
-                    }
-                    self.track_scroll(popped_before);
-                    return;
+        match dispatch::decode_action(self.modes.vt52_mode, &mut self.vt52_cursor_addr, action) {
+            DecodedAction::Ignore => {}
+            DecodedAction::Vt52CursorPosition {
+                row,
+                col,
+                trailing_ascii,
+            } => apply_vt52_cursor_position(
+                &mut self.active,
+                &self.viewport,
+                self.modes.insert_mode,
+                row,
+                col,
+                trailing_ascii,
+            ),
+            DecodedAction::PrintAscii(run) => apply_ascii_run(
+                &mut self.active,
+                &self.viewport,
+                self.modes.insert_mode,
+                run,
+            ),
+            DecodedAction::PrintText(run) => apply_text_run(
+                &mut self.active,
+                &self.viewport,
+                self.modes.insert_mode,
+                run,
+            ),
+            DecodedAction::Print(text) => apply_printable(
+                &mut self.active,
+                &self.viewport,
+                self.modes.insert_mode,
+                text,
+            ),
+            DecodedAction::Print8Bit(byte) => apply_8bit_byte(
+                &mut self.active,
+                &self.viewport,
+                self.modes.insert_mode,
+                byte,
+            ),
+            DecodedAction::Execute(byte) => apply_execute(
+                &mut self.active,
+                &self.viewport,
+                &mut self.output.bell_pending,
+                self.modes.newline_mode,
+                byte,
+            ),
+            DecodedAction::SpecialCsi(special) => match special {
+                SpecialCsi::InvokeMacro(id) => self.invoke_macro(id),
+                SpecialCsi::AssignDecColor { item, fg, bg } => {
+                    self.assign_dec_color(item, fg, bg);
                 }
-                (Vt52CursorAddr::AwaitingCol(row), Some(b)) => {
-                    let col = b.saturating_sub(0x20) as u32;
-                    self.active.cursor.row = (row as u32).min(self.viewport.rows.saturating_sub(1));
-                    self.active.cursor.col = col.min(self.viewport.cols.saturating_sub(1));
-                    self.vt52_cursor_addr = Vt52CursorAddr::Idle;
-
-                    // If more bytes follow in the same PrintAscii run, print them.
-                    if let Action::PrintAscii(run) = &action
-                        && run.len() > 1
-                    {
-                        let view = screen::screen_viewport(&self.active, &self.viewport);
-                        put_ascii_run(&mut self.active, &view, &run[1..], self.modes.insert_mode);
-                    }
-                    self.track_scroll(popped_before);
-                    return;
+                SpecialCsi::AssignDecAlternateTextColor { item, fg, bg } => {
+                    self.assign_dec_alternate_text_color(item, fg, bg);
                 }
-                _ => {
-                    // Unexpected action type: abort the ESC Y sequence and
-                    // fall through to process this action normally.
-                    self.vt52_cursor_addr = Vt52CursorAddr::Idle;
+                SpecialCsi::SelectDecLookupTable(selection) => {
+                    self.select_dec_lookup_table(selection);
                 }
-            }
-        }
-
-        // In VT52 mode, CSI sequences are not valid and should be silently
-        // dropped — vtepp still parses them because it doesn't know the
-        // terminal mode, but executing them would be wrong.
-        if self.modes.vt52_mode && matches!(action, Action::CsiDispatch { .. }) {
-            self.track_scroll(popped_before);
-            return;
-        }
-
-        match action {
-            Action::PrintAscii(run) => {
-                if self.active.active_display == screen::ActiveDisplay::Status
-                    && screen::status_line_writable(&self.active)
-                {
-                    put_status_ascii_run(&mut self.active, run, self.modes.insert_mode);
-                } else {
-                    let view = screen::screen_viewport(&self.active, &self.viewport);
-                    put_ascii_run(&mut self.active, &view, run, self.modes.insert_mode);
-                }
-            }
-            Action::PrintText(run) => {
-                if self.active.active_display == screen::ActiveDisplay::Status
-                    && screen::status_line_writable(&self.active)
-                {
-                    put_status_text_run(&mut self.active, run, self.modes.insert_mode);
-                } else {
-                    let view = screen::screen_viewport(&self.active, &self.viewport);
-                    put_text_run(&mut self.active, &view, run, self.modes.insert_mode);
-                }
-            }
-            Action::Print(c) => {
-                if self.active.active_display == screen::ActiveDisplay::Status
-                    && screen::status_line_writable(&self.active)
-                {
-                    put_status_printable(&mut self.active, c, self.modes.insert_mode);
-                } else {
-                    let view = screen::screen_viewport(&self.active, &self.viewport);
-                    put_printable(&mut self.active, &view, c, self.modes.insert_mode);
-                }
-            }
-            Action::Print8Bit(byte) => {
-                if self.active.active_display == screen::ActiveDisplay::Status
-                    && screen::status_line_writable(&self.active)
-                {
-                    put_status_8bit_byte(&mut self.active, byte, self.modes.insert_mode);
-                } else {
-                    let view = screen::screen_viewport(&self.active, &self.viewport);
-                    put_8bit_byte(&mut self.active, &view, byte, self.modes.insert_mode);
-                }
-            }
-            Action::Execute(byte) => {
-                if self.active.active_display == screen::ActiveDisplay::Status
-                    && screen::status_line_writable(&self.active)
-                {
-                    execute_status(
-                        &mut self.active,
-                        byte,
-                        &mut self.output.bell_pending,
-                        self.modes.newline_mode,
-                    );
-                } else {
-                    let view = screen::screen_viewport(&self.active, &self.viewport);
-                    execute(
-                        &mut self.active,
-                        &view,
-                        byte,
-                        &mut self.output.bell_pending,
-                        self.modes.newline_mode,
-                    );
-                }
-            }
-            Action::CsiDispatch {
+                SpecialCsi::ReportTerminalState => write_terminal_state_report(
+                    &self.active,
+                    &mut self.output.pending_output,
+                    self.modes.c1_mode,
+                ),
+                SpecialCsi::ReportColorTable(space) => write_color_table_report(
+                    &self.dec_color,
+                    &mut self.output.pending_output,
+                    self.modes.c1_mode,
+                    space,
+                ),
+            },
+            DecodedAction::Csi {
                 params,
                 intermediates,
                 action,
             } => {
-                if intermediates.as_slice() == b"*" && action == 'z' {
-                    let id = params
-                        .iter()
-                        .next()
-                        .and_then(|group| group.first().copied())
-                        .unwrap_or(0);
-                    self.invoke_macro(id);
-                    self.track_scroll(popped_before);
-                    return;
-                }
-                if intermediates.as_slice() == b"," && action == '|' {
-                    let mut groups = params.iter();
-                    let item = groups
-                        .next()
-                        .and_then(|group| group.first().copied())
-                        .unwrap_or(0);
-                    if let (Some(fg), Some(bg)) = (
-                        groups.next().and_then(|group| group.first().copied()),
-                        groups.next().and_then(|group| group.first().copied()),
-                    ) {
-                        self.assign_dec_color(item, fg, bg);
-                    }
-                    self.track_scroll(popped_before);
-                    return;
-                }
-                if intermediates.as_slice() == b"," && action == '}' {
-                    let mut groups = params.iter();
-                    let item = groups
-                        .next()
-                        .and_then(|group| group.first().copied())
-                        .unwrap_or(0);
-                    if let (Some(fg), Some(bg)) = (
-                        groups.next().and_then(|group| group.first().copied()),
-                        groups.next().and_then(|group| group.first().copied()),
-                    ) {
-                        self.assign_dec_alternate_text_color(item, fg, bg);
-                    }
-                    self.track_scroll(popped_before);
-                    return;
-                }
-                if intermediates.as_slice() == b")" && action == '{' {
-                    let selection = params
-                        .iter()
-                        .next()
-                        .and_then(|group| group.first().copied())
-                        .unwrap_or(0);
-                    self.select_dec_lookup_table(selection);
-                    self.track_scroll(popped_before);
-                    return;
-                }
-                if intermediates.as_slice() == b"$" && action == 'u' {
-                    let mut groups = params.iter();
-                    let report_type = groups
-                        .next()
-                        .and_then(|group| group.first().copied())
-                        .unwrap_or(0);
-                    match report_type {
-                        1 => {
-                            let payload = report::dectsr_payload(&self.active);
-                            conformance::push_dcs_prefix(
-                                &mut self.output.pending_output,
-                                self.modes.c1_mode,
-                            );
-                            self.output.pending_output.extend_from_slice(b"1$s");
-                            self.output.pending_output.extend_from_slice(&payload);
-                            conformance::push_st(
-                                &mut self.output.pending_output,
-                                self.modes.c1_mode,
-                            );
-                        }
-                        2 => {
-                            let space = groups
-                                .next()
-                                .and_then(|group| group.first().copied())
-                                .unwrap_or(0);
-                            if let Some(space) = DecColorSpace::from_param(Some(space)) {
-                                let report = report_color_table(&self.dec_color, space);
-                                conformance::write_dcs(
-                                    &mut self.output.pending_output,
-                                    self.modes.c1_mode,
-                                    format_args!("2$s{report}"),
-                                );
-                            }
-                        }
-                        _ => {}
-                    }
-                    self.track_scroll(popped_before);
-                    return;
-                }
                 let mut ctx = CsiContext {
                     screen: &mut self.active,
                     stash: &mut self.stash,
@@ -874,7 +719,7 @@ impl Terminal {
                 };
                 csi_dispatch(&mut ctx, &params, intermediates.as_slice(), action);
             }
-            Action::EscDispatch {
+            DecodedAction::Esc {
                 intermediates,
                 byte,
             } => {
@@ -904,43 +749,34 @@ impl Terminal {
                 };
                 esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
             }
-            Action::OscDispatch(data) => {
-                // iTerm2 image protocol rides on OSC 1337. Route it next
-                // to the other graphics protocols (kitty on APC, sixel
-                // on DCS) rather than through the text-OSC dispatcher,
-                // which doesn't carry cursor / cell-size state.
-                if let Some(rest) = data.strip_prefix(b"1337;")
-                    && graphics::is_iterm_image_cmd(rest)
-                {
-                    graphics::handle_iterm_graphics(
-                        rest,
-                        &mut self.images.iterm_chunked,
-                        &mut self.active,
-                        &self.viewport,
-                        &mut self.images.next_image_id,
-                        self.cell_height,
-                        self.cell_width,
-                    );
-                } else {
-                    let mut ctx = OscContext {
-                        clipboard: &mut self.clipboard,
-                        pending_output: &mut self.output.pending_output,
-                        c1_mode: self.modes.c1_mode,
-                        current_directory: &mut self.metadata.current_directory,
-                        hyperlinks: &mut self.hyperlinks,
-                        active_screen: &mut self.active,
-                        viewport: &self.viewport,
-                        current_title: &mut self.metadata.current_title,
-                        current_prompt_row: &mut self.metadata.current_prompt_row,
-                        command_metas: &mut self.metadata.command_metas,
-                        palette: &self.palette,
-                        cell_width: self.cell_width,
-                        cell_height: self.cell_height,
-                    };
-                    handle_osc(&data, &mut ctx);
-                }
+            DecodedAction::Osc(data) => {
+                let mut ctx = OscContext {
+                    clipboard: &mut self.clipboard,
+                    pending_output: &mut self.output.pending_output,
+                    c1_mode: self.modes.c1_mode,
+                    current_directory: &mut self.metadata.current_directory,
+                    hyperlinks: &mut self.hyperlinks,
+                    active_screen: &mut self.active,
+                    viewport: &self.viewport,
+                    current_title: &mut self.metadata.current_title,
+                    current_prompt_row: &mut self.metadata.current_prompt_row,
+                    command_metas: &mut self.metadata.command_metas,
+                    palette: &self.palette,
+                    cell_width: self.cell_width,
+                    cell_height: self.cell_height,
+                };
+                handle_osc(&data, &mut ctx);
             }
-            Action::ApcDispatch(data) => {
+            DecodedAction::ItermGraphics(data) => graphics::handle_iterm_graphics(
+                data.strip_prefix(b"1337;").expect("OSC 1337 prefix"),
+                &mut self.images.iterm_chunked,
+                &mut self.active,
+                &self.viewport,
+                &mut self.images.next_image_id,
+                self.cell_height,
+                self.cell_width,
+            ),
+            DecodedAction::KittyGraphics(data) => {
                 graphics::handle_kitty_graphics(
                     &data,
                     &mut self.images.kitty_images,
@@ -954,9 +790,6 @@ impl Terminal {
                     &mut self.output.pending_output,
                 );
             }
-            // Hook/Put/Unhook are accumulated by the terminal thread and
-            // dispatched via place_sixel_image — they never reach here.
-            Action::Hook { .. } | Action::Put(_) | Action::Unhook => {}
         }
 
         self.track_scroll(popped_before);
@@ -1022,6 +855,125 @@ impl Terminal {
             popped_before,
         )
     }
+}
+
+fn apply_ascii_run(
+    active: &mut Screen,
+    viewport: &Viewport,
+    insert_mode: bool,
+    run: &[u8],
+) {
+    if active.active_display == screen::ActiveDisplay::Status
+        && screen::status_line_writable(active)
+    {
+        put_status_ascii_run(active, run, insert_mode);
+    } else {
+        let view = screen::screen_viewport(active, viewport);
+        put_ascii_run(active, &view, run, insert_mode);
+    }
+}
+
+fn apply_text_run(
+    active: &mut Screen,
+    viewport: &Viewport,
+    insert_mode: bool,
+    run: &str,
+) {
+    if active.active_display == screen::ActiveDisplay::Status
+        && screen::status_line_writable(active)
+    {
+        put_status_text_run(active, run, insert_mode);
+    } else {
+        let view = screen::screen_viewport(active, viewport);
+        put_text_run(active, &view, run, insert_mode);
+    }
+}
+
+fn apply_printable(
+    active: &mut Screen,
+    viewport: &Viewport,
+    insert_mode: bool,
+    text: smol_str::SmolStr,
+) {
+    if active.active_display == screen::ActiveDisplay::Status
+        && screen::status_line_writable(active)
+    {
+        put_status_printable(active, text, insert_mode);
+    } else {
+        let view = screen::screen_viewport(active, viewport);
+        put_printable(active, &view, text, insert_mode);
+    }
+}
+
+fn apply_8bit_byte(
+    active: &mut Screen,
+    viewport: &Viewport,
+    insert_mode: bool,
+    byte: u8,
+) {
+    if active.active_display == screen::ActiveDisplay::Status
+        && screen::status_line_writable(active)
+    {
+        put_status_8bit_byte(active, byte, insert_mode);
+    } else {
+        let view = screen::screen_viewport(active, viewport);
+        put_8bit_byte(active, &view, byte, insert_mode);
+    }
+}
+
+fn apply_execute(
+    active: &mut Screen,
+    viewport: &Viewport,
+    bell_pending: &mut bool,
+    newline_mode: bool,
+    byte: u8,
+) {
+    if active.active_display == screen::ActiveDisplay::Status
+        && screen::status_line_writable(active)
+    {
+        execute_status(active, byte, bell_pending, newline_mode);
+    } else {
+        let view = screen::screen_viewport(active, viewport);
+        execute(active, &view, byte, bell_pending, newline_mode);
+    }
+}
+
+fn apply_vt52_cursor_position(
+    active: &mut Screen,
+    viewport: &Viewport,
+    insert_mode: bool,
+    row: u32,
+    col: u32,
+    trailing_ascii: &[u8],
+) {
+    active.cursor.row = row.min(viewport.rows.saturating_sub(1));
+    active.cursor.col = col.min(viewport.cols.saturating_sub(1));
+    if !trailing_ascii.is_empty() {
+        let view = screen::screen_viewport(active, viewport);
+        put_ascii_run(active, &view, trailing_ascii, insert_mode);
+    }
+}
+
+fn write_terminal_state_report(
+    active: &Screen,
+    pending_output: &mut Vec<u8>,
+    c1_mode: C1Mode,
+) {
+    let payload = report::dectsr_payload(active);
+    conformance::push_dcs_prefix(pending_output, c1_mode);
+    pending_output.extend_from_slice(b"1$s");
+    pending_output.extend_from_slice(&payload);
+    conformance::push_st(pending_output, c1_mode);
+}
+
+fn write_color_table_report(
+    dec_color: &DecColorState,
+    pending_output: &mut Vec<u8>,
+    c1_mode: C1Mode,
+    space: DecColorSpace,
+) {
+    let report = report_color_table(dec_color, space);
+    conformance::write_dcs(pending_output, c1_mode, format_args!("2$s{report}"));
 }
 
 /// Handle to a running terminal thread. Signals the thread to stop on drop.
