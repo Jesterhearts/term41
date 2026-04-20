@@ -192,6 +192,20 @@ pub struct TerminalProtocolState {
     pub drcs: DrcsStore,
 }
 
+/// Image-protocol storage and image-id allocation state.
+#[derive(Debug, Default)]
+pub struct TerminalImageState {
+    next_image_id: u64,
+    /// Kitty graphics protocol image store. Images transmitted via `a=t`
+    /// live here until placed or deleted.
+    pub kitty_images: image41::kitty::KittyImageStore,
+    /// Accumulates chunks for multi-part kitty graphics transmissions.
+    pub kitty_chunked: image41::kitty::ChunkedTransmission,
+    /// Accumulates chunks for multi-part iTerm2 graphics transmissions
+    /// (`MultipartFile` → `FilePart*` → `FileEnd`).
+    pub iterm_chunked: image41::iterm::ChunkedTransmission,
+}
+
 /// State machine for absorbing the two parameter bytes of a VT52
 /// `ESC Y Pr Pc` direct cursor address. The bytes arrive as separate
 /// parser actions after the `EscDispatch { byte: 'Y' }` is handled.
@@ -313,8 +327,6 @@ pub struct Terminal {
     /// once that path is wired up.
     cell_width: u32,
 
-    next_image_id: u64,
-
     /// System clipboard gateway. Shared between OSC 52 and mouse-driven
     /// copy/paste paths.
     pub clipboard: Clipboard,
@@ -357,16 +369,8 @@ pub struct Terminal {
     /// Shell/app metadata surfaced to the host and prompt-selection tools.
     pub metadata: TerminalMetadata,
 
-    /// Kitty graphics protocol image store. Images transmitted via `a=t`
-    /// live here until placed or deleted.
-    kitty_images: image41::kitty::KittyImageStore,
-
-    /// Accumulates chunks for multi-part kitty graphics transmissions.
-    kitty_chunked: image41::kitty::ChunkedTransmission,
-
-    /// Accumulates chunks for multi-part iTerm2 graphics transmissions
-    /// (`MultipartFile` → `FilePart*` → `FileEnd`).
-    iterm_chunked: image41::iterm::ChunkedTransmission,
+    /// Image-protocol transmission/storage state plus image-id allocation.
+    pub(crate) images: TerminalImageState,
 
     /// Runtime color palette. Stored here so SGR resets, OSC color queries,
     /// and the renderer can all resolve themed colors.
@@ -430,7 +434,6 @@ impl Terminal {
             viewport: Viewport { rows, cols, top: 0 },
             on_alt_screen: false,
             cell_height,
-            next_image_id: 0,
             clipboard: Clipboard::new(),
             output: TerminalOutput::default(),
             modes: TerminalModes::new(),
@@ -441,9 +444,7 @@ impl Terminal {
             cursor_style: CursorStyle::default(),
             saved_private_modes: HashMap::new(),
             metadata: TerminalMetadata::default(),
-            kitty_images: image41::kitty::KittyImageStore::new(),
-            kitty_chunked: image41::kitty::ChunkedTransmission::new(),
-            iterm_chunked: image41::iterm::ChunkedTransmission::new(),
+            images: TerminalImageState::default(),
             cell_width,
             palette,
             base_palette,
@@ -1165,10 +1166,10 @@ impl Terminal {
                 {
                     graphics::handle_iterm_graphics(
                         rest,
-                        &mut self.iterm_chunked,
+                        &mut self.images.iterm_chunked,
                         &mut self.active,
                         &self.viewport,
-                        &mut self.next_image_id,
+                        &mut self.images.next_image_id,
                         self.cell_height,
                         self.cell_width,
                     );
@@ -1194,11 +1195,11 @@ impl Terminal {
             Action::ApcDispatch(data) => {
                 graphics::handle_kitty_graphics(
                     &data,
-                    &mut self.kitty_images,
-                    &mut self.kitty_chunked,
+                    &mut self.images.kitty_images,
+                    &mut self.images.kitty_chunked,
                     &mut self.active,
                     &self.viewport,
-                    &mut self.next_image_id,
+                    &mut self.images.next_image_id,
                     self.cell_height,
                     self.cell_width,
                     self.modes.c1_mode,
@@ -1222,8 +1223,8 @@ impl Terminal {
     ) {
         let popped_before: usize = self.active.grid.total_popped;
 
-        let id = self.next_image_id;
-        self.next_image_id += 1;
+        let id = self.images.next_image_id;
+        self.images.next_image_id += 1;
         let row = screen::active_row_index(&self.active, &self.viewport);
         let image_rows = image.height.div_ceil(self.cell_height);
         crate::image::remove_overlapping(
@@ -1842,8 +1843,8 @@ mod tests {
         col: u32,
         height_px: u32,
     ) -> u64 {
-        let id = term.next_image_id;
-        term.next_image_id += 1;
+        let id = term.images.next_image_id;
+        term.images.next_image_id += 1;
         term.active.images.insert(
             id,
             PlacedImage {
