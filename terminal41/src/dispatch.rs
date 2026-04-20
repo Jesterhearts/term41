@@ -1,5 +1,3 @@
-use std::collections::HashMap;
-
 use pty_pipe41::ForegroundProcessSet;
 use smol_str::SmolStr;
 use vtepp::Action;
@@ -10,20 +8,15 @@ use crate::C1Mode;
 use crate::DecColorSpace;
 use crate::DecColorState;
 use crate::FeaturePermissions;
-use crate::TerminalModes;
 use crate::Vt52CursorAddr;
 use crate::color::ColorPalette;
 use crate::conformance;
-use crate::cursor::CursorStyle;
 use crate::dec::color::TEXT_COLOR_ASSIGNMENT_CLASS;
 use crate::dec::color::assign_color;
 use crate::dec::color::effective_palette;
 use crate::dec_assign_alternate_text_color;
 use crate::dec_select_lookup_table;
 use crate::graphics;
-use crate::io::keyboard::KittyKeyboardState;
-use crate::parser::EscContext;
-use crate::parser::esc_dispatch;
 use crate::parser::execute;
 use crate::parser::execute_status;
 use crate::parser::put_8bit_byte;
@@ -38,7 +31,6 @@ use crate::report;
 use crate::report_color_table;
 use crate::screen;
 use crate::screen::Screen;
-use crate::screen::StatusDisplayKind;
 use crate::screen::grid::Viewport;
 use crate::screen::palette_sync::apply_screen_palette;
 use crate::screen::palette_sync::sync_screen_erase_defaults;
@@ -84,24 +76,6 @@ pub(super) enum DecodedAction<'a> {
 pub(crate) enum PendingApplication {
     None,
     Bytes(Vec<u8>),
-}
-
-pub(super) struct MacroInvocationContext<'a> {
-    pub feature_permissions: &'a FeaturePermissions,
-    pub foreground_processes: &'a Option<ForegroundProcessSet>,
-    pub macros: &'a crate::dec::r#macro::MacroStore,
-    pub macro_invocation_depth: usize,
-}
-
-pub(super) struct SpecialCsiContext<'a> {
-    pub active: &'a mut Screen,
-    pub stash: &'a mut Screen,
-    pub palette: &'a mut ColorPalette,
-    pub base_palette: &'a ColorPalette,
-    pub dec_color: &'a mut DecColorState,
-    pub pending_output: &'a mut Vec<u8>,
-    pub c1_mode: C1Mode,
-    pub macros: MacroInvocationContext<'a>,
 }
 
 pub(super) fn decode_action<'a>(
@@ -242,22 +216,29 @@ pub(super) fn apply_execute(
     }
 }
 
+#[bon::builder]
 pub(super) fn apply_special_csi(
-    ctx: SpecialCsiContext<'_>,
     special: SpecialCsi,
+    active: &mut Screen,
+    stash: &mut Screen,
+    palette: &mut ColorPalette,
+    base_palette: &ColorPalette,
+    dec_color: &mut DecColorState,
+    pending_output: &mut Vec<u8>,
+    c1_mode: C1Mode,
+    feature_permissions: &FeaturePermissions,
+    foreground_processes: &Option<ForegroundProcessSet>,
+    macros: &crate::dec::r#macro::MacroStore,
+    macro_invocation_depth: usize,
 ) -> PendingApplication {
-    let SpecialCsiContext {
-        active,
-        stash,
-        palette,
-        base_palette,
-        dec_color,
-        pending_output,
-        c1_mode,
-        macros,
-    } = ctx;
     match special {
-        SpecialCsi::InvokeMacro(id) => invoke_macro(macros, id),
+        SpecialCsi::InvokeMacro(id) => invoke_macro(
+            feature_permissions,
+            foreground_processes,
+            macros,
+            macro_invocation_depth,
+            id,
+        ),
         SpecialCsi::AssignDecColor { item, fg, bg } => {
             assign_dec_color(
                 active,
@@ -288,55 +269,6 @@ pub(super) fn apply_special_csi(
             PendingApplication::None
         }
     }
-}
-
-pub(super) fn apply_esc(
-    screen: &mut Screen,
-    stash: &mut Screen,
-    viewport: &mut Viewport,
-    on_alt_screen: &mut bool,
-    modes: &mut TerminalModes,
-    kitty_keyboard: &mut KittyKeyboardState,
-    cursor_style: &mut CursorStyle,
-    current_title: &mut Option<String>,
-    title_stack: &mut Vec<Option<String>>,
-    saved_modes: &mut HashMap<u16, bool>,
-    current_prompt_row: &mut Option<u64>,
-    bell_pending: &mut bool,
-    palette: &mut ColorPalette,
-    base_palette: &ColorPalette,
-    dec_color: &mut DecColorState,
-    default_status_display: &mut StatusDisplayKind,
-    pending_output: &mut Vec<u8>,
-    vt52_cursor_addr: &mut Vt52CursorAddr,
-    macros: &mut crate::dec::r#macro::MacroStore,
-    drcs: &mut crate::drcs::Store,
-    intermediates: &[u8],
-    byte: u8,
-) {
-    let mut ctx = EscContext {
-        screen,
-        stash,
-        viewport,
-        on_alt_screen,
-        modes,
-        kitty_keyboard,
-        cursor_style,
-        current_title,
-        title_stack,
-        saved_modes,
-        current_prompt_row,
-        bell_pending,
-        palette,
-        base_palette,
-        dec_color,
-        default_status_display,
-        pending_output,
-        vt52_cursor_addr,
-        macros,
-        drcs,
-    };
-    esc_dispatch(&mut ctx, intermediates, byte);
 }
 
 pub(super) fn apply_iterm_graphics(
@@ -538,15 +470,15 @@ fn apply_dec_color_defaults(
 }
 
 fn invoke_macro(
-    ctx: MacroInvocationContext<'_>,
+    feature_permissions: &FeaturePermissions,
+    foreground_processes: &Option<ForegroundProcessSet>,
+    macros: &crate::dec::r#macro::MacroStore,
+    macro_invocation_depth: usize,
     id: u16,
 ) -> PendingApplication {
-    let enabled = crate::feature::macro_feature_enabled(
-        ctx.feature_permissions,
-        ctx.foreground_processes.as_ref(),
-    );
-    let Some(bytes) =
-        crate::feature::invoke_macro(enabled, ctx.macros, ctx.macro_invocation_depth, id)
+    let enabled =
+        crate::feature::macro_feature_enabled(feature_permissions, foreground_processes.as_ref());
+    let Some(bytes) = crate::feature::invoke_macro(enabled, macros, macro_invocation_depth, id)
     else {
         return PendingApplication::None;
     };

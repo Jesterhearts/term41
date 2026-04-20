@@ -98,6 +98,7 @@ use crate::dec::color::report_color_table;
 use crate::dec::color::restore_color_table;
 use crate::osc::handle_osc;
 use crate::parser::csi_dispatch;
+use crate::parser::esc_dispatch;
 use crate::selection::Selection;
 use crate::selection::search::SearchState;
 
@@ -615,37 +616,20 @@ impl Terminal {
                 );
                 dispatch::PendingApplication::None
             }
-            DecodedAction::SpecialCsi(special) => {
-                let Terminal {
-                    active,
-                    stash,
-                    palette,
-                    base_palette,
-                    dec_color,
-                    output,
-                    modes,
-                    protocol,
-                    ..
-                } = self;
-                dispatch::apply_special_csi(
-                    dispatch::SpecialCsiContext {
-                        active,
-                        stash,
-                        palette,
-                        base_palette,
-                        dec_color,
-                        pending_output: &mut output.pending_output,
-                        c1_mode: modes.c1_mode,
-                        macros: dispatch::MacroInvocationContext {
-                            feature_permissions: &protocol.feature_permissions,
-                            foreground_processes: &protocol.foreground_processes,
-                            macros: &protocol.macros,
-                            macro_invocation_depth: protocol.macro_invocation_depth,
-                        },
-                    },
-                    special,
-                )
-            }
+            DecodedAction::SpecialCsi(special) => dispatch::apply_special_csi()
+                .special(special)
+                .active(&mut self.active)
+                .stash(&mut self.stash)
+                .palette(&mut self.palette)
+                .base_palette(&self.base_palette)
+                .dec_color(&mut self.dec_color)
+                .pending_output(&mut self.output.pending_output)
+                .c1_mode(self.modes.c1_mode)
+                .feature_permissions(&self.protocol.feature_permissions)
+                .foreground_processes(&self.protocol.foreground_processes)
+                .macros(&self.protocol.macros)
+                .macro_invocation_depth(self.protocol.macro_invocation_depth)
+                .call(),
             DecodedAction::Csi {
                 params,
                 intermediates,
@@ -687,30 +671,30 @@ impl Terminal {
                 intermediates,
                 byte,
             } => {
-                dispatch::apply_esc(
-                    &mut self.active,
-                    &mut self.stash,
-                    &mut self.viewport,
-                    &mut self.on_alt_screen,
-                    &mut self.modes,
-                    &mut self.kitty_keyboard,
-                    &mut self.cursor_style,
-                    &mut self.metadata.current_title,
-                    &mut self.metadata.title_stack,
-                    &mut self.saved_private_modes,
-                    &mut self.metadata.current_prompt_row,
-                    &mut self.output.bell_pending,
-                    &mut self.palette,
-                    &self.base_palette,
-                    &mut self.dec_color,
-                    &mut self.default_status_display,
-                    &mut self.output.pending_output,
-                    &mut self.vt52_cursor_addr,
-                    &mut self.protocol.macros,
-                    &mut self.protocol.drcs,
-                    intermediates.as_slice(),
-                    byte,
-                );
+                esc_dispatch()
+                    .screen(&mut self.active)
+                    .stash(&mut self.stash)
+                    .viewport(&mut self.viewport)
+                    .on_alt_screen(&mut self.on_alt_screen)
+                    .modes(&mut self.modes)
+                    .kitty_keyboard(&mut self.kitty_keyboard)
+                    .cursor_style(&mut self.cursor_style)
+                    .current_title(&mut self.metadata.current_title)
+                    .title_stack(&mut self.metadata.title_stack)
+                    .saved_modes(&mut self.saved_private_modes)
+                    .current_prompt_row(&mut self.metadata.current_prompt_row)
+                    .bell_pending(&mut self.output.bell_pending)
+                    .palette(&mut self.palette)
+                    .base_palette(&self.base_palette)
+                    .dec_color(&mut self.dec_color)
+                    .default_status_display(&mut self.default_status_display)
+                    .pending_output(&mut self.output.pending_output)
+                    .vt52_cursor_addr(&mut self.vt52_cursor_addr)
+                    .macros(&mut self.protocol.macros)
+                    .drcs(&mut self.protocol.drcs)
+                    .intermediates(intermediates.as_slice())
+                    .byte(byte)
+                    .call();
                 dispatch::PendingApplication::None
             }
             DecodedAction::Osc(data) => {

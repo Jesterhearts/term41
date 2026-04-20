@@ -46,35 +46,6 @@ use crate::screen::grid::Viewport;
 use crate::screen::row::LineAttr;
 use crate::screen::row::Row;
 
-/// Bundles the bits of [`Terminal`](super::Terminal) state that ESC handlers
-/// need beyond the active screen. RIS in particular resets nearly everything.
-pub(super) struct EscContext<'a> {
-    pub screen: &'a mut Screen,
-    pub stash: &'a mut Screen,
-    pub viewport: &'a mut Viewport,
-    pub on_alt_screen: &'a mut bool,
-    pub modes: &'a mut TerminalModes,
-    pub kitty_keyboard: &'a mut KittyKeyboardState,
-    pub cursor_style: &'a mut CursorStyle,
-    pub current_title: &'a mut Option<String>,
-    pub title_stack: &'a mut Vec<Option<String>>,
-    pub saved_modes: &'a mut std::collections::HashMap<u16, bool>,
-    pub current_prompt_row: &'a mut Option<u64>,
-    pub bell_pending: &'a mut bool,
-    pub palette: &'a mut color::ColorPalette,
-    pub base_palette: &'a color::ColorPalette,
-    pub dec_color: &'a mut DecColorState,
-    pub default_status_display: &'a mut StatusDisplayKind,
-    /// Bytes to write back to the PTY (e.g. VT52 identify response `ESC / Z`).
-    pub pending_output: &'a mut Vec<u8>,
-    /// State machine for VT52 `ESC Y Pr Pc`. Set to `AwaitingRow` when the
-    /// `ESC Y` byte is dispatched; the subsequent bytes are consumed in
-    /// [`Terminal::apply`] before any other dispatch occurs.
-    pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
-    pub macros: &'a mut MacroStore,
-    pub drcs: &'a mut DrcsStore,
-}
-
 /// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
 /// `put_ascii_run` clones out of this table instead of constructing a fresh
 /// `SmolStr` per byte — inline-backed clones are a short memcpy, so the table
@@ -2981,18 +2952,22 @@ pub(super) fn csi_dispatch(
 }
 
 fn esc_dispatch_vt52(
-    ctx: &mut EscContext<'_>,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    modes: &mut TerminalModes,
+    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
+    pending_output: &mut Vec<u8>,
     byte: u8,
 ) -> bool {
-    if !ctx.modes.vt52_mode {
+    if !modes.vt52_mode {
         return false;
     }
-    if *ctx.vt52_cursor_addr != crate::Vt52CursorAddr::Idle {
+    if *vt52_cursor_addr != crate::Vt52CursorAddr::Idle {
         return false;
     }
 
     if byte == b'Y' {
-        *ctx.vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
+        *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
         return true;
     }
 
@@ -3008,87 +2983,80 @@ fn esc_dispatch_vt52(
     // byte space with ANSI SCS, so we must gate on vt52_mode *first*.
     {
         // Cancel pending wrap before any cursor-moving sequence.
-        clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
+        clamp_cursor_to_row_width(screen, viewport);
         match byte {
             // ESC A — cursor up (no scroll).
             b'A' => {
-                ctx.screen.cursor.row = ctx.screen.cursor.row.saturating_sub(1);
-                clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
+                screen.cursor.row = screen.cursor.row.saturating_sub(1);
+                clamp_cursor_to_row_width(screen, viewport);
             }
             // ESC B — cursor down (no scroll).
-            b'B' if ctx.screen.cursor.row + 1 < ctx.viewport.rows => {
-                ctx.screen.cursor.row += 1;
-                clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
+            b'B' if screen.cursor.row + 1 < viewport.rows => {
+                screen.cursor.row += 1;
+                clamp_cursor_to_row_width(screen, viewport);
             }
             // ESC C — cursor right (no scroll).
-            b'C' if ctx.screen.cursor.col + 1
-                < current_row_display_cols(ctx.screen, ctx.viewport) =>
-            {
-                ctx.screen.cursor.col += 1;
+            b'C' if screen.cursor.col + 1 < current_row_display_cols(screen, viewport) => {
+                screen.cursor.col += 1;
             }
             // ESC D — cursor left (no scroll).
             b'D' => {
-                ctx.screen.cursor.col = ctx.screen.cursor.col.saturating_sub(1);
+                screen.cursor.col = screen.cursor.col.saturating_sub(1);
             }
             // ESC F — enter DEC Special Graphics mode (same as SCS G0 = 0).
             b'F' => {
-                ctx.screen
+                screen
                     .charset
                     .designate(GraphicSetSlot::G0, CharacterSet::DecSpecialGraphics);
             }
             // ESC G — exit DEC Special Graphics mode (same as SCS G0 = B).
             b'G' => {
-                ctx.screen
+                screen
                     .charset
                     .designate(GraphicSetSlot::G0, CharacterSet::Ascii);
             }
             // ESC H — cursor home (0, 0).
             b'H' => {
-                ctx.screen.cursor.row = 0;
-                ctx.screen.cursor.col = 0;
+                screen.cursor.row = 0;
+                screen.cursor.col = 0;
             }
             // ESC I — reverse index (identical to ANSI RI / ESC M): scroll
             // down if at the top of the scroll region, else cursor up.
             b'I' => {
-                if ctx.screen.cursor.row == ctx.screen.scroll_top {
-                    ctx.screen.grid.scroll_down_in_region(
-                        ctx.viewport,
-                        &mut ctx.screen.images,
-                        ctx.screen.scroll_top,
-                        ctx.screen.scroll_bottom,
+                if screen.cursor.row == screen.scroll_top {
+                    screen.grid.scroll_down_in_region(
+                        viewport,
+                        &mut screen.images,
+                        screen.scroll_top,
+                        screen.scroll_bottom,
                         1,
                     );
-                } else if ctx.screen.cursor.row > 0 {
-                    ctx.screen.cursor.row -= 1;
+                } else if screen.cursor.row > 0 {
+                    screen.cursor.row -= 1;
                 }
             }
             // ESC J — erase to end of screen (same as ANSI ED 0).
             b'J' => {
-                ctx.screen.grid.erase_in_display(
-                    &ctx.screen.cursor,
-                    ctx.viewport,
-                    &mut ctx.screen.images,
-                    0,
-                );
+                screen
+                    .grid
+                    .erase_in_display(&screen.cursor, viewport, &mut screen.images, 0);
             }
             // ESC K — erase to end of line (same as ANSI EL 0).
             b'K' => {
-                ctx.screen
-                    .grid
-                    .erase_in_line(&ctx.screen.cursor, ctx.viewport, 0);
+                screen.grid.erase_in_line(&screen.cursor, viewport, 0);
             }
             // ESC Y — direct cursor address. The two parameter bytes are
             // absorbed by Terminal::apply via Vt52CursorAddr state.
             b'Y' => {
-                *ctx.vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
+                *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
             }
             // ESC Z — identify. VT52 responds ESC / Z (0x1b 0x2f 0x5a).
             b'Z' => {
-                ctx.pending_output.extend_from_slice(b"\x1b/Z");
+                pending_output.extend_from_slice(b"\x1b/Z");
             }
             // ESC < — exit VT52 mode, return to ANSI mode (sets DECANM).
             b'<' => {
-                ctx.modes.vt52_mode = false;
+                modes.vt52_mode = false;
             }
             _ => {}
         }
@@ -3097,16 +3065,16 @@ fn esc_dispatch_vt52(
 }
 
 fn esc_dispatch_with_space_intermediate(
-    ctx: &mut EscContext<'_>,
+    modes: &mut TerminalModes,
     byte: u8,
 ) -> bool {
     match byte {
-        b'F' if can_negotiate_c1(ctx.modes) => {
-            ctx.modes.c1_mode = C1Mode::SevenBit;
+        b'F' if can_negotiate_c1(modes) => {
+            modes.c1_mode = C1Mode::SevenBit;
             true
         }
-        b'G' if can_negotiate_c1(ctx.modes) => {
-            ctx.modes.c1_mode = C1Mode::EightBit;
+        b'G' if can_negotiate_c1(modes) => {
+            modes.c1_mode = C1Mode::EightBit;
             true
         }
         _ => false,
@@ -3114,11 +3082,11 @@ fn esc_dispatch_with_space_intermediate(
 }
 
 fn esc_dispatch_with_percent_intermediate(
-    ctx: &mut EscContext<'_>,
+    modes: &mut TerminalModes,
     byte: u8,
 ) -> bool {
     if let Some(mode) = TextMode::from_docs_final(byte) {
-        ctx.modes.text_mode = mode;
+        modes.text_mode = mode;
         true
     } else {
         false
@@ -3126,16 +3094,17 @@ fn esc_dispatch_with_percent_intermediate(
 }
 
 fn esc_dispatch_designation(
-    ctx: &mut EscContext<'_>,
+    screen: &mut Screen,
+    drcs: &mut DrcsStore,
     intermediates: &[u8],
     byte: u8,
 ) -> bool {
     if let Some((slot, charset)) = charset::parse_designation(intermediates, byte).or_else(|| {
         let slot = charset::slot_for_intermediates(intermediates)?;
-        let charset = ctx.drcs.lookup_designation(intermediates, byte)?;
+        let charset = drcs.lookup_designation(intermediates, byte)?;
         Some((slot, charset))
     }) {
-        ctx.screen.charset.designate(slot, charset);
+        screen.charset.designate(slot, charset);
         true
     } else {
         false
@@ -3143,22 +3112,23 @@ fn esc_dispatch_designation(
 }
 
 fn esc_dispatch_with_hash_intermediate(
-    ctx: &mut EscContext<'_>,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    palette: &ColorPalette,
     byte: u8,
 ) -> bool {
     match byte {
         b'8' => {
-            let first_visible = ctx
-                .screen
+            let first_visible = screen
                 .grid
                 .rows
                 .len()
-                .saturating_sub(ctx.viewport.rows as usize);
+                .saturating_sub(viewport.rows as usize);
             let e_cell = SmolStr::new_inline("E");
-            let fg = ctx.palette.fg;
-            let bg = ctx.palette.bg;
-            for r in first_visible..ctx.screen.grid.rows.len() {
-                let row = &mut ctx.screen.grid.rows[r];
+            let fg = palette.fg;
+            let bg = palette.bg;
+            for r in first_visible..screen.grid.rows.len() {
+                let row = &mut screen.grid.rows[r];
                 row.clear(fg, bg);
                 row.wrapped = false;
                 row.line_attr = LineAttr::Normal;
@@ -3168,32 +3138,31 @@ fn esc_dispatch_with_hash_intermediate(
                 row.fg.fill(fg);
                 row.bg.fill(bg);
             }
-            ctx.screen.scroll_top = 0;
-            ctx.screen.scroll_bottom = ctx.viewport.rows.saturating_sub(1);
-            ctx.screen.left_margin = 0;
-            ctx.screen.right_margin = ctx.viewport.cols.saturating_sub(1);
-            ctx.screen.origin_mode = false;
-            ctx.screen.cursor.row = 0;
-            ctx.screen.cursor.col = 0;
+            screen.scroll_top = 0;
+            screen.scroll_bottom = viewport.rows.saturating_sub(1);
+            screen.left_margin = 0;
+            screen.right_margin = viewport.cols.saturating_sub(1);
+            screen.origin_mode = false;
+            screen.cursor.row = 0;
+            screen.cursor.col = 0;
             true
         }
         b'3' | b'4' | b'5' | b'6' => {
-            let visible_start = ctx
-                .screen
+            let visible_start = screen
                 .grid
                 .rows
                 .len()
-                .saturating_sub(ctx.viewport.rows as usize);
-            let abs_row = visible_start + ctx.screen.cursor.row as usize;
-            if let Some(row) = ctx.screen.grid.rows.get_mut(abs_row) {
+                .saturating_sub(viewport.rows as usize);
+            let abs_row = visible_start + screen.cursor.row as usize;
+            if let Some(row) = screen.grid.rows.get_mut(abs_row) {
                 row.line_attr = match byte {
                     b'3' => LineAttr::DoubleHeightTop,
                     b'4' => LineAttr::DoubleHeightBottom,
                     b'5' => LineAttr::Normal,
                     _ => LineAttr::DoubleWidth,
                 };
-                if ctx.screen.cursor.row as usize + visible_start == abs_row {
-                    clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
+                if screen.cursor.row as usize + visible_start == abs_row {
+                    clamp_cursor_to_row_width(screen, viewport);
                 }
             }
             true
@@ -3202,175 +3171,197 @@ fn esc_dispatch_with_hash_intermediate(
     }
 }
 
+#[builder]
 pub(super) fn esc_dispatch(
-    ctx: &mut EscContext<'_>,
+    screen: &mut Screen,
+    stash: &mut Screen,
+    viewport: &mut Viewport,
+    on_alt_screen: &mut bool,
+    modes: &mut TerminalModes,
+    kitty_keyboard: &mut KittyKeyboardState,
+    cursor_style: &mut CursorStyle,
+    current_title: &mut Option<String>,
+    title_stack: &mut Vec<Option<String>>,
+    saved_modes: &mut std::collections::HashMap<u16, bool>,
+    current_prompt_row: &mut Option<u64>,
+    bell_pending: &mut bool,
+    palette: &mut color::ColorPalette,
+    base_palette: &color::ColorPalette,
+    dec_color: &mut DecColorState,
+    default_status_display: &mut StatusDisplayKind,
+    pending_output: &mut Vec<u8>,
+    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
+    macros: &mut MacroStore,
+    drcs: &mut DrcsStore,
     intermediates: &[u8],
     byte: u8,
 ) {
-    if intermediates.is_empty() && esc_dispatch_vt52(ctx, byte) {
+    if intermediates.is_empty()
+        && esc_dispatch_vt52(
+            screen,
+            viewport,
+            modes,
+            vt52_cursor_addr,
+            pending_output,
+            byte,
+        )
+    {
         return;
     }
 
     match intermediates {
-        b" " if esc_dispatch_with_space_intermediate(ctx, byte) => return,
-        b"%" if esc_dispatch_with_percent_intermediate(ctx, byte) => return,
-        b"#" if esc_dispatch_with_hash_intermediate(ctx, byte) => return,
+        b" " if esc_dispatch_with_space_intermediate(modes, byte) => return,
+        b"%" if esc_dispatch_with_percent_intermediate(modes, byte) => return,
+        b"#" if esc_dispatch_with_hash_intermediate(screen, viewport, palette, byte) => return,
         b"" => {}
-        _ if esc_dispatch_designation(ctx, intermediates, byte) => return,
+        _ if esc_dispatch_designation(screen, drcs, intermediates, byte) => return,
         _ => return,
     }
 
     // Cancel pending wrap before ESC sequences that move the cursor.
-    clamp_cursor_to_row_width(ctx.screen, ctx.viewport);
-    let viewport = screen::screen_viewport(ctx.screen, ctx.viewport);
-    let viewport = &viewport;
+    clamp_cursor_to_row_width(screen, viewport);
+    if byte == b'c' {
+        // RIS (Reset to Initial State). Drop the app's terminal state back to
+        // power-on defaults — every mode the app might have flipped, plus the
+        // visible screen. Scrollback is preserved: a misbehaving app's reset
+        // shouldn't take the user's history.
+        let conformance_level = ConformanceLevel::Level4;
+        let c1_mode = C1Mode::SevenBit;
+        apply_hard_reset_state()
+            .screen(screen)
+            .stash(stash)
+            .on_alt_screen(on_alt_screen)
+            .modes(modes)
+            .viewport(viewport)
+            .kitty_keyboard(kitty_keyboard)
+            .cursor_style(cursor_style)
+            .current_title(current_title)
+            .title_stack(title_stack)
+            .saved_modes(saved_modes)
+            .current_prompt_row(current_prompt_row)
+            .bell_pending(bell_pending)
+            .vt52_cursor_addr(vt52_cursor_addr)
+            .palette(palette)
+            .base_palette(base_palette)
+            .dec_color(dec_color)
+            .default_status_display(default_status_display)
+            .macros(macros)
+            .drcs(drcs)
+            .conformance_level(conformance_level)
+            .c1_mode(c1_mode)
+            .call();
+        return;
+    }
+    let screen_view = screen::screen_viewport(screen, viewport);
+    let screen_view = &screen_view;
 
     match byte {
-        b'7' => screen::save_cursor_slot(ctx.screen),
-        b'8' => screen::restore_cursor_slot(ctx.screen, viewport),
+        b'7' => screen::save_cursor_slot(screen),
+        b'8' => screen::restore_cursor_slot(screen, screen_view),
         // IND — Index. Move the cursor down one line; if at the bottom of
         // the scroll region, scroll the region up.
         b'D' => {
-            if ctx.screen.cursor.row == ctx.screen.scroll_bottom {
-                if ctx.screen.scroll_top == 0 && ctx.screen.scroll_bottom == viewport.rows - 1 {
-                    if screen::page_can_scroll_down(ctx.screen, viewport) {
-                        screen::scroll_page_down(ctx.screen, viewport, 1);
+            if screen.cursor.row == screen.scroll_bottom {
+                if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
+                    if screen::page_can_scroll_down(screen, screen_view) {
+                        screen::scroll_page_down(screen, screen_view, 1);
                     } else {
-                        ctx.screen.grid.push_visible_row(viewport);
+                        screen.grid.push_visible_row(screen_view);
                     }
                 } else {
-                    ctx.screen.grid.scroll_up_in_region(
-                        viewport,
-                        &mut ctx.screen.images,
-                        ctx.screen.scroll_top,
-                        ctx.screen.scroll_bottom,
+                    screen.grid.scroll_up_in_region(
+                        screen_view,
+                        &mut screen.images,
+                        screen.scroll_top,
+                        screen.scroll_bottom,
                         1,
                     );
                 }
-            } else if ctx.screen.cursor.row < viewport.rows - 1 {
-                ctx.screen.cursor.row += 1;
-                clamp_cursor_to_row_width(ctx.screen, viewport);
+            } else if screen.cursor.row < screen_view.rows - 1 {
+                screen.cursor.row += 1;
+                clamp_cursor_to_row_width(screen, screen_view);
             }
         }
         // NEL — Next Line. Move to column 0 of the next line; scroll if
         // at the bottom of the scroll region.
         b'E' => {
-            ctx.screen.cursor.col = 0;
-            if ctx.screen.cursor.row == ctx.screen.scroll_bottom {
-                if ctx.screen.scroll_top == 0 && ctx.screen.scroll_bottom == viewport.rows - 1 {
-                    if screen::page_can_scroll_down(ctx.screen, viewport) {
-                        screen::scroll_page_down(ctx.screen, viewport, 1);
+            screen.cursor.col = 0;
+            if screen.cursor.row == screen.scroll_bottom {
+                if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
+                    if screen::page_can_scroll_down(screen, screen_view) {
+                        screen::scroll_page_down(screen, screen_view, 1);
                     } else {
-                        ctx.screen.grid.push_visible_row(viewport);
+                        screen.grid.push_visible_row(screen_view);
                     }
                 } else {
-                    ctx.screen.grid.scroll_up_in_region(
-                        viewport,
-                        &mut ctx.screen.images,
-                        ctx.screen.scroll_top,
-                        ctx.screen.scroll_bottom,
+                    screen.grid.scroll_up_in_region(
+                        screen_view,
+                        &mut screen.images,
+                        screen.scroll_top,
+                        screen.scroll_bottom,
                         1,
                     );
                 }
-            } else if ctx.screen.cursor.row < viewport.rows - 1 {
-                ctx.screen.cursor.row += 1;
+            } else if screen.cursor.row < screen_view.rows - 1 {
+                screen.cursor.row += 1;
             }
-            clamp_cursor_to_row_width(ctx.screen, viewport);
+            clamp_cursor_to_row_width(screen, screen_view);
         }
         b'H' => {
             // HTS — set a tab stop at the current cursor column.
-            let col = ctx.screen.cursor.col as usize;
-            if col < ctx.screen.tab_stops.len() {
-                ctx.screen.tab_stops[col] = true;
+            let col = screen.cursor.col as usize;
+            if col < screen.tab_stops.len() {
+                screen.tab_stops[col] = true;
             }
         }
-        b'c' => {
-            // RIS (Reset to Initial State). Drop the app's terminal state
-            // back to power-on defaults — every mode the app might have
-            // flipped, plus the visible screen. Scrollback is preserved: a
-            // misbehaving app's reset shouldn't take the user's history.
-            {
-                let conformance_level = ConformanceLevel::Level4;
-                let c1_mode = C1Mode::SevenBit;
-                apply_hard_reset_state()
-                    .screen(ctx.screen)
-                    .stash(ctx.stash)
-                    .on_alt_screen(ctx.on_alt_screen)
-                    .modes(ctx.modes)
-                    .viewport(ctx.viewport)
-                    .kitty_keyboard(ctx.kitty_keyboard)
-                    .cursor_style(ctx.cursor_style)
-                    .current_title(ctx.current_title)
-                    .title_stack(ctx.title_stack)
-                    .saved_modes(ctx.saved_modes)
-                    .current_prompt_row(ctx.current_prompt_row)
-                    .bell_pending(ctx.bell_pending)
-                    .vt52_cursor_addr(ctx.vt52_cursor_addr)
-                    .palette(ctx.palette)
-                    .base_palette(ctx.base_palette)
-                    .dec_color(ctx.dec_color)
-                    .default_status_display(ctx.default_status_display)
-                    .macros(ctx.macros)
-                    .drcs(ctx.drcs)
-                    .conformance_level(conformance_level)
-                    .c1_mode(c1_mode)
-                    .call();
-            };
-        }
         b'M' => {
-            if ctx.screen.cursor.row == ctx.screen.scroll_top {
-                ctx.screen.grid.scroll_down_in_region(
-                    viewport,
-                    &mut ctx.screen.images,
-                    ctx.screen.scroll_top,
-                    ctx.screen.scroll_bottom,
+            if screen.cursor.row == screen.scroll_top {
+                screen.grid.scroll_down_in_region(
+                    screen_view,
+                    &mut screen.images,
+                    screen.scroll_top,
+                    screen.scroll_bottom,
                     1,
                 );
-            } else if ctx.screen.cursor.row > 0 {
-                ctx.screen.cursor.row -= 1;
+            } else if screen.cursor.row > 0 {
+                screen.cursor.row -= 1;
             }
         }
         // DECKPAM (ESC =) — application keypad mode.
         // DECKPNM (ESC >) — normal keypad mode.
-        b'=' => ctx.screen.app_keypad = true,
-        b'>' => ctx.screen.app_keypad = false,
+        b'=' => screen.app_keypad = true,
+        b'>' => screen.app_keypad = false,
         // SS2 — Single Shift G2. Next graphic character uses G2.
-        b'N' => ctx.screen.charset.single_shift = Some(GraphicSetSlot::G2),
+        b'N' => screen.charset.single_shift = Some(GraphicSetSlot::G2),
         // SS3 — Single Shift G3. Next graphic character uses G3.
-        b'O' => ctx.screen.charset.single_shift = Some(GraphicSetSlot::G3),
+        b'O' => screen.charset.single_shift = Some(GraphicSetSlot::G3),
         // LS2 / LS3 — lock G2/G3 into GL.
-        b'n' => ctx.screen.charset.set_gl(GraphicSetSlot::G2),
-        b'o' => ctx.screen.charset.set_gl(GraphicSetSlot::G3),
+        b'n' => screen.charset.set_gl(GraphicSetSlot::G2),
+        b'o' => screen.charset.set_gl(GraphicSetSlot::G3),
         // LS1R / LS2R / LS3R — lock G1/G2/G3 into GR.
-        b'~' => ctx.screen.charset.set_gr(GraphicSetSlot::G1),
-        b'}' => ctx.screen.charset.set_gr(GraphicSetSlot::G2),
-        b'|' => ctx.screen.charset.set_gr(GraphicSetSlot::G3),
+        b'~' => screen.charset.set_gr(GraphicSetSlot::G1),
+        b'}' => screen.charset.set_gr(GraphicSetSlot::G2),
+        b'|' => screen.charset.set_gr(GraphicSetSlot::G3),
         // DECBI — Back Index. Scroll region right if at left margin, else
         // move cursor left.
         b'6' => {
-            if ctx.screen.cursor.col == 0 {
-                ctx.screen.grid.scroll_right(
-                    ctx.viewport,
-                    ctx.screen.scroll_top,
-                    ctx.screen.scroll_bottom,
-                    1,
-                );
+            if screen.cursor.col == 0 {
+                screen
+                    .grid
+                    .scroll_right(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
             } else {
-                ctx.screen.cursor.col -= 1;
+                screen.cursor.col -= 1;
             }
         }
         // DECFI — Forward Index. Scroll region left if at right margin, else
         // move cursor right.
         b'9' => {
-            if ctx.screen.cursor.col >= current_row_display_cols(ctx.screen, ctx.viewport) - 1 {
-                ctx.screen.grid.scroll_left(
-                    ctx.viewport,
-                    ctx.screen.scroll_top,
-                    ctx.screen.scroll_bottom,
-                    1,
-                );
+            if screen.cursor.col >= current_row_display_cols(screen, screen_view) - 1 {
+                screen
+                    .grid
+                    .scroll_left(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
             } else {
-                ctx.screen.cursor.col += 1;
+                screen.cursor.col += 1;
             }
         }
         _ => {}
@@ -3559,29 +3550,30 @@ mod tests {
                     intermediates,
                     byte,
                 } => {
-                    let mut ctx = EscContext {
-                        screen,
-                        stash: &mut stash,
-                        viewport,
-                        on_alt_screen: &mut on_alt_screen,
-                        modes: &mut modes,
-                        kitty_keyboard: &mut kitty_keyboard,
-                        cursor_style: &mut cursor_style,
-                        current_title: &mut current_title,
-                        title_stack: &mut title_stack,
-                        saved_modes: &mut saved_modes,
-                        current_prompt_row: &mut current_prompt_row,
-                        bell_pending: &mut bell_pending,
-                        palette: &mut pal,
-                        base_palette: &base_pal,
-                        dec_color: &mut dec_color,
-                        default_status_display: &mut default_status_display,
-                        pending_output: &mut pending_output,
-                        vt52_cursor_addr: &mut vt52_cursor_addr,
-                        macros: &mut macros,
-                        drcs: &mut drcs,
-                    };
-                    esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
+                    esc_dispatch()
+                        .screen(screen)
+                        .stash(&mut stash)
+                        .viewport(viewport)
+                        .on_alt_screen(&mut on_alt_screen)
+                        .modes(&mut modes)
+                        .kitty_keyboard(&mut kitty_keyboard)
+                        .cursor_style(&mut cursor_style)
+                        .current_title(&mut current_title)
+                        .title_stack(&mut title_stack)
+                        .saved_modes(&mut saved_modes)
+                        .current_prompt_row(&mut current_prompt_row)
+                        .bell_pending(&mut bell_pending)
+                        .palette(&mut pal)
+                        .base_palette(&base_pal)
+                        .dec_color(&mut dec_color)
+                        .default_status_display(&mut default_status_display)
+                        .pending_output(&mut pending_output)
+                        .vt52_cursor_addr(&mut vt52_cursor_addr)
+                        .macros(&mut macros)
+                        .drcs(&mut drcs)
+                        .intermediates(intermediates.as_slice())
+                        .byte(byte)
+                        .call();
                 }
                 _ => {}
             }
@@ -4511,29 +4503,30 @@ mod tests {
                     intermediates,
                     byte,
                 } => {
-                    let mut ctx = EscContext {
-                        screen,
-                        stash: &mut stash,
-                        viewport,
-                        on_alt_screen: &mut on_alt_screen,
-                        modes: &mut modes,
-                        kitty_keyboard: &mut kitty_keyboard,
-                        cursor_style: &mut cursor_style,
-                        current_title: &mut current_title,
-                        title_stack: &mut title_stack,
-                        saved_modes: &mut saved_modes,
-                        current_prompt_row: &mut current_prompt_row,
-                        bell_pending: &mut bell_pending,
-                        palette: &mut pal,
-                        base_palette: &base_pal,
-                        dec_color: &mut dec_color,
-                        default_status_display: &mut default_status_display,
-                        pending_output: &mut pending_output,
-                        vt52_cursor_addr: &mut vt52_cursor_addr,
-                        macros: &mut macros,
-                        drcs: &mut drcs,
-                    };
-                    esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
+                    esc_dispatch()
+                        .screen(screen)
+                        .stash(&mut stash)
+                        .viewport(viewport)
+                        .on_alt_screen(&mut on_alt_screen)
+                        .modes(&mut modes)
+                        .kitty_keyboard(&mut kitty_keyboard)
+                        .cursor_style(&mut cursor_style)
+                        .current_title(&mut current_title)
+                        .title_stack(&mut title_stack)
+                        .saved_modes(&mut saved_modes)
+                        .current_prompt_row(&mut current_prompt_row)
+                        .bell_pending(&mut bell_pending)
+                        .palette(&mut pal)
+                        .base_palette(&base_pal)
+                        .dec_color(&mut dec_color)
+                        .default_status_display(&mut default_status_display)
+                        .pending_output(&mut pending_output)
+                        .vt52_cursor_addr(&mut vt52_cursor_addr)
+                        .macros(&mut macros)
+                        .drcs(&mut drcs)
+                        .intermediates(intermediates.as_slice())
+                        .byte(byte)
+                        .call();
                 }
                 _ => {}
             }
@@ -5186,29 +5179,30 @@ mod tests {
                         intermediates,
                         byte,
                     } => {
-                        let mut ctx = EscContext {
-                            screen: &mut screen,
-                            stash: &mut stash,
-                            viewport: &mut viewport,
-                            on_alt_screen: &mut on_alt_screen,
-                            modes: &mut modes,
-                            kitty_keyboard: &mut kitty_keyboard,
-                            cursor_style: &mut cursor_style,
-                            current_title: &mut current_title,
-                            title_stack: &mut title_stack,
-                            saved_modes: &mut saved_modes,
-                            current_prompt_row: &mut current_prompt_row,
-                            bell_pending: &mut bell_pending,
-                            palette: &mut pal,
-                            base_palette: &base_pal,
-                            dec_color: &mut dec_color,
-                            default_status_display: &mut default_status_display,
-                            pending_output: &mut pending_output,
-                            vt52_cursor_addr: &mut vt52_cursor_addr,
-                            macros: &mut macros,
-                            drcs: &mut drcs,
-                        };
-                        esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
+                        esc_dispatch()
+                            .screen(&mut screen)
+                            .stash(&mut stash)
+                            .viewport(&mut viewport)
+                            .on_alt_screen(&mut on_alt_screen)
+                            .modes(&mut modes)
+                            .kitty_keyboard(&mut kitty_keyboard)
+                            .cursor_style(&mut cursor_style)
+                            .current_title(&mut current_title)
+                            .title_stack(&mut title_stack)
+                            .saved_modes(&mut saved_modes)
+                            .current_prompt_row(&mut current_prompt_row)
+                            .bell_pending(&mut bell_pending)
+                            .palette(&mut pal)
+                            .base_palette(&base_pal)
+                            .dec_color(&mut dec_color)
+                            .default_status_display(&mut default_status_display)
+                            .pending_output(&mut pending_output)
+                            .vt52_cursor_addr(&mut vt52_cursor_addr)
+                            .macros(&mut macros)
+                            .drcs(&mut drcs)
+                            .intermediates(intermediates.as_slice())
+                            .byte(byte)
+                            .call();
                     }
                     _ => {}
                 }
