@@ -27,6 +27,7 @@ pub enum DemoId {
     EraseProtection,
     PasteFocus,
     MouseReporting,
+    ModeMatrix,
     ScrollWrap,
     Rectangles,
     AltScreen,
@@ -139,6 +140,13 @@ pub fn catalog() -> Vec<Demo> {
             id: DemoId::MouseReporting,
         },
         Demo {
+            title: "Mode Matrix",
+            summary: "Queries DECRQM for supported private modes and shows the raw replies.",
+            detail: "Exercises the mode-report surface directly so it is easy to see which DEC \
+                     private modes are set, reset, or permanently fixed.",
+            id: DemoId::ModeMatrix,
+        },
+        Demo {
             title: "Scroll & Wrap",
             summary: "IND, NEL, RI, DECAWM on/off, REP, and scroll-region movement.",
             detail: "Exercises the core scrolling and wrapping behaviors that many fullscreen \
@@ -225,6 +233,7 @@ pub fn run_demo(
         DemoId::EraseProtection => run_erase_protection_demo(out),
         DemoId::PasteFocus => run_paste_focus_placeholder(out),
         DemoId::MouseReporting => run_mouse_reporting_placeholder(out),
+        DemoId::ModeMatrix => run_mode_matrix_demo(out, read_reply),
         DemoId::ScrollWrap => run_scroll_wrap_demo(out),
         DemoId::Rectangles => run_rectangles_demo(out),
         DemoId::AltScreen => run_alt_screen_demo(out),
@@ -754,6 +763,40 @@ fn run_mouse_reporting_placeholder(out: &mut impl Write) -> io::Result<()> {
     line(
         out,
         "This demo is handled by terminal_io because it needs a live raw-byte capture loop.",
+    )?;
+    Ok(())
+}
+
+fn run_mode_matrix_demo(
+    out: &mut impl Write,
+    read_reply: &mut ReadReplyFn<'_>,
+) -> io::Result<()> {
+    heading(out, "Mode Matrix")?;
+    line(
+        out,
+        "Querying DECRQM for a representative set of DEC private modes.",
+    )?;
+    let mode_queries = [
+        ("  ?1 DECCKM", b"\x1b[?1$p".as_slice()),
+        ("  ?3 DECCOLM", b"\x1b[?3$p".as_slice()),
+        ("  ?6 DECOM", b"\x1b[?6$p".as_slice()),
+        ("  ?7 DECAWM", b"\x1b[?7$p".as_slice()),
+        ("  ?25 DECTCEM", b"\x1b[?25$p".as_slice()),
+        ("  ?42 DECNRCM", b"\x1b[?42$p".as_slice()),
+        ("  ?66 DECNKM", b"\x1b[?66$p".as_slice()),
+        ("  ?69 DECLRMM", b"\x1b[?69$p".as_slice()),
+        ("  ?1004 Focus", b"\x1b[?1004$p".as_slice()),
+        ("  ?1049 Alt Screen", b"\x1b[?1049$p".as_slice()),
+        ("  ?2004 Bracketed Paste", b"\x1b[?2004$p".as_slice()),
+        ("  ?2026 Sync Update", b"\x1b[?2026$p".as_slice()),
+    ];
+    for (label, request) in mode_queries {
+        query_and_print(out, read_reply, label, request, Duration::from_millis(200))?;
+    }
+    blank(out)?;
+    line(
+        out,
+        "Reply codes: 1=set, 2=reset, 3=permanently set, 4=permanently reset.",
     )?;
     Ok(())
 }
