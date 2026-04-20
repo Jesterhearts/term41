@@ -9,6 +9,7 @@
 //!
 //! Spec: <https://sw.kovidgoyal.net/kitty/keyboard-protocol/>
 
+#[cfg(test)]
 use vtepp::Params;
 
 use crate::C1Mode;
@@ -195,6 +196,7 @@ mod tests {
 /// Dispatcher for `CSI <intermediate> <params> u`. The intermediate (one of
 /// `>`, `<`, `=`, `?`) selects which kitty operation runs; query writes its
 /// reply through `pending_output`.
+#[cfg(test)]
 pub fn handle_kitty_keyboard(
     intermediate: u8,
     params: &Params,
@@ -202,8 +204,19 @@ pub fn handle_kitty_keyboard(
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
-    let first = params.iter().next().and_then(|g| g.first().copied());
-    let second = params.iter().nth(1).and_then(|g| g.first().copied());
+    let groups: Vec<&[u16]> = params.iter().collect();
+    handle_kitty_keyboard_groups(intermediate, &groups, state, c1_mode, pending_output);
+}
+
+pub fn handle_kitty_keyboard_groups(
+    intermediate: u8,
+    params: &[&[u16]],
+    state: &mut KittyKeyboardState,
+    c1_mode: C1Mode,
+    pending_output: &mut Vec<u8>,
+) {
+    let first = params.first().and_then(|g| g.first().copied());
+    let second = params.get(1).and_then(|g| g.first().copied());
 
     match intermediate {
         b'>' => {

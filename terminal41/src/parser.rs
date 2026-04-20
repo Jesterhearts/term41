@@ -21,7 +21,7 @@ use crate::charset;
 use crate::charset::CharacterSet;
 use crate::charset::GraphicSetSlot;
 use crate::color;
-use crate::color::apply_sgr;
+use crate::color::apply_sgr_groups;
 use crate::conformance;
 use crate::cursor::CursorStyle;
 use crate::dec::color::DecColorState;
@@ -32,7 +32,7 @@ use crate::dec_color_state_from_palette;
 use crate::drcs::Store as DrcsStore;
 use crate::feature::FeaturePermissions;
 use crate::io::keyboard::KittyKeyboardState;
-use crate::io::keyboard::handle_kitty_keyboard;
+use crate::io::keyboard::handle_kitty_keyboard_groups;
 use crate::io::mouse::MouseTracking;
 use crate::io::mouse::apply_mouse_mode;
 use crate::mode;
@@ -357,47 +357,198 @@ pub(super) fn execute_status(
     }
 }
 
+#[derive(Debug, Clone)]
+pub(super) struct OwnedParams(Vec<Vec<u16>>);
+
+impl OwnedParams {
+    fn from_vte(params: Params) -> Self {
+        Self(params.iter().map(|group| group.to_vec()).collect())
+    }
+
+    fn as_groups(&self) -> &[Vec<u16>] {
+        &self.0
+    }
+
+    fn iter(&self) -> impl Iterator<Item = &[u16]> {
+        self.0.iter().map(Vec::as_slice)
+    }
+
+    fn get(
+        &self,
+        idx: usize,
+    ) -> Option<&[u16]> {
+        self.0.get(idx).map(Vec::as_slice)
+    }
+}
+
+#[derive(Debug, Clone)]
+pub(super) enum ParsedCsiAction {
+    Unsupported,
+    SetPrivateModes {
+        enable: bool,
+        modes: OwnedParams,
+    },
+    SavePrivateModes {
+        modes: OwnedParams,
+    },
+    RestorePrivateModes {
+        modes: OwnedParams,
+    },
+    SelectiveEraseDisplay {
+        mode: u16,
+    },
+    SelectiveEraseLine {
+        mode: u16,
+    },
+    KittyKeyboard {
+        intermediate: u8,
+        params: OwnedParams,
+    },
+    PrivateDeviceStatusReport {
+        selector: u16,
+    },
+    QueryPrivateMode {
+        mode: u16,
+    },
+    SelectActiveDisplay {
+        mode: u16,
+    },
+    SetStatusDisplay {
+        mode: u16,
+    },
+    ReportStatus {
+        selector: u16,
+    },
+    QueryAnsiMode {
+        mode: u16,
+    },
+    ResizeColumns {
+        cols: u16,
+    },
+    EraseRect {
+        params: OwnedParams,
+    },
+    SelectiveEraseRect {
+        params: OwnedParams,
+    },
+    FillRect {
+        params: OwnedParams,
+    },
+    CopyRect {
+        params: OwnedParams,
+    },
+    ChangeRectAttrs {
+        params: OwnedParams,
+    },
+    ReverseRectAttrs {
+        params: OwnedParams,
+    },
+    SetScreenLines {
+        lines: u16,
+    },
+    SetAttrChangeExtent {
+        extent: grid::AttrChangeExtent,
+    },
+    SetCursorStyle {
+        style: u16,
+    },
+    ScrollLeft {
+        count: u16,
+    },
+    ScrollRight {
+        count: u16,
+    },
+    SelectPage {
+        page: u16,
+    },
+    NextPage {
+        count: u16,
+    },
+    PrevPage {
+        count: u16,
+    },
+    SetConformanceLevel {
+        level: ConformanceLevel,
+        c1_mode: C1Mode,
+    },
+    SetCharacterProtection {
+        mode: u16,
+    },
+    InsertColumns {
+        count: u16,
+    },
+    DeleteColumns {
+        count: u16,
+    },
+    SoftReset,
+    ReportUserPreferredSupplementalSet,
+    ResetWithConfirmation {
+        confirmation_param: Option<u16>,
+    },
+    ReportXtVersion,
+    ReportSecondaryDeviceAttrs,
+    ReportTertiaryDeviceAttrs,
+    Plain {
+        action: char,
+        params: OwnedParams,
+    },
+}
+
+fn first_group_param(
+    params: &OwnedParams,
+    default: u16,
+) -> u16 {
+    params
+        .get(0)
+        .and_then(|group| group.first().copied())
+        .unwrap_or(default)
+}
+
+fn nth_group_param(
+    params: &OwnedParams,
+    idx: usize,
+    default: u16,
+) -> u16 {
+    params
+        .get(idx)
+        .and_then(|group| group.first().copied())
+        .unwrap_or(default)
+}
+
 fn status_line_csi_dispatch(
     screen: &mut Screen,
     palette: &mut color::ColorPalette,
     insert_mode: bool,
-    params: &Params,
-    intermediates: &[u8],
-    action: char,
+    command: &ParsedCsiAction,
 ) -> bool {
     let Some(status) = status_line_mut(screen) else {
         return false;
     };
     let cols = status.row.len().max(1);
     let cursor = &mut status.cursor;
+    let ParsedCsiAction::Plain { action, params } = command else {
+        return false;
+    };
 
-    if intermediates.is_empty() && action == 'm' {
+    if *action == 'm' {
         let mut palette = palette.clone();
         palette.fg = palette.status_line_fg;
         palette.bg = palette.status_line_bg;
-        apply_sgr(
+        apply_sgr_groups(
             &mut status.fg,
             &mut status.bg,
             &mut status.attrs,
             &mut status.underline,
             &mut status.underline_color,
-            params,
+            params.as_groups(),
             &palette,
         );
         return true;
     }
 
-    if !intermediates.is_empty() {
-        return false;
-    }
-
     match action {
         '@' => {
-            let count = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1) as usize;
+            let count = first_group_param(params, 1) as usize;
             status_insert_chars(status, count);
             true
         }
@@ -406,40 +557,22 @@ fn status_line_csi_dispatch(
             true
         }
         'C' => {
-            let n = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1) as u32;
+            let n = first_group_param(params, 1) as u32;
             cursor.col = (cursor.col + n).min(cols - 1);
             true
         }
         'D' => {
-            let n = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1) as u32;
+            let n = first_group_param(params, 1) as u32;
             cursor.col = cursor.col.saturating_sub(n);
             true
         }
         'G' | '`' => {
-            let col = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1)
-                .max(1);
+            let col = first_group_param(params, 1).max(1);
             cursor.col = (col as u32 - 1).min(cols - 1);
             true
         }
         'H' | 'f' => {
-            let col = params
-                .iter()
-                .nth(1)
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1)
-                .max(1);
+            let col = nth_group_param(params, 1, 1).max(1);
             cursor.row = 0;
             cursor.col = (col as u32 - 1).min(cols - 1);
             true
@@ -449,11 +582,7 @@ fn status_line_csi_dispatch(
             true
         }
         'K' => {
-            let mode = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(0);
+            let mode = first_group_param(params, 0);
             let col = cursor.col as usize;
             let len = cols as usize;
             match mode {
@@ -465,29 +594,17 @@ fn status_line_csi_dispatch(
             true
         }
         'P' => {
-            let count = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1) as usize;
+            let count = first_group_param(params, 1) as usize;
             status_delete_chars(status, count);
             true
         }
         'X' => {
-            let count = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1) as usize;
+            let count = first_group_param(params, 1) as usize;
             status_erase_chars(status, count);
             true
         }
         'b' => {
-            let count = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1);
+            let count = first_group_param(params, 1);
             if let Some(last) = status.last_char.clone() {
                 for _ in 0..count {
                     status_put_char(screen, last.clone(), insert_mode);
@@ -497,390 +614,6 @@ fn status_line_csi_dispatch(
         }
         _ => false,
     }
-}
-
-fn csi_dispatch_star_intermediate(
-    screen: &mut Screen,
-    stash: &mut Screen,
-    viewport: &mut Viewport,
-    pending_resize: &mut Option<(u32, u32)>,
-    params: &Params,
-    action: char,
-) -> bool {
-    match action {
-        '|' => {
-            let ps = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(24);
-            if let Some(rows) = valid_screen_lines(ps) {
-                let page_rows = screen::page_rows(screen).unwrap_or(rows.max(viewport.rows));
-                for screen in [&mut *screen, &mut *stash] {
-                    screen::activate_page_memory(
-                        screen,
-                        &Viewport {
-                            rows,
-                            cols: viewport.cols,
-                            top: 0,
-                        },
-                        page_rows,
-                    );
-                }
-                let old_cols = viewport.cols;
-                let old_total_rows = viewport.rows + screen::status_line_rows(screen);
-                let new_total_rows = rows + screen::status_line_rows(screen);
-                for screen in [&mut *screen, &mut *stash] {
-                    let old_rows = old_total_rows.saturating_sub(screen::status_line_rows(screen));
-                    let new_rows = new_total_rows.saturating_sub(screen::status_line_rows(screen));
-                    screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
-                }
-                viewport.rows = rows;
-                *pending_resize = Some((viewport.cols, rows + screen::status_line_rows(screen)));
-                screen.scroll_top = 0;
-                screen.scroll_bottom = rows.saturating_sub(1);
-                screen.cursor.row = screen.cursor.row.min(rows.saturating_sub(1));
-            }
-            true
-        }
-        'x' => {
-            let ps = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(0);
-            screen.attr_change_extent = match ps {
-                2 => grid::AttrChangeExtent::Rectangle,
-                0 | 1 => grid::AttrChangeExtent::Stream,
-                _ => screen.attr_change_extent,
-            };
-            true
-        }
-        _ => false,
-    }
-}
-
-fn csi_dispatch_space_intermediate(
-    screen: &mut Screen,
-    viewport: &mut Viewport,
-    cursor_style: &mut CursorStyle,
-    params: &Params,
-    action: char,
-) -> bool {
-    match action {
-        'q' => {
-            let ps = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(0);
-            cursor_style.apply_decscusr(ps);
-            true
-        }
-        '@' => {
-            let view = screen::screen_viewport(screen, viewport);
-            let n = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1)
-                .max(1) as u32;
-            screen
-                .grid
-                .scroll_left(&view, screen.scroll_top, screen.scroll_bottom, n);
-            true
-        }
-        'A' => {
-            let view = screen::screen_viewport(screen, viewport);
-            let n = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1)
-                .max(1) as u32;
-            screen
-                .grid
-                .scroll_right(&view, screen.scroll_top, screen.scroll_bottom, n);
-            true
-        }
-        'P' | 'Q' | 'R' => {
-            let n = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(1)
-                .max(1) as u32;
-            let view = screen::screen_viewport(screen, viewport);
-            screen::activate_page_memory(screen, &view, view.rows);
-            if let Some(page) = screen.page_memory.as_mut() {
-                match action {
-                    'P' => {
-                        page.active_page =
-                            (n.saturating_sub(1)).min(page.page_count().saturating_sub(1))
-                    }
-                    'Q' => {
-                        page.active_page =
-                            (page.active_page + n).min(page.page_count().saturating_sub(1))
-                    }
-                    'R' => page.active_page = page.active_page.saturating_sub(n),
-                    _ => unreachable!(),
-                }
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
-fn csi_dispatch_quote_intermediate(
-    screen: &mut Screen,
-    modes: &mut TerminalModes,
-    params: &Params,
-    action: char,
-) -> bool {
-    match action {
-        'p' => {
-            let ps1 = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(0);
-            let Some(level) = ConformanceLevel::from_decscl(ps1) else {
-                return true;
-            };
-            let ps2 = params.iter().nth(1).and_then(|g| g.first().copied());
-            let c1_mode = if level.supports_c1_negotiation() {
-                C1Mode::from_decscl(ps2)
-            } else {
-                C1Mode::SevenBit
-            };
-            modes.conformance_level = level;
-            modes.c1_mode = c1_mode;
-            modes.vt52_mode = false;
-            true
-        }
-        'q' => {
-            let ps = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(0);
-            match ps {
-                1 => screen.attrs.insert(CellAttrs::PROTECTED),
-                0 | 2 => screen.attrs.remove(CellAttrs::PROTECTED),
-                _ => {}
-            }
-            true
-        }
-        _ => false,
-    }
-}
-
-fn csi_dispatch_apostrophe_intermediate(
-    screen: &mut Screen,
-    viewport: &mut Viewport,
-    params: &Params,
-    action: char,
-) -> bool {
-    let view = screen::screen_viewport(screen, viewport);
-    let n = params
-        .iter()
-        .next()
-        .and_then(|g| g.first().copied())
-        .unwrap_or(1)
-        .max(1) as u32;
-    match action {
-        '}' => {
-            screen.grid.insert_cols(
-                &view,
-                screen.cursor.col,
-                screen.scroll_top,
-                screen.scroll_bottom,
-                n,
-            );
-            true
-        }
-        '~' => {
-            screen.grid.delete_cols(
-                &view,
-                screen.cursor.col,
-                screen.scroll_top,
-                screen.scroll_bottom,
-                n,
-            );
-            true
-        }
-        _ => false,
-    }
-}
-
-fn csi_dispatch_gt_lt_eq_intermediate(
-    pending_output: &mut Vec<u8>,
-    modes: &mut TerminalModes,
-    kitty_keyboard: &mut KittyKeyboardState,
-    params: &Params,
-    intermediates: &[u8],
-    action: char,
-) -> bool {
-    match (intermediates, action) {
-        (b">" | b"<" | b"=", 'u') => {
-            handle_kitty_keyboard(
-                intermediates[0],
-                params,
-                kitty_keyboard,
-                modes.c1_mode,
-                pending_output,
-            );
-            true
-        }
-        (b">", 'q') => {
-            conformance::write_dcs(
-                pending_output,
-                modes.c1_mode,
-                format_args!(">|term41 {}", env!("CARGO_PKG_VERSION")),
-            );
-            true
-        }
-        (b">", 'c') => {
-            conformance::write_csi(pending_output, modes.c1_mode, format_args!(">41;0;0c"));
-            true
-        }
-        (b"=", 'c') => {
-            if modes.vt52_mode || !modes.conformance_level.supports_c1_negotiation() {
-                return true;
-            }
-            conformance::write_dcs(pending_output, modes.c1_mode, format_args!("!|000000000"));
-            true
-        }
-        _ => false,
-    }
-}
-
-fn csi_dispatch_bang_intermediate(
-    screen: &mut Screen,
-    viewport: &mut Viewport,
-    modes: &mut TerminalModes,
-    kitty_keyboard: &mut KittyKeyboardState,
-    cursor_style: &mut CursorStyle,
-    palette: &color::ColorPalette,
-    action: char,
-) -> bool {
-    if action != 'p' {
-        return false;
-    }
-    if modes.vt52_mode || !modes.conformance_level.supports_c1_negotiation() {
-        return true;
-    }
-    screen.fg = palette.fg;
-    screen.bg = palette.bg;
-    screen.attrs = CellAttrs::default();
-    screen.underline = UnderlineStyle::None;
-    screen.underline_color = None;
-    screen.scroll_top = 0;
-    screen.scroll_bottom = viewport.rows.saturating_sub(1);
-    screen.left_margin = 0;
-    screen.right_margin = viewport.cols.saturating_sub(1);
-    screen.saved_cursor = None;
-    screen.current_hyperlink = None;
-    screen.cursor_visible = true;
-    screen.last_char = None;
-    screen.tab_stops = screen::init_tab_stops(viewport.cols);
-    screen.origin_mode = false;
-    screen.nrc_mode = false;
-    screen.upss = charset::UserPreferredSupplementalSet::DecSupplemental;
-    screen.autowrap = true;
-    screen.app_cursor_keys = false;
-    screen.attr_change_extent = grid::AttrChangeExtent::Stream;
-    screen.app_keypad = false;
-    screen.charset = charset::CharsetState::new();
-    let conformance_level = modes.conformance_level;
-    let c1_mode = modes.c1_mode;
-    *modes = TerminalModes::new();
-    modes.conformance_level = conformance_level;
-    modes.c1_mode = c1_mode;
-    *kitty_keyboard = KittyKeyboardState::new();
-    *cursor_style = CursorStyle::default();
-    true
-}
-
-fn csi_dispatch_amp_intermediate(
-    screen: &mut Screen,
-    pending_output: &mut Vec<u8>,
-    c1_mode: C1Mode,
-    action: char,
-) -> bool {
-    if action != 'u' {
-        return false;
-    }
-    conformance::write_dcs(
-        pending_output,
-        c1_mode,
-        format_args!("{}", charset::decaupss_report(screen.upss)),
-    );
-    true
-}
-
-#[builder]
-fn csi_dispatch_plus_intermediate(
-    screen: &mut Screen,
-    stash: &mut Screen,
-    pending_output: &mut Vec<u8>,
-    viewport: &mut Viewport,
-    on_alt_screen: &mut bool,
-    modes: &mut TerminalModes,
-    kitty_keyboard: &mut KittyKeyboardState,
-    cursor_style: &mut CursorStyle,
-    current_title: &mut Option<String>,
-    title_stack: &mut Vec<Option<String>>,
-    saved_modes: &mut std::collections::HashMap<u16, bool>,
-    current_prompt_row: &mut Option<u64>,
-    bell_pending: &mut bool,
-    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
-    palette: &mut color::ColorPalette,
-    base_palette: &color::ColorPalette,
-    dec_color: &mut DecColorState,
-    default_status_display: &mut StatusDisplayKind,
-    macros: &mut MacroStore,
-    drcs: &mut DrcsStore,
-    params: &Params,
-    action: char,
-) -> bool {
-    if action != 'p' {
-        return false;
-    }
-    let confirmation_param = params
-        .iter()
-        .next()
-        .and_then(|group| group.first().copied());
-
-    apply_hard_reset_state()
-        .screen(screen)
-        .stash(stash)
-        .viewport(viewport)
-        .on_alt_screen(on_alt_screen)
-        .modes(modes)
-        .kitty_keyboard(kitty_keyboard)
-        .cursor_style(cursor_style)
-        .current_title(current_title)
-        .title_stack(title_stack)
-        .saved_modes(saved_modes)
-        .current_prompt_row(current_prompt_row)
-        .bell_pending(bell_pending)
-        .vt52_cursor_addr(vt52_cursor_addr)
-        .dec_color(dec_color)
-        .default_status_display(default_status_display)
-        .macros(macros)
-        .drcs(drcs)
-        .palette(palette)
-        .base_palette(base_palette)
-        .conformance_level(ConformanceLevel::Level4)
-        .c1_mode(C1Mode::SevenBit)
-        .call();
-
-    if let Some(pr) = confirmation_param {
-        conformance::write_csi(pending_output, modes.c1_mode, format_args!("{pr}*q"));
-    }
-    true
 }
 
 // C0 control bytes (ECMA-48 / ASCII).
@@ -1851,11 +1584,153 @@ pub(super) fn execute(
     }
 }
 
-#[bon::builder]
-pub(super) fn csi_dispatch(
-    params: &Params,
+pub(super) fn csi_parse(
+    params: Params,
     intermediates: &[u8],
     action: char,
+) -> ParsedCsiAction {
+    let params = OwnedParams::from_vte(params);
+    match intermediates {
+        b"?" => match action {
+            'h' => ParsedCsiAction::SetPrivateModes {
+                enable: true,
+                modes: params,
+            },
+            'l' => ParsedCsiAction::SetPrivateModes {
+                enable: false,
+                modes: params,
+            },
+            's' => ParsedCsiAction::SavePrivateModes { modes: params },
+            'r' => ParsedCsiAction::RestorePrivateModes { modes: params },
+            'J' => ParsedCsiAction::SelectiveEraseDisplay {
+                mode: first_group_param(&params, 0),
+            },
+            'K' => ParsedCsiAction::SelectiveEraseLine {
+                mode: first_group_param(&params, 0),
+            },
+            'u' => ParsedCsiAction::KittyKeyboard {
+                intermediate: b'?',
+                params,
+            },
+            'n' => ParsedCsiAction::PrivateDeviceStatusReport {
+                selector: first_group_param(&params, 0),
+            },
+            _ => ParsedCsiAction::Unsupported,
+        },
+        b"?$" if action == 'p' => ParsedCsiAction::QueryPrivateMode {
+            mode: first_group_param(&params, 0),
+        },
+        b"$" => match action {
+            '}' => ParsedCsiAction::SelectActiveDisplay {
+                mode: first_group_param(&params, 0),
+            },
+            '~' => ParsedCsiAction::SetStatusDisplay {
+                mode: first_group_param(&params, 0),
+            },
+            'w' => ParsedCsiAction::ReportStatus {
+                selector: first_group_param(&params, 0),
+            },
+            'p' => ParsedCsiAction::QueryAnsiMode {
+                mode: first_group_param(&params, 0),
+            },
+            '|' => ParsedCsiAction::ResizeColumns {
+                cols: first_group_param(&params, 80),
+            },
+            'z' => ParsedCsiAction::EraseRect { params },
+            '{' => ParsedCsiAction::SelectiveEraseRect { params },
+            'x' => ParsedCsiAction::FillRect { params },
+            'v' => ParsedCsiAction::CopyRect { params },
+            'r' => ParsedCsiAction::ChangeRectAttrs { params },
+            't' => ParsedCsiAction::ReverseRectAttrs { params },
+            _ => ParsedCsiAction::Unsupported,
+        },
+        b"*" => match action {
+            '|' => ParsedCsiAction::SetScreenLines {
+                lines: first_group_param(&params, 24),
+            },
+            'x' => match first_group_param(&params, 0) {
+                2 => ParsedCsiAction::SetAttrChangeExtent {
+                    extent: grid::AttrChangeExtent::Rectangle,
+                },
+                0 | 1 => ParsedCsiAction::SetAttrChangeExtent {
+                    extent: grid::AttrChangeExtent::Stream,
+                },
+                _ => ParsedCsiAction::Unsupported,
+            },
+            _ => ParsedCsiAction::Unsupported,
+        },
+        b" " => match action {
+            'q' => ParsedCsiAction::SetCursorStyle {
+                style: first_group_param(&params, 0),
+            },
+            '@' => ParsedCsiAction::ScrollLeft {
+                count: first_group_param(&params, 1),
+            },
+            'A' => ParsedCsiAction::ScrollRight {
+                count: first_group_param(&params, 1),
+            },
+            'P' => ParsedCsiAction::SelectPage {
+                page: first_group_param(&params, 1),
+            },
+            'Q' => ParsedCsiAction::NextPage {
+                count: first_group_param(&params, 1),
+            },
+            'R' => ParsedCsiAction::PrevPage {
+                count: first_group_param(&params, 1),
+            },
+            _ => ParsedCsiAction::Unsupported,
+        },
+        b"\"" => match action {
+            'p' => {
+                let ps1 = first_group_param(&params, 0);
+                let Some(level) = ConformanceLevel::from_decscl(ps1) else {
+                    return ParsedCsiAction::Unsupported;
+                };
+                let ps2 = nth_group_param(&params, 1, 0);
+                let c1_mode = if level.supports_c1_negotiation() {
+                    C1Mode::from_decscl(Some(ps2))
+                } else {
+                    C1Mode::SevenBit
+                };
+                ParsedCsiAction::SetConformanceLevel { level, c1_mode }
+            }
+            'q' => ParsedCsiAction::SetCharacterProtection {
+                mode: first_group_param(&params, 0),
+            },
+            _ => ParsedCsiAction::Unsupported,
+        },
+        b"'" => match action {
+            '}' => ParsedCsiAction::InsertColumns {
+                count: first_group_param(&params, 1),
+            },
+            '~' => ParsedCsiAction::DeleteColumns {
+                count: first_group_param(&params, 1),
+            },
+            _ => ParsedCsiAction::Unsupported,
+        },
+        b"!" if action == 'p' => ParsedCsiAction::SoftReset,
+        b"&" if action == 'u' => ParsedCsiAction::ReportUserPreferredSupplementalSet,
+        b"+" if action == 'p' => ParsedCsiAction::ResetWithConfirmation {
+            confirmation_param: params.get(0).and_then(|group| group.first().copied()),
+        },
+        [b'>' | b'<' | b'='] => match (intermediates[0], action) {
+            (b'>' | b'<' | b'=', 'u') => ParsedCsiAction::KittyKeyboard {
+                intermediate: intermediates[0],
+                params,
+            },
+            (b'>', 'q') => ParsedCsiAction::ReportXtVersion,
+            (b'>', 'c') => ParsedCsiAction::ReportSecondaryDeviceAttrs,
+            (b'=', 'c') => ParsedCsiAction::ReportTertiaryDeviceAttrs,
+            _ => ParsedCsiAction::Unsupported,
+        },
+        b"" => ParsedCsiAction::Plain { action, params },
+        _ => ParsedCsiAction::Unsupported,
+    }
+}
+
+#[bon::builder]
+pub(super) fn csi_apply(
+    action: ParsedCsiAction,
     screen: &mut Screen,
     stash: &mut Screen,
     viewport: &mut Viewport,
@@ -1890,607 +1765,681 @@ pub(super) fn csi_dispatch(
 
     if screen.active_display == ActiveDisplay::Status
         && screen::status_line_writable(screen)
-        && status_line_csi_dispatch(
-            screen,
-            palette,
-            modes.insert_mode,
-            params,
-            intermediates,
-            action,
-        )
+        && status_line_csi_dispatch(screen, palette, modes.insert_mode, &action)
     {
         return;
     }
 
-    match intermediates {
-        b"?" => {
-            match action {
-                'h' | 'l' => {
-                    let enable = action == 'h';
-                    for p in params.iter() {
-                        match p[0] {
-                            mode::DECANM => {
-                                modes.vt52_mode = !enable;
-                            }
-                            mode::DECSCNM => {
-                                modes.screen_reverse = enable;
-                            }
-                            mode::DECARM => {
-                                modes.decarm = enable;
-                            }
-                            mode::ATT610_BLINK => {
-                                cursor_style.blink = enable;
-                            }
-                            mode::DECNCSM => {
-                                modes.decncsm = enable;
-                            }
-                            mode::DECLRMM => {
-                                modes.declrmm = enable;
-                                if !enable {
-                                    screen.left_margin = 0;
-                                    screen.right_margin = viewport.cols.saturating_sub(1);
-                                }
-                            }
-                            mode::DECNRCM => {
-                                modes.decnrcm = enable;
-                                for screen in [&mut *screen, &mut *stash] {
-                                    screen.nrc_mode = enable;
-                                    screen.charset = charset::CharsetState::new();
-                                }
-                            }
-                            mode::BRACKETED_PASTE => {
-                                modes.bracketed_paste = enable;
-                            }
-                            mode::FOCUS_REPORTING => {
-                                modes.focus_reporting = enable;
-                            }
-                            mode::SYNCHRONIZED_UPDATE => {
-                                modes.synchronized_update_since = enable.then(Instant::now);
-                            }
-                            mode::ALLOW_DECCOLM => {
-                                modes.allow_deccolm = enable;
-                            }
-                            mode::DECATCUM => {
-                                dec_color.alternate_underline_text = enable;
-                            }
-                            mode::DECATCBM => {
-                                dec_color.alternate_blink_text = enable;
-                            }
-                            mode::DECBBSM => {
-                                dec_color.bold_blink_affects_background = enable;
-                            }
-                            mode::DECECM => {
-                                dec_color.erase_to_screen = enable;
-                                for screen in [&mut *screen, &mut *stash] {
-                                    sync_screen_erase_defaults(screen, dec_color);
-                                }
-                            }
-                            mode::DECCOLM => {
-                                if !modes.allow_deccolm {
-                                    continue;
-                                }
-                                let new_cols = if enable {
-                                    modes.deccolm_saved_cols = Some(viewport.cols);
-                                    132
-                                } else {
-                                    modes.deccolm_saved_cols.take().unwrap_or(viewport.cols)
-                                };
-                                let old_cols = viewport.cols;
-                                let rows = viewport.rows;
-                                for s in [&mut *screen, &mut *stash] {
-                                    screen::resize_screen(s, old_cols, rows, new_cols, rows);
-                                }
-                                viewport.cols = new_cols;
-                                if !modes.decncsm {
-                                    let view = screen::screen_viewport(screen, viewport);
-                                    screen::clear_visible(screen, &view);
-                                }
-                                screen.scroll_top = 0;
-                                screen.scroll_bottom = rows.saturating_sub(1);
-                                screen.left_margin = 0;
-                                screen.right_margin = (viewport.cols).saturating_sub(1);
-                                screen.cursor = grid::Cursor::default();
-                            }
-                            mode => {
-                                if !apply_mouse_mode(
-                                    mode,
-                                    enable,
-                                    &mut modes.mouse_tracking,
-                                    &mut modes.mouse_encoding,
-                                ) {
-                                    screen::set_private_mode(
-                                        mode,
-                                        enable,
-                                        screen,
-                                        stash,
-                                        viewport,
-                                        on_alt_screen,
-                                    );
-                                }
-                            }
+    let (action, params) = match action {
+        ParsedCsiAction::Unsupported => return,
+        ParsedCsiAction::SetPrivateModes {
+            enable,
+            modes: params,
+        } => {
+            for p in params.iter() {
+                match p[0] {
+                    mode::DECANM => {
+                        modes.vt52_mode = !enable;
+                    }
+                    mode::DECSCNM => {
+                        modes.screen_reverse = enable;
+                    }
+                    mode::DECARM => {
+                        modes.decarm = enable;
+                    }
+                    mode::ATT610_BLINK => {
+                        cursor_style.blink = enable;
+                    }
+                    mode::DECNCSM => {
+                        modes.decncsm = enable;
+                    }
+                    mode::DECLRMM => {
+                        modes.declrmm = enable;
+                        if !enable {
+                            screen.left_margin = 0;
+                            screen.right_margin = viewport.cols.saturating_sub(1);
                         }
                     }
-                }
-                's' => {
-                    for p in params.iter() {
-                        let mode = p[0];
-                        let state = query_private_mode(
-                            modes,
-                            screen,
-                            *on_alt_screen,
-                            dec_color,
-                            cursor_style,
-                            mode,
-                        );
-                        saved_modes.insert(mode, state == 1);
+                    mode::DECNRCM => {
+                        modes.decnrcm = enable;
+                        for screen in [&mut *screen, &mut *stash] {
+                            screen.nrc_mode = enable;
+                            screen.charset = charset::CharsetState::new();
+                        }
                     }
-                }
-                'r' => {
-                    for p in params.iter() {
-                        let mode = p[0];
-                        if let Some(&saved) = saved_modes.get(&mode) {
-                            apply_private_mode(
-                                modes,
+                    mode::BRACKETED_PASTE => {
+                        modes.bracketed_paste = enable;
+                    }
+                    mode::FOCUS_REPORTING => {
+                        modes.focus_reporting = enable;
+                    }
+                    mode::SYNCHRONIZED_UPDATE => {
+                        modes.synchronized_update_since = enable.then(Instant::now);
+                    }
+                    mode::ALLOW_DECCOLM => {
+                        modes.allow_deccolm = enable;
+                    }
+                    mode::DECATCUM => {
+                        dec_color.alternate_underline_text = enable;
+                    }
+                    mode::DECATCBM => {
+                        dec_color.alternate_blink_text = enable;
+                    }
+                    mode::DECBBSM => {
+                        dec_color.bold_blink_affects_background = enable;
+                    }
+                    mode::DECECM => {
+                        dec_color.erase_to_screen = enable;
+                        for screen in [&mut *screen, &mut *stash] {
+                            sync_screen_erase_defaults(screen, dec_color);
+                        }
+                    }
+                    mode::DECCOLM => {
+                        if !modes.allow_deccolm {
+                            continue;
+                        }
+                        let new_cols = if enable {
+                            modes.deccolm_saved_cols = Some(viewport.cols);
+                            132
+                        } else {
+                            modes.deccolm_saved_cols.take().unwrap_or(viewport.cols)
+                        };
+                        let old_cols = viewport.cols;
+                        let rows = viewport.rows;
+                        for s in [&mut *screen, &mut *stash] {
+                            screen::resize_screen(s, old_cols, rows, new_cols, rows);
+                        }
+                        viewport.cols = new_cols;
+                        if !modes.decncsm {
+                            let view = screen::screen_viewport(screen, viewport);
+                            screen::clear_visible(screen, &view);
+                        }
+                        screen.scroll_top = 0;
+                        screen.scroll_bottom = rows.saturating_sub(1);
+                        screen.left_margin = 0;
+                        screen.right_margin = viewport.cols.saturating_sub(1);
+                        screen.cursor = grid::Cursor::default();
+                    }
+                    mode => {
+                        if !apply_mouse_mode(
+                            mode,
+                            enable,
+                            &mut modes.mouse_tracking,
+                            &mut modes.mouse_encoding,
+                        ) {
+                            screen::set_private_mode(
+                                mode,
+                                enable,
                                 screen,
                                 stash,
                                 viewport,
                                 on_alt_screen,
-                                cursor_style,
-                                dec_color,
-                                mode,
-                                saved,
                             );
                         }
                     }
                 }
-                'J' => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    let mode = params
-                        .iter()
-                        .next()
-                        .and_then(|g| g.first().copied())
-                        .unwrap_or(0);
-                    screen.grid.erase_in_display_selective(
-                        &screen.cursor,
-                        &view,
-                        &mut screen.images,
-                        mode,
-                    );
-                }
-                'K' => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    let mode = params
-                        .iter()
-                        .next()
-                        .and_then(|g| g.first().copied())
-                        .unwrap_or(0);
-                    screen
-                        .grid
-                        .erase_in_line_selective(&screen.cursor, &view, mode);
-                }
-                'u' => {
-                    handle_kitty_keyboard(
-                        b'?',
-                        params,
-                        kitty_keyboard,
-                        modes.c1_mode,
-                        pending_output,
-                    );
-                }
-                'n' => {
-                    let ps = params
-                        .iter()
-                        .next()
-                        .and_then(|g| g.first().copied())
-                        .unwrap_or(0);
-                    if ps == DSR_CPR {
-                        let row = screen.cursor.row + 1;
-                        let col = screen.cursor.col + 1;
-                        let page = screen
-                            .page_memory
-                            .as_ref()
-                            .map(|page| page.active_page + 1)
-                            .unwrap_or(1);
-                        conformance::write_csi(
-                            pending_output,
-                            modes.c1_mode,
-                            format_args!("?{row};{col};{page}R"),
-                        );
-                    }
-                }
-                _ => {}
             }
             return;
         }
-        b"?$" if action == 'p' => {
-            let ps = params
-                .iter()
-                .next()
-                .and_then(|g| g.first().copied())
-                .unwrap_or(0);
+        ParsedCsiAction::SavePrivateModes { modes: params } => {
+            for p in params.iter() {
+                let mode = p[0];
+                let state = query_private_mode(
+                    modes,
+                    screen,
+                    *on_alt_screen,
+                    dec_color,
+                    cursor_style,
+                    mode,
+                );
+                saved_modes.insert(mode, state == 1);
+            }
+            return;
+        }
+        ParsedCsiAction::RestorePrivateModes { modes: params } => {
+            for p in params.iter() {
+                let mode = p[0];
+                if let Some(&saved) = saved_modes.get(&mode) {
+                    apply_private_mode(
+                        modes,
+                        screen,
+                        stash,
+                        viewport,
+                        on_alt_screen,
+                        cursor_style,
+                        dec_color,
+                        mode,
+                        saved,
+                    );
+                }
+            }
+            return;
+        }
+        ParsedCsiAction::SelectiveEraseDisplay { mode } => {
+            let view = screen::screen_viewport(screen, viewport);
+            screen
+                .grid
+                .erase_in_display_selective(&screen.cursor, &view, &mut screen.images, mode);
+            return;
+        }
+        ParsedCsiAction::SelectiveEraseLine { mode } => {
+            let view = screen::screen_viewport(screen, viewport);
+            screen
+                .grid
+                .erase_in_line_selective(&screen.cursor, &view, mode);
+            return;
+        }
+        ParsedCsiAction::KittyKeyboard {
+            intermediate,
+            params,
+        } => {
+            let groups: Vec<&[u16]> = params.iter().collect();
+            handle_kitty_keyboard_groups(
+                intermediate,
+                &groups,
+                kitty_keyboard,
+                modes.c1_mode,
+                pending_output,
+            );
+            return;
+        }
+        ParsedCsiAction::PrivateDeviceStatusReport { selector } => {
+            if selector == DSR_CPR {
+                let row = screen.cursor.row + 1;
+                let col = screen.cursor.col + 1;
+                let page = screen
+                    .page_memory
+                    .as_ref()
+                    .map(|page| page.active_page + 1)
+                    .unwrap_or(1);
+                conformance::write_csi(
+                    pending_output,
+                    modes.c1_mode,
+                    format_args!("?{row};{col};{page}R"),
+                );
+            }
+            return;
+        }
+        ParsedCsiAction::QueryPrivateMode { mode: ps } => {
             let pm = query_private_mode(modes, screen, *on_alt_screen, dec_color, cursor_style, ps);
             conformance::write_csi(pending_output, modes.c1_mode, format_args!("?{ps};{pm}$y"));
             return;
         }
-        b"$" => {
-            match action {
-                '}' => {
-                    let ps = params
-                        .iter()
-                        .next()
-                        .and_then(|g| g.first().copied())
-                        .unwrap_or(0);
-                    screen.active_display = match ps {
-                        1 if screen::status_line_writable(screen) => ActiveDisplay::Status,
-                        _ => ActiveDisplay::Main,
-                    };
-                }
-                '~' => {
-                    let ps = params
-                        .iter()
-                        .next()
-                        .and_then(|g| g.first().copied())
-                        .unwrap_or(0);
-                    let total_rows = viewport.rows + screen::status_line_rows(screen);
-                    let old_rows = viewport.rows;
-                    let status_display = match ps {
-                        1 => StatusDisplayKind::Indicator,
-                        2 => StatusDisplayKind::HostWritable,
-                        _ => StatusDisplayKind::None,
-                    };
-                    screen::set_status_display(
+        ParsedCsiAction::SelectActiveDisplay { mode } => {
+            screen.active_display = match mode {
+                1 if screen::status_line_writable(screen) => ActiveDisplay::Status,
+                _ => ActiveDisplay::Main,
+            };
+            return;
+        }
+        ParsedCsiAction::SetStatusDisplay { mode } => {
+            let total_rows = viewport.rows + screen::status_line_rows(screen);
+            let old_rows = viewport.rows;
+            let status_display = match mode {
+                1 => StatusDisplayKind::Indicator,
+                2 => StatusDisplayKind::HostWritable,
+                _ => StatusDisplayKind::None,
+            };
+            screen::set_status_display(
+                screen,
+                viewport.cols,
+                status_display,
+                palette.status_line_fg,
+                palette.status_line_bg,
+            );
+            let new_rows = total_rows.saturating_sub(screen::status_line_rows(screen));
+            if new_rows != old_rows {
+                let old_cols = viewport.cols;
+                screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
+                if screen::page_memory_active(screen)
+                    && let Some(page_rows) = screen::page_rows(screen)
+                {
+                    screen::resize_page_memory(
                         screen,
-                        viewport.cols,
-                        status_display,
-                        palette.status_line_fg,
-                        palette.status_line_bg,
+                        &Viewport {
+                            rows: new_rows,
+                            cols: old_cols,
+                            top: 0,
+                        },
+                        page_rows,
                     );
-                    let new_rows = total_rows.saturating_sub(screen::status_line_rows(screen));
-                    if new_rows != old_rows {
-                        let old_cols = viewport.cols;
-                        screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
-                        if screen::page_memory_active(screen)
-                            && let Some(page_rows) = screen::page_rows(screen)
-                        {
-                            screen::resize_page_memory(
-                                screen,
-                                &Viewport {
-                                    rows: new_rows,
-                                    cols: old_cols,
-                                    top: 0,
-                                },
-                                page_rows,
-                            );
-                        }
-                        viewport.rows = new_rows;
+                }
+                viewport.rows = new_rows;
+            }
+            return;
+        }
+        ParsedCsiAction::ReportStatus { selector } => {
+            match selector {
+                1 => {
+                    if let Some(report) = crate::deccir_report(screen, viewport, modes, drcs) {
+                        conformance::write_dcs(
+                            pending_output,
+                            modes.c1_mode,
+                            format_args!("1$u{report}"),
+                        );
                     }
                 }
-                'w' => {
-                    let ps = params
-                        .iter()
-                        .next()
-                        .and_then(|g| g.first().copied())
-                        .unwrap_or(0);
-                    match ps {
-                        1 => {
-                            if let Some(report) =
-                                crate::deccir_report(screen, viewport, modes, drcs)
-                            {
-                                conformance::write_dcs(
-                                    pending_output,
-                                    modes.c1_mode,
-                                    format_args!("1$u{report}"),
-                                );
-                            }
-                        }
-                        2 => {
-                            let stops = crate::dectabsr_report(screen);
-                            conformance::write_dcs(
-                                pending_output,
-                                modes.c1_mode,
-                                format_args!("2$u{stops}"),
-                            );
-                        }
-                        _ => {}
-                    }
-                }
-                'p' => {
-                    let ps = params
-                        .iter()
-                        .next()
-                        .and_then(|g| g.first().copied())
-                        .unwrap_or(0);
-                    let pm = match ps {
-                        mode::IRM => {
-                            if modes.insert_mode {
-                                1
-                            } else {
-                                2
-                            }
-                        }
-                        mode::LNM => {
-                            if modes.newline_mode {
-                                1
-                            } else {
-                                2
-                            }
-                        }
-                        1 | 5 | 7 | 10 | 11 | 13 | 14 | 15 | 16 | 17 | 18 | 19 => 4,
-                        _ => 0,
-                    };
-                    conformance::write_csi(
+                2 => {
+                    let stops = crate::dectabsr_report(screen);
+                    conformance::write_dcs(
                         pending_output,
                         modes.c1_mode,
-                        format_args!("{ps};{pm}$y"),
+                        format_args!("2$u{stops}"),
                     );
-                }
-                '|' => {
-                    let ps = params
-                        .iter()
-                        .next()
-                        .and_then(|g| g.first().copied())
-                        .unwrap_or(80);
-                    let Some(cols) = matches!(ps, 80 | 132).then_some(ps as u32) else {
-                        return;
-                    };
-                    let old_cols = viewport.cols;
-                    let total_rows = viewport.rows + screen::status_line_rows(screen);
-                    for screen in [&mut *screen, &mut *stash] {
-                        let rows = total_rows.saturating_sub(screen::status_line_rows(screen));
-                        screen::resize_screen(screen, old_cols, rows, cols, rows);
-                        if screen::page_memory_active(screen) {
-                            let page_rows = screen::page_rows(screen).unwrap_or(rows);
-                            screen::resize_page_memory(
-                                screen,
-                                &Viewport { rows, cols, top: 0 },
-                                page_rows,
-                            );
-                        }
-                    }
-                    viewport.cols = cols;
-                    *pending_resize =
-                        Some((cols, viewport.rows + screen::status_line_rows(screen)));
-                    screen.right_margin = cols.saturating_sub(1);
-                    screen.cursor.col = screen.cursor.col.min(cols.saturating_sub(1));
-                }
-                'z' | '{' | 'x' | 'v' | 'r' | 't' => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    let rows = view.rows;
-                    let cols = view.cols;
-                    let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
-
-                    if matches!(action, 'r' | 't')
-                        && screen.attr_change_extent == grid::AttrChangeExtent::Stream
-                    {
-                        let start_row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
-                        let start_col = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
-                        let end_row = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
-                            .min(rows.saturating_sub(1));
-                        let end_col = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
-                            .min(cols.saturating_sub(1));
-                        if start_row > end_row || (start_row == end_row && start_col > end_col) {
-                            return;
-                        }
-                        let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                        match action {
-                            'r' => screen.grid.change_attrs_rect(
-                                &view,
-                                start_row,
-                                start_col,
-                                end_row,
-                                end_col,
-                                &sgr,
-                                screen.attr_change_extent,
-                            ),
-                            't' => screen.grid.reverse_attrs_rect(
-                                &view,
-                                start_row,
-                                start_col,
-                                end_row,
-                                end_col,
-                                &sgr,
-                                screen.attr_change_extent,
-                            ),
-                            _ => {}
-                        }
-                        return;
-                    }
-
-                    let rect_top = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
-                    let rect_left = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
-                    let rect_bottom = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
-                        .min(rows.saturating_sub(1));
-                    let rect_right = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
-                        .min(cols.saturating_sub(1));
-
-                    if rect_top > rect_bottom || rect_left > rect_right {
-                        return;
-                    }
-
-                    match action {
-                        'z' => {
-                            screen.grid.erase_rect(
-                                &view,
-                                rect_top,
-                                rect_left,
-                                rect_bottom,
-                                rect_right,
-                            );
-                        }
-                        '{' => {
-                            screen.grid.erase_rect_selective(
-                                &view,
-                                rect_top,
-                                rect_left,
-                                rect_bottom,
-                                rect_right,
-                            );
-                        }
-                        'x' => {
-                            let ch_code = p.get(4).copied().unwrap_or(0x20) as u32;
-                            let valid =
-                                (32..=126).contains(&ch_code) || (160..=255).contains(&ch_code);
-                            if valid && let Some(ch) = char::from_u32(ch_code) {
-                                let mut buf = [0u8; 4];
-                                let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
-                                screen.grid.fill_rect(
-                                    &view,
-                                    rect_top,
-                                    rect_left,
-                                    rect_bottom,
-                                    rect_right,
-                                    s,
-                                    screen.fg,
-                                    screen.bg,
-                                    screen.attrs,
-                                    screen.underline,
-                                    screen.underline_color,
-                                );
-                            }
-                        }
-                        'v' => {
-                            let src_page = p.get(4).copied().unwrap_or(1);
-                            let dst_top = p.get(5).copied().unwrap_or(1).max(1) as u32 - 1;
-                            let dst_left = p.get(6).copied().unwrap_or(1).max(1) as u32 - 1;
-                            let dst_page = p.get(7).copied().unwrap_or(1);
-                            if src_page > 1 || dst_page > 1 {
-                                screen::ensure_page_memory(screen, viewport);
-                            }
-                            let Some(src_view) = screen::page_viewport(screen, viewport, src_page)
-                            else {
-                                return;
-                            };
-                            let Some(dst_view) = screen::page_viewport(screen, viewport, dst_page)
-                            else {
-                                return;
-                            };
-                            screen.grid.copy_rect(
-                                &src_view,
-                                rect_top,
-                                rect_left,
-                                rect_bottom,
-                                rect_right,
-                                dst_top,
-                                dst_left,
-                                &dst_view,
-                            );
-                        }
-                        'r' => {
-                            let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                            screen.grid.change_attrs_rect(
-                                &view,
-                                rect_top,
-                                rect_left,
-                                rect_bottom,
-                                rect_right,
-                                &sgr,
-                                screen.attr_change_extent,
-                            );
-                        }
-                        't' => {
-                            let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                            screen.grid.reverse_attrs_rect(
-                                &view,
-                                rect_top,
-                                rect_left,
-                                rect_bottom,
-                                rect_right,
-                                &sgr,
-                                screen.attr_change_extent,
-                            );
-                        }
-                        _ => {}
-                    }
                 }
                 _ => {}
             }
             return;
         }
-        b"*" if csi_dispatch_star_intermediate(
-            screen,
-            stash,
-            viewport,
-            pending_resize,
-            params,
-            action,
-        ) =>
-        {
+        ParsedCsiAction::QueryAnsiMode { mode: ps } => {
+            let pm = match ps {
+                mode::IRM => {
+                    if modes.insert_mode {
+                        1
+                    } else {
+                        2
+                    }
+                }
+                mode::LNM => {
+                    if modes.newline_mode {
+                        1
+                    } else {
+                        2
+                    }
+                }
+                1 | 5 | 7 | 10 | 11 | 13 | 14 | 15 | 16 | 17 | 18 | 19 => 4,
+                _ => 0,
+            };
+            conformance::write_csi(pending_output, modes.c1_mode, format_args!("{ps};{pm}$y"));
             return;
         }
-        b" " if csi_dispatch_space_intermediate(screen, viewport, cursor_style, params, action) => {
+        ParsedCsiAction::ResizeColumns { cols } => {
+            let Some(cols) = matches!(cols, 80 | 132).then_some(cols as u32) else {
+                return;
+            };
+            let old_cols = viewport.cols;
+            let total_rows = viewport.rows + screen::status_line_rows(screen);
+            for screen in [&mut *screen, &mut *stash] {
+                let rows = total_rows.saturating_sub(screen::status_line_rows(screen));
+                screen::resize_screen(screen, old_cols, rows, cols, rows);
+                if screen::page_memory_active(screen) {
+                    let page_rows = screen::page_rows(screen).unwrap_or(rows);
+                    screen::resize_page_memory(screen, &Viewport { rows, cols, top: 0 }, page_rows);
+                }
+            }
+            viewport.cols = cols;
+            *pending_resize = Some((cols, viewport.rows + screen::status_line_rows(screen)));
+            screen.right_margin = cols.saturating_sub(1);
+            screen.cursor.col = screen.cursor.col.min(cols.saturating_sub(1));
             return;
         }
-        b"\"" if csi_dispatch_quote_intermediate(screen, modes, params, action) => {
-            return;
-        }
-        b"'" if csi_dispatch_apostrophe_intermediate(screen, viewport, params, action) => {
-            return;
-        }
-        b"!" if csi_dispatch_bang_intermediate(
-            screen,
-            viewport,
-            modes,
-            kitty_keyboard,
-            cursor_style,
-            palette,
-            action,
-        ) =>
-        {
-            return;
-        }
-        b"&" if csi_dispatch_amp_intermediate(screen, pending_output, modes.c1_mode, action) => {
-            return;
-        }
-        b"+" if csi_dispatch_plus_intermediate()
-            .action(action)
-            .bell_pending(bell_pending)
-            .current_prompt_row(current_prompt_row)
-            .screen(screen)
-            .stash(stash)
-            .pending_output(pending_output)
-            .viewport(viewport)
-            .on_alt_screen(on_alt_screen)
-            .modes(modes)
-            .kitty_keyboard(kitty_keyboard)
-            .cursor_style(cursor_style)
-            .current_title(current_title)
-            .title_stack(title_stack)
-            .saved_modes(saved_modes)
-            .vt52_cursor_addr(vt52_cursor_addr)
-            .default_status_display(default_status_display)
-            .macros(macros)
-            .drcs(drcs)
-            .params(params)
-            .palette(palette)
-            .base_palette(base_palette)
-            .dec_color(dec_color)
-            .call() =>
-        {
-            return;
-        }
-        b">" | b"<" | b"="
-            if csi_dispatch_gt_lt_eq_intermediate(
-                pending_output,
-                modes,
-                kitty_keyboard,
-                params,
-                intermediates,
-                action,
-            ) =>
-        {
-            return;
-        }
-        _ => {}
-    }
+        ParsedCsiAction::EraseRect { ref params }
+        | ParsedCsiAction::SelectiveEraseRect { ref params }
+        | ParsedCsiAction::FillRect { ref params }
+        | ParsedCsiAction::CopyRect { ref params }
+        | ParsedCsiAction::ChangeRectAttrs { ref params }
+        | ParsedCsiAction::ReverseRectAttrs { ref params } => {
+            let view = screen::screen_viewport(screen, viewport);
+            let rows = view.rows;
+            let cols = view.cols;
+            let p: Vec<u16> = params.iter().map(|group| group[0]).collect();
 
-    if !intermediates.is_empty() {
-        return;
-    }
+            if matches!(
+                action,
+                ParsedCsiAction::ChangeRectAttrs { .. } | ParsedCsiAction::ReverseRectAttrs { .. }
+            ) && screen.attr_change_extent == grid::AttrChangeExtent::Stream
+            {
+                let start_row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
+                let start_col = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
+                let end_row = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
+                    .min(rows.saturating_sub(1));
+                let end_col = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
+                    .min(cols.saturating_sub(1));
+                if start_row > end_row || (start_row == end_row && start_col > end_col) {
+                    return;
+                }
+                let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+                match action {
+                    ParsedCsiAction::ChangeRectAttrs { .. } => screen.grid.change_attrs_rect(
+                        &view,
+                        start_row,
+                        start_col,
+                        end_row,
+                        end_col,
+                        &sgr,
+                        screen.attr_change_extent,
+                    ),
+                    ParsedCsiAction::ReverseRectAttrs { .. } => screen.grid.reverse_attrs_rect(
+                        &view,
+                        start_row,
+                        start_col,
+                        end_row,
+                        end_col,
+                        &sgr,
+                        screen.attr_change_extent,
+                    ),
+                    _ => {}
+                }
+                return;
+            }
+
+            let rect_top = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
+            let rect_left = p.get(1).copied().unwrap_or(1).max(1) as u32 - 1;
+            let rect_bottom = (p.get(2).copied().unwrap_or(rows as u16).max(1) as u32 - 1)
+                .min(rows.saturating_sub(1));
+            let rect_right = (p.get(3).copied().unwrap_or(cols as u16).max(1) as u32 - 1)
+                .min(cols.saturating_sub(1));
+
+            if rect_top > rect_bottom || rect_left > rect_right {
+                return;
+            }
+
+            match action {
+                ParsedCsiAction::EraseRect { .. } => {
+                    screen
+                        .grid
+                        .erase_rect(&view, rect_top, rect_left, rect_bottom, rect_right);
+                }
+                ParsedCsiAction::SelectiveEraseRect { .. } => {
+                    screen.grid.erase_rect_selective(
+                        &view,
+                        rect_top,
+                        rect_left,
+                        rect_bottom,
+                        rect_right,
+                    );
+                }
+                ParsedCsiAction::FillRect { .. } => {
+                    let ch_code = p.get(4).copied().unwrap_or(0x20) as u32;
+                    let valid = (32..=126).contains(&ch_code) || (160..=255).contains(&ch_code);
+                    if valid && let Some(ch) = char::from_u32(ch_code) {
+                        let mut buf = [0u8; 4];
+                        let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
+                        screen.grid.fill_rect(
+                            &view,
+                            rect_top,
+                            rect_left,
+                            rect_bottom,
+                            rect_right,
+                            s,
+                            screen.fg,
+                            screen.bg,
+                            screen.attrs,
+                            screen.underline,
+                            screen.underline_color,
+                        );
+                    }
+                }
+                ParsedCsiAction::CopyRect { .. } => {
+                    let src_page = p.get(4).copied().unwrap_or(1);
+                    let dst_top = p.get(5).copied().unwrap_or(1).max(1) as u32 - 1;
+                    let dst_left = p.get(6).copied().unwrap_or(1).max(1) as u32 - 1;
+                    let dst_page = p.get(7).copied().unwrap_or(1);
+                    if src_page > 1 || dst_page > 1 {
+                        screen::ensure_page_memory(screen, viewport);
+                    }
+                    let Some(src_view) = screen::page_viewport(screen, viewport, src_page) else {
+                        return;
+                    };
+                    let Some(dst_view) = screen::page_viewport(screen, viewport, dst_page) else {
+                        return;
+                    };
+                    screen.grid.copy_rect(
+                        &src_view,
+                        rect_top,
+                        rect_left,
+                        rect_bottom,
+                        rect_right,
+                        dst_top,
+                        dst_left,
+                        &dst_view,
+                    );
+                }
+                ParsedCsiAction::ChangeRectAttrs { .. } => {
+                    let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+                    screen.grid.change_attrs_rect(
+                        &view,
+                        rect_top,
+                        rect_left,
+                        rect_bottom,
+                        rect_right,
+                        &sgr,
+                        screen.attr_change_extent,
+                    );
+                }
+                ParsedCsiAction::ReverseRectAttrs { .. } => {
+                    let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
+                    screen.grid.reverse_attrs_rect(
+                        &view,
+                        rect_top,
+                        rect_left,
+                        rect_bottom,
+                        rect_right,
+                        &sgr,
+                        screen.attr_change_extent,
+                    );
+                }
+                _ => {}
+            }
+            return;
+        }
+        ParsedCsiAction::SetScreenLines { lines } => {
+            if let Some(rows) = valid_screen_lines(lines) {
+                let page_rows = screen::page_rows(screen).unwrap_or(rows.max(viewport.rows));
+                for screen in [&mut *screen, &mut *stash] {
+                    screen::activate_page_memory(
+                        screen,
+                        &Viewport {
+                            rows,
+                            cols: viewport.cols,
+                            top: 0,
+                        },
+                        page_rows,
+                    );
+                }
+                let old_cols = viewport.cols;
+                let old_total_rows = viewport.rows + screen::status_line_rows(screen);
+                let new_total_rows = rows + screen::status_line_rows(screen);
+                for screen in [&mut *screen, &mut *stash] {
+                    let old_rows = old_total_rows.saturating_sub(screen::status_line_rows(screen));
+                    let new_rows = new_total_rows.saturating_sub(screen::status_line_rows(screen));
+                    screen::resize_screen(screen, old_cols, old_rows, old_cols, new_rows);
+                }
+                viewport.rows = rows;
+                *pending_resize = Some((viewport.cols, rows + screen::status_line_rows(screen)));
+                screen.scroll_top = 0;
+                screen.scroll_bottom = rows.saturating_sub(1);
+                screen.cursor.row = screen.cursor.row.min(rows.saturating_sub(1));
+            }
+            return;
+        }
+        ParsedCsiAction::SetAttrChangeExtent { extent } => {
+            screen.attr_change_extent = extent;
+            return;
+        }
+        ParsedCsiAction::SetCursorStyle { style } => {
+            cursor_style.apply_decscusr(style);
+            return;
+        }
+        ParsedCsiAction::ScrollLeft { count } => {
+            let view = screen::screen_viewport(screen, viewport);
+            let n = count.max(1) as u32;
+            screen
+                .grid
+                .scroll_left(&view, screen.scroll_top, screen.scroll_bottom, n);
+            return;
+        }
+        ParsedCsiAction::ScrollRight { count } => {
+            let view = screen::screen_viewport(screen, viewport);
+            let n = count.max(1) as u32;
+            screen
+                .grid
+                .scroll_right(&view, screen.scroll_top, screen.scroll_bottom, n);
+            return;
+        }
+        ParsedCsiAction::SelectPage { page } => {
+            let view = screen::screen_viewport(screen, viewport);
+            screen::activate_page_memory(screen, &view, view.rows);
+            if let Some(page_memory) = screen.page_memory.as_mut() {
+                page_memory.active_page = u32::from(page.saturating_sub(1))
+                    .min(page_memory.page_count().saturating_sub(1));
+            }
+            return;
+        }
+        ParsedCsiAction::NextPage { count } => {
+            let n = count.max(1) as u32;
+            let view = screen::screen_viewport(screen, viewport);
+            screen::activate_page_memory(screen, &view, view.rows);
+            if let Some(page_memory) = screen.page_memory.as_mut() {
+                page_memory.active_page =
+                    (page_memory.active_page + n).min(page_memory.page_count().saturating_sub(1));
+            }
+            return;
+        }
+        ParsedCsiAction::PrevPage { count } => {
+            let n = count.max(1) as u32;
+            let view = screen::screen_viewport(screen, viewport);
+            screen::activate_page_memory(screen, &view, view.rows);
+            if let Some(page_memory) = screen.page_memory.as_mut() {
+                page_memory.active_page = page_memory.active_page.saturating_sub(n);
+            }
+            return;
+        }
+        ParsedCsiAction::SetConformanceLevel { level, c1_mode } => {
+            modes.conformance_level = level;
+            modes.c1_mode = c1_mode;
+            modes.vt52_mode = false;
+            return;
+        }
+        ParsedCsiAction::SetCharacterProtection { mode } => {
+            match mode {
+                1 => screen.attrs.insert(CellAttrs::PROTECTED),
+                0 | 2 => screen.attrs.remove(CellAttrs::PROTECTED),
+                _ => {}
+            }
+            return;
+        }
+        ParsedCsiAction::InsertColumns { count } => {
+            let view = screen::screen_viewport(screen, viewport);
+            screen.grid.insert_cols(
+                &view,
+                screen.cursor.col,
+                screen.scroll_top,
+                screen.scroll_bottom,
+                count.max(1) as u32,
+            );
+            return;
+        }
+        ParsedCsiAction::DeleteColumns { count } => {
+            let view = screen::screen_viewport(screen, viewport);
+            screen.grid.delete_cols(
+                &view,
+                screen.cursor.col,
+                screen.scroll_top,
+                screen.scroll_bottom,
+                count.max(1) as u32,
+            );
+            return;
+        }
+        ParsedCsiAction::SoftReset => {
+            if modes.vt52_mode || !modes.conformance_level.supports_c1_negotiation() {
+                return;
+            }
+            screen.fg = palette.fg;
+            screen.bg = palette.bg;
+            screen.attrs = CellAttrs::default();
+            screen.underline = UnderlineStyle::None;
+            screen.underline_color = None;
+            screen.scroll_top = 0;
+            screen.scroll_bottom = viewport.rows.saturating_sub(1);
+            screen.left_margin = 0;
+            screen.right_margin = viewport.cols.saturating_sub(1);
+            screen.saved_cursor = None;
+            screen.current_hyperlink = None;
+            screen.cursor_visible = true;
+            screen.last_char = None;
+            screen.tab_stops = screen::init_tab_stops(viewport.cols);
+            screen.origin_mode = false;
+            screen.nrc_mode = false;
+            screen.upss = charset::UserPreferredSupplementalSet::DecSupplemental;
+            screen.autowrap = true;
+            screen.app_cursor_keys = false;
+            screen.attr_change_extent = grid::AttrChangeExtent::Stream;
+            screen.app_keypad = false;
+            screen.charset = charset::CharsetState::new();
+            let conformance_level = modes.conformance_level;
+            let c1_mode = modes.c1_mode;
+            *modes = TerminalModes::new();
+            modes.conformance_level = conformance_level;
+            modes.c1_mode = c1_mode;
+            *kitty_keyboard = KittyKeyboardState::new();
+            *cursor_style = CursorStyle::default();
+            return;
+        }
+        ParsedCsiAction::ReportUserPreferredSupplementalSet => {
+            conformance::write_dcs(
+                pending_output,
+                modes.c1_mode,
+                format_args!("{}", charset::decaupss_report(screen.upss)),
+            );
+            return;
+        }
+        ParsedCsiAction::ResetWithConfirmation { confirmation_param } => {
+            apply_hard_reset_state()
+                .screen(screen)
+                .stash(stash)
+                .viewport(viewport)
+                .on_alt_screen(on_alt_screen)
+                .modes(modes)
+                .kitty_keyboard(kitty_keyboard)
+                .cursor_style(cursor_style)
+                .current_title(current_title)
+                .title_stack(title_stack)
+                .saved_modes(saved_modes)
+                .current_prompt_row(current_prompt_row)
+                .bell_pending(bell_pending)
+                .vt52_cursor_addr(vt52_cursor_addr)
+                .dec_color(dec_color)
+                .default_status_display(default_status_display)
+                .macros(macros)
+                .drcs(drcs)
+                .palette(palette)
+                .base_palette(base_palette)
+                .conformance_level(ConformanceLevel::Level4)
+                .c1_mode(C1Mode::SevenBit)
+                .call();
+
+            if let Some(pr) = confirmation_param {
+                conformance::write_csi(pending_output, modes.c1_mode, format_args!("{pr}*q"));
+            }
+            return;
+        }
+        ParsedCsiAction::ReportXtVersion => {
+            conformance::write_dcs(
+                pending_output,
+                modes.c1_mode,
+                format_args!(">|term41 {}", env!("CARGO_PKG_VERSION")),
+            );
+            return;
+        }
+        ParsedCsiAction::ReportSecondaryDeviceAttrs => {
+            conformance::write_csi(pending_output, modes.c1_mode, format_args!(">41;0;0c"));
+            return;
+        }
+        ParsedCsiAction::ReportTertiaryDeviceAttrs => {
+            if modes.vt52_mode || !modes.conformance_level.supports_c1_negotiation() {
+                return;
+            }
+            conformance::write_dcs(pending_output, modes.c1_mode, format_args!("!|000000000"));
+            return;
+        }
+        ParsedCsiAction::Plain { action, params } => (action, params),
+    };
 
     let pending_output = &mut *pending_output;
     let screen = &mut *screen;
     let mut viewport = screen::screen_viewport(screen, viewport);
-    let p: Vec<u16> = params.iter().map(|p| p[0]).collect();
+    let p: Vec<u16> = params.iter().map(|group| group[0]).collect();
 
     match action {
         'y' => {
@@ -2719,13 +2668,13 @@ pub(super) fn csi_dispatch(
             screen.grid.erase_in_line(&screen.cursor, &viewport, mode);
         }
         'm' => {
-            apply_sgr(
+            apply_sgr_groups(
                 &mut screen.fg,
                 &mut screen.bg,
                 &mut screen.attrs,
                 &mut screen.underline,
                 &mut screen.underline_color,
-                params,
+                params.as_groups(),
                 palette,
             );
             sync_screen_erase_defaults(screen, dec_color);
@@ -2949,6 +2898,69 @@ pub(super) fn csi_dispatch(
         }
         _ => {}
     }
+}
+
+#[cfg(test)]
+#[bon::builder]
+pub(super) fn csi_dispatch(
+    params: &Params,
+    intermediates: &[u8],
+    action: char,
+    screen: &mut Screen,
+    stash: &mut Screen,
+    viewport: &mut Viewport,
+    on_alt_screen: &mut bool,
+    modes: &mut TerminalModes,
+    kitty_keyboard: &mut KittyKeyboardState,
+    pending_output: &mut Vec<u8>,
+    pending_resize: &mut Option<(u32, u32)>,
+    cursor_style: &mut CursorStyle,
+    cell_width: u32,
+    cell_height: u32,
+    palette: &mut ColorPalette,
+    base_palette: &ColorPalette,
+    dec_color: &mut DecColorState,
+    default_status_display: &mut StatusDisplayKind,
+    title_stack: &mut Vec<Option<String>>,
+    current_title: &mut Option<String>,
+    saved_modes: &mut HashMap<u16, bool>,
+    current_prompt_row: &mut Option<u64>,
+    bell_pending: &mut bool,
+    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
+    macros: &mut MacroStore,
+    feature_permissions: &FeaturePermissions,
+    foreground_processes: &Option<ForegroundProcessSet>,
+    drcs: &mut DrcsStore,
+) {
+    let action = csi_parse(*params, intermediates, action);
+    csi_apply()
+        .action(action)
+        .screen(screen)
+        .stash(stash)
+        .viewport(viewport)
+        .on_alt_screen(on_alt_screen)
+        .modes(modes)
+        .kitty_keyboard(kitty_keyboard)
+        .pending_output(pending_output)
+        .pending_resize(pending_resize)
+        .cursor_style(cursor_style)
+        .cell_width(cell_width)
+        .cell_height(cell_height)
+        .palette(palette)
+        .base_palette(base_palette)
+        .dec_color(dec_color)
+        .default_status_display(default_status_display)
+        .title_stack(title_stack)
+        .current_title(current_title)
+        .saved_modes(saved_modes)
+        .current_prompt_row(current_prompt_row)
+        .bell_pending(bell_pending)
+        .vt52_cursor_addr(vt52_cursor_addr)
+        .macros(macros)
+        .feature_permissions(feature_permissions)
+        .foreground_processes(foreground_processes)
+        .drcs(drcs)
+        .call();
 }
 
 fn esc_dispatch_vt52(
@@ -3400,6 +3412,21 @@ mod tests {
         (screen, viewport)
     }
 
+    fn parse_csi_action(input: &[u8]) -> ParsedCsiAction {
+        let mut parser = Parser::new();
+        for action in parser.parse(input) {
+            if let Action::CsiDispatch {
+                params,
+                intermediates,
+                action,
+            } = action
+            {
+                return csi_parse(params, intermediates.as_slice(), action);
+            }
+        }
+        panic!("no CSI dispatch from input {input:?}");
+    }
+
     /// Drive `input` through a VTE parser and dispatch each action through the
     /// parser module under test. This is the same pipeline the live terminal
     /// uses, so tests exercise the same paths callers actually take.
@@ -3578,6 +3605,64 @@ mod tests {
                 _ => {}
             }
         }
+    }
+
+    #[test]
+    fn csi_parse_maps_private_mode_query_semantically() {
+        assert!(matches!(
+            parse_csi_action(b"\x1b[?7$p"),
+            ParsedCsiAction::QueryPrivateMode { mode: 7 }
+        ));
+    }
+
+    #[test]
+    fn csi_parse_maps_ansi_mode_query_semantically() {
+        assert!(matches!(
+            parse_csi_action(b"\x1b[4$p"),
+            ParsedCsiAction::QueryAnsiMode { mode: 4 }
+        ));
+    }
+
+    #[test]
+    fn csi_parse_maps_status_display_semantically() {
+        assert!(matches!(
+            parse_csi_action(b"\x1b[2$~"),
+            ParsedCsiAction::SetStatusDisplay { mode: 2 }
+        ));
+    }
+
+    #[test]
+    fn csi_parse_maps_private_mode_set_semantically() {
+        assert!(matches!(
+            parse_csi_action(b"\x1b[?2004h"),
+            ParsedCsiAction::SetPrivateModes { enable: true, .. }
+        ));
+    }
+
+    #[test]
+    fn csi_parse_maps_attr_change_extent_semantically() {
+        assert!(matches!(
+            parse_csi_action(b"\x1b[2*x"),
+            ParsedCsiAction::SetAttrChangeExtent {
+                extent: grid::AttrChangeExtent::Rectangle
+            }
+        ));
+    }
+
+    #[test]
+    fn csi_parse_maps_cursor_style_semantically() {
+        assert!(matches!(
+            parse_csi_action(b"\x1b[5 q"),
+            ParsedCsiAction::SetCursorStyle { style: 5 }
+        ));
+    }
+
+    #[test]
+    fn csi_parse_maps_soft_reset_semantically() {
+        assert!(matches!(
+            parse_csi_action(b"\x1b[!p"),
+            ParsedCsiAction::SoftReset
+        ));
     }
 
     fn row_text(

@@ -1,6 +1,7 @@
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
 use palette::Srgb;
+#[cfg(test)]
 use vtepp::Params;
 
 /// First palette index of the 6×6×6 RGB color cube in the 256-color palette.
@@ -203,6 +204,7 @@ const fn computed_color(index: u8) -> Srgb<u8> {
 /// Sub-parameters (colon-separated, e.g. `4:3` for curly underline) are
 /// preserved through the group iterator; the legacy semicolon form
 /// (`38;5;N`) is still supported by consuming subsequent groups.
+#[cfg(test)]
 pub(super) fn apply_sgr(
     fg: &mut Srgb<u8>,
     bg: &mut Srgb<u8>,
@@ -213,7 +215,31 @@ pub(super) fn apply_sgr(
     palette: &ColorPalette,
 ) {
     let groups: Vec<&[u16]> = params.iter().collect();
+    apply_sgr_group_refs(fg, bg, attrs, underline, underline_color, &groups, palette);
+}
 
+pub(super) fn apply_sgr_groups(
+    fg: &mut Srgb<u8>,
+    bg: &mut Srgb<u8>,
+    attrs: &mut CellAttrs,
+    underline: &mut UnderlineStyle,
+    underline_color: &mut Option<Srgb<u8>>,
+    params: &[Vec<u16>],
+    palette: &ColorPalette,
+) {
+    let groups: Vec<&[u16]> = params.iter().map(Vec::as_slice).collect();
+    apply_sgr_group_refs(fg, bg, attrs, underline, underline_color, &groups, palette);
+}
+
+fn apply_sgr_group_refs(
+    fg: &mut Srgb<u8>,
+    bg: &mut Srgb<u8>,
+    attrs: &mut CellAttrs,
+    underline: &mut UnderlineStyle,
+    underline_color: &mut Option<Srgb<u8>>,
+    groups: &[&[u16]],
+    palette: &ColorPalette,
+) {
     if groups.is_empty() {
         reset_all(fg, bg, attrs, underline, underline_color, palette);
         return;
@@ -250,20 +276,20 @@ pub(super) fn apply_sgr(
             SGR_RESET_OVERLINE => attrs.remove(CellAttrs::OVERLINE),
             SGR_FG_START..=SGR_FG_END => *fg = palette_color(palette, (g[0] - SGR_FG_START) as u8),
             SGR_FG_EXTENDED => {
-                if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
+                if let Some(color) = parse_extended_color(groups, &mut i, palette) {
                     *fg = color;
                 }
             }
             SGR_FG_DEFAULT => *fg = palette.fg,
             SGR_BG_START..=SGR_BG_END => *bg = palette_color(palette, (g[0] - SGR_BG_START) as u8),
             SGR_BG_EXTENDED => {
-                if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
+                if let Some(color) = parse_extended_color(groups, &mut i, palette) {
                     *bg = color;
                 }
             }
             SGR_BG_DEFAULT => *bg = palette.bg,
             SGR_UNDERLINE_COLOR => {
-                if let Some(color) = parse_extended_color(&groups, &mut i, palette) {
+                if let Some(color) = parse_extended_color(groups, &mut i, palette) {
                     *underline_color = Some(color);
                 }
             }

@@ -27,7 +27,9 @@ use crate::dec_assign_alternate_text_color;
 use crate::dec_select_lookup_table;
 use crate::graphics;
 use crate::osc::handle_osc;
-use crate::parser::csi_dispatch;
+use crate::parser::ParsedCsiAction;
+use crate::parser::csi_apply;
+use crate::parser::csi_parse;
 use crate::parser::esc_dispatch;
 use crate::parser::execute;
 use crate::parser::execute_status;
@@ -93,11 +95,7 @@ pub(super) enum Vt52Action<'a> {
 pub(super) enum CsiAction {
     Ignore,
     Special(SpecialCsi),
-    Dispatch {
-        params: Params,
-        intermediates: Intermediates,
-        action: char,
-    },
+    Parsed(ParsedCsiAction),
 }
 
 #[derive(Debug)]
@@ -241,14 +239,8 @@ pub(super) fn apply_csi_action(
             .macros(macros)
             .macro_invocation_depth(macro_invocation_depth)
             .call(),
-        CsiAction::Dispatch {
-            params,
-            intermediates,
-            action,
-        } => {
-            csi_dispatch()
-                .params(&params)
-                .intermediates(intermediates.as_slice())
+        CsiAction::Parsed(action) => {
+            csi_apply()
                 .action(action)
                 .screen(active)
                 .stash(stash)
@@ -698,13 +690,7 @@ fn classify_csi_action(
             }
             _ => return CsiAction::Ignore,
         },
-        _ => {
-            return CsiAction::Dispatch {
-                params,
-                intermediates,
-                action,
-            };
-        }
+        _ => return CsiAction::Parsed(csi_parse(params, intermediates.as_slice(), action)),
     };
     CsiAction::Special(special)
 }
@@ -816,7 +802,10 @@ mod tests {
         let classified = classify_action(false, &mut Vt52CursorAddr::Idle, action);
         assert!(matches!(
             classified,
-            TerminalAction::Csi(CsiAction::Dispatch { action: 'm', .. })
+            TerminalAction::Csi(CsiAction::Parsed(ParsedCsiAction::Plain {
+                action: 'm',
+                ..
+            }))
         ));
     }
 
