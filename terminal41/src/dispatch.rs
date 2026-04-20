@@ -124,6 +124,7 @@ pub(crate) enum PendingApplication {
 pub(super) fn classify_action<'a>(
     screen: &Screen,
     modes: &TerminalModes,
+    drcs: &crate::drcs::Store,
     vt52_cursor_addr: &mut Vt52CursorAddr,
     action: Action<'a>,
 ) -> TerminalAction<'a> {
@@ -157,6 +158,7 @@ pub(super) fn classify_action<'a>(
             byte,
         } => TerminalAction::Esc(EscAction::Parsed(esc_parse(
             modes,
+            drcs,
             intermediates.as_slice(),
             byte,
         ))),
@@ -828,8 +830,9 @@ mod tests {
         let mut parser = vtepp::Parser::new();
         let action = parser.parse(b"\x1b[31m").next().expect("parsed action");
         let modes = TerminalModes::new();
+        let drcs = crate::drcs::Store::default();
         let screen = screen();
-        let classified = classify_action(&screen, &modes, &mut Vt52CursorAddr::Idle, action);
+        let classified = classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, action);
         assert!(matches!(
             classified,
             TerminalAction::Csi(CsiAction::Parsed(ParsedCsiAction::Main(
@@ -843,8 +846,9 @@ mod tests {
         let mut parser = vtepp::Parser::new();
         let action = parser.parse(b"\x1b[1$u").next().expect("parsed action");
         let modes = TerminalModes::new();
+        let drcs = crate::drcs::Store::default();
         let screen = screen();
-        let classified = classify_action(&screen, &modes, &mut Vt52CursorAddr::Idle, action);
+        let classified = classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, action);
         assert!(matches!(
             classified,
             TerminalAction::Csi(CsiAction::Special(SpecialCsi::ReportTerminalState))
@@ -859,8 +863,9 @@ mod tests {
             .next()
             .expect("parsed action");
         let modes = TerminalModes::new();
+        let drcs = crate::drcs::Store::default();
         let screen = screen();
-        let classified = classify_action(&screen, &modes, &mut Vt52CursorAddr::Idle, action);
+        let classified = classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, action);
         assert!(matches!(
             classified,
             TerminalAction::Osc(OscAction::ItermGraphics(_))
@@ -871,9 +876,15 @@ mod tests {
     fn classify_vt52_cursor_bytes_as_vt52_action() {
         let mut state = Vt52CursorAddr::AwaitingRow;
         let modes = TerminalModes::new();
+        let drcs = crate::drcs::Store::default();
         let screen = screen();
-        let classified =
-            classify_action(&screen, &modes, &mut state, Action::PrintAscii(b"!\"rest"));
+        let classified = classify_action(
+            &screen,
+            &modes,
+            &drcs,
+            &mut state,
+            Action::PrintAscii(b"!\"rest"),
+        );
         match classified {
             TerminalAction::Vt52(Vt52Action::CursorPosition {
                 row,
@@ -894,8 +905,9 @@ mod tests {
         let mut parser = vtepp::Parser::new();
         let action = parser.parse(b"\x1bc").next().expect("parsed action");
         let modes = TerminalModes::new();
+        let drcs = crate::drcs::Store::default();
         let screen = screen();
-        let classified = classify_action(&screen, &modes, &mut Vt52CursorAddr::Idle, action);
+        let classified = classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, action);
         assert!(matches!(
             classified,
             TerminalAction::Esc(EscAction::Parsed(ParsedEscAction::HardReset))

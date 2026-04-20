@@ -564,6 +564,7 @@ impl Terminal {
         match dispatch::classify_action(
             &self.active,
             &self.modes,
+            &self.protocol.drcs,
             &mut self.vt52_cursor_addr,
             action,
         ) {

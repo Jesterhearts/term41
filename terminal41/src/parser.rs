@@ -381,19 +381,6 @@ impl OwnedParams {
     }
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
-pub(super) struct OwnedIntermediates(Vec<u8>);
-
-impl OwnedIntermediates {
-    fn from_slice(intermediates: &[u8]) -> Self {
-        Self(intermediates.to_vec())
-    }
-
-    fn as_slice(&self) -> &[u8] {
-        &self.0
-    }
-}
-
 #[derive(Debug, Clone)]
 pub(super) enum ParsedCsiAction {
     Unsupported,
@@ -587,19 +574,19 @@ pub(super) enum Vt52EscAction {
 pub(super) enum ParsedEscAction {
     Unsupported,
     Vt52(Vt52EscAction),
-    SetC1Mode(C1Mode),
-    SetTextMode(TextMode),
+    UseSevenBitC1Controls,
+    UseEightBitC1Controls,
+    UseEightBitText,
+    UseUtf8Text,
     DesignateCharset {
         slot: GraphicSetSlot,
         charset: CharacterSet,
     },
-    DesignateSoftCharset {
-        slot: GraphicSetSlot,
-        intermediates: OwnedIntermediates,
-        byte: u8,
-    },
     ScreenAlignmentTest,
-    SetLineAttr(LineAttr),
+    SetDoubleHeightTopLine,
+    SetDoubleHeightBottomLine,
+    SetSingleWidthLine,
+    SetDoubleWidthLine,
     HardReset,
     SaveCursor,
     RestoreCursor,
@@ -607,10 +594,15 @@ pub(super) enum ParsedEscAction {
     NextLine,
     SetTabStop,
     ReverseIndex,
-    SetApplicationKeypad(bool),
-    SingleShift(GraphicSetSlot),
-    SetGl(GraphicSetSlot),
-    SetGr(GraphicSetSlot),
+    EnableApplicationKeypad,
+    DisableApplicationKeypad,
+    SingleShiftG2,
+    SingleShiftG3,
+    LockingShiftG2ToGl,
+    LockingShiftG3ToGl,
+    LockingShiftG1ToGr,
+    LockingShiftG2ToGr,
+    LockingShiftG3ToGr,
     BackIndex,
     ForwardIndex,
 }
@@ -3199,84 +3191,340 @@ pub(super) fn csi_dispatch(
         .call();
 }
 
-pub(super) fn esc_parse(
+fn parse_vt52_esc(byte: u8) -> Option<ParsedEscAction> {
+    let action = match byte {
+        b'A' => Vt52EscAction::CursorUp,
+        b'B' => Vt52EscAction::CursorDown,
+        b'C' => Vt52EscAction::CursorRight,
+        b'D' => Vt52EscAction::CursorLeft,
+        b'F' => Vt52EscAction::EnterDecSpecialGraphics,
+        b'G' => Vt52EscAction::ExitDecSpecialGraphics,
+        b'H' => Vt52EscAction::CursorHome,
+        b'I' => Vt52EscAction::ReverseIndex,
+        b'J' => Vt52EscAction::EraseToEndOfScreen,
+        b'K' => Vt52EscAction::EraseToEndOfLine,
+        b'Y' => Vt52EscAction::DirectCursorAddressStart,
+        b'Z' => Vt52EscAction::Identify,
+        b'<' => Vt52EscAction::ExitVt52Mode,
+        _ => return None,
+    };
+    Some(ParsedEscAction::Vt52(action))
+}
+
+fn parse_space_esc(
     modes: &TerminalModes,
+    byte: u8,
+) -> ParsedEscAction {
+    match byte {
+        b'F' if can_negotiate_c1(modes) => ParsedEscAction::UseSevenBitC1Controls,
+        b'G' if can_negotiate_c1(modes) => ParsedEscAction::UseEightBitC1Controls,
+        _ => ParsedEscAction::Unsupported,
+    }
+}
+
+fn parse_percent_esc(byte: u8) -> ParsedEscAction {
+    match TextMode::from_docs_final(byte) {
+        Some(TextMode::EightBit) => ParsedEscAction::UseEightBitText,
+        Some(TextMode::Utf8) => ParsedEscAction::UseUtf8Text,
+        None => ParsedEscAction::Unsupported,
+    }
+}
+
+fn parse_hash_esc(byte: u8) -> ParsedEscAction {
+    match byte {
+        b'8' => ParsedEscAction::ScreenAlignmentTest,
+        b'3' => ParsedEscAction::SetDoubleHeightTopLine,
+        b'4' => ParsedEscAction::SetDoubleHeightBottomLine,
+        b'5' => ParsedEscAction::SetSingleWidthLine,
+        b'6' => ParsedEscAction::SetDoubleWidthLine,
+        _ => ParsedEscAction::Unsupported,
+    }
+}
+
+fn parse_plain_esc(byte: u8) -> ParsedEscAction {
+    match byte {
+        b'c' => ParsedEscAction::HardReset,
+        b'7' => ParsedEscAction::SaveCursor,
+        b'8' => ParsedEscAction::RestoreCursor,
+        b'D' => ParsedEscAction::Index,
+        b'E' => ParsedEscAction::NextLine,
+        b'H' => ParsedEscAction::SetTabStop,
+        b'M' => ParsedEscAction::ReverseIndex,
+        b'=' => ParsedEscAction::EnableApplicationKeypad,
+        b'>' => ParsedEscAction::DisableApplicationKeypad,
+        b'N' => ParsedEscAction::SingleShiftG2,
+        b'O' => ParsedEscAction::SingleShiftG3,
+        b'n' => ParsedEscAction::LockingShiftG2ToGl,
+        b'o' => ParsedEscAction::LockingShiftG3ToGl,
+        b'~' => ParsedEscAction::LockingShiftG1ToGr,
+        b'}' => ParsedEscAction::LockingShiftG2ToGr,
+        b'|' => ParsedEscAction::LockingShiftG3ToGr,
+        b'6' => ParsedEscAction::BackIndex,
+        b'9' => ParsedEscAction::ForwardIndex,
+        _ => ParsedEscAction::Unsupported,
+    }
+}
+
+fn parse_charset_esc(
+    drcs: &DrcsStore,
     intermediates: &[u8],
     byte: u8,
 ) -> ParsedEscAction {
-    if intermediates.is_empty() && modes.vt52_mode {
-        let vt52 = match byte {
-            b'A' => Some(Vt52EscAction::CursorUp),
-            b'B' => Some(Vt52EscAction::CursorDown),
-            b'C' => Some(Vt52EscAction::CursorRight),
-            b'D' => Some(Vt52EscAction::CursorLeft),
-            b'F' => Some(Vt52EscAction::EnterDecSpecialGraphics),
-            b'G' => Some(Vt52EscAction::ExitDecSpecialGraphics),
-            b'H' => Some(Vt52EscAction::CursorHome),
-            b'I' => Some(Vt52EscAction::ReverseIndex),
-            b'J' => Some(Vt52EscAction::EraseToEndOfScreen),
-            b'K' => Some(Vt52EscAction::EraseToEndOfLine),
-            b'Y' => Some(Vt52EscAction::DirectCursorAddressStart),
-            b'Z' => Some(Vt52EscAction::Identify),
-            b'<' => Some(Vt52EscAction::ExitVt52Mode),
-            _ => None,
-        };
-        if let Some(action) = vt52 {
-            return ParsedEscAction::Vt52(action);
-        }
+    if let Some((slot, charset)) = charset::parse_designation(intermediates, byte) {
+        return ParsedEscAction::DesignateCharset { slot, charset };
+    }
+
+    let Some(slot) = charset::slot_for_intermediates(intermediates) else {
+        return ParsedEscAction::Unsupported;
+    };
+    let Some(charset) = drcs.lookup_designation(intermediates, byte) else {
+        return ParsedEscAction::Unsupported;
+    };
+    ParsedEscAction::DesignateCharset { slot, charset }
+}
+
+pub(super) fn esc_parse(
+    modes: &TerminalModes,
+    drcs: &DrcsStore,
+    intermediates: &[u8],
+    byte: u8,
+) -> ParsedEscAction {
+    if intermediates.is_empty()
+        && modes.vt52_mode
+        && let Some(action) = parse_vt52_esc(byte)
+    {
+        return action;
     }
 
     match intermediates {
-        b" " => match byte {
-            b'F' if can_negotiate_c1(modes) => ParsedEscAction::SetC1Mode(C1Mode::SevenBit),
-            b'G' if can_negotiate_c1(modes) => ParsedEscAction::SetC1Mode(C1Mode::EightBit),
-            _ => ParsedEscAction::Unsupported,
-        },
-        b"%" => TextMode::from_docs_final(byte)
-            .map(ParsedEscAction::SetTextMode)
-            .unwrap_or(ParsedEscAction::Unsupported),
-        b"#" => match byte {
-            b'8' => ParsedEscAction::ScreenAlignmentTest,
-            b'3' => ParsedEscAction::SetLineAttr(LineAttr::DoubleHeightTop),
-            b'4' => ParsedEscAction::SetLineAttr(LineAttr::DoubleHeightBottom),
-            b'5' => ParsedEscAction::SetLineAttr(LineAttr::Normal),
-            b'6' => ParsedEscAction::SetLineAttr(LineAttr::DoubleWidth),
-            _ => ParsedEscAction::Unsupported,
-        },
-        b"" => match byte {
-            b'c' => ParsedEscAction::HardReset,
-            b'7' => ParsedEscAction::SaveCursor,
-            b'8' => ParsedEscAction::RestoreCursor,
-            b'D' => ParsedEscAction::Index,
-            b'E' => ParsedEscAction::NextLine,
-            b'H' => ParsedEscAction::SetTabStop,
-            b'M' => ParsedEscAction::ReverseIndex,
-            b'=' => ParsedEscAction::SetApplicationKeypad(true),
-            b'>' => ParsedEscAction::SetApplicationKeypad(false),
-            b'N' => ParsedEscAction::SingleShift(GraphicSetSlot::G2),
-            b'O' => ParsedEscAction::SingleShift(GraphicSetSlot::G3),
-            b'n' => ParsedEscAction::SetGl(GraphicSetSlot::G2),
-            b'o' => ParsedEscAction::SetGl(GraphicSetSlot::G3),
-            b'~' => ParsedEscAction::SetGr(GraphicSetSlot::G1),
-            b'}' => ParsedEscAction::SetGr(GraphicSetSlot::G2),
-            b'|' => ParsedEscAction::SetGr(GraphicSetSlot::G3),
-            b'6' => ParsedEscAction::BackIndex,
-            b'9' => ParsedEscAction::ForwardIndex,
-            _ => ParsedEscAction::Unsupported,
-        },
-        _ => {
-            if let Some((slot, charset)) = charset::parse_designation(intermediates, byte) {
-                ParsedEscAction::DesignateCharset { slot, charset }
-            } else if let Some(slot) = charset::slot_for_intermediates(intermediates) {
-                ParsedEscAction::DesignateSoftCharset {
-                    slot,
-                    intermediates: OwnedIntermediates::from_slice(intermediates),
-                    byte,
-                }
-            } else {
-                ParsedEscAction::Unsupported
+        b" " => parse_space_esc(modes, byte),
+        b"%" => parse_percent_esc(byte),
+        b"#" => parse_hash_esc(byte),
+        b"" => parse_plain_esc(byte),
+        _ => parse_charset_esc(drcs, intermediates, byte),
+    }
+}
+
+fn apply_vt52_esc(
+    action: Vt52EscAction,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    modes: &mut TerminalModes,
+    pending_output: &mut Vec<u8>,
+    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
+) {
+    clamp_cursor_to_row_width(screen, viewport);
+    match action {
+        Vt52EscAction::CursorUp => {
+            screen.cursor.row = screen.cursor.row.saturating_sub(1);
+            clamp_cursor_to_row_width(screen, viewport);
+        }
+        Vt52EscAction::CursorDown if screen.cursor.row + 1 < viewport.rows => {
+            screen.cursor.row += 1;
+            clamp_cursor_to_row_width(screen, viewport);
+        }
+        Vt52EscAction::CursorDown => {}
+        Vt52EscAction::CursorRight
+            if screen.cursor.col + 1 < current_row_display_cols(screen, viewport) =>
+        {
+            screen.cursor.col += 1;
+        }
+        Vt52EscAction::CursorRight => {}
+        Vt52EscAction::CursorLeft => {
+            screen.cursor.col = screen.cursor.col.saturating_sub(1);
+        }
+        Vt52EscAction::EnterDecSpecialGraphics => {
+            screen
+                .charset
+                .designate(GraphicSetSlot::G0, CharacterSet::DecSpecialGraphics);
+        }
+        Vt52EscAction::ExitDecSpecialGraphics => {
+            screen
+                .charset
+                .designate(GraphicSetSlot::G0, CharacterSet::Ascii);
+        }
+        Vt52EscAction::CursorHome => {
+            screen.cursor.row = 0;
+            screen.cursor.col = 0;
+        }
+        Vt52EscAction::ReverseIndex => {
+            if screen.cursor.row == screen.scroll_top {
+                screen.grid.scroll_down_in_region(
+                    viewport,
+                    &mut screen.images,
+                    screen.scroll_top,
+                    screen.scroll_bottom,
+                    1,
+                );
+            } else if screen.cursor.row > 0 {
+                screen.cursor.row -= 1;
             }
         }
+        Vt52EscAction::EraseToEndOfScreen => {
+            screen
+                .grid
+                .erase_in_display(&screen.cursor, viewport, &mut screen.images, 0);
+        }
+        Vt52EscAction::EraseToEndOfLine => {
+            screen.grid.erase_in_line(&screen.cursor, viewport, 0);
+        }
+        Vt52EscAction::DirectCursorAddressStart => {
+            *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
+        }
+        Vt52EscAction::Identify => {
+            pending_output.extend_from_slice(b"\x1b/Z");
+        }
+        Vt52EscAction::ExitVt52Mode => {
+            modes.vt52_mode = false;
+        }
+    }
+}
+
+fn apply_screen_alignment_test(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    palette: &color::ColorPalette,
+) {
+    let first_visible = screen
+        .grid
+        .rows
+        .len()
+        .saturating_sub(viewport.rows as usize);
+    let e_cell = SmolStr::new_inline("E");
+    let fg = palette.fg;
+    let bg = palette.bg;
+    for r in first_visible..screen.grid.rows.len() {
+        let row = &mut screen.grid.rows[r];
+        row.clear(fg, bg);
+        row.wrapped = false;
+        row.line_attr = LineAttr::Normal;
+        for cell in row.cells.iter_mut() {
+            *cell = e_cell.clone();
+        }
+        row.fg.fill(fg);
+        row.bg.fill(bg);
+    }
+    screen.scroll_top = 0;
+    screen.scroll_bottom = viewport.rows.saturating_sub(1);
+    screen.left_margin = 0;
+    screen.right_margin = viewport.cols.saturating_sub(1);
+    screen.origin_mode = false;
+    screen.cursor.row = 0;
+    screen.cursor.col = 0;
+}
+
+fn apply_esc_line_attr(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    line_attr: LineAttr,
+) {
+    let visible_start = screen
+        .grid
+        .rows
+        .len()
+        .saturating_sub(viewport.rows as usize);
+    let abs_row = visible_start + screen.cursor.row as usize;
+    if let Some(row) = screen.grid.rows.get_mut(abs_row) {
+        row.line_attr = line_attr;
+        if screen.cursor.row as usize + visible_start == abs_row {
+            clamp_cursor_to_row_width(screen, viewport);
+        }
+    }
+}
+
+fn apply_esc_index(
+    screen: &mut Screen,
+    screen_view: &Viewport,
+) {
+    if screen.cursor.row == screen.scroll_bottom {
+        if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
+            if screen::page_can_scroll_down(screen, screen_view) {
+                screen::scroll_page_down(screen, screen_view, 1);
+            } else {
+                screen.grid.push_visible_row(screen_view);
+            }
+        } else {
+            screen.grid.scroll_up_in_region(
+                screen_view,
+                &mut screen.images,
+                screen.scroll_top,
+                screen.scroll_bottom,
+                1,
+            );
+        }
+    } else if screen.cursor.row < screen_view.rows - 1 {
+        screen.cursor.row += 1;
+        clamp_cursor_to_row_width(screen, screen_view);
+    }
+}
+
+fn apply_esc_next_line(
+    screen: &mut Screen,
+    screen_view: &Viewport,
+) {
+    screen.cursor.col = 0;
+    if screen.cursor.row == screen.scroll_bottom {
+        if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
+            if screen::page_can_scroll_down(screen, screen_view) {
+                screen::scroll_page_down(screen, screen_view, 1);
+            } else {
+                screen.grid.push_visible_row(screen_view);
+            }
+        } else {
+            screen.grid.scroll_up_in_region(
+                screen_view,
+                &mut screen.images,
+                screen.scroll_top,
+                screen.scroll_bottom,
+                1,
+            );
+        }
+    } else if screen.cursor.row < screen_view.rows - 1 {
+        screen.cursor.row += 1;
+    }
+    clamp_cursor_to_row_width(screen, screen_view);
+}
+
+fn apply_esc_reverse_index(
+    screen: &mut Screen,
+    screen_view: &Viewport,
+) {
+    if screen.cursor.row == screen.scroll_top {
+        screen.grid.scroll_down_in_region(
+            screen_view,
+            &mut screen.images,
+            screen.scroll_top,
+            screen.scroll_bottom,
+            1,
+        );
+    } else if screen.cursor.row > 0 {
+        screen.cursor.row -= 1;
+    }
+}
+
+fn apply_esc_back_index(
+    screen: &mut Screen,
+    screen_view: &Viewport,
+) {
+    if screen.cursor.col == 0 {
+        screen
+            .grid
+            .scroll_right(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
+    } else {
+        screen.cursor.col -= 1;
+    }
+}
+
+fn apply_esc_forward_index(
+    screen: &mut Screen,
+    screen_view: &Viewport,
+) {
+    if screen.cursor.col >= current_row_display_cols(screen, screen_view) - 1 {
+        screen
+            .grid
+            .scroll_left(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
+    } else {
+        screen.cursor.col += 1;
     }
 }
 
@@ -3305,141 +3553,46 @@ pub(super) fn esc_apply(
     drcs: &mut DrcsStore,
 ) {
     match action {
-        ParsedEscAction::Unsupported => return,
+        ParsedEscAction::Unsupported => {}
         ParsedEscAction::Vt52(action) => {
-            clamp_cursor_to_row_width(screen, viewport);
-            match action {
-                Vt52EscAction::CursorUp => {
-                    screen.cursor.row = screen.cursor.row.saturating_sub(1);
-                    clamp_cursor_to_row_width(screen, viewport);
-                }
-                Vt52EscAction::CursorDown if screen.cursor.row + 1 < viewport.rows => {
-                    screen.cursor.row += 1;
-                    clamp_cursor_to_row_width(screen, viewport);
-                }
-                Vt52EscAction::CursorDown => {}
-                Vt52EscAction::CursorRight
-                    if screen.cursor.col + 1 < current_row_display_cols(screen, viewport) =>
-                {
-                    screen.cursor.col += 1;
-                }
-                Vt52EscAction::CursorRight => {}
-                Vt52EscAction::CursorLeft => {
-                    screen.cursor.col = screen.cursor.col.saturating_sub(1);
-                }
-                Vt52EscAction::EnterDecSpecialGraphics => {
-                    screen
-                        .charset
-                        .designate(GraphicSetSlot::G0, CharacterSet::DecSpecialGraphics);
-                }
-                Vt52EscAction::ExitDecSpecialGraphics => {
-                    screen
-                        .charset
-                        .designate(GraphicSetSlot::G0, CharacterSet::Ascii);
-                }
-                Vt52EscAction::CursorHome => {
-                    screen.cursor.row = 0;
-                    screen.cursor.col = 0;
-                }
-                Vt52EscAction::ReverseIndex => {
-                    if screen.cursor.row == screen.scroll_top {
-                        screen.grid.scroll_down_in_region(
-                            viewport,
-                            &mut screen.images,
-                            screen.scroll_top,
-                            screen.scroll_bottom,
-                            1,
-                        );
-                    } else if screen.cursor.row > 0 {
-                        screen.cursor.row -= 1;
-                    }
-                }
-                Vt52EscAction::EraseToEndOfScreen => {
-                    screen
-                        .grid
-                        .erase_in_display(&screen.cursor, viewport, &mut screen.images, 0);
-                }
-                Vt52EscAction::EraseToEndOfLine => {
-                    screen.grid.erase_in_line(&screen.cursor, viewport, 0);
-                }
-                Vt52EscAction::DirectCursorAddressStart => {
-                    *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
-                }
-                Vt52EscAction::Identify => {
-                    pending_output.extend_from_slice(b"\x1b/Z");
-                }
-                Vt52EscAction::ExitVt52Mode => {
-                    modes.vt52_mode = false;
-                }
-            }
-            return;
+            apply_vt52_esc(
+                action,
+                screen,
+                viewport,
+                modes,
+                pending_output,
+                vt52_cursor_addr,
+            );
         }
-        ParsedEscAction::SetC1Mode(mode) => {
-            modes.c1_mode = mode;
-            return;
+        ParsedEscAction::UseSevenBitC1Controls => {
+            modes.c1_mode = C1Mode::SevenBit;
         }
-        ParsedEscAction::SetTextMode(mode) => {
-            modes.text_mode = mode;
-            return;
+        ParsedEscAction::UseEightBitC1Controls => {
+            modes.c1_mode = C1Mode::EightBit;
+        }
+        ParsedEscAction::UseEightBitText => {
+            modes.text_mode = TextMode::EightBit;
+        }
+        ParsedEscAction::UseUtf8Text => {
+            modes.text_mode = TextMode::Utf8;
         }
         ParsedEscAction::DesignateCharset { slot, charset } => {
             screen.charset.designate(slot, charset);
-            return;
-        }
-        ParsedEscAction::DesignateSoftCharset {
-            slot,
-            intermediates,
-            byte,
-        } => {
-            let Some(charset) = drcs.lookup_designation(intermediates.as_slice(), byte) else {
-                return;
-            };
-            screen.charset.designate(slot, charset);
-            return;
         }
         ParsedEscAction::ScreenAlignmentTest => {
-            let first_visible = screen
-                .grid
-                .rows
-                .len()
-                .saturating_sub(viewport.rows as usize);
-            let e_cell = SmolStr::new_inline("E");
-            let fg = palette.fg;
-            let bg = palette.bg;
-            for r in first_visible..screen.grid.rows.len() {
-                let row = &mut screen.grid.rows[r];
-                row.clear(fg, bg);
-                row.wrapped = false;
-                row.line_attr = LineAttr::Normal;
-                for cell in row.cells.iter_mut() {
-                    *cell = e_cell.clone();
-                }
-                row.fg.fill(fg);
-                row.bg.fill(bg);
-            }
-            screen.scroll_top = 0;
-            screen.scroll_bottom = viewport.rows.saturating_sub(1);
-            screen.left_margin = 0;
-            screen.right_margin = viewport.cols.saturating_sub(1);
-            screen.origin_mode = false;
-            screen.cursor.row = 0;
-            screen.cursor.col = 0;
-            return;
+            apply_screen_alignment_test(screen, viewport, palette);
         }
-        ParsedEscAction::SetLineAttr(line_attr) => {
-            let visible_start = screen
-                .grid
-                .rows
-                .len()
-                .saturating_sub(viewport.rows as usize);
-            let abs_row = visible_start + screen.cursor.row as usize;
-            if let Some(row) = screen.grid.rows.get_mut(abs_row) {
-                row.line_attr = line_attr;
-                if screen.cursor.row as usize + visible_start == abs_row {
-                    clamp_cursor_to_row_width(screen, viewport);
-                }
-            }
-            return;
+        ParsedEscAction::SetDoubleHeightTopLine => {
+            apply_esc_line_attr(screen, viewport, LineAttr::DoubleHeightTop);
+        }
+        ParsedEscAction::SetDoubleHeightBottomLine => {
+            apply_esc_line_attr(screen, viewport, LineAttr::DoubleHeightBottom);
+        }
+        ParsedEscAction::SetSingleWidthLine => {
+            apply_esc_line_attr(screen, viewport, LineAttr::Normal);
+        }
+        ParsedEscAction::SetDoubleWidthLine => {
+            apply_esc_line_attr(screen, viewport, LineAttr::DoubleWidth);
         }
         ParsedEscAction::HardReset => {
             let conformance_level = ConformanceLevel::Level4;
@@ -3467,116 +3620,77 @@ pub(super) fn esc_apply(
                 .conformance_level(conformance_level)
                 .c1_mode(c1_mode)
                 .call();
-            return;
         }
-        ParsedEscAction::SaveCursor
-        | ParsedEscAction::RestoreCursor
-        | ParsedEscAction::Index
-        | ParsedEscAction::NextLine
-        | ParsedEscAction::SetTabStop
-        | ParsedEscAction::ReverseIndex
-        | ParsedEscAction::SetApplicationKeypad(_)
-        | ParsedEscAction::SingleShift(_)
-        | ParsedEscAction::SetGl(_)
-        | ParsedEscAction::SetGr(_)
-        | ParsedEscAction::BackIndex
-        | ParsedEscAction::ForwardIndex => {}
-    }
-
-    clamp_cursor_to_row_width(screen, viewport);
-    let screen_view = screen::screen_viewport(screen, viewport);
-    let screen_view = &screen_view;
-
-    match action {
-        ParsedEscAction::SaveCursor => screen::save_cursor_slot(screen),
-        ParsedEscAction::RestoreCursor => screen::restore_cursor_slot(screen, screen_view),
+        ParsedEscAction::SaveCursor => {
+            clamp_cursor_to_row_width(screen, viewport);
+            let screen_view = screen::screen_viewport(screen, viewport);
+            screen::save_cursor_slot(screen);
+            clamp_cursor_to_row_width(screen, &screen_view);
+        }
+        ParsedEscAction::RestoreCursor => {
+            clamp_cursor_to_row_width(screen, viewport);
+            let screen_view = screen::screen_viewport(screen, viewport);
+            screen::restore_cursor_slot(screen, &screen_view);
+        }
         ParsedEscAction::Index => {
-            if screen.cursor.row == screen.scroll_bottom {
-                if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
-                    if screen::page_can_scroll_down(screen, screen_view) {
-                        screen::scroll_page_down(screen, screen_view, 1);
-                    } else {
-                        screen.grid.push_visible_row(screen_view);
-                    }
-                } else {
-                    screen.grid.scroll_up_in_region(
-                        screen_view,
-                        &mut screen.images,
-                        screen.scroll_top,
-                        screen.scroll_bottom,
-                        1,
-                    );
-                }
-            } else if screen.cursor.row < screen_view.rows - 1 {
-                screen.cursor.row += 1;
-                clamp_cursor_to_row_width(screen, screen_view);
-            }
+            clamp_cursor_to_row_width(screen, viewport);
+            let screen_view = screen::screen_viewport(screen, viewport);
+            apply_esc_index(screen, &screen_view);
         }
         ParsedEscAction::NextLine => {
-            screen.cursor.col = 0;
-            if screen.cursor.row == screen.scroll_bottom {
-                if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
-                    if screen::page_can_scroll_down(screen, screen_view) {
-                        screen::scroll_page_down(screen, screen_view, 1);
-                    } else {
-                        screen.grid.push_visible_row(screen_view);
-                    }
-                } else {
-                    screen.grid.scroll_up_in_region(
-                        screen_view,
-                        &mut screen.images,
-                        screen.scroll_top,
-                        screen.scroll_bottom,
-                        1,
-                    );
-                }
-            } else if screen.cursor.row < screen_view.rows - 1 {
-                screen.cursor.row += 1;
-            }
-            clamp_cursor_to_row_width(screen, screen_view);
+            clamp_cursor_to_row_width(screen, viewport);
+            let screen_view = screen::screen_viewport(screen, viewport);
+            apply_esc_next_line(screen, &screen_view);
         }
         ParsedEscAction::SetTabStop => {
+            clamp_cursor_to_row_width(screen, viewport);
             let col = screen.cursor.col as usize;
             if col < screen.tab_stops.len() {
                 screen.tab_stops[col] = true;
             }
         }
         ParsedEscAction::ReverseIndex => {
-            if screen.cursor.row == screen.scroll_top {
-                screen.grid.scroll_down_in_region(
-                    screen_view,
-                    &mut screen.images,
-                    screen.scroll_top,
-                    screen.scroll_bottom,
-                    1,
-                );
-            } else if screen.cursor.row > 0 {
-                screen.cursor.row -= 1;
-            }
+            clamp_cursor_to_row_width(screen, viewport);
+            let screen_view = screen::screen_viewport(screen, viewport);
+            apply_esc_reverse_index(screen, &screen_view);
         }
-        ParsedEscAction::SetApplicationKeypad(enable) => screen.app_keypad = enable,
-        ParsedEscAction::SingleShift(slot) => screen.charset.single_shift = Some(slot),
-        ParsedEscAction::SetGl(slot) => screen.charset.set_gl(slot),
-        ParsedEscAction::SetGr(slot) => screen.charset.set_gr(slot),
+        ParsedEscAction::EnableApplicationKeypad => {
+            screen.app_keypad = true;
+        }
+        ParsedEscAction::DisableApplicationKeypad => {
+            screen.app_keypad = false;
+        }
+        ParsedEscAction::SingleShiftG2 => {
+            screen.charset.single_shift = Some(GraphicSetSlot::G2);
+        }
+        ParsedEscAction::SingleShiftG3 => {
+            screen.charset.single_shift = Some(GraphicSetSlot::G3);
+        }
+        ParsedEscAction::LockingShiftG2ToGl => {
+            screen.charset.set_gl(GraphicSetSlot::G2);
+        }
+        ParsedEscAction::LockingShiftG3ToGl => {
+            screen.charset.set_gl(GraphicSetSlot::G3);
+        }
+        ParsedEscAction::LockingShiftG1ToGr => {
+            screen.charset.set_gr(GraphicSetSlot::G1);
+        }
+        ParsedEscAction::LockingShiftG2ToGr => {
+            screen.charset.set_gr(GraphicSetSlot::G2);
+        }
+        ParsedEscAction::LockingShiftG3ToGr => {
+            screen.charset.set_gr(GraphicSetSlot::G3);
+        }
         ParsedEscAction::BackIndex => {
-            if screen.cursor.col == 0 {
-                screen
-                    .grid
-                    .scroll_right(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
-            } else {
-                screen.cursor.col -= 1;
-            }
+            clamp_cursor_to_row_width(screen, viewport);
+            let screen_view = screen::screen_viewport(screen, viewport);
+            apply_esc_back_index(screen, &screen_view);
         }
         ParsedEscAction::ForwardIndex => {
-            if screen.cursor.col >= current_row_display_cols(screen, screen_view) - 1 {
-                screen
-                    .grid
-                    .scroll_left(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
-            } else {
-                screen.cursor.col += 1;
-            }
+            clamp_cursor_to_row_width(screen, viewport);
+            let screen_view = screen::screen_viewport(screen, viewport);
+            apply_esc_forward_index(screen, &screen_view);
         }
-        _ => unreachable!(),
     }
 }
 
@@ -3606,7 +3720,7 @@ pub(super) fn esc_dispatch(
     intermediates: &[u8],
     byte: u8,
 ) {
-    let action = esc_parse(modes, intermediates, byte);
+    let action = esc_parse(modes, drcs, intermediates, byte);
     esc_apply()
         .action(action)
         .screen(screen)
@@ -3693,6 +3807,15 @@ mod tests {
         input: &[u8],
         modes: &TerminalModes,
     ) -> ParsedEscAction {
+        let drcs = DrcsStore::default();
+        parse_esc_action_with(input, modes, &drcs)
+    }
+
+    fn parse_esc_action_with(
+        input: &[u8],
+        modes: &TerminalModes,
+        drcs: &DrcsStore,
+    ) -> ParsedEscAction {
         let mut parser = Parser::new();
         for action in parser.parse(input) {
             if let Action::EscDispatch {
@@ -3700,7 +3823,7 @@ mod tests {
                 byte,
             } = action
             {
-                return esc_parse(modes, intermediates.as_slice(), byte);
+                return esc_parse(modes, drcs, intermediates.as_slice(), byte);
             }
         }
         panic!("no ESC dispatch from input {input:?}");
@@ -4002,6 +4125,20 @@ mod tests {
             ParsedEscAction::DesignateCharset {
                 slot: GraphicSetSlot::G0,
                 charset: CharacterSet::DecSpecialGraphics
+            }
+        ));
+    }
+
+    #[test]
+    fn esc_parse_resolves_soft_charset_designations_semantically() {
+        let modes = TerminalModes::new();
+        let mut drcs = DrcsStore::default();
+        drcs.define(&[0, 0, 0, 0, 0, 0, 0, 0], b"@?");
+        assert!(matches!(
+            parse_esc_action_with(b"\x1b(@", &modes, &drcs),
+            ParsedEscAction::DesignateCharset {
+                slot: GraphicSetSlot::G0,
+                charset: CharacterSet::Drcs(0, crate::drcs::CharsetSize::Cs94)
             }
         ));
     }
