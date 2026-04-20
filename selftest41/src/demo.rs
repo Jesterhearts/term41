@@ -26,6 +26,7 @@ pub enum DemoId {
     CursorMarginsEdit,
     EraseProtection,
     PasteFocus,
+    MouseReporting,
     ScrollWrap,
     Rectangles,
     AltScreen,
@@ -130,6 +131,14 @@ pub fn catalog() -> Vec<Demo> {
             id: DemoId::PasteFocus,
         },
         Demo {
+            title: "Mouse Reporting",
+            summary: "Enables SGR mouse reporting and shows the exact bytes for clicks, drags, \
+                      and scroll.",
+            detail: "Exercises the live mouse-reporting path with raw byte capture so it is easy \
+                     to see what the terminal emits for pointer activity.",
+            id: DemoId::MouseReporting,
+        },
+        Demo {
             title: "Scroll & Wrap",
             summary: "IND, NEL, RI, DECAWM on/off, REP, and scroll-region movement.",
             detail: "Exercises the core scrolling and wrapping behaviors that many fullscreen \
@@ -215,6 +224,7 @@ pub fn run_demo(
         DemoId::CursorMarginsEdit => run_cursor_margins_edit_demo(out),
         DemoId::EraseProtection => run_erase_protection_demo(out),
         DemoId::PasteFocus => run_paste_focus_placeholder(out),
+        DemoId::MouseReporting => run_mouse_reporting_placeholder(out),
         DemoId::ScrollWrap => run_scroll_wrap_demo(out),
         DemoId::Rectangles => run_rectangles_demo(out),
         DemoId::AltScreen => run_alt_screen_demo(out),
@@ -732,6 +742,15 @@ fn run_erase_protection_demo(out: &mut impl Write) -> io::Result<()> {
 
 fn run_paste_focus_placeholder(out: &mut impl Write) -> io::Result<()> {
     heading(out, "Paste & Focus")?;
+    line(
+        out,
+        "This demo is handled by terminal_io because it needs a live raw-byte capture loop.",
+    )?;
+    Ok(())
+}
+
+fn run_mouse_reporting_placeholder(out: &mut impl Write) -> io::Result<()> {
+    heading(out, "Mouse Reporting")?;
     line(
         out,
         "This demo is handled by terminal_io because it needs a live raw-byte capture loop.",

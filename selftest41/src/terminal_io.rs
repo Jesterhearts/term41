@@ -82,6 +82,9 @@ impl TerminalSession {
         if demo_id == DemoId::PasteFocus {
             return self.run_paste_focus_demo();
         }
+        if demo_id == DemoId::MouseReporting {
+            return self.run_mouse_reporting_demo();
+        }
         self.suspend_tui()?;
         {
             let out = self.terminal.backend_mut();
@@ -127,6 +130,41 @@ impl TerminalSession {
         {
             let out = self.terminal.backend_mut();
             write!(out, "\x1b[?2004l\x1b[?1004l\x1bc")?;
+            out.flush()?;
+        }
+        self.resume_tui()
+    }
+
+    fn run_mouse_reporting_demo(&mut self) -> io::Result<()> {
+        self.suspend_tui()?;
+        {
+            let out = self.terminal.backend_mut();
+            render_mouse_reporting_demo(out, &[])?;
+            write!(out, "\x1b[?1003h\x1b[?1006h")?;
+            out.flush()?;
+        }
+
+        let mut chunks = Vec::new();
+        loop {
+            let bytes = read_reply_bytes(Duration::from_millis(250))?;
+            if !bytes.is_empty() {
+                if bytes == b"q" || bytes == b"Q" {
+                    break;
+                }
+                chunks.push(demo::format_bytes(&bytes));
+                if chunks.len() > 12 {
+                    let excess = chunks.len() - 12;
+                    chunks.drain(0..excess);
+                }
+                let out = self.terminal.backend_mut();
+                render_mouse_reporting_demo(out, &chunks)?;
+                out.flush()?;
+            }
+        }
+
+        {
+            let out = self.terminal.backend_mut();
+            write!(out, "\x1b[?1006l\x1b[?1003l\x1bc")?;
             out.flush()?;
         }
         self.resume_tui()
@@ -230,6 +268,33 @@ fn render_paste_focus_demo(
     write!(
         out,
         "Paste text, switch focus away and back, then inspect the raw bytes below.\r\n"
+    )?;
+    write!(out, "Press q to return to selftest41.\r\n\r\n")?;
+    write!(out, "Recent input chunks:\r\n")?;
+    if chunks.is_empty() {
+        write!(out, "  <nothing captured yet>\r\n")?;
+    } else {
+        for chunk in chunks {
+            write!(out, "  {chunk}\r\n")?;
+        }
+    }
+    Ok(())
+}
+
+fn render_mouse_reporting_demo(
+    out: &mut impl Write,
+    chunks: &[String],
+) -> io::Result<()> {
+    demo::clear_visible_screen(out)?;
+    write!(out, "\x1b[1mMouse Reporting\x1b[0m\r\n\r\n")?;
+    write!(
+        out,
+        "SGR mouse reporting with any-event tracking is now enabled.\r\n"
+    )?;
+    write!(
+        out,
+        "Click, drag, release, and scroll inside the terminal, then inspect the raw bytes \
+         below.\r\n"
     )?;
     write!(out, "Press q to return to selftest41.\r\n\r\n")?;
     write!(out, "Recent input chunks:\r\n")?;
