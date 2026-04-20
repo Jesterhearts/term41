@@ -46,6 +46,12 @@ use crate::screen::row::Row;
 /// Bundles the bits of [`Terminal`](super::Terminal) state that CSI handlers
 /// need beyond the active screen. Keeps the call signature stable as new CSI
 /// sequences get wired in.
+pub(super) struct PaletteContext<'a> {
+    pub palette: &'a mut color::ColorPalette,
+    pub base_palette: &'a color::ColorPalette,
+    pub dec_color: &'a mut DecColorState,
+}
+
 pub(super) struct CsiContext<'a> {
     pub screen: &'a mut Screen,
     pub stash: &'a mut Screen,
@@ -58,8 +64,7 @@ pub(super) struct CsiContext<'a> {
     pub cursor_style: &'a mut CursorStyle,
     pub cell_width: u32,
     pub cell_height: u32,
-    pub palette: &'a mut color::ColorPalette,
-    pub base_palette: &'a color::ColorPalette,
+    pub colors: PaletteContext<'a>,
     pub default_status_display: &'a mut StatusDisplayKind,
     pub title_stack: &'a mut Vec<Option<String>>,
     pub current_title: &'a mut Option<String>,
@@ -68,7 +73,6 @@ pub(super) struct CsiContext<'a> {
     pub bell_pending: &'a mut bool,
     pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
     pub macros: &'a mut MacroStore,
-    pub dec_color: &'a mut DecColorState,
     pub feature_permissions: &'a FeaturePermissions,
     pub foreground_processes: &'a Option<ForegroundProcessSet>,
     pub drcs: &'a mut DrcsStore,
@@ -89,8 +93,7 @@ pub(super) struct EscContext<'a> {
     pub saved_modes: &'a mut std::collections::HashMap<u16, bool>,
     pub current_prompt_row: &'a mut Option<u64>,
     pub bell_pending: &'a mut bool,
-    pub palette: &'a mut color::ColorPalette,
-    pub base_palette: &'a color::ColorPalette,
+    pub colors: PaletteContext<'a>,
     pub default_status_display: &'a mut StatusDisplayKind,
     /// Bytes to write back to the PTY (e.g. VT52 identify response `ESC / Z`).
     pub pending_output: &'a mut Vec<u8>,
@@ -99,7 +102,6 @@ pub(super) struct EscContext<'a> {
     /// [`Terminal::apply`] before any other dispatch occurs.
     pub vt52_cursor_addr: &'a mut crate::Vt52CursorAddr,
     pub macros: &'a mut MacroStore,
-    pub dec_color: &'a mut DecColorState,
     pub drcs: &'a mut DrcsStore,
 }
 
@@ -427,7 +429,7 @@ fn status_line_csi_dispatch(
     let cursor = &mut status.cursor;
 
     if intermediates.is_empty() && action == 'm' {
-        let mut palette = ctx.palette.clone();
+        let mut palette = ctx.colors.palette.clone();
         palette.fg = palette.status_line_fg;
         palette.bg = palette.status_line_bg;
         apply_sgr(
@@ -825,8 +827,8 @@ fn csi_dispatch_bang_intermediate(
         return true;
     }
     let screen = &mut *ctx.screen;
-    screen.fg = ctx.palette.fg;
-    screen.bg = ctx.palette.bg;
+    screen.fg = ctx.colors.palette.fg;
+    screen.bg = ctx.colors.palette.bg;
     screen.attrs = CellAttrs::default();
     screen.underline = UnderlineStyle::None;
     screen.underline_color = None;
@@ -955,17 +957,17 @@ fn apply_hard_reset_state(
     current_prompt_row: &mut Option<u64>,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
-    palette: &mut color::ColorPalette,
-    base_palette: &color::ColorPalette,
+    colors: &mut PaletteContext<'_>,
     default_status_display: &StatusDisplayKind,
-    dec_color: &mut DecColorState,
     macros: &mut MacroStore,
     drcs: &mut DrcsStore,
     conformance_level: ConformanceLevel,
     c1_mode: C1Mode,
 ) {
-    *dec_color = dec_color_state_from_palette(base_palette);
-    *palette = effective_palette(base_palette, dec_color);
+    *colors.dec_color = dec_color_state_from_palette(colors.base_palette);
+    *colors.palette = effective_palette(colors.base_palette, colors.dec_color);
+    let palette = &*colors.palette;
+    let dec_color = &*colors.dec_color;
     if *on_alt_screen {
         std::mem::swap(screen, stash);
         *on_alt_screen = false;
@@ -1046,10 +1048,8 @@ fn apply_hard_reset(
         ctx.current_prompt_row,
         ctx.bell_pending,
         ctx.vt52_cursor_addr,
-        ctx.palette,
-        ctx.base_palette,
+        &mut ctx.colors,
         ctx.default_status_display,
-        ctx.dec_color,
         ctx.macros,
         ctx.drcs,
         conformance_level,
@@ -1076,10 +1076,8 @@ fn apply_hard_reset_from_csi(
         ctx.current_prompt_row,
         ctx.bell_pending,
         ctx.vt52_cursor_addr,
-        ctx.palette,
-        ctx.base_palette,
+        &mut ctx.colors,
         ctx.default_status_display,
-        ctx.dec_color,
         ctx.macros,
         ctx.drcs,
         conformance_level,
@@ -1593,15 +1591,15 @@ fn apply_private_mode(
     } else if mode == mode::ALLOW_DECCOLM {
         ctx.modes.allow_deccolm = enable;
     } else if mode == mode::DECATCUM {
-        ctx.dec_color.alternate_underline_text = enable;
+        ctx.colors.dec_color.alternate_underline_text = enable;
     } else if mode == mode::DECATCBM {
-        ctx.dec_color.alternate_blink_text = enable;
+        ctx.colors.dec_color.alternate_blink_text = enable;
     } else if mode == mode::DECBBSM {
-        ctx.dec_color.bold_blink_affects_background = enable;
+        ctx.colors.dec_color.bold_blink_affects_background = enable;
     } else if mode == mode::DECECM {
-        ctx.dec_color.erase_to_screen = enable;
+        ctx.colors.dec_color.erase_to_screen = enable;
         for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-            sync_screen_erase_defaults(screen, ctx.dec_color);
+            sync_screen_erase_defaults(screen, ctx.colors.dec_color);
         }
     } else if mode == mode::DECCOLM {
         // DECCOLM restore is tricky (resizes the grid). Skip for save/restore —
@@ -1709,28 +1707,28 @@ fn query_private_mode(
             }
         }
         mode::DECATCUM => {
-            if ctx.dec_color.alternate_underline_text {
+            if ctx.colors.dec_color.alternate_underline_text {
                 1
             } else {
                 2
             }
         }
         mode::DECATCBM => {
-            if ctx.dec_color.alternate_blink_text {
+            if ctx.colors.dec_color.alternate_blink_text {
                 1
             } else {
                 2
             }
         }
         mode::DECBBSM => {
-            if ctx.dec_color.bold_blink_affects_background {
+            if ctx.colors.dec_color.bold_blink_affects_background {
                 1
             } else {
                 2
             }
         }
         mode::DECECM => {
-            if ctx.dec_color.erase_to_screen {
+            if ctx.colors.dec_color.erase_to_screen {
                 1
             } else {
                 2
@@ -1987,18 +1985,18 @@ pub(super) fn csi_dispatch(
                                 ctx.modes.allow_deccolm = enable;
                             }
                             mode::DECATCUM => {
-                                ctx.dec_color.alternate_underline_text = enable;
+                                ctx.colors.dec_color.alternate_underline_text = enable;
                             }
                             mode::DECATCBM => {
-                                ctx.dec_color.alternate_blink_text = enable;
+                                ctx.colors.dec_color.alternate_blink_text = enable;
                             }
                             mode::DECBBSM => {
-                                ctx.dec_color.bold_blink_affects_background = enable;
+                                ctx.colors.dec_color.bold_blink_affects_background = enable;
                             }
                             mode::DECECM => {
-                                ctx.dec_color.erase_to_screen = enable;
+                                ctx.colors.dec_color.erase_to_screen = enable;
                                 for screen in [&mut *ctx.screen, &mut *ctx.stash] {
-                                    sync_screen_erase_defaults(screen, ctx.dec_color);
+                                    sync_screen_erase_defaults(screen, ctx.colors.dec_color);
                                 }
                             }
                             mode::DECCOLM => {
@@ -2169,8 +2167,8 @@ pub(super) fn csi_dispatch(
                         ctx.screen,
                         ctx.viewport.cols,
                         status_display,
-                        ctx.palette.status_line_fg,
-                        ctx.palette.status_line_bg,
+                        ctx.colors.palette.status_line_fg,
+                        ctx.colors.palette.status_line_bg,
                     );
                     let new_rows = total_rows.saturating_sub(screen::status_line_rows(ctx.screen));
                     if new_rows != old_rows {
@@ -2502,10 +2500,8 @@ pub(super) fn csi_dispatch(
                     ctx.current_prompt_row,
                     ctx.bell_pending,
                     ctx.vt52_cursor_addr,
-                    ctx.palette,
-                    ctx.base_palette,
+                    &mut ctx.colors,
                     ctx.default_status_display,
-                    ctx.dec_color,
                     ctx.macros,
                     ctx.drcs,
                     ConformanceLevel::Level4,
@@ -2717,9 +2713,9 @@ pub(super) fn csi_dispatch(
                 &mut screen.underline,
                 &mut screen.underline_color,
                 params,
-                ctx.palette,
+                ctx.colors.palette,
             );
-            sync_screen_erase_defaults(screen, ctx.dec_color);
+            sync_screen_erase_defaults(screen, ctx.colors.dec_color);
         }
         'd' => {
             let row = p.first().copied().unwrap_or(1).max(1) as u32 - 1;
@@ -3117,8 +3113,8 @@ fn esc_dispatch_with_hash_intermediate(
                 .len()
                 .saturating_sub(ctx.viewport.rows as usize);
             let e_cell = SmolStr::new_inline("E");
-            let fg = ctx.palette.fg;
-            let bg = ctx.palette.bg;
+            let fg = ctx.colors.palette.fg;
+            let bg = ctx.colors.palette.bg;
             for r in first_visible..ctx.screen.grid.rows.len() {
                 let row = &mut ctx.screen.grid.rows[r];
                 row.clear(fg, bg);
@@ -3472,8 +3468,11 @@ mod tests {
                         cursor_style: &mut cursor_style,
                         cell_width: 8,
                         cell_height: 16,
-                        palette: &mut pal,
-                        base_palette: &base_pal,
+                        colors: PaletteContext {
+                            palette: &mut pal,
+                            base_palette: &base_pal,
+                            dec_color: &mut dec_color,
+                        },
                         default_status_display: &mut default_status_display,
                         title_stack: &mut title_stack,
                         current_title: &mut current_title,
@@ -3482,7 +3481,6 @@ mod tests {
                         bell_pending: &mut bell_pending,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
-                        dec_color: &mut dec_color,
                         feature_permissions: &feature_permissions,
                         foreground_processes: &foreground_processes,
                         drcs: &mut drcs,
@@ -3506,13 +3504,15 @@ mod tests {
                         saved_modes: &mut saved_modes,
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
-                        palette: &mut pal,
-                        base_palette: &base_pal,
+                        colors: PaletteContext {
+                            palette: &mut pal,
+                            base_palette: &base_pal,
+                            dec_color: &mut dec_color,
+                        },
                         default_status_display: &mut default_status_display,
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
-                        dec_color: &mut dec_color,
                         drcs: &mut drcs,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
@@ -4422,8 +4422,11 @@ mod tests {
                         cursor_style: &mut cursor_style,
                         cell_width: 8,
                         cell_height: 16,
-                        palette: &mut pal,
-                        base_palette: &base_pal,
+                        colors: PaletteContext {
+                            palette: &mut pal,
+                            base_palette: &base_pal,
+                            dec_color: &mut dec_color,
+                        },
                         default_status_display: &mut default_status_display,
                         title_stack: &mut title_stack,
                         current_title: &mut current_title,
@@ -4432,7 +4435,6 @@ mod tests {
                         bell_pending: &mut bell_pending,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
-                        dec_color: &mut dec_color,
                         feature_permissions: &feature_permissions,
                         foreground_processes: &foreground_processes,
                         drcs: &mut drcs,
@@ -4456,13 +4458,15 @@ mod tests {
                         saved_modes: &mut saved_modes,
                         current_prompt_row: &mut current_prompt_row,
                         bell_pending: &mut bell_pending,
-                        palette: &mut pal,
-                        base_palette: &base_pal,
+                        colors: PaletteContext {
+                            palette: &mut pal,
+                            base_palette: &base_pal,
+                            dec_color: &mut dec_color,
+                        },
                         default_status_display: &mut default_status_display,
                         pending_output: &mut pending_output,
                         vt52_cursor_addr: &mut vt52_cursor_addr,
                         macros: &mut macros,
-                        dec_color: &mut dec_color,
                         drcs: &mut drcs,
                     };
                     esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
@@ -5095,8 +5099,11 @@ mod tests {
                             cursor_style: &mut cursor_style,
                             cell_width: 8,
                             cell_height: 16,
-                            palette: &mut pal,
-                            base_palette: &base_pal,
+                            colors: PaletteContext {
+                                palette: &mut pal,
+                                base_palette: &base_pal,
+                                dec_color: &mut dec_color,
+                            },
                             default_status_display: &mut default_status_display,
                             title_stack: &mut title_stack,
                             current_title: &mut current_title,
@@ -5105,7 +5112,6 @@ mod tests {
                             bell_pending: &mut bell_pending,
                             vt52_cursor_addr: &mut vt52_cursor_addr,
                             macros: &mut macros,
-                            dec_color: &mut dec_color,
                             feature_permissions: &feature_permissions,
                             foreground_processes: &foreground_processes,
                             drcs: &mut drcs,
@@ -5129,13 +5135,15 @@ mod tests {
                             saved_modes: &mut saved_modes,
                             current_prompt_row: &mut current_prompt_row,
                             bell_pending: &mut bell_pending,
-                            palette: &mut pal,
-                            base_palette: &base_pal,
+                            colors: PaletteContext {
+                                palette: &mut pal,
+                                base_palette: &base_pal,
+                                dec_color: &mut dec_color,
+                            },
                             default_status_display: &mut default_status_display,
                             pending_output: &mut pending_output,
                             vt52_cursor_addr: &mut vt52_cursor_addr,
                             macros: &mut macros,
-                            dec_color: &mut dec_color,
                             drcs: &mut drcs,
                         };
                         esc_dispatch(&mut ctx, intermediates.as_slice(), byte);
