@@ -328,6 +328,20 @@ fn paint_tab_bar(
                 pack_rgb(tab_bg),
             );
         }
+        let row = label_row(&tab.label, fg, bg, true);
+        paint_shaped_label(
+            font_system,
+            snap,
+            buffer,
+            width,
+            height,
+            &row,
+            tab.label_x,
+            0.0,
+        );
+    }
+
+    for tab in &plan.tabs {
         if let Some(separator) = tab.separator {
             fill_rect(
                 buffer,
@@ -340,17 +354,6 @@ fn paint_tab_bar(
                 pack_rgb(separator),
             );
         }
-        let row = label_row(&tab.label, fg, bg, true);
-        paint_shaped_label(
-            font_system,
-            snap,
-            buffer,
-            width,
-            height,
-            &row,
-            tab.label_x,
-            0.0,
-        );
     }
 
     for button in &plan.buttons {

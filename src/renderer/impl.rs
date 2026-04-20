@@ -2282,6 +2282,20 @@ impl Renderer {
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
             }
 
+            self.shape_and_render_label(
+                font_system,
+                &tab.label,
+                tab.label_x,
+                0.0,
+                baseline,
+                cell_w,
+                label_fg,
+                fg_vertices,
+                fg_indices,
+            );
+        }
+
+        for tab in &plan.tabs {
             if let Some(separator) = tab.separator {
                 let sep_w = 3.0_f32;
                 let sep_color = pack_color(&separator, self.bg_alpha);
@@ -2306,18 +2320,6 @@ impl Renderer {
                 ]);
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
             }
-
-            self.shape_and_render_label(
-                font_system,
-                &tab.label,
-                tab.label_x,
-                0.0,
-                baseline,
-                cell_w,
-                label_fg,
-                fg_vertices,
-                fg_indices,
-            );
         }
 
         for button in &plan.buttons {
