@@ -21,8 +21,11 @@ use crate::color;
 use crate::color::apply_sgr;
 use crate::conformance;
 use crate::cursor::CursorStyle;
-use crate::dec_color::DecColorState;
-use crate::decmacro::MacroStore;
+use crate::dec::color::DecColorState;
+use crate::dec::color::effective_palette;
+use crate::dec::color::erase_background_color;
+use crate::dec::r#macro::MacroStore;
+use crate::dec_color_state_from_palette;
 use crate::drcs::Store as DrcsStore;
 use crate::feature::FeaturePermissions;
 use crate::grid;
@@ -935,7 +938,7 @@ fn sync_screen_erase_defaults(
     screen: &mut Screen,
     dec_color: &DecColorState,
 ) {
-    screen.grid.default_bg = crate::dec_color::erase_background_color(dec_color, screen.bg);
+    screen.grid.default_bg = erase_background_color(dec_color, screen.bg);
 }
 
 fn apply_hard_reset_state(
@@ -961,8 +964,8 @@ fn apply_hard_reset_state(
     conformance_level: ConformanceLevel,
     c1_mode: C1Mode,
 ) {
-    *dec_color = crate::dec_color::state_from_palette(base_palette);
-    *palette = crate::dec_color::effective_palette(base_palette, dec_color);
+    *dec_color = dec_color_state_from_palette(base_palette);
+    *palette = effective_palette(base_palette, dec_color);
     if *on_alt_screen {
         std::mem::swap(screen, stash);
         *on_alt_screen = false;
@@ -3351,8 +3354,8 @@ mod tests {
         viewport: &mut Viewport,
     ) {
         let base_pal = color::ColorPalette::default();
-        let mut dec_color = crate::dec_color::state_from_palette(&base_pal);
-        let mut pal = crate::dec_color::effective_palette(&base_pal, &dec_color);
+        let mut dec_color = dec_color_state_from_palette(&base_pal);
+        let mut pal = effective_palette(&base_pal, &dec_color);
         let mut parser = Parser::new();
         let mut stash = Screen::new(
             viewport.cols,
@@ -4301,8 +4304,8 @@ mod tests {
         viewport: &mut Viewport,
     ) -> Vec<u8> {
         let base_pal = color::ColorPalette::default();
-        let mut dec_color = crate::dec_color::state_from_palette(&base_pal);
-        let mut pal = crate::dec_color::effective_palette(&base_pal, &dec_color);
+        let mut dec_color = dec_color_state_from_palette(&base_pal);
+        let mut pal = effective_palette(&base_pal, &dec_color);
         let mut parser = Parser::new();
         let mut stash = Screen::new(
             viewport.cols,
@@ -5025,8 +5028,8 @@ mod tests {
     fn scs_gr_translation_applies_to_split_utf8_codepoint() {
         let (mut screen, mut viewport) = setup();
         let base_pal = color::ColorPalette::default();
-        let mut dec_color = crate::dec_color::state_from_palette(&base_pal);
-        let mut pal = crate::dec_color::effective_palette(&base_pal, &dec_color);
+        let mut dec_color = dec_color_state_from_palette(&base_pal);
+        let mut pal = effective_palette(&base_pal, &dec_color);
         let mut parser = Parser::new();
         let mut stash = Screen::new(
             viewport.cols,

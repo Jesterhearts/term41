@@ -1,4 +1,5 @@
 use super::*;
+use crate::dec::color::erase_background_color;
 
 pub(crate) fn apply_screen_palette(
     screen: &mut Screen,
@@ -38,7 +39,7 @@ pub(crate) fn sync_screen_erase_defaults(
     screen: &mut Screen,
     dec_color: &DecColorState,
 ) {
-    screen.grid.default_bg = dec_color::erase_background_color(dec_color, screen.bg);
+    screen.grid.default_bg = erase_background_color(dec_color, screen.bg);
 }
 
 fn remap_screen_default_colors(

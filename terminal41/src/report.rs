@@ -1,4 +1,6 @@
 use super::*;
+use crate::dec::color::report_alternate_text_color;
+use crate::dec::color::report_color_assignment;
 
 pub(crate) fn handle_decrqss(
     selector: &[u8],
@@ -115,9 +117,9 @@ pub(crate) fn handle_decrqss(
         [item @ b'0'..=b'9', b',', kind @ (b'|' | b'}')] => {
             let item = (item - b'0') as u16;
             let report = if *kind == b'|' {
-                dec_color::report_color_assignment(&terminal.dec_color, item)
+                report_color_assignment(&terminal.dec_color, item)
             } else {
-                dec_color::report_alternate_text_color(&terminal.dec_color, item)
+                report_alternate_text_color(&terminal.dec_color, item)
             };
             if let Some(report) = report {
                 conformance::write_dcs(out, c1_mode, format_args!("1$r{report}"));
@@ -129,8 +131,7 @@ pub(crate) fn handle_decrqss(
             let item = selector[0..2]
                 .iter()
                 .fold(0u16, |acc, b| acc * 10 + (b - b'0') as u16);
-            if let Some(report) = dec_color::report_alternate_text_color(&terminal.dec_color, item)
-            {
+            if let Some(report) = report_alternate_text_color(&terminal.dec_color, item) {
                 conformance::write_dcs(out, c1_mode, format_args!("1$r{report}"));
             } else {
                 conformance::write_dcs(out, c1_mode, format_args!("0$r"));

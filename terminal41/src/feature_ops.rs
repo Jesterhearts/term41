@@ -8,9 +8,9 @@ use crate::StatusDisplayKind;
 use crate::Terminal;
 use crate::Viewport;
 use crate::dcs;
-use crate::decmacro::MAX_MACRO_INVOCATION_DEPTH;
-use crate::decmacro::MacroEncoding;
-use crate::decmacro::MacroStore;
+use crate::dec::r#macro::MAX_MACRO_INVOCATION_DEPTH;
+use crate::dec::r#macro::MacroEncoding;
+use crate::dec::r#macro::MacroStore;
 use crate::screen;
 
 pub(crate) fn log_foreground_process_probe(

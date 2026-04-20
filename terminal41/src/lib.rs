@@ -10,8 +10,7 @@ mod color;
 mod conformance;
 mod cursor;
 mod dcs;
-mod dec_color;
-mod decmacro;
+mod dec;
 mod drcs;
 mod feature;
 mod feature_ops;
@@ -58,15 +57,15 @@ pub use self::conformance::C1Mode;
 pub use self::conformance::ConformanceLevel;
 pub use self::cursor::CursorShape;
 pub use self::cursor::CursorStyle;
-pub use self::dec_color::ColorSpace as DecColorSpace;
-pub use self::dec_color::DecColorState;
-pub use self::dec_color::LookupTable as DecColorLookupTable;
-pub use self::dec_color::alternate_assignment_for_style as dec_alternate_assignment_for_style;
-pub use self::dec_color::assign_alternate_text_color as dec_assign_alternate_text_color;
-pub use self::dec_color::select_lookup_table as dec_select_lookup_table;
-pub use self::dec_color::state_from_palette as dec_color_state_from_palette;
-pub use self::dec_color::table_color as dec_table_color;
-use self::decmacro::MacroStore;
+pub use self::dec::color::ColorSpace as DecColorSpace;
+pub use self::dec::color::DecColorState;
+pub use self::dec::color::LookupTable as DecColorLookupTable;
+pub use self::dec::color::alternate_assignment_for_style as dec_alternate_assignment_for_style;
+pub use self::dec::color::assign_alternate_text_color as dec_assign_alternate_text_color;
+pub use self::dec::color::select_lookup_table as dec_select_lookup_table;
+pub use self::dec::color::state_from_palette as dec_color_state_from_palette;
+pub use self::dec::color::table_color as dec_table_color;
+use self::dec::r#macro::MacroStore;
 use self::drcs::Store as DrcsStore;
 pub use self::feature::FeaturePermissions;
 pub use self::feature::ProgramAllowlist;
@@ -110,6 +109,12 @@ pub use self::row::Row;
 pub use self::screen::Screen;
 pub use self::screen::StatusDisplayKind;
 use self::screen::resize_screen;
+use crate::dec::color::TEXT_COLOR_ASSIGNMENT_CLASS;
+use crate::dec::color::assign_color;
+use crate::dec::color::effective_palette;
+use crate::dec::color::rebase_theme_entries;
+use crate::dec::color::report_color_table;
+use crate::dec::color::restore_color_table;
 use crate::search::SearchState;
 use crate::selection::Selection;
 
@@ -402,8 +407,8 @@ impl Terminal {
         palette: ColorPalette,
     ) -> Self {
         let base_palette = palette;
-        let dec_color = dec_color::state_from_palette(&base_palette);
-        let palette = dec_color::effective_palette(&base_palette, &dec_color);
+        let dec_color = dec_color_state_from_palette(&base_palette);
+        let palette = effective_palette(&base_palette, &dec_color);
         let mut terminal = Self {
             active: Screen::new(
                 cols,
@@ -499,9 +504,9 @@ impl Terminal {
         palette: ColorPalette,
     ) {
         let old_palette = self.palette.clone();
-        dec_color::rebase_theme_entries(&mut self.dec_color, &self.base_palette, &palette);
+        rebase_theme_entries(&mut self.dec_color, &self.base_palette, &palette);
         self.base_palette = palette;
-        self.palette = dec_color::effective_palette(&self.base_palette, &self.dec_color);
+        self.palette = effective_palette(&self.base_palette, &self.dec_color);
         for screen in [&mut self.active, &mut self.stash] {
             apply_screen_palette(screen, &old_palette, &self.palette);
             sync_screen_erase_defaults(screen, &self.dec_color);
@@ -514,10 +519,10 @@ impl Terminal {
         fg: u16,
         bg: u16,
     ) -> bool {
-        if !dec_color::assign_color(&mut self.dec_color, item, fg, bg) {
+        if !assign_color(&mut self.dec_color, item, fg, bg) {
             return false;
         }
-        if item == dec_color::TEXT_COLOR_ASSIGNMENT_CLASS {
+        if item == TEXT_COLOR_ASSIGNMENT_CLASS {
             self.apply_dec_color_defaults();
         }
         true
@@ -529,21 +534,21 @@ impl Terminal {
         fg: u16,
         bg: u16,
     ) -> bool {
-        dec_color::assign_alternate_text_color(&mut self.dec_color, item, fg, bg)
+        dec_assign_alternate_text_color(&mut self.dec_color, item, fg, bg)
     }
 
     fn select_dec_lookup_table(
         &mut self,
         ps: u16,
     ) -> bool {
-        dec_color::select_lookup_table(&mut self.dec_color, ps)
+        dec_select_lookup_table(&mut self.dec_color, ps)
     }
 
     fn restore_dec_color_table(
         &mut self,
         payload: &[u8],
     ) -> bool {
-        if !dec_color::restore_color_table(&mut self.dec_color, payload) {
+        if !restore_color_table(&mut self.dec_color, payload) {
             return false;
         }
         self.apply_dec_color_defaults();
@@ -552,7 +557,7 @@ impl Terminal {
 
     fn apply_dec_color_defaults(&mut self) {
         let old_palette = self.palette.clone();
-        self.palette = dec_color::effective_palette(&self.base_palette, &self.dec_color);
+        self.palette = effective_palette(&self.base_palette, &self.dec_color);
         for screen in [&mut self.active, &mut self.stash] {
             apply_screen_palette(screen, &old_palette, &self.palette);
             sync_screen_erase_defaults(screen, &self.dec_color);
@@ -1086,8 +1091,8 @@ impl Terminal {
                                 .next()
                                 .and_then(|group| group.first().copied())
                                 .unwrap_or(0);
-                            if let Some(space) = dec_color::ColorSpace::from_param(Some(space)) {
-                                let report = dec_color::report_color_table(&self.dec_color, space);
+                            if let Some(space) = DecColorSpace::from_param(Some(space)) {
+                                let report = report_color_table(&self.dec_color, space);
                                 conformance::write_dcs(
                                     &mut self.pending_output,
                                     self.modes.c1_mode,
@@ -3374,7 +3379,7 @@ mod tests {
         term.process(b"\x1b[2;2$u");
         let expected = format!(
             "\x1bP2$s{}\x1b\\",
-            dec_color::report_color_table(&term.dec_color, dec_color::ColorSpace::Rgb)
+            report_color_table(&term.dec_color, DecColorSpace::Rgb)
         );
         assert_eq!(term.take_pending_output(), expected.as_bytes());
     }
@@ -3385,7 +3390,7 @@ mod tests {
         term.process(b"\x1b[2;1$u");
         let expected = format!(
             "\x1bP2$s{}\x1b\\",
-            dec_color::report_color_table(&term.dec_color, dec_color::ColorSpace::Hls)
+            report_color_table(&term.dec_color, DecColorSpace::Hls)
         );
         assert_eq!(term.take_pending_output(), expected.as_bytes());
     }
@@ -3450,10 +3455,10 @@ mod tests {
         term.process(b"\x1b[1){");
         assert_eq!(
             term.dec_color.lookup_table,
-            dec_color::LookupTable::AlternateWithAttrs
+            DecColorLookupTable::AlternateWithAttrs
         );
         term.process(b"\x1b[3){");
-        assert_eq!(term.dec_color.lookup_table, dec_color::LookupTable::AnsiSgr);
+        assert_eq!(term.dec_color.lookup_table, DecColorLookupTable::AnsiSgr);
     }
 
     #[test]
