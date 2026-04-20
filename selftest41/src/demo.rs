@@ -20,6 +20,7 @@ pub enum DemoId {
     Charset,
     Drcs,
     LineAttrs,
+    Tabs,
     CursorMarginsEdit,
     EraseProtection,
     PasteFocus,
@@ -81,6 +82,13 @@ pub fn catalog() -> Vec<Demo> {
             summary: "Single-width, double-width, and double-height rows.",
             detail: "Exercises DECSWL, DECDWL, and the double-height top/bottom pair.",
             id: DemoId::LineAttrs,
+        },
+        Demo {
+            title: "Tabs",
+            summary: "HT, HTS, CHT, CBT, TBC, and visible tab-stop placement/removal.",
+            detail: "Exercises hardware tab-stop creation, clearing, and movement so it is easy \
+                     to see where the terminal believes stops exist.",
+            id: DemoId::Tabs,
         },
         Demo {
             title: "Cursor, Margins & Edit",
@@ -183,6 +191,7 @@ pub fn run_demo(
         DemoId::Charset => run_charset_demo(out),
         DemoId::Drcs => run_drcs_demo(out),
         DemoId::LineAttrs => run_line_attrs_demo(out),
+        DemoId::Tabs => run_tabs_demo(out),
         DemoId::CursorMarginsEdit => run_cursor_margins_edit_demo(out),
         DemoId::EraseProtection => run_erase_protection_demo(out),
         DemoId::PasteFocus => run_paste_focus_placeholder(out),
@@ -450,6 +459,54 @@ fn run_line_attrs_demo(out: &mut impl Write) -> io::Result<()> {
     write!(out, "\r\nThis line should appear double-height\x1b#3")?;
     write!(out, "\r\nThis line should appear double-height\x1b#4")?;
     write!(out, "\r\nBack to single width\x1b#5")?;
+    out.flush()?;
+    Ok(())
+}
+
+fn run_tabs_demo(out: &mut impl Write) -> io::Result<()> {
+    heading(out, "Tabs")?;
+    line(
+        out,
+        "Starting from the default 8-column stops, then placing and clearing custom ones.",
+    )?;
+    line(
+        out,
+        "Ruler:    1.......2.......3.......4.......5.......6.......7.......8",
+    )?;
+    write!(out, "\x1b[3;1Hdefault:\tA\tB\tC")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Clearing all tab stops and setting custom stops at columns 12, 20, and 28.",
+    )?;
+    write!(out, "\x1b[3g")?;
+    write!(out, "\x1b[6;12H\x1bH\x1b[6;20H\x1bH\x1b[6;28H\x1bH")?;
+    write!(out, "\x1b[7;1Hcustom:\tA\tB\tC")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "CHT should advance to the next stop; CBT should move back to the previous one.",
+    )?;
+    write!(out, "\x1b[9;1Horigin")?;
+    write!(out, "\x1b[9;1H\x1b[1Iafter CHT")?;
+    write!(out, "\x1b[9;20H\x1b[1Zafter CBT")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "TBC should remove just the current stop first, then all stops.",
+    )?;
+    write!(out, "\x1b[6;20H\x1b[0g")?;
+    write!(out, "\x1b[11;1Hafter TBC(0):\tA\tB\tC")?;
+    present_step(out)?;
+
+    write!(out, "\x1b[3g")?;
+    write!(out, "\x1b[12;1Hafter TBC(3):\tA\tB\tC")?;
     out.flush()?;
     Ok(())
 }
