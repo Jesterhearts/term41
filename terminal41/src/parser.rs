@@ -381,6 +381,19 @@ impl OwnedParams {
     }
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) struct OwnedIntermediates(Vec<u8>);
+
+impl OwnedIntermediates {
+    fn from_slice(intermediates: &[u8]) -> Self {
+        Self(intermediates.to_vec())
+    }
+
+    fn as_slice(&self) -> &[u8] {
+        &self.0
+    }
+}
+
 #[derive(Debug, Clone)]
 pub(super) enum ParsedCsiAction {
     Unsupported,
@@ -492,6 +505,55 @@ pub(super) enum ParsedCsiAction {
         action: char,
         params: OwnedParams,
     },
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub(super) enum Vt52EscAction {
+    CursorUp,
+    CursorDown,
+    CursorRight,
+    CursorLeft,
+    EnterDecSpecialGraphics,
+    ExitDecSpecialGraphics,
+    CursorHome,
+    ReverseIndex,
+    EraseToEndOfScreen,
+    EraseToEndOfLine,
+    DirectCursorAddressStart,
+    Identify,
+    ExitVt52Mode,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub(super) enum ParsedEscAction {
+    Unsupported,
+    Vt52(Vt52EscAction),
+    SetC1Mode(C1Mode),
+    SetTextMode(TextMode),
+    DesignateCharset {
+        slot: GraphicSetSlot,
+        charset: CharacterSet,
+    },
+    DesignateSoftCharset {
+        slot: GraphicSetSlot,
+        intermediates: OwnedIntermediates,
+        byte: u8,
+    },
+    ScreenAlignmentTest,
+    SetLineAttr(LineAttr),
+    HardReset,
+    SaveCursor,
+    RestoreCursor,
+    Index,
+    NextLine,
+    SetTabStop,
+    ReverseIndex,
+    SetApplicationKeypad(bool),
+    SingleShift(GraphicSetSlot),
+    SetGl(GraphicSetSlot),
+    SetGr(GraphicSetSlot),
+    BackIndex,
+    ForwardIndex,
 }
 
 fn first_group_param(
@@ -2963,174 +3025,205 @@ pub(super) fn csi_dispatch(
         .call();
 }
 
-fn esc_dispatch_vt52(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    modes: &mut TerminalModes,
-    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
-    pending_output: &mut Vec<u8>,
-    byte: u8,
-) -> bool {
-    if !modes.vt52_mode {
-        return false;
-    }
-    if *vt52_cursor_addr != crate::Vt52CursorAddr::Idle {
-        return false;
-    }
-
-    if byte == b'Y' {
-        *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
-        return true;
-    }
-
-    if !matches!(
-        byte,
-        b'A' | b'B' | b'C' | b'D' | b'F' | b'G' | b'H' | b'I' | b'J' | b'K' | b'Z' | b'<'
-    ) {
-        return false;
-    }
-
-    // VT52 mode — completely different ESC vocabulary, no CSI or parameters.
-    // The `/` intermediate (ESC / Z identify response) shares the intermediate
-    // byte space with ANSI SCS, so we must gate on vt52_mode *first*.
-    {
-        // Cancel pending wrap before any cursor-moving sequence.
-        clamp_cursor_to_row_width(screen, viewport);
-        match byte {
-            // ESC A — cursor up (no scroll).
-            b'A' => {
-                screen.cursor.row = screen.cursor.row.saturating_sub(1);
-                clamp_cursor_to_row_width(screen, viewport);
-            }
-            // ESC B — cursor down (no scroll).
-            b'B' if screen.cursor.row + 1 < viewport.rows => {
-                screen.cursor.row += 1;
-                clamp_cursor_to_row_width(screen, viewport);
-            }
-            // ESC C — cursor right (no scroll).
-            b'C' if screen.cursor.col + 1 < current_row_display_cols(screen, viewport) => {
-                screen.cursor.col += 1;
-            }
-            // ESC D — cursor left (no scroll).
-            b'D' => {
-                screen.cursor.col = screen.cursor.col.saturating_sub(1);
-            }
-            // ESC F — enter DEC Special Graphics mode (same as SCS G0 = 0).
-            b'F' => {
-                screen
-                    .charset
-                    .designate(GraphicSetSlot::G0, CharacterSet::DecSpecialGraphics);
-            }
-            // ESC G — exit DEC Special Graphics mode (same as SCS G0 = B).
-            b'G' => {
-                screen
-                    .charset
-                    .designate(GraphicSetSlot::G0, CharacterSet::Ascii);
-            }
-            // ESC H — cursor home (0, 0).
-            b'H' => {
-                screen.cursor.row = 0;
-                screen.cursor.col = 0;
-            }
-            // ESC I — reverse index (identical to ANSI RI / ESC M): scroll
-            // down if at the top of the scroll region, else cursor up.
-            b'I' => {
-                if screen.cursor.row == screen.scroll_top {
-                    screen.grid.scroll_down_in_region(
-                        viewport,
-                        &mut screen.images,
-                        screen.scroll_top,
-                        screen.scroll_bottom,
-                        1,
-                    );
-                } else if screen.cursor.row > 0 {
-                    screen.cursor.row -= 1;
-                }
-            }
-            // ESC J — erase to end of screen (same as ANSI ED 0).
-            b'J' => {
-                screen
-                    .grid
-                    .erase_in_display(&screen.cursor, viewport, &mut screen.images, 0);
-            }
-            // ESC K — erase to end of line (same as ANSI EL 0).
-            b'K' => {
-                screen.grid.erase_in_line(&screen.cursor, viewport, 0);
-            }
-            // ESC Y — direct cursor address. The two parameter bytes are
-            // absorbed by Terminal::apply via Vt52CursorAddr state.
-            b'Y' => {
-                *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
-            }
-            // ESC Z — identify. VT52 responds ESC / Z (0x1b 0x2f 0x5a).
-            b'Z' => {
-                pending_output.extend_from_slice(b"\x1b/Z");
-            }
-            // ESC < — exit VT52 mode, return to ANSI mode (sets DECANM).
-            b'<' => {
-                modes.vt52_mode = false;
-            }
-            _ => {}
-        }
-    }
-    true
-}
-
-fn esc_dispatch_with_space_intermediate(
-    modes: &mut TerminalModes,
-    byte: u8,
-) -> bool {
-    match byte {
-        b'F' if can_negotiate_c1(modes) => {
-            modes.c1_mode = C1Mode::SevenBit;
-            true
-        }
-        b'G' if can_negotiate_c1(modes) => {
-            modes.c1_mode = C1Mode::EightBit;
-            true
-        }
-        _ => false,
-    }
-}
-
-fn esc_dispatch_with_percent_intermediate(
-    modes: &mut TerminalModes,
-    byte: u8,
-) -> bool {
-    if let Some(mode) = TextMode::from_docs_final(byte) {
-        modes.text_mode = mode;
-        true
-    } else {
-        false
-    }
-}
-
-fn esc_dispatch_designation(
-    screen: &mut Screen,
-    drcs: &mut DrcsStore,
+pub(super) fn esc_parse(
+    modes: &TerminalModes,
     intermediates: &[u8],
     byte: u8,
-) -> bool {
-    if let Some((slot, charset)) = charset::parse_designation(intermediates, byte).or_else(|| {
-        let slot = charset::slot_for_intermediates(intermediates)?;
-        let charset = drcs.lookup_designation(intermediates, byte)?;
-        Some((slot, charset))
-    }) {
-        screen.charset.designate(slot, charset);
-        true
-    } else {
-        false
+) -> ParsedEscAction {
+    if intermediates.is_empty() && modes.vt52_mode {
+        let vt52 = match byte {
+            b'A' => Some(Vt52EscAction::CursorUp),
+            b'B' => Some(Vt52EscAction::CursorDown),
+            b'C' => Some(Vt52EscAction::CursorRight),
+            b'D' => Some(Vt52EscAction::CursorLeft),
+            b'F' => Some(Vt52EscAction::EnterDecSpecialGraphics),
+            b'G' => Some(Vt52EscAction::ExitDecSpecialGraphics),
+            b'H' => Some(Vt52EscAction::CursorHome),
+            b'I' => Some(Vt52EscAction::ReverseIndex),
+            b'J' => Some(Vt52EscAction::EraseToEndOfScreen),
+            b'K' => Some(Vt52EscAction::EraseToEndOfLine),
+            b'Y' => Some(Vt52EscAction::DirectCursorAddressStart),
+            b'Z' => Some(Vt52EscAction::Identify),
+            b'<' => Some(Vt52EscAction::ExitVt52Mode),
+            _ => None,
+        };
+        if let Some(action) = vt52 {
+            return ParsedEscAction::Vt52(action);
+        }
+    }
+
+    match intermediates {
+        b" " => match byte {
+            b'F' if can_negotiate_c1(modes) => ParsedEscAction::SetC1Mode(C1Mode::SevenBit),
+            b'G' if can_negotiate_c1(modes) => ParsedEscAction::SetC1Mode(C1Mode::EightBit),
+            _ => ParsedEscAction::Unsupported,
+        },
+        b"%" => TextMode::from_docs_final(byte)
+            .map(ParsedEscAction::SetTextMode)
+            .unwrap_or(ParsedEscAction::Unsupported),
+        b"#" => match byte {
+            b'8' => ParsedEscAction::ScreenAlignmentTest,
+            b'3' => ParsedEscAction::SetLineAttr(LineAttr::DoubleHeightTop),
+            b'4' => ParsedEscAction::SetLineAttr(LineAttr::DoubleHeightBottom),
+            b'5' => ParsedEscAction::SetLineAttr(LineAttr::Normal),
+            b'6' => ParsedEscAction::SetLineAttr(LineAttr::DoubleWidth),
+            _ => ParsedEscAction::Unsupported,
+        },
+        b"" => match byte {
+            b'c' => ParsedEscAction::HardReset,
+            b'7' => ParsedEscAction::SaveCursor,
+            b'8' => ParsedEscAction::RestoreCursor,
+            b'D' => ParsedEscAction::Index,
+            b'E' => ParsedEscAction::NextLine,
+            b'H' => ParsedEscAction::SetTabStop,
+            b'M' => ParsedEscAction::ReverseIndex,
+            b'=' => ParsedEscAction::SetApplicationKeypad(true),
+            b'>' => ParsedEscAction::SetApplicationKeypad(false),
+            b'N' => ParsedEscAction::SingleShift(GraphicSetSlot::G2),
+            b'O' => ParsedEscAction::SingleShift(GraphicSetSlot::G3),
+            b'n' => ParsedEscAction::SetGl(GraphicSetSlot::G2),
+            b'o' => ParsedEscAction::SetGl(GraphicSetSlot::G3),
+            b'~' => ParsedEscAction::SetGr(GraphicSetSlot::G1),
+            b'}' => ParsedEscAction::SetGr(GraphicSetSlot::G2),
+            b'|' => ParsedEscAction::SetGr(GraphicSetSlot::G3),
+            b'6' => ParsedEscAction::BackIndex,
+            b'9' => ParsedEscAction::ForwardIndex,
+            _ => ParsedEscAction::Unsupported,
+        },
+        _ => {
+            if let Some((slot, charset)) = charset::parse_designation(intermediates, byte) {
+                ParsedEscAction::DesignateCharset { slot, charset }
+            } else if let Some(slot) = charset::slot_for_intermediates(intermediates) {
+                ParsedEscAction::DesignateSoftCharset {
+                    slot,
+                    intermediates: OwnedIntermediates::from_slice(intermediates),
+                    byte,
+                }
+            } else {
+                ParsedEscAction::Unsupported
+            }
+        }
     }
 }
 
-fn esc_dispatch_with_hash_intermediate(
+#[builder]
+pub(super) fn esc_apply(
+    action: ParsedEscAction,
     screen: &mut Screen,
-    viewport: &Viewport,
-    palette: &ColorPalette,
-    byte: u8,
-) -> bool {
-    match byte {
-        b'8' => {
+    stash: &mut Screen,
+    viewport: &mut Viewport,
+    on_alt_screen: &mut bool,
+    modes: &mut TerminalModes,
+    kitty_keyboard: &mut KittyKeyboardState,
+    cursor_style: &mut CursorStyle,
+    current_title: &mut Option<String>,
+    title_stack: &mut Vec<Option<String>>,
+    saved_modes: &mut std::collections::HashMap<u16, bool>,
+    current_prompt_row: &mut Option<u64>,
+    bell_pending: &mut bool,
+    palette: &mut color::ColorPalette,
+    base_palette: &color::ColorPalette,
+    dec_color: &mut DecColorState,
+    default_status_display: &mut StatusDisplayKind,
+    pending_output: &mut Vec<u8>,
+    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
+    macros: &mut MacroStore,
+    drcs: &mut DrcsStore,
+) {
+    match action {
+        ParsedEscAction::Unsupported => return,
+        ParsedEscAction::Vt52(action) => {
+            clamp_cursor_to_row_width(screen, viewport);
+            match action {
+                Vt52EscAction::CursorUp => {
+                    screen.cursor.row = screen.cursor.row.saturating_sub(1);
+                    clamp_cursor_to_row_width(screen, viewport);
+                }
+                Vt52EscAction::CursorDown if screen.cursor.row + 1 < viewport.rows => {
+                    screen.cursor.row += 1;
+                    clamp_cursor_to_row_width(screen, viewport);
+                }
+                Vt52EscAction::CursorDown => {}
+                Vt52EscAction::CursorRight
+                    if screen.cursor.col + 1 < current_row_display_cols(screen, viewport) =>
+                {
+                    screen.cursor.col += 1;
+                }
+                Vt52EscAction::CursorRight => {}
+                Vt52EscAction::CursorLeft => {
+                    screen.cursor.col = screen.cursor.col.saturating_sub(1);
+                }
+                Vt52EscAction::EnterDecSpecialGraphics => {
+                    screen
+                        .charset
+                        .designate(GraphicSetSlot::G0, CharacterSet::DecSpecialGraphics);
+                }
+                Vt52EscAction::ExitDecSpecialGraphics => {
+                    screen
+                        .charset
+                        .designate(GraphicSetSlot::G0, CharacterSet::Ascii);
+                }
+                Vt52EscAction::CursorHome => {
+                    screen.cursor.row = 0;
+                    screen.cursor.col = 0;
+                }
+                Vt52EscAction::ReverseIndex => {
+                    if screen.cursor.row == screen.scroll_top {
+                        screen.grid.scroll_down_in_region(
+                            viewport,
+                            &mut screen.images,
+                            screen.scroll_top,
+                            screen.scroll_bottom,
+                            1,
+                        );
+                    } else if screen.cursor.row > 0 {
+                        screen.cursor.row -= 1;
+                    }
+                }
+                Vt52EscAction::EraseToEndOfScreen => {
+                    screen
+                        .grid
+                        .erase_in_display(&screen.cursor, viewport, &mut screen.images, 0);
+                }
+                Vt52EscAction::EraseToEndOfLine => {
+                    screen.grid.erase_in_line(&screen.cursor, viewport, 0);
+                }
+                Vt52EscAction::DirectCursorAddressStart => {
+                    *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
+                }
+                Vt52EscAction::Identify => {
+                    pending_output.extend_from_slice(b"\x1b/Z");
+                }
+                Vt52EscAction::ExitVt52Mode => {
+                    modes.vt52_mode = false;
+                }
+            }
+            return;
+        }
+        ParsedEscAction::SetC1Mode(mode) => {
+            modes.c1_mode = mode;
+            return;
+        }
+        ParsedEscAction::SetTextMode(mode) => {
+            modes.text_mode = mode;
+            return;
+        }
+        ParsedEscAction::DesignateCharset { slot, charset } => {
+            screen.charset.designate(slot, charset);
+            return;
+        }
+        ParsedEscAction::DesignateSoftCharset {
+            slot,
+            intermediates,
+            byte,
+        } => {
+            let Some(charset) = drcs.lookup_designation(intermediates.as_slice(), byte) else {
+                return;
+            };
+            screen.charset.designate(slot, charset);
+            return;
+        }
+        ParsedEscAction::ScreenAlignmentTest => {
             let first_visible = screen
                 .grid
                 .rows
@@ -3157,9 +3250,9 @@ fn esc_dispatch_with_hash_intermediate(
             screen.origin_mode = false;
             screen.cursor.row = 0;
             screen.cursor.col = 0;
-            true
+            return;
         }
-        b'3' | b'4' | b'5' | b'6' => {
+        ParsedEscAction::SetLineAttr(line_attr) => {
             let visible_start = screen
                 .grid
                 .rows
@@ -3167,22 +3260,153 @@ fn esc_dispatch_with_hash_intermediate(
                 .saturating_sub(viewport.rows as usize);
             let abs_row = visible_start + screen.cursor.row as usize;
             if let Some(row) = screen.grid.rows.get_mut(abs_row) {
-                row.line_attr = match byte {
-                    b'3' => LineAttr::DoubleHeightTop,
-                    b'4' => LineAttr::DoubleHeightBottom,
-                    b'5' => LineAttr::Normal,
-                    _ => LineAttr::DoubleWidth,
-                };
+                row.line_attr = line_attr;
                 if screen.cursor.row as usize + visible_start == abs_row {
                     clamp_cursor_to_row_width(screen, viewport);
                 }
             }
-            true
+            return;
         }
-        _ => false,
+        ParsedEscAction::HardReset => {
+            let conformance_level = ConformanceLevel::Level4;
+            let c1_mode = C1Mode::SevenBit;
+            apply_hard_reset_state()
+                .screen(screen)
+                .stash(stash)
+                .on_alt_screen(on_alt_screen)
+                .modes(modes)
+                .viewport(viewport)
+                .kitty_keyboard(kitty_keyboard)
+                .cursor_style(cursor_style)
+                .current_title(current_title)
+                .title_stack(title_stack)
+                .saved_modes(saved_modes)
+                .current_prompt_row(current_prompt_row)
+                .bell_pending(bell_pending)
+                .vt52_cursor_addr(vt52_cursor_addr)
+                .palette(palette)
+                .base_palette(base_palette)
+                .dec_color(dec_color)
+                .default_status_display(default_status_display)
+                .macros(macros)
+                .drcs(drcs)
+                .conformance_level(conformance_level)
+                .c1_mode(c1_mode)
+                .call();
+            return;
+        }
+        ParsedEscAction::SaveCursor
+        | ParsedEscAction::RestoreCursor
+        | ParsedEscAction::Index
+        | ParsedEscAction::NextLine
+        | ParsedEscAction::SetTabStop
+        | ParsedEscAction::ReverseIndex
+        | ParsedEscAction::SetApplicationKeypad(_)
+        | ParsedEscAction::SingleShift(_)
+        | ParsedEscAction::SetGl(_)
+        | ParsedEscAction::SetGr(_)
+        | ParsedEscAction::BackIndex
+        | ParsedEscAction::ForwardIndex => {}
+    }
+
+    clamp_cursor_to_row_width(screen, viewport);
+    let screen_view = screen::screen_viewport(screen, viewport);
+    let screen_view = &screen_view;
+
+    match action {
+        ParsedEscAction::SaveCursor => screen::save_cursor_slot(screen),
+        ParsedEscAction::RestoreCursor => screen::restore_cursor_slot(screen, screen_view),
+        ParsedEscAction::Index => {
+            if screen.cursor.row == screen.scroll_bottom {
+                if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
+                    if screen::page_can_scroll_down(screen, screen_view) {
+                        screen::scroll_page_down(screen, screen_view, 1);
+                    } else {
+                        screen.grid.push_visible_row(screen_view);
+                    }
+                } else {
+                    screen.grid.scroll_up_in_region(
+                        screen_view,
+                        &mut screen.images,
+                        screen.scroll_top,
+                        screen.scroll_bottom,
+                        1,
+                    );
+                }
+            } else if screen.cursor.row < screen_view.rows - 1 {
+                screen.cursor.row += 1;
+                clamp_cursor_to_row_width(screen, screen_view);
+            }
+        }
+        ParsedEscAction::NextLine => {
+            screen.cursor.col = 0;
+            if screen.cursor.row == screen.scroll_bottom {
+                if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
+                    if screen::page_can_scroll_down(screen, screen_view) {
+                        screen::scroll_page_down(screen, screen_view, 1);
+                    } else {
+                        screen.grid.push_visible_row(screen_view);
+                    }
+                } else {
+                    screen.grid.scroll_up_in_region(
+                        screen_view,
+                        &mut screen.images,
+                        screen.scroll_top,
+                        screen.scroll_bottom,
+                        1,
+                    );
+                }
+            } else if screen.cursor.row < screen_view.rows - 1 {
+                screen.cursor.row += 1;
+            }
+            clamp_cursor_to_row_width(screen, screen_view);
+        }
+        ParsedEscAction::SetTabStop => {
+            let col = screen.cursor.col as usize;
+            if col < screen.tab_stops.len() {
+                screen.tab_stops[col] = true;
+            }
+        }
+        ParsedEscAction::ReverseIndex => {
+            if screen.cursor.row == screen.scroll_top {
+                screen.grid.scroll_down_in_region(
+                    screen_view,
+                    &mut screen.images,
+                    screen.scroll_top,
+                    screen.scroll_bottom,
+                    1,
+                );
+            } else if screen.cursor.row > 0 {
+                screen.cursor.row -= 1;
+            }
+        }
+        ParsedEscAction::SetApplicationKeypad(enable) => screen.app_keypad = enable,
+        ParsedEscAction::SingleShift(slot) => screen.charset.single_shift = Some(slot),
+        ParsedEscAction::SetGl(slot) => screen.charset.set_gl(slot),
+        ParsedEscAction::SetGr(slot) => screen.charset.set_gr(slot),
+        ParsedEscAction::BackIndex => {
+            if screen.cursor.col == 0 {
+                screen
+                    .grid
+                    .scroll_right(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
+            } else {
+                screen.cursor.col -= 1;
+            }
+        }
+        ParsedEscAction::ForwardIndex => {
+            if screen.cursor.col >= current_row_display_cols(screen, screen_view) - 1 {
+                screen
+                    .grid
+                    .scroll_left(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
+            } else {
+                screen.cursor.col += 1;
+            }
+        }
+        _ => unreachable!(),
     }
 }
 
+#[cfg(test)]
 #[builder]
 pub(super) fn esc_dispatch(
     screen: &mut Screen,
@@ -3208,176 +3432,30 @@ pub(super) fn esc_dispatch(
     intermediates: &[u8],
     byte: u8,
 ) {
-    if intermediates.is_empty()
-        && esc_dispatch_vt52(
-            screen,
-            viewport,
-            modes,
-            vt52_cursor_addr,
-            pending_output,
-            byte,
-        )
-    {
-        return;
-    }
-
-    match intermediates {
-        b" " if esc_dispatch_with_space_intermediate(modes, byte) => return,
-        b"%" if esc_dispatch_with_percent_intermediate(modes, byte) => return,
-        b"#" if esc_dispatch_with_hash_intermediate(screen, viewport, palette, byte) => return,
-        b"" => {}
-        _ if esc_dispatch_designation(screen, drcs, intermediates, byte) => return,
-        _ => return,
-    }
-
-    // Cancel pending wrap before ESC sequences that move the cursor.
-    clamp_cursor_to_row_width(screen, viewport);
-    if byte == b'c' {
-        // RIS (Reset to Initial State). Drop the app's terminal state back to
-        // power-on defaults — every mode the app might have flipped, plus the
-        // visible screen. Scrollback is preserved: a misbehaving app's reset
-        // shouldn't take the user's history.
-        let conformance_level = ConformanceLevel::Level4;
-        let c1_mode = C1Mode::SevenBit;
-        apply_hard_reset_state()
-            .screen(screen)
-            .stash(stash)
-            .on_alt_screen(on_alt_screen)
-            .modes(modes)
-            .viewport(viewport)
-            .kitty_keyboard(kitty_keyboard)
-            .cursor_style(cursor_style)
-            .current_title(current_title)
-            .title_stack(title_stack)
-            .saved_modes(saved_modes)
-            .current_prompt_row(current_prompt_row)
-            .bell_pending(bell_pending)
-            .vt52_cursor_addr(vt52_cursor_addr)
-            .palette(palette)
-            .base_palette(base_palette)
-            .dec_color(dec_color)
-            .default_status_display(default_status_display)
-            .macros(macros)
-            .drcs(drcs)
-            .conformance_level(conformance_level)
-            .c1_mode(c1_mode)
-            .call();
-        return;
-    }
-    let screen_view = screen::screen_viewport(screen, viewport);
-    let screen_view = &screen_view;
-
-    match byte {
-        b'7' => screen::save_cursor_slot(screen),
-        b'8' => screen::restore_cursor_slot(screen, screen_view),
-        // IND — Index. Move the cursor down one line; if at the bottom of
-        // the scroll region, scroll the region up.
-        b'D' => {
-            if screen.cursor.row == screen.scroll_bottom {
-                if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
-                    if screen::page_can_scroll_down(screen, screen_view) {
-                        screen::scroll_page_down(screen, screen_view, 1);
-                    } else {
-                        screen.grid.push_visible_row(screen_view);
-                    }
-                } else {
-                    screen.grid.scroll_up_in_region(
-                        screen_view,
-                        &mut screen.images,
-                        screen.scroll_top,
-                        screen.scroll_bottom,
-                        1,
-                    );
-                }
-            } else if screen.cursor.row < screen_view.rows - 1 {
-                screen.cursor.row += 1;
-                clamp_cursor_to_row_width(screen, screen_view);
-            }
-        }
-        // NEL — Next Line. Move to column 0 of the next line; scroll if
-        // at the bottom of the scroll region.
-        b'E' => {
-            screen.cursor.col = 0;
-            if screen.cursor.row == screen.scroll_bottom {
-                if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
-                    if screen::page_can_scroll_down(screen, screen_view) {
-                        screen::scroll_page_down(screen, screen_view, 1);
-                    } else {
-                        screen.grid.push_visible_row(screen_view);
-                    }
-                } else {
-                    screen.grid.scroll_up_in_region(
-                        screen_view,
-                        &mut screen.images,
-                        screen.scroll_top,
-                        screen.scroll_bottom,
-                        1,
-                    );
-                }
-            } else if screen.cursor.row < screen_view.rows - 1 {
-                screen.cursor.row += 1;
-            }
-            clamp_cursor_to_row_width(screen, screen_view);
-        }
-        b'H' => {
-            // HTS — set a tab stop at the current cursor column.
-            let col = screen.cursor.col as usize;
-            if col < screen.tab_stops.len() {
-                screen.tab_stops[col] = true;
-            }
-        }
-        b'M' => {
-            if screen.cursor.row == screen.scroll_top {
-                screen.grid.scroll_down_in_region(
-                    screen_view,
-                    &mut screen.images,
-                    screen.scroll_top,
-                    screen.scroll_bottom,
-                    1,
-                );
-            } else if screen.cursor.row > 0 {
-                screen.cursor.row -= 1;
-            }
-        }
-        // DECKPAM (ESC =) — application keypad mode.
-        // DECKPNM (ESC >) — normal keypad mode.
-        b'=' => screen.app_keypad = true,
-        b'>' => screen.app_keypad = false,
-        // SS2 — Single Shift G2. Next graphic character uses G2.
-        b'N' => screen.charset.single_shift = Some(GraphicSetSlot::G2),
-        // SS3 — Single Shift G3. Next graphic character uses G3.
-        b'O' => screen.charset.single_shift = Some(GraphicSetSlot::G3),
-        // LS2 / LS3 — lock G2/G3 into GL.
-        b'n' => screen.charset.set_gl(GraphicSetSlot::G2),
-        b'o' => screen.charset.set_gl(GraphicSetSlot::G3),
-        // LS1R / LS2R / LS3R — lock G1/G2/G3 into GR.
-        b'~' => screen.charset.set_gr(GraphicSetSlot::G1),
-        b'}' => screen.charset.set_gr(GraphicSetSlot::G2),
-        b'|' => screen.charset.set_gr(GraphicSetSlot::G3),
-        // DECBI — Back Index. Scroll region right if at left margin, else
-        // move cursor left.
-        b'6' => {
-            if screen.cursor.col == 0 {
-                screen
-                    .grid
-                    .scroll_right(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
-            } else {
-                screen.cursor.col -= 1;
-            }
-        }
-        // DECFI — Forward Index. Scroll region left if at right margin, else
-        // move cursor right.
-        b'9' => {
-            if screen.cursor.col >= current_row_display_cols(screen, screen_view) - 1 {
-                screen
-                    .grid
-                    .scroll_left(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
-            } else {
-                screen.cursor.col += 1;
-            }
-        }
-        _ => {}
-    }
+    let action = esc_parse(modes, intermediates, byte);
+    esc_apply()
+        .action(action)
+        .screen(screen)
+        .stash(stash)
+        .viewport(viewport)
+        .on_alt_screen(on_alt_screen)
+        .modes(modes)
+        .kitty_keyboard(kitty_keyboard)
+        .cursor_style(cursor_style)
+        .current_title(current_title)
+        .title_stack(title_stack)
+        .saved_modes(saved_modes)
+        .current_prompt_row(current_prompt_row)
+        .bell_pending(bell_pending)
+        .palette(palette)
+        .base_palette(base_palette)
+        .dec_color(dec_color)
+        .default_status_display(default_status_display)
+        .pending_output(pending_output)
+        .vt52_cursor_addr(vt52_cursor_addr)
+        .macros(macros)
+        .drcs(drcs)
+        .call();
 }
 
 #[cfg(test)]
@@ -3425,6 +3503,23 @@ mod tests {
             }
         }
         panic!("no CSI dispatch from input {input:?}");
+    }
+
+    fn parse_esc_action(
+        input: &[u8],
+        modes: &TerminalModes,
+    ) -> ParsedEscAction {
+        let mut parser = Parser::new();
+        for action in parser.parse(input) {
+            if let Action::EscDispatch {
+                intermediates,
+                byte,
+            } = action
+            {
+                return esc_parse(modes, intermediates.as_slice(), byte);
+            }
+        }
+        panic!("no ESC dispatch from input {input:?}");
     }
 
     /// Drive `input` through a VTE parser and dispatch each action through the
@@ -3662,6 +3757,46 @@ mod tests {
         assert!(matches!(
             parse_csi_action(b"\x1b[!p"),
             ParsedCsiAction::SoftReset
+        ));
+    }
+
+    #[test]
+    fn esc_parse_maps_hard_reset_semantically() {
+        let modes = TerminalModes::new();
+        assert!(matches!(
+            parse_esc_action(b"\x1bc", &modes),
+            ParsedEscAction::HardReset
+        ));
+    }
+
+    #[test]
+    fn esc_parse_maps_hash_intermediate_semantically() {
+        let modes = TerminalModes::new();
+        assert!(matches!(
+            parse_esc_action(b"\x1b#8", &modes),
+            ParsedEscAction::ScreenAlignmentTest
+        ));
+    }
+
+    #[test]
+    fn esc_parse_maps_charset_designation_semantically() {
+        let modes = TerminalModes::new();
+        assert!(matches!(
+            parse_esc_action(b"\x1b(0", &modes),
+            ParsedEscAction::DesignateCharset {
+                slot: GraphicSetSlot::G0,
+                charset: CharacterSet::DecSpecialGraphics
+            }
+        ));
+    }
+
+    #[test]
+    fn esc_parse_maps_vt52_sequences_using_mode_state() {
+        let mut modes = TerminalModes::new();
+        modes.vt52_mode = true;
+        assert!(matches!(
+            parse_esc_action(b"\x1bH", &modes),
+            ParsedEscAction::Vt52(Vt52EscAction::CursorHome)
         ));
     }
 
