@@ -28,6 +28,7 @@ pub enum DemoId {
     PasteFocus,
     MouseReporting,
     ModeMatrix,
+    StatusCursorReports,
     ScrollWrap,
     Rectangles,
     AltScreen,
@@ -147,6 +148,13 @@ pub fn catalog() -> Vec<Demo> {
             id: DemoId::ModeMatrix,
         },
         Demo {
+            title: "Status & Cursor Reports",
+            summary: "Queries CPR, DECXCPR, DECCIR, DECTABSR, and DECRQTSR in one place.",
+            detail: "Exercises the cursor/status-oriented report families directly and prints \
+                     their raw replies back to the screen.",
+            id: DemoId::StatusCursorReports,
+        },
+        Demo {
             title: "Scroll & Wrap",
             summary: "IND, NEL, RI, DECAWM on/off, REP, and scroll-region movement.",
             detail: "Exercises the core scrolling and wrapping behaviors that many fullscreen \
@@ -234,6 +242,7 @@ pub fn run_demo(
         DemoId::PasteFocus => run_paste_focus_placeholder(out),
         DemoId::MouseReporting => run_mouse_reporting_placeholder(out),
         DemoId::ModeMatrix => run_mode_matrix_demo(out, read_reply),
+        DemoId::StatusCursorReports => run_status_cursor_reports_demo(out, read_reply),
         DemoId::ScrollWrap => run_scroll_wrap_demo(out),
         DemoId::Rectangles => run_rectangles_demo(out),
         DemoId::AltScreen => run_alt_screen_demo(out),
@@ -797,6 +806,60 @@ fn run_mode_matrix_demo(
     line(
         out,
         "Reply codes: 1=set, 2=reset, 3=permanently set, 4=permanently reset.",
+    )?;
+    Ok(())
+}
+
+fn run_status_cursor_reports_demo(
+    out: &mut impl Write,
+    read_reply: &mut ReadReplyFn<'_>,
+) -> io::Result<()> {
+    heading(out, "Status & Cursor Reports")?;
+    line(
+        out,
+        "Positioning the cursor, then querying the main cursor/status-oriented report families.",
+    )?;
+    write!(out, "\x1b[6;11H")?;
+    out.flush()?;
+    query_and_print(
+        out,
+        read_reply,
+        "  CPR 6n",
+        b"\x1b[6n",
+        Duration::from_millis(200),
+    )?;
+    query_and_print(
+        out,
+        read_reply,
+        "  DECXCPR ?6n",
+        b"\x1b[?6n",
+        Duration::from_millis(200),
+    )?;
+    query_and_print(
+        out,
+        read_reply,
+        "  DECCIR 1$w",
+        b"\x1b[1$w",
+        Duration::from_millis(200),
+    )?;
+    query_and_print(
+        out,
+        read_reply,
+        "  DECTABSR 2$w",
+        b"\x1b[2$w",
+        Duration::from_millis(200),
+    )?;
+    query_and_print(
+        out,
+        read_reply,
+        "  DECRQTSR 1$u",
+        b"\x1b[1$u",
+        Duration::from_millis(200),
+    )?;
+    blank(out)?;
+    line(
+        out,
+        "These replies are printed raw so formatting mistakes are easy to spot.",
     )?;
     Ok(())
 }
