@@ -4,6 +4,8 @@
 //! index` into the grid — so selections stay anchored to their content even
 //! as scrollback trims the front of the grid or the user scrolls history.
 
+pub mod search;
+
 use clip41::Clipboard;
 use clip41::ClipboardKind;
 use unicode_segmentation::UnicodeSegmentation;
@@ -12,8 +14,8 @@ use crate::Row;
 use crate::Screen;
 use crate::Viewport;
 use crate::screen;
-use crate::search::MatchSpan;
-use crate::search::SearchState;
+use crate::selection::search::MatchSpan;
+use crate::selection::search::SearchState;
 
 /// A point in the grid addressable across scrollback lifetime.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

@@ -28,20 +28,20 @@ use crate::dec::r#macro::MacroStore;
 use crate::dec_color_state_from_palette;
 use crate::drcs::Store as DrcsStore;
 use crate::feature::FeaturePermissions;
-use crate::grid;
-use crate::grid::Viewport;
 use crate::io::keyboard::KittyKeyboardState;
 use crate::io::keyboard::handle_kitty_keyboard;
 use crate::io::mouse::MouseTracking;
 use crate::io::mouse::apply_mouse_mode;
 use crate::mode;
-use crate::row::LineAttr;
-use crate::row::Row;
 use crate::screen;
 use crate::screen::ActiveDisplay;
 use crate::screen::Screen;
 use crate::screen::StatusDisplayKind;
 use crate::screen::StatusLine;
+use crate::screen::grid;
+use crate::screen::grid::Viewport;
+use crate::screen::row::LineAttr;
+use crate::screen::row::Row;
 
 /// Bundles the bits of [`Terminal`](super::Terminal) state that CSI handlers
 /// need beyond the active screen. Keeps the call signature stable as new CSI

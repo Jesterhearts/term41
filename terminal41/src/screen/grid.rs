@@ -9,8 +9,8 @@ use smol_str::SmolStr;
 use crate::image::PlacedImage;
 use crate::image::clear_in_range;
 use crate::image::shift_in_region;
-use crate::row::LineAttr;
-use crate::row::Row;
+use crate::screen::row::LineAttr;
+use crate::screen::row::Row;
 
 fn reset_row_after_full_clear(row: &mut Row) {
     row.wrapped = false;
@@ -282,7 +282,7 @@ impl Grid {
     /// at `bottom`. Both are viewport-relative row indices. Images anchored
     /// inside the region shift up with the content; images pushed out the
     /// top are dropped (matches xterm's "scrolled off = gone" rule).
-    pub(super) fn scroll_up_in_region(
+    pub(crate) fn scroll_up_in_region(
         &mut self,
         viewport: &Viewport,
         images: &mut BTreeMap<u64, PlacedImage>,
@@ -308,7 +308,7 @@ impl Grid {
     /// line at `bottom`. Both are viewport-relative row indices. Images
     /// anchored inside the region shift down with the content; images
     /// pushed out the bottom are dropped.
-    pub(super) fn scroll_down_in_region(
+    pub(crate) fn scroll_down_in_region(
         &mut self,
         viewport: &Viewport,
         images: &mut BTreeMap<u64, PlacedImage>,
@@ -334,7 +334,7 @@ impl Grid {
     /// `top..=bottom` and columns `left..=right`. Each row copies the
     /// column range from n rows below; the bottom n rows' column range is
     /// cleared. Used by IL/DL/IND when DECLRMM is active.
-    pub(super) fn scroll_up_in_rect(
+    pub(crate) fn scroll_up_in_rect(
         &mut self,
         viewport: &Viewport,
         top: u32,
@@ -376,7 +376,7 @@ impl Grid {
 
     /// Scroll content down within a rectangular sub-region. Mirrors
     /// [`scroll_up_in_rect`] but shifts content downward.
-    pub(super) fn scroll_down_in_rect(
+    pub(crate) fn scroll_down_in_rect(
         &mut self,
         viewport: &Viewport,
         top: u32,
@@ -424,7 +424,7 @@ impl Grid {
         viewport.top_index(self.rows.len()) + cursor.row as usize
     }
 
-    pub(super) fn reflow(
+    pub(crate) fn reflow(
         &mut self,
         new_width: u32,
     ) {
@@ -585,7 +585,7 @@ impl Grid {
 
     /// Scroll every row in [top, bottom] left by `n` columns (SL, `CSI SP @`).
     /// Cells on the right edge are cleared. Viewport-relative row indices.
-    pub(super) fn scroll_left(
+    pub(crate) fn scroll_left(
         &mut self,
         viewport: &Viewport,
         top: u32,
@@ -607,7 +607,7 @@ impl Grid {
 
     /// Scroll every row in [top, bottom] right by `n` columns (SR, `CSI SP A`).
     /// Cells on the left edge are cleared. Viewport-relative row indices.
-    pub(super) fn scroll_right(
+    pub(crate) fn scroll_right(
         &mut self,
         viewport: &Viewport,
         top: u32,
@@ -631,7 +631,7 @@ impl Grid {
     /// scroll region (DECIC, `CSI ' }`). Columns from cursor to right margin
     /// shift right; columns pushed off the right edge are lost.
     /// `cursor_col` and `top`/`bottom` are viewport-relative.
-    pub(super) fn insert_cols(
+    pub(crate) fn insert_cols(
         &mut self,
         viewport: &Viewport,
         cursor_col: u32,
@@ -657,7 +657,7 @@ impl Grid {
     /// region (DECDC, `CSI ' ~`). Columns after the cursor shift left;
     /// columns vacated on the right edge are cleared.
     /// `cursor_col` and `top`/`bottom` are viewport-relative.
-    pub(super) fn delete_cols(
+    pub(crate) fn delete_cols(
         &mut self,
         viewport: &Viewport,
         cursor_col: u32,
@@ -682,7 +682,7 @@ impl Grid {
     /// Erase (fill with blank default-color cells) a rectangular region
     /// (DECERA, `CSI $ z`). All coordinates are 0-based, viewport-relative,
     /// inclusive on all four sides.
-    pub(super) fn erase_rect(
+    pub(crate) fn erase_rect(
         &mut self,
         viewport: &Viewport,
         top: u32,
@@ -701,7 +701,7 @@ impl Grid {
 
     /// Selective erase rectangular area (DECSERA, `CSI $ {`). Same as
     /// [`erase_rect`] but leaves `PROTECTED` cells untouched.
-    pub(super) fn erase_rect_selective(
+    pub(crate) fn erase_rect_selective(
         &mut self,
         viewport: &Viewport,
         top: u32,
@@ -727,7 +727,7 @@ impl Grid {
     /// other code points are a no-op. Coordinates are 0-based, viewport-
     /// relative, inclusive on all four sides.
     #[allow(clippy::too_many_arguments)]
-    pub(super) fn fill_rect(
+    pub(crate) fn fill_rect(
         &mut self,
         viewport: &Viewport,
         top: u32,
@@ -764,7 +764,7 @@ impl Grid {
     /// overlapping source and destination produce well-defined results.
     /// All coordinates are 0-based, viewport-relative; the copy is clipped
     /// to viewport bounds.
-    pub(super) fn copy_rect(
+    pub(crate) fn copy_rect(
         &mut self,
         src_viewport: &Viewport,
         src_top: u32,
@@ -807,7 +807,7 @@ impl Grid {
 
     /// Apply SGR attribute changes to a rectangular region (DECCARA,
     /// `CSI $ r`). Coordinates are 0-based, viewport-relative, inclusive.
-    pub(super) fn change_attrs_rect(
+    pub(crate) fn change_attrs_rect(
         &mut self,
         viewport: &Viewport,
         top: u32,
@@ -850,7 +850,7 @@ impl Grid {
 
     /// Reverse (toggle) SGR attributes in a rectangular region (DECRARA,
     /// `CSI $ t`). Coordinates are 0-based, viewport-relative, inclusive.
-    pub(super) fn reverse_attrs_rect(
+    pub(crate) fn reverse_attrs_rect(
         &mut self,
         viewport: &Viewport,
         top: u32,

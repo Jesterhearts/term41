@@ -1,3 +1,8 @@
+pub(crate) mod grid;
+pub(crate) mod hyperlink;
+pub(crate) mod palette_sync;
+pub(crate) mod row;
+
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
@@ -8,18 +13,18 @@ use smol_str::SmolStr;
 
 use crate::charset::CharsetState;
 use crate::charset::UserPreferredSupplementalSet;
-use crate::grid::AttrChangeExtent;
-use crate::grid::Cursor;
-use crate::grid::Grid;
-use crate::grid::Viewport;
-use crate::hyperlink::HyperlinkId;
 use crate::image::PlacedImage;
 use crate::image::anchor_images;
 use crate::image::clear_in_range;
 use crate::image::restore_images;
 use crate::mode;
-use crate::row::LineAttr;
-use crate::row::Row;
+use crate::screen::grid::AttrChangeExtent;
+use crate::screen::grid::Cursor;
+use crate::screen::grid::Grid;
+use crate::screen::grid::Viewport;
+use crate::screen::hyperlink::HyperlinkId;
+use crate::screen::row::LineAttr;
+use crate::screen::row::Row;
 
 /// Snapshot of cursor position and active colors, used by DECSC/DECRC
 /// (ESC 7 / ESC 8) and the `?1048`/`?1049` private modes.

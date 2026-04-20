@@ -4,7 +4,7 @@ use std::time::Instant;
 
 use image41::DecodedImage;
 
-use crate::row::Row;
+use crate::screen::row::Row;
 
 #[derive(Debug, Clone)]
 pub struct PlacedImage {

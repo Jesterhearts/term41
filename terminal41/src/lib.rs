@@ -12,23 +12,17 @@ mod dcs;
 mod dec;
 mod drcs;
 mod feature;
-mod feature_ops;
 mod graphics;
-mod grid;
-mod hyperlink;
 mod image;
 pub mod io;
 mod lifecycle_ops;
 mod mode;
 mod osc;
-mod palette_sync;
 mod parser;
 pub mod prompt;
 mod report;
-mod row;
 mod runtime;
 mod screen;
-mod search;
 pub mod selection;
 
 use std::collections::HashMap;
@@ -67,9 +61,7 @@ use self::dec::r#macro::MacroStore;
 use self::drcs::Store as DrcsStore;
 pub use self::feature::FeaturePermissions;
 pub use self::feature::ProgramAllowlist;
-pub(crate) use self::feature_ops::apply_status_display_mode;
-pub use self::grid::Viewport;
-pub use self::hyperlink::HyperlinkRegistry;
+pub(crate) use self::feature::apply_status_display_mode;
 pub use self::image::PlacedImage;
 pub use self::image::VisibleImage;
 pub use self::io::keyboard::KittyFlags;
@@ -84,8 +76,6 @@ use self::io::mouse::encode_mouse_event;
 use self::io::mouse::should_report;
 use self::osc::OscContext;
 use self::osc::handle_osc;
-use self::palette_sync::apply_screen_palette;
-use self::palette_sync::sync_screen_erase_defaults;
 use self::parser::CsiContext;
 use self::parser::EscContext;
 use self::parser::csi_dispatch;
@@ -102,19 +92,23 @@ use self::parser::put_status_text_run;
 use self::parser::put_text_run;
 pub(crate) use self::report::deccir_report;
 pub(crate) use self::report::dectabsr_report;
-pub use self::row::LineAttr;
-pub use self::row::Row;
 pub use self::screen::Screen;
 pub use self::screen::StatusDisplayKind;
+pub use self::screen::grid::Viewport;
+pub use self::screen::hyperlink::HyperlinkRegistry;
+use self::screen::palette_sync::apply_screen_palette;
+use self::screen::palette_sync::sync_screen_erase_defaults;
 use self::screen::resize_screen;
+pub use self::screen::row::LineAttr;
+pub use self::screen::row::Row;
 use crate::dec::color::TEXT_COLOR_ASSIGNMENT_CLASS;
 use crate::dec::color::assign_color;
 use crate::dec::color::effective_palette;
 use crate::dec::color::rebase_theme_entries;
 use crate::dec::color::report_color_table;
 use crate::dec::color::restore_color_table;
-use crate::search::SearchState;
 use crate::selection::Selection;
+use crate::selection::search::SearchState;
 
 /// Per-prompt metadata recorded from OSC 133 B/C/D sequences. Keyed by
 /// the absolute row of the prompt (`A` mark) in
@@ -423,7 +417,7 @@ impl Terminal {
             stash: Screen::new(
                 cols,
                 rows,
-                feature_ops::alt_scrollback_limit(scrollback_limit, strict_altscreen_scrollback),
+                feature::alt_scrollback_limit(scrollback_limit, strict_altscreen_scrollback),
                 palette.fg,
                 palette.bg,
                 palette.status_line_fg,
@@ -578,21 +572,18 @@ impl Terminal {
         processes: Option<ForegroundProcessSet>,
     ) {
         if !self.foreground_processes_logged || self.foreground_processes != processes {
-            feature_ops::log_foreground_process_probe(
-                &self.feature_permissions,
-                processes.as_ref(),
-            );
+            feature::log_foreground_process_probe(&self.feature_permissions, processes.as_ref());
             self.foreground_processes_logged = true;
         }
         self.foreground_processes = processes;
     }
 
     pub fn drcs_render_glyphs(&self) -> font41::DrcsGlyphMap {
-        feature_ops::drcs_render_glyphs(&self.drcs)
+        feature::drcs_render_glyphs(&self.drcs)
     }
 
     pub fn macro_feature_enabled(&self) -> bool {
-        feature_ops::macro_feature_enabled(
+        feature::macro_feature_enabled(
             &self.feature_permissions,
             self.foreground_processes.as_ref(),
         )
@@ -603,7 +594,7 @@ impl Terminal {
         params: vtepp::Params,
         payload: &[u8],
     ) {
-        feature_ops::define_macro(
+        feature::define_macro(
             self.macro_feature_enabled(),
             &mut self.macros,
             params,
@@ -615,7 +606,7 @@ impl Terminal {
         &mut self,
         id: u16,
     ) {
-        let Some(bytes) = feature_ops::invoke_macro(
+        let Some(bytes) = feature::invoke_macro(
             self.macro_feature_enabled(),
             &self.macros,
             self.macro_invocation_depth,
@@ -624,7 +615,7 @@ impl Terminal {
             return;
         };
         self.macro_invocation_depth += 1;
-        feature_ops::apply_macro_bytes(self, &bytes);
+        feature::apply_macro_bytes(self, &bytes);
         self.macro_invocation_depth -= 1;
     }
 
@@ -647,9 +638,9 @@ impl Terminal {
         strict_altscreen_scrollback: bool,
     ) {
         self.strict_altscreen_scrollback = strict_altscreen_scrollback;
-        feature_ops::apply_scrollback_limit(&mut self.active, &self.viewport, limit);
-        let alt_limit = feature_ops::alt_scrollback_limit(limit, self.strict_altscreen_scrollback);
-        feature_ops::apply_scrollback_limit(&mut self.stash, &self.viewport, alt_limit);
+        feature::apply_scrollback_limit(&mut self.active, &self.viewport, limit);
+        let alt_limit = feature::alt_scrollback_limit(limit, self.strict_altscreen_scrollback);
+        feature::apply_scrollback_limit(&mut self.stash, &self.viewport, alt_limit);
     }
 
     /// Queue a focus-in / focus-out report onto `pending_output` if focus

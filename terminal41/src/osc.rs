@@ -10,12 +10,13 @@ use percent_encoding::percent_decode;
 
 use crate::C1Mode;
 use crate::CommandMeta;
+use crate::Row;
 use crate::color;
 use crate::conformance;
-use crate::grid::Viewport;
-use crate::hyperlink::HyperlinkId;
-use crate::hyperlink::HyperlinkRegistry;
 use crate::screen::Screen;
+use crate::screen::grid::Viewport;
+use crate::screen::hyperlink::HyperlinkId;
+use crate::screen::hyperlink::HyperlinkRegistry;
 
 // -- OSC command numbers ------------------------------------------------------
 
@@ -269,7 +270,7 @@ fn handle_osc_133(
 fn mark_current_row(
     screen: &mut Screen,
     viewport: &Viewport,
-    apply: impl FnOnce(&mut crate::row::Row),
+    apply: impl FnOnce(&mut Row),
 ) -> u64 {
     let local = crate::screen::active_row_index(screen, viewport);
     apply(&mut screen.grid.rows[local]);
@@ -526,7 +527,6 @@ fn handle_osc_8(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::hyperlink::HyperlinkRegistry;
 
     struct Bag {
         clipboard: Clipboard,
@@ -975,7 +975,7 @@ mod tests {
         fn row_at(
             &self,
             screen_row: u32,
-        ) -> &crate::row::Row {
+        ) -> &Row {
             let first_visible = self.screen.grid.rows.len() - self.viewport.rows as usize;
             &self.screen.grid.rows[first_visible + screen_row as usize]
         }

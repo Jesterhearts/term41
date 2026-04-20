@@ -48,8 +48,8 @@ pub(crate) fn set_default_status_display(
     let total_rows = total_rows(active, viewport);
     let cols = viewport.cols;
     viewport.rows =
-        feature_ops::apply_status_display_mode(active, total_rows, cols, status_display, palette);
-    feature_ops::apply_status_display_mode(stash, total_rows, cols, status_display, palette);
+        feature::apply_status_display_mode(active, total_rows, cols, status_display, palette);
+    feature::apply_status_display_mode(stash, total_rows, cols, status_display, palette);
 }
 
 pub(crate) fn take_pending_output(pending_output: &mut Vec<u8>) -> Vec<u8> {

@@ -1,4 +1,6 @@
-use super::*;
+use crate::ColorPalette;
+use crate::DecColorState;
+use crate::Screen;
 use crate::dec::color::erase_background_color;
 
 pub(crate) fn apply_screen_palette(

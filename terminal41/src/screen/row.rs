@@ -5,10 +5,10 @@ use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
-use crate::hyperlink::HyperlinkId;
+use crate::screen::hyperlink::HyperlinkId;
 
 /// Inline SmolStr for the default blank cell. Cheap to clone.
-pub(super) const fn blank_cell() -> SmolStr {
+pub(crate) const fn blank_cell() -> SmolStr {
     SmolStr::new_inline(" ")
 }
 
@@ -91,11 +91,11 @@ impl Row {
         }
     }
 
-    pub(super) fn len(&self) -> u32 {
+    pub(crate) fn len(&self) -> u32 {
         self.cells.len() as u32
     }
 
-    pub(super) fn content_len(&self) -> u32 {
+    pub(crate) fn content_len(&self) -> u32 {
         if self.wrapped {
             self.len()
         } else {
@@ -106,7 +106,7 @@ impl Row {
         }
     }
 
-    pub(super) fn resize(
+    pub(crate) fn resize(
         &mut self,
         new_len: u32,
         fg: Srgb<u8>,
@@ -122,7 +122,7 @@ impl Row {
         self.links.resize(new_len, None);
     }
 
-    pub(super) fn truncate(
+    pub(crate) fn truncate(
         &mut self,
         new_len: u32,
     ) {
@@ -136,7 +136,7 @@ impl Row {
         self.links.truncate(new_len);
     }
 
-    pub(super) fn clear(
+    pub(crate) fn clear(
         &mut self,
         fg: Srgb<u8>,
         bg: Srgb<u8>,
@@ -154,7 +154,7 @@ impl Row {
     /// scrollback limit is hit and we'd otherwise drop+reallocate the
     /// row's four backing vectors. Resizes to `cols` if the viewport width
     /// changed, blanks every cell, and clears the soft-wrap marker.
-    pub(super) fn reset_for_reuse(
+    pub(crate) fn reset_for_reuse(
         &mut self,
         cols: u32,
         fg: Srgb<u8>,
@@ -169,7 +169,7 @@ impl Row {
         self.line_attr = LineAttr::Normal;
     }
 
-    pub(super) fn clear_range(
+    pub(crate) fn clear_range(
         &mut self,
         range: std::ops::Range<usize>,
         fg: Srgb<u8>,
@@ -186,7 +186,7 @@ impl Row {
 
     /// Selective clear: erase only cells whose `PROTECTED` bit is *not* set.
     /// Used by DECSED (`CSI ? J`) and DECSEL (`CSI ? K`).
-    pub(super) fn clear_range_selective(
+    pub(crate) fn clear_range_selective(
         &mut self,
         range: std::ops::Range<usize>,
         fg: Srgb<u8>,
@@ -207,7 +207,7 @@ impl Row {
 
     /// Selective full-row clear: like [`clear`] but skips protected cells
     /// and preserves semantic marks (since partial content may survive).
-    pub(super) fn clear_selective(
+    pub(crate) fn clear_selective(
         &mut self,
         fg: Srgb<u8>,
         bg: Srgb<u8>,
@@ -215,7 +215,7 @@ impl Row {
         self.clear_range_selective(0..self.cells.len(), fg, bg);
     }
 
-    pub(super) fn copy_within<R>(
+    pub(crate) fn copy_within<R>(
         &mut self,
         src: R,
         dest: usize,
@@ -243,7 +243,7 @@ impl Row {
         self.links.copy_within(src, dest);
     }
 
-    pub(super) fn copy_from(
+    pub(crate) fn copy_from(
         &mut self,
         other: &Self,
         src: std::ops::Range<usize>,
@@ -272,7 +272,7 @@ impl Row {
 
     /// Snapshot a column slice [left, right_excl) into a new Row for DECCRA.
     /// The returned Row is as wide as the slice; semantic flags are not copied.
-    pub(super) fn snap_range(
+    pub(crate) fn snap_range(
         &self,
         left: usize,
         right_excl: usize,
@@ -298,7 +298,7 @@ impl Row {
     /// Write a snapshot row (from `snap_range`) into this row starting at
     /// `dst_start`. Columns outside [dst_start, dst_start+snap.len()) are
     /// left untouched.
-    pub(super) fn paste_range(
+    pub(crate) fn paste_range(
         &mut self,
         snap: &Self,
         dst_start: usize,
@@ -319,7 +319,7 @@ impl Row {
         self.links[dst_start..dst_start + copy_len].copy_from_slice(&snap.links[..copy_len]);
     }
 
-    pub(super) fn has_drawn_cell_at(
+    pub(crate) fn has_drawn_cell_at(
         &self,
         col: usize,
     ) -> bool {
@@ -329,7 +329,7 @@ impl Row {
     /// Apply SGR attribute parameters to every cell in [left, right_excl).
     /// Used by DECCARA. VT420 recognizes only bold, underline, blink, and
     /// reverse-image toggles here; the rest are ignored.
-    pub(super) fn apply_attrs_in_range(
+    pub(crate) fn apply_attrs_in_range(
         &mut self,
         left: usize,
         right_excl: usize,
@@ -344,7 +344,7 @@ impl Row {
         }
     }
 
-    pub(super) fn apply_attrs_at(
+    pub(crate) fn apply_attrs_at(
         &mut self,
         col: usize,
         sgr_params: &[u16],
@@ -371,7 +371,7 @@ impl Row {
     /// Toggle (XOR) SGR attributes in [left, right_excl). Used by DECRARA.
     /// Underline is toggled between None and Single (it is an enum, not a
     /// bitflag, so it must be handled separately).
-    pub(super) fn toggle_attrs_in_range(
+    pub(crate) fn toggle_attrs_in_range(
         &mut self,
         left: usize,
         right_excl: usize,
@@ -386,7 +386,7 @@ impl Row {
         }
     }
 
-    pub(super) fn toggle_attrs_at(
+    pub(crate) fn toggle_attrs_at(
         &mut self,
         col: usize,
         sgr_params: &[u16],

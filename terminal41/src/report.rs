@@ -1,6 +1,7 @@
 use super::*;
 use crate::dec::color::report_alternate_text_color;
 use crate::dec::color::report_color_assignment;
+use crate::screen::grid::AttrChangeExtent;
 
 pub(crate) fn handle_decrqss(
     selector: &[u8],
@@ -83,8 +84,8 @@ pub(crate) fn handle_decrqss(
         }
         b"*x" => {
             let ps = match terminal.active.attr_change_extent {
-                grid::AttrChangeExtent::Stream => 1,
-                grid::AttrChangeExtent::Rectangle => 2,
+                AttrChangeExtent::Stream => 1,
+                AttrChangeExtent::Rectangle => 2,
             };
             conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}*x"));
         }
