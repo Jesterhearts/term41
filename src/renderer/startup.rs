@@ -94,6 +94,8 @@ impl StartupPresenter {
         &mut self,
         window: &Arc<Window>,
         target: &InputEndpoint,
+        hovered_button: Option<crate::renderer::TabBarHover>,
+        maximized: bool,
     ) {
         let size = window.inner_size();
         let Some(width) = NonZeroU32::new(size.width.max(1)) else {
@@ -154,6 +156,8 @@ impl StartupPresenter {
             tab_bar_h,
             snap.palette.bg,
             snap.palette.fg,
+            hovered_button,
+            maximized,
         );
         if gutter_w > 0 {
             paint_gutter_markers(
@@ -291,6 +295,8 @@ fn paint_tab_bar(
     tab_bar_h: i32,
     bg: Srgb<u8>,
     fg: Srgb<u8>,
+    hovered_button: Option<crate::renderer::TabBarHover>,
+    maximized: bool,
 ) {
     let plan = build_tab_bar_plan(
         &[crate::renderer::r#impl::TabInfo {
@@ -298,8 +304,8 @@ fn paint_tab_bar(
             active: true,
         }],
         &snap.palette,
-        None,
-        false,
+        hovered_button,
+        maximized,
         width as f32,
         cell_w as f32,
     );
@@ -355,6 +361,22 @@ fn paint_tab_bar(
             );
         }
     }
+
+    if let Some(button_bg) = plan.new_tab_button.bg {
+        fill_rect(
+            buffer,
+            width,
+            height,
+            plan.new_tab_button.x.round() as i32,
+            0,
+            plan.new_tab_button.width.round() as i32,
+            tab_bar_h,
+            pack_rgb(button_bg),
+        );
+    }
+    let row = label_row(plan.new_tab_button.label, fg, plan.base_bg, false);
+    let x = plan.new_tab_button.x + (plan.new_tab_button.width - cell_w as f32) * 0.5;
+    paint_shaped_label(font_system, snap, buffer, width, height, &row, x, 0.0);
 
     for button in &plan.buttons {
         if let Some(button_bg) = button.bg {

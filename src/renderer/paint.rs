@@ -9,6 +9,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::renderer::BUTTON_CELLS;
 use crate::renderer::BUTTONS_REGION_CELLS;
+use crate::renderer::TabBarHover;
 use crate::renderer::r#impl::MAX_TAB_WIDTH;
 use crate::renderer::r#impl::RowSnapshot;
 use crate::renderer::r#impl::TabInfo;
@@ -19,7 +20,21 @@ use crate::renderer::r#impl::resolve_cell_colors;
 pub(crate) struct TabBarPlan {
     pub base_bg: Srgb<u8>,
     pub tabs: Vec<TabVisual>,
+    pub new_tab_button: TabBarButtonVisual,
     pub buttons: [WindowButtonVisual; 3],
+}
+
+#[derive(Clone, Copy)]
+pub(crate) struct TabBarRegion {
+    pub x: f32,
+    pub width: f32,
+    pub button: Option<TabBarHover>,
+}
+
+pub(crate) struct TabBarLayout {
+    pub tabs: Vec<TabBarRegion>,
+    pub new_tab_button: TabBarRegion,
+    pub buttons: [TabBarRegion; 3],
 }
 
 pub(crate) struct TabVisual {
@@ -29,6 +44,13 @@ pub(crate) struct TabVisual {
     pub separator: Option<Srgb<u8>>,
     pub label: String,
     pub label_x: f32,
+}
+
+pub(crate) struct TabBarButtonVisual {
+    pub x: f32,
+    pub width: f32,
+    pub bg: Option<Srgb<u8>>,
+    pub label: &'static str,
 }
 
 pub(crate) struct WindowButtonVisual {
@@ -159,53 +181,58 @@ fn clip_status_line_tail<'a>(
 pub(crate) fn build_tab_bar_plan(
     tabs: &[TabInfo<'_>],
     palette: &ColorPalette,
-    hovered_button: Option<u8>,
+    hovered_button: Option<TabBarHover>,
     maximized: bool,
     surface_w: f32,
     cell_w: f32,
 ) -> TabBarPlan {
     let active_bg = palette.bg;
     let inactive_bg = blend(palette.bg, palette.fg, 0.5);
-    let buttons_region_w = cell_w * BUTTONS_REGION_CELLS;
-    let tabs_available_w = surface_w - buttons_region_w;
-    let max_tab_w = (cell_w * MAX_TAB_WIDTH).min(surface_w);
-    let tab_w = if tabs.is_empty() {
-        0.0
-    } else {
-        (tabs_available_w / tabs.len() as f32).min(max_tab_w)
-    };
+    let layout = build_tab_bar_layout(tabs.len(), surface_w, cell_w);
     let margin = cell_w;
 
     let tabs = tabs
         .iter()
-        .enumerate()
-        .map(|(i, tab)| {
-            let x = i as f32 * tab_w;
-            let max_label_chars = ((tab_w - margin * 2.0) / cell_w).max(1.0) as usize;
+        .zip(layout.tabs.iter().copied())
+        .map(|(tab, region)| {
+            let max_label_chars = ((region.width - margin * 2.0) / cell_w).max(1.0) as usize;
             let label = truncate_label(tab.label, max_label_chars);
             TabVisual {
-                x,
-                width: tab_w,
+                x: region.x,
+                width: region.width,
                 bg: tab.active.then_some(active_bg),
-                separator: (tabs.len() > 1).then(|| blend(active_bg, inactive_bg, 0.5)),
-                label_x: x + margin,
+                separator: (!tabs.is_empty()).then(|| blend(active_bg, inactive_bg, 0.5)),
+                label_x: region.x + margin,
                 label,
             }
         })
         .collect();
 
-    let btn_w = cell_w * BUTTON_CELLS;
-    let buttons_x = surface_w - buttons_region_w;
+    let new_tab_button = TabBarButtonVisual {
+        x: layout.new_tab_button.x,
+        width: layout.new_tab_button.width,
+        bg: Some(match hovered_button {
+            Some(TabBarHover::NewTab) => blend(inactive_bg, palette.fg, 0.3),
+            _ => blend(inactive_bg, palette.fg, 0.15),
+        }),
+        label: "\u{2795}",
+    };
+
     let button_labels = [
         "\u{1F5D5}",
         if maximized { "\u{1F5D7}" } else { "\u{1F5D6}" },
         "\u{1F5D9}",
     ];
     let buttons = core::array::from_fn(|i| WindowButtonVisual {
-        x: buttons_x + i as f32 * btn_w,
-        width: btn_w,
+        x: layout.buttons[i].x,
+        width: layout.buttons[i].width,
         bg: hovered_button
-            .map(|idx| idx as usize)
+            .and_then(|hover| match hover {
+                TabBarHover::NewTab => None,
+                TabBarHover::Minimize => Some(0),
+                TabBarHover::Maximize => Some(1),
+                TabBarHover::Close => Some(2),
+            })
             .filter(|&idx| idx == i)
             .map(|_| {
                 if i == 2 {
@@ -220,6 +247,53 @@ pub(crate) fn build_tab_bar_plan(
     TabBarPlan {
         base_bg: inactive_bg,
         tabs,
+        new_tab_button,
+        buttons,
+    }
+}
+
+pub(crate) fn build_tab_bar_layout(
+    tab_count: usize,
+    surface_w: f32,
+    cell_w: f32,
+) -> TabBarLayout {
+    let buttons_region_w = cell_w * BUTTONS_REGION_CELLS;
+    let new_tab_button_w = cell_w * BUTTON_CELLS;
+    let tabs_available_w = (surface_w - buttons_region_w - new_tab_button_w).max(0.0);
+    let max_tab_w = (cell_w * MAX_TAB_WIDTH).min(tabs_available_w);
+    let tab_w = if tab_count == 0 {
+        0.0
+    } else {
+        (tabs_available_w / tab_count as f32).min(max_tab_w)
+    };
+    let tabs = (0..tab_count)
+        .map(|i| TabBarRegion {
+            x: i as f32 * tab_w,
+            width: tab_w,
+            button: None,
+        })
+        .collect();
+    let new_tab_button = TabBarRegion {
+        x: tab_count as f32 * tab_w,
+        width: new_tab_button_w,
+        button: Some(TabBarHover::NewTab),
+    };
+    let button_w = cell_w * BUTTON_CELLS;
+    let buttons_x = surface_w - buttons_region_w;
+    let buttons = core::array::from_fn(|i| TabBarRegion {
+        x: buttons_x + i as f32 * button_w,
+        width: button_w,
+        button: match i {
+            0 => Some(TabBarHover::Minimize),
+            1 => Some(TabBarHover::Maximize),
+            2 => Some(TabBarHover::Close),
+            _ => None,
+        },
+    });
+
+    TabBarLayout {
+        tabs,
+        new_tab_button,
         buttons,
     }
 }
@@ -445,5 +519,36 @@ mod tests {
         let fill = painted.fill_bg.expect("mono mode still fills the cell");
         assert_eq!(fill.red, fill.green);
         assert_eq!(fill.green, fill.blue);
+    }
+
+    #[test]
+    fn tab_bar_layout_reserves_space_for_new_tab_button_and_window_buttons() {
+        let layout = build_tab_bar_layout(2, 200.0, 10.0);
+
+        assert_eq!(layout.tabs.len(), 2);
+        assert_eq!(layout.tabs[0].x, 0.0);
+        assert_eq!(layout.tabs[0].width, 40.0);
+        assert_eq!(layout.tabs[1].x, 40.0);
+        assert_eq!(layout.tabs[1].width, 40.0);
+        assert_eq!(layout.new_tab_button.x, 80.0);
+        assert_eq!(layout.new_tab_button.width, 30.0);
+        assert_eq!(layout.buttons[0].x, 110.0);
+        assert_eq!(layout.buttons[1].x, 140.0);
+        assert_eq!(layout.buttons[2].x, 170.0);
+        assert_eq!(layout.buttons[0].width, 30.0);
+    }
+
+    #[test]
+    fn new_tab_button_hover_uses_window_button_hover_strength() {
+        let palette = ColorPalette::default();
+        let normal = build_tab_bar_plan(&[], &palette, None, false, 200.0, 10.0);
+        let hovered =
+            build_tab_bar_plan(&[], &palette, Some(TabBarHover::NewTab), false, 200.0, 10.0);
+
+        assert_ne!(normal.new_tab_button.bg, hovered.new_tab_button.bg);
+        assert_eq!(
+            hovered.new_tab_button.bg,
+            Some(blend(normal.base_bg, palette.fg, 0.3))
+        );
     }
 }

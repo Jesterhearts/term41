@@ -630,9 +630,11 @@ impl FontSystem {
         // so "pixel art" built from them tiles seamlessly across neighbouring
         // cells. See `legacy` for the full codepoint list.
         if font_index == legacy::FONT_INDEX {
+            debug!("rasterizing legacy glyph {glyph_index} for cell span {cells_wide}");
             return legacy::rasterize(glyph_index, self.cell_width, self.cell_height, self.ascent);
         }
         if font_index == drcs::FONT_INDEX {
+            debug!("rasterizing DRCS glyph {glyph_index} for cell span {cells_wide}");
             return drcs::rasterize(glyph_index, self.cell_width, self.cell_height);
         }
 
@@ -652,18 +654,22 @@ impl FontSystem {
         let target_w = self.cell_width * cells_wide.max(1);
 
         if let Some(glyph) = svg::rasterize_svg(&font, glyph_index, target_w, self.cell_height) {
+            debug!("rasterized SVG glyph {glyph_index} for cell span {cells_wide}");
             return glyph;
         }
         if let Some(glyph) = colr::rasterize_colr_v1(&font, glyph_index, target_w, self.cell_height)
         {
+            debug!("rasterized COLR v1 glyph {glyph_index} for cell span {cells_wide}");
             return glyph;
         }
         if let Some(glyph) = bitmap::rasterize_sbix(&font, glyph_index, target_w, self.cell_height)
         {
+            debug!("rasterized sbix glyph {glyph_index} for cell span {cells_wide}");
             return glyph;
         }
         if let Some(glyph) = bitmap::rasterize_cbdt(&font, glyph_index, target_w, self.cell_height)
         {
+            debug!("rasterized CBDT glyph {glyph_index} for cell span {cells_wide}");
             return glyph;
         }
 

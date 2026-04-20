@@ -198,10 +198,12 @@ fn place_emoji(
             let line_h = (ascent_units + descent_units).max(1.0);
             let upem = font
                 .head()
-                .map(|h| h.units_per_em() as f32)
-                .unwrap_or(line_h);
-            let font_scale = cell_height as f32 / line_h;
-            let src_to_pixel = font_scale * (upem / src.height() as f32);
+                .ok()
+                .map(|head| head.units_per_em())
+                .unwrap_or(cell_width as u16) as f32;
+            let font_scale = (cell_height as f32 / line_h).min(cell_width as f32 / upem);
+            let src_to_pixel =
+                font_scale * (upem / src.width() as f32).max(line_h / src.height() as f32);
             (src_to_pixel, ascent_units * font_scale)
         }
         Err(_) => {
@@ -216,10 +218,9 @@ fn place_emoji(
 
     let scaled_w = (src.width() as f32 * scale).round() as u32;
     let scaled_h = (src.height() as f32 * scale).round() as u32;
-    // Center horizontally and vertically inside the cell — keeps width=1
-    // emoji visually balanced rather than crammed against the top-left.
-    let x_off = pad as i32 + ((cell_width as i32 - scaled_w as i32) / 2).max(0);
-    let y_off = pad as i32 + ((cell_height as i32 - scaled_h as i32) / 2).max(0);
+
+    let x_off = pad as f32 + ((cell_width as f32 - scaled_w as f32) * 0.5).max(0.0);
+    let y_off = pad as f32 + ((cell_height as f32 - scaled_h as f32) * 0.5).max(0.0);
 
     let mut dst = match Pixmap::new(out_w, out_h) {
         Some(p) => p,
@@ -238,8 +239,8 @@ fn place_emoji(
     };
 
     dst.draw_pixmap(
-        x_off,
-        y_off,
+        x_off as i32,
+        y_off as i32,
         src.as_ref(),
         &PixmapPaint {
             quality: FilterQuality::Bilinear,
@@ -254,10 +255,7 @@ fn place_emoji(
         width: out_w,
         height: out_h,
         bearing_x: -(pad as i32),
-        // bearing_y measures baseline → top of bitmap. We padded the top by
-        // `pad` above the cell origin, so the baseline sits pad+ascent above
-        // the bitmap top — identical to the COLR rasteriser.
-        bearing_y: (pad as f32 + ascent_px) as i32,
+        bearing_y: ascent_px as i32,
         is_color: true,
     }
 }

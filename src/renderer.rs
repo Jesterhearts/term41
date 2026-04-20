@@ -102,6 +102,14 @@ pub(crate) const BUTTON_CELLS: f32 = 3.0;
 /// Total width of the window-control button region in cell-width units.
 pub(crate) const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum TabBarHover {
+    NewTab,
+    Minimize,
+    Maximize,
+    Close,
+}
+
 // ---------------------------------------------------------------------------
 // Tab context menu — right-click on a tab in the tab bar
 // ---------------------------------------------------------------------------
@@ -1130,7 +1138,7 @@ impl RenderHost {
         let (hovered_button, tab_context_menu, gutter_popup, recording_popup, preedit) = {
             let input_state = self.input_state.lock();
             (
-                input_state.hovered_button,
+                input_state.hovered_tab_bar_button,
                 input_state.tab_context_menu.clone(),
                 input_state.gutter_popup.clone(),
                 input_state.recording_popup.clone(),

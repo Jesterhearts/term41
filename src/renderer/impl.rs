@@ -585,7 +585,7 @@ fn snapshot_status_line_row(
 /// CSD window control state passed to the renderer each frame.
 pub struct WindowControls {
     /// Which button the mouse is hovering, if any.
-    pub hovered: Option<u8>,
+    pub hovered: Option<crate::renderer::TabBarHover>,
     /// Whether the window is currently maximized (affects the maximize icon).
     pub maximized: bool,
     /// Tab context menu state, if open: (x position, hovered item index).
@@ -2321,6 +2321,29 @@ impl Renderer {
                 bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
             }
         }
+
+        if let Some(bg) = plan.new_tab_button.bg {
+            push_rect(
+                plan.new_tab_button.x,
+                0.0,
+                plan.new_tab_button.width,
+                cell_h,
+                pack_color(&bg, 255),
+                bg_vertices,
+                bg_indices,
+            );
+        }
+        self.shape_and_render_label(
+            font_system,
+            plan.new_tab_button.label,
+            plan.new_tab_button.x + (plan.new_tab_button.width - cell_w) / 2.0,
+            0.0,
+            baseline,
+            cell_w,
+            label_fg,
+            fg_vertices,
+            fg_indices,
+        );
 
         for button in &plan.buttons {
             if let Some(bg) = button.bg {

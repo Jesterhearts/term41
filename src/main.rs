@@ -89,6 +89,7 @@ use crate::renderer::kitty_encode_ime_commit;
 use crate::renderer::kitty_encode_input;
 use crate::renderer::legacy_encode_named;
 use crate::renderer::legacy_encode_numpad_character;
+use crate::renderer::paint::build_tab_bar_layout;
 
 #[macro_use]
 extern crate log;
@@ -165,7 +166,7 @@ pub(crate) struct InputState {
     cell_width: u32,
     cell_height: u32,
     gutter_width: u32,
-    hovered_button: Option<u8>,
+    hovered_tab_bar_button: Option<renderer::TabBarHover>,
     tab_context_menu: Option<TabContextMenu>,
     gutter_popup: Option<renderer::GutterPopup>,
     recording_popup: Option<RecordingPopupView>,
@@ -280,11 +281,11 @@ impl WindowHost {
         self.notify_interaction_changed();
     }
 
-    fn update_hovered_button(
+    fn update_hovered_tab_bar_button(
         &mut self,
-        hovered_button: Option<u8>,
+        hovered_button: Option<renderer::TabBarHover>,
     ) {
-        self.input_state.lock().hovered_button = hovered_button;
+        self.input_state.lock().hovered_tab_bar_button = hovered_button;
     }
 
     fn update_tab_context_menu(
@@ -769,8 +770,8 @@ impl WindowHost {
             return;
         }
 
-        let hovered_button = self.window_button_at().map(|b| b as u8);
-        self.update_hovered_button(hovered_button);
+        let hovered_button = self.tab_bar_hover_at();
+        self.update_hovered_tab_bar_button(hovered_button);
 
         let hovered_menu_item = self.tab_menu_item_at(x, y).map(|(_, idx)| idx);
         {
@@ -900,6 +901,14 @@ impl WindowHost {
                     }
                 }
             }
+            return;
+        }
+
+        if pressed && button == MouseButton::Left && self.is_on_new_tab_button() {
+            self.close_gutter_popup();
+            self.update_tab_context_menu(None);
+            self.send(RenderEvent::Action(Action::NewTab));
+            self.notify_interaction_changed();
             return;
         }
 
@@ -1390,24 +1399,10 @@ impl WindowHost {
     }
 
     fn window_button_at(&self) -> Option<WindowButton> {
-        if !self.is_in_tab_bar() {
-            return None;
-        }
-        let (cell_w, _, _, _) = self.layout_snapshot();
-        let cell_w = cell_w as f32;
-        let surface_w = self.window_size.0 as f32;
-        let region_w = cell_w * BUTTONS_REGION_CELLS;
-        let buttons_x = surface_w - region_w;
-        let mx = self.mouse_pos.0 as f32;
-        if mx < buttons_x {
-            return None;
-        }
-        let btn_w = cell_w * BUTTON_CELLS;
-        let idx = ((mx - buttons_x) / btn_w) as usize;
-        match idx {
-            0 => Some(WindowButton::Minimize),
-            1 => Some(WindowButton::Maximize),
-            2 => Some(WindowButton::Close),
+        match self.tab_bar_hover_at() {
+            Some(renderer::TabBarHover::Minimize) => Some(WindowButton::Minimize),
+            Some(renderer::TabBarHover::Maximize) => Some(WindowButton::Maximize),
+            Some(renderer::TabBarHover::Close) => Some(WindowButton::Close),
             _ => None,
         }
     }
@@ -1417,22 +1412,39 @@ impl WindowHost {
         if tab_count == 0 {
             return None;
         }
-        let cell_w = cell_w as f32;
-        let surface_w = self.window_size.0 as f32;
-        let region_w = cell_w * BUTTONS_REGION_CELLS;
-        let tabs_w = surface_w - region_w;
-        let max_tab_w = cell_w * 30.0;
-        let tab_w = (tabs_w / tab_count as f32).min(max_tab_w);
         let mx = self.mouse_pos.0.max(0.0) as f32;
-        if mx >= tabs_w {
-            return None;
-        }
-        let idx = (mx / tab_w) as usize;
-        (idx < tab_count).then_some(idx)
+        let layout = build_tab_bar_layout(tab_count, self.window_size.0 as f32, cell_w as f32);
+        layout
+            .tabs
+            .iter()
+            .position(|tab| mx >= tab.x && mx < tab.x + tab.width)
+    }
+
+    fn is_on_new_tab_button(&self) -> bool {
+        matches!(self.tab_bar_hover_at(), Some(renderer::TabBarHover::NewTab))
     }
 
     fn is_in_titlebar_drag_region(&self) -> bool {
-        self.is_in_tab_bar() && self.window_button_at().is_none()
+        self.is_in_tab_bar() && self.tab_bar_hover_at().is_none()
+    }
+
+    fn tab_bar_hover_at(&self) -> Option<renderer::TabBarHover> {
+        if !self.is_in_tab_bar() {
+            return None;
+        }
+        let (cell_w, _, _, tab_count) = self.layout_snapshot();
+        let mx = self.mouse_pos.0.max(0.0) as f32;
+        let layout = build_tab_bar_layout(tab_count, self.window_size.0 as f32, cell_w as f32);
+        if mx >= layout.new_tab_button.x
+            && mx < layout.new_tab_button.x + layout.new_tab_button.width
+        {
+            return Some(renderer::TabBarHover::NewTab);
+        }
+        layout
+            .buttons
+            .iter()
+            .find(|button| mx >= button.x && mx < button.x + button.width)
+            .and_then(|button| button.button)
     }
 
     fn resize_direction_at(&self) -> Option<winit::window::ResizeDirection> {
@@ -1525,8 +1537,6 @@ enum TabMenuActionLocal {
 }
 
 const RESIZE_BORDER: f32 = 5.0;
-const BUTTON_CELLS: f32 = 3.0;
-const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
 const TAB_MENU_WIDTH_CELLS: f32 = 16.0;
 const POPUP_WIDTH_CELLS: f32 = 20.0;
 
@@ -1709,7 +1719,8 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             && let Some(target) = self.input_endpoints.get(&tab_id)
             && let Some(presenter) = self.startup_presenter.as_mut()
         {
-            presenter.present(&window, target);
+            let hovered_button = self.input_state.lock().hovered_tab_bar_button;
+            presenter.present(&window, target, hovered_button, window.is_maximized());
             window.request_redraw();
         }
 
@@ -1756,7 +1767,8 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     && let Some(target) = self.input_endpoints.get(&tab_id)
                     && let Some(presenter) = self.startup_presenter.as_mut()
                 {
-                    presenter.present(window, target);
+                    let hovered_button = self.input_state.lock().hovered_tab_bar_button;
+                    presenter.present(window, target, hovered_button, window.is_maximized());
                     return;
                 }
                 return;
@@ -2020,7 +2032,7 @@ fn main() {
         } else {
             0
         },
-        hovered_button: None,
+        hovered_tab_bar_button: None,
         tab_context_menu: None,
         gutter_popup: None,
         recording_popup: None,
