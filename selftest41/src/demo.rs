@@ -21,6 +21,7 @@ pub enum DemoId {
     Drcs,
     LineAttrs,
     CursorMarginsEdit,
+    EraseProtection,
     Rectangles,
     AltScreen,
     OscShell,
@@ -85,6 +86,13 @@ pub fn catalog() -> Vec<Demo> {
             detail: "Exercises cursor-addressing modes, left/right margins, hardware tab stops, \
                      insert mode, and editing controls on a live grid.",
             id: DemoId::CursorMarginsEdit,
+        },
+        Demo {
+            title: "Erase & Protection",
+            summary: "ED/EL, DECSED/DECSEL, and DECSCA protected text semantics.",
+            detail: "Shows the difference between normal erase and selective erase by mixing \
+                     protected and unprotected text on the same rows.",
+            id: DemoId::EraseProtection,
         },
         Demo {
             title: "Rectangular Ops",
@@ -158,6 +166,7 @@ pub fn run_demo(
         DemoId::Drcs => run_drcs_demo(out),
         DemoId::LineAttrs => run_line_attrs_demo(out),
         DemoId::CursorMarginsEdit => run_cursor_margins_edit_demo(out),
+        DemoId::EraseProtection => run_erase_protection_demo(out),
         DemoId::Rectangles => run_rectangles_demo(out),
         DemoId::AltScreen => run_alt_screen_demo(out),
         DemoId::OscShell => run_osc_shell_demo(out, read_reply),
@@ -446,6 +455,53 @@ fn run_cursor_margins_edit_demo(out: &mut impl Write) -> io::Result<()> {
     write!(out, "\x1b[13;1H\x1b[1M")?;
     present_step(out)?;
     write!(out, "\x1b[r\x1b[?6l\x1b[?69l")?;
+    out.flush()?;
+    Ok(())
+}
+
+fn run_erase_protection_demo(out: &mut impl Write) -> io::Result<()> {
+    heading(out, "Erase & Protection")?;
+    line(
+        out,
+        "Building rows with mixed protected/unprotected text, then applying erase variants.",
+    )?;
+    write!(out, "\x1b[4;1Hleft ")?;
+    write!(out, "\x1b[1\"qPROTECTED\x1b[0\"q right")?;
+    write!(out, "\x1b[5;1Hkeep ")?;
+    write!(out, "\x1b[1\"qSAFE\x1b[0\"q erase-me")?;
+    write!(out, "\x1b[6;1Hfull-row ")?;
+    write!(out, "\x1b[1\"qGUARD\x1b[0\"q tail")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Normal EL/ED should erase both protected and unprotected text.",
+    )?;
+    write!(out, "\x1b[5;1H\x1b[0K")?;
+    write!(out, "\x1b[6;1H\x1b[2K")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Rebuilding rows, then selective erase should leave only the DECSCA-protected cells \
+         behind.",
+    )?;
+    write!(out, "\x1b[4;1Hleft ")?;
+    write!(out, "\x1b[1\"qPROTECTED\x1b[0\"q right")?;
+    write!(out, "\x1b[5;1Hkeep ")?;
+    write!(out, "\x1b[1\"qSAFE\x1b[0\"q erase-me")?;
+    write!(out, "\x1b[6;1Hfull-row ")?;
+    write!(out, "\x1b[1\"qGUARD\x1b[0\"q tail")?;
+    present_step(out)?;
+
+    write!(out, "\x1b[4;1H\x1b[?2K")?;
+    write!(out, "\x1b[5;1H\x1b[?0K")?;
+    write!(out, "\x1b[6;1H\x1b[?2K")?;
+    write!(out, "\x1b[5;12H\x1b[?1K")?;
+    write!(out, "\x1b[5;1H")?;
+    out.write_all(b"\x1b[?1J")?;
     out.flush()?;
     Ok(())
 }
