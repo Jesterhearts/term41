@@ -6,3 +6,4 @@ perf.data
 *.swp
 *.log
 massif.out.*
+REFACTOR.md
