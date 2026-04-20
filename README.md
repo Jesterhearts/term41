@@ -19,7 +19,7 @@ write my own, with the features I prefer.
 
 ## Objections
 1. You use AI.
-  - Fair enough.
+   - Fair enough.
 2. It's ugly.
    - I don't think it's that bad, but only using the same graphics primitives
      for menus/modals as the rest of the terminal does give it a certain
