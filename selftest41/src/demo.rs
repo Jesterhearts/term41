@@ -1,5 +1,6 @@
 use std::io;
 use std::io::Write;
+use std::thread::sleep;
 use std::time::Duration;
 
 use crate::capabilities::CapabilityReport;
@@ -31,6 +32,7 @@ pub enum DemoId {
 }
 
 const DRCS_SAMPLE_SCRIPT: &str = include_str!("../resources/icon.drcs");
+const DEMO_STEP_PAUSE: Duration = Duration::from_millis(1200);
 
 type ReadReplyFn<'a> = dyn FnMut(Duration) -> io::Result<Vec<u8>> + 'a;
 
@@ -194,6 +196,12 @@ fn blank(out: &mut impl Write) -> io::Result<()> {
     line(out, "")
 }
 
+fn present_step(out: &mut impl Write) -> io::Result<()> {
+    out.flush()?;
+    sleep(DEMO_STEP_PAUSE);
+    Ok(())
+}
+
 fn query_and_print(
     out: &mut impl Write,
     read_reply: &mut ReadReplyFn<'_>,
@@ -312,19 +320,21 @@ fn run_reset_reports_demo(
     )?;
     write!(out, "\x1b[4;10H\x1b7\x1b[8;30Hmoved\x1b8")?;
     line(out, "Restored cursor should land back near row 4, col 10.")?;
+    present_step(out)?;
     blank(out)?;
     line(out, "Now issuing DECSR with confirmation parameter 41.")?;
     out.write_all(b"\x1b[41+p")?;
-    out.flush()?;
+    present_step(out)?;
     let reply = read_reply(Duration::from_millis(200))?;
     clear_screen(out)?;
     heading(out, "Reset & State Restore")?;
     line(out, "DECSR reset the terminal state and returned:")?;
     line(out, &format!("  {}", format_reply(&reply)))?;
+    present_step(out)?;
     blank(out)?;
     line(out, "Issuing DECTST power-up self-test form next.")?;
     out.write_all(b"\x1b[4;1y")?;
-    out.flush()?;
+    present_step(out)?;
     clear_screen(out)?;
     heading(out, "Reset & State Restore")?;
     line(
@@ -413,12 +423,14 @@ fn run_cursor_margins_edit_demo(out: &mut impl Write) -> io::Result<()> {
     write!(out, "\x1b[1;12H\x1bH")?;
     write!(out, "\x1b[2;1Htab:\t<- HTS target")?;
     write!(out, "\x1b[2;18H\x1b[1Z<- CBT")?;
+    present_step(out)?;
     blank(out)?;
     line(out, "Testing insert mode and character insert/delete.")?;
     write!(out, "\x1b[4;1Habcdef")?;
     write!(out, "\x1b[4;3H\x1b[4hX\x1b[4l")?;
     write!(out, "\x1b[5;1H123456")?;
     write!(out, "\x1b[5;3H\x1b[2@<<\x1b[2P")?;
+    present_step(out)?;
     blank(out)?;
     line(
         out,
@@ -432,6 +444,7 @@ fn run_cursor_margins_edit_demo(out: &mut impl Write) -> io::Result<()> {
     write!(out, "\x1b[11;1Hline a\r\nline b\r\nline c")?;
     write!(out, "\x1b[11;1H\x1b[1Linserted line")?;
     write!(out, "\x1b[13;1H\x1b[1M")?;
+    present_step(out)?;
     write!(out, "\x1b[r\x1b[?6l\x1b[?69l")?;
     out.flush()?;
     Ok(())
@@ -445,11 +458,14 @@ fn run_rectangles_demo(out: &mut impl Write) -> io::Result<()> {
     )?;
     write!(out, "\x1b[2*x")?;
     write!(out, "\x1b#8")?;
+    present_step(out)?;
     write!(out, "\x1b[5;5;14;30$z")?;
     write!(out, "\x1b[5;5;14;30;35$x")?;
+    present_step(out)?;
     out.write_all(b"\x1b[6;6;13;29${")?;
     write!(out, "\x1b[5;5;14;30;7$r")?;
     write!(out, "\x1b[6;6;13;29;7$t")?;
+    present_step(out)?;
     write!(out, "\x1b[5;32;14;57;1;1;10;5;1$v")?;
     write!(out, "\x1b[1*x\x1b[5;32;14;57;1$r")?;
     out.flush()?;
@@ -464,6 +480,7 @@ fn run_alt_screen_demo(out: &mut impl Write) -> io::Result<()> {
     )?;
     write!(out, "\x1b7")?;
     write!(out, "\r\nSwitching to alternate screen now...\r\n")?;
+    present_step(out)?;
     write!(out, "\x1b[?1049h")?;
     write!(out, "\x1b[2J\x1b[H")?;
     line(
@@ -471,6 +488,7 @@ fn run_alt_screen_demo(out: &mut impl Write) -> io::Result<()> {
         "Alternate screen content should replace the primary surface.",
     )?;
     line(out, "Returning to primary should restore the earlier text.")?;
+    present_step(out)?;
     write!(out, "\r\n\x1b[?1049l")?;
     write!(out, "\r\nBack on the primary screen after 1049l.")?;
     out.flush()?;
@@ -534,6 +552,7 @@ fn run_status_line_demo(out: &mut impl Write) -> io::Result<()> {
         out,
         "The bottom row should now be emulator-owned indicator content.",
     )?;
+    present_step(out)?;
     blank(out)?;
     line(
         out,
@@ -582,7 +601,9 @@ fn run_page_demo(
     )?;
     write!(out, "\x1b[72t")?;
     write!(out, "\x1b[2 P\x1b[6;1HThis text is on page 2.")?;
+    present_step(out)?;
     write!(out, "\x1b[1 P\x1b[8;1HBack on page 1.")?;
+    present_step(out)?;
     write!(out, "\x1b[6;1;6;18;2;10;1;1$v")?;
     blank(out)?;
     query_and_print(
@@ -603,6 +624,7 @@ fn run_vt52_demo(out: &mut impl Write) -> io::Result<()> {
     )?;
     write!(out, "\x1b[?2l")?;
     write!(out, "\x1bHVT52 home\x1bY#$cursor addr")?;
+    present_step(out)?;
     write!(out, "\x1b<\r\n\x1b[64;2\"p\x1b G")?;
     line(
         out,
