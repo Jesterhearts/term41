@@ -58,8 +58,9 @@ impl TerminalProcessor {
         &mut self,
         terminal: &mut Terminal,
         data: &[u8],
-    ) {
+    ) -> TerminalEffects {
         let popped_before = terminal.active.grid.total_popped;
+        let mut effects = TerminalEffects::default();
         let mut inputs = vec![FrameInput::Borrowed {
             bytes: data,
             offset: 0,
@@ -84,9 +85,9 @@ impl TerminalProcessor {
                         let Some(hook) = frame.hooks.pop() else {
                             continue;
                         };
-                        dcs::dispatch_hook(hook, terminal);
+                        dcs::dispatch_hook(hook, terminal, &mut effects);
                     }
-                    action => match terminal.apply(action) {
+                    action => match terminal.apply(action, &mut effects) {
                         dispatch::PendingApplication::None => {}
                         dispatch::PendingApplication::Bytes(bytes) => {
                             input.advance(parser.tell());
@@ -114,5 +115,6 @@ impl TerminalProcessor {
         }
 
         terminal.track_scroll(popped_before);
+        effects
     }
 }

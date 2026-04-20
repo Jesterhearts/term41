@@ -6,8 +6,9 @@ use crate::screen::grid::AttrChangeExtent;
 pub(crate) fn handle_decrqss(
     selector: &[u8],
     terminal: &mut Terminal,
+    output: &mut Vec<u8>,
 ) {
-    let out = &mut terminal.output.pending_output;
+    let out = output;
     let c1_mode = terminal.modes.c1_mode;
 
     match selector {

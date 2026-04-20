@@ -55,15 +55,16 @@ pub(crate) fn append_hook_bytes(
 pub(crate) fn dispatch_hook(
     hook: HookState,
     terminal: &mut Terminal,
+    effects: &mut TerminalEffects,
 ) {
     if hook.truncated {
         return;
     }
     if hook.action == 'q' && hook.intermediates.as_slice() == b"+" {
         let c1_mode = terminal.modes.c1_mode;
-        report::handle_xtgettcap(&hook.bytes, c1_mode, &mut terminal.output.pending_output);
+        report::handle_xtgettcap(&hook.bytes, c1_mode, &mut effects.host_bytes);
     } else if hook.action == 'q' && hook.intermediates.as_slice() == b"$" {
-        report::handle_decrqss(&hook.bytes, terminal);
+        report::handle_decrqss(&hook.bytes, terminal, &mut effects.host_bytes);
     } else if hook.action == 'q' && hook.intermediates.as_slice().is_empty() {
         let image = image41::sixel::parse_sixel(hook.params, hook.bytes);
         terminal.place_sixel_image(image);
@@ -74,6 +75,7 @@ pub(crate) fn dispatch_hook(
             hook.action,
             &hook.bytes,
             terminal,
+            effects,
         );
     }
 }
@@ -84,12 +86,13 @@ fn handle_dcs(
     action: char,
     payload: &[u8],
     terminal: &mut Terminal,
+    effects: &mut TerminalEffects,
 ) {
     if action == 'q' && intermediates == b"+" {
         let c1_mode = terminal.modes.c1_mode;
-        report::handle_xtgettcap(payload, c1_mode, &mut terminal.output.pending_output);
+        report::handle_xtgettcap(payload, c1_mode, &mut effects.host_bytes);
     } else if action == 'q' && intermediates == b"$" {
-        report::handle_decrqss(payload, terminal);
+        report::handle_decrqss(payload, terminal, &mut effects.host_bytes);
     } else if action == 'u' && intermediates == b"!" {
         let ps = params
             .iter()

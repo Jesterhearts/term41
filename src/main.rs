@@ -30,6 +30,7 @@ use terminal41::MouseButton as TermMouseButton;
 use terminal41::MouseEventKind;
 use terminal41::MouseModifiers;
 use terminal41::Terminal;
+use terminal41::TerminalEffects;
 use terminal41::TerminalThread;
 use terminal41::host;
 use terminal41::io::clipboard::copy_to_clipboard;
@@ -118,11 +119,9 @@ enum AppEvent {
     RequestUserAttention,
     RequestStartupRedraw,
     ReleaseStartupSurface,
-    FlushTerminalOutput(TabId),
-    RequestTerminalResize {
+    ApplyTerminalEffects {
         tab_id: TabId,
-        cols: u32,
-        rows: u32,
+        effects: TerminalEffects,
     },
     RegisterInputEndpoint {
         tab_id: TabId,
@@ -419,30 +418,43 @@ impl WindowHost {
         }
     }
 
-    fn flush_target_output(
+    fn write_host_bytes(
         &self,
         target: &InputEndpoint,
+        host_bytes: Vec<u8>,
+        reset_viewport: bool,
     ) {
-        let pending = host::take_pending_output(&mut target.terminal.lock().output);
-        if pending.is_empty() {
+        if host_bytes.is_empty() {
             return;
         }
-        let _ = target.writer.borrow_mut().write(&pending);
-        view::reset_viewport(&mut target.terminal.lock().active);
+        let _ = target.writer.borrow_mut().write(&host_bytes);
+        if reset_viewport {
+            view::reset_viewport(&mut target.terminal.lock().active);
+        }
     }
 
-    fn flush_tab_output(
-        &self,
+    fn apply_terminal_effects(
+        &mut self,
         tab_id: TabId,
+        effects: TerminalEffects,
     ) {
         let Some(target) = self.input_endpoints.get(&tab_id) else {
             return;
         };
-        let pending = host::take_pending_output(&mut target.terminal.lock().output);
-        if pending.is_empty() {
-            return;
+        let TerminalEffects {
+            host_bytes,
+            resize_request,
+            bell,
+        } = effects;
+        self.write_host_bytes(target, host_bytes, false);
+        if let Some((cols, rows)) = resize_request
+            && self.active_input_tab == Some(tab_id)
+        {
+            self.request_window_grid_size(cols, rows);
         }
-        let _ = target.writer.borrow_mut().write(&pending);
+        if bell {
+            self.send(RenderEvent::Bell(tab_id));
+        }
     }
 
     fn handle_focus_event(
@@ -453,12 +465,13 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let mut terminal = target.terminal.lock();
+            let terminal = target.terminal.lock();
             let c1_mode = terminal.modes.c1_mode;
             let focus_reporting = terminal.modes.focus_reporting;
-            host::report_focus_change(&mut terminal.output, c1_mode, focus_reporting, focused);
+            let mut host_bytes = Vec::new();
+            host::report_focus_change(&mut host_bytes, c1_mode, focus_reporting, focused);
             drop(terminal);
-            self.flush_target_output(target);
+            self.write_host_bytes(target, host_bytes, true);
         }
         self.notify_interaction_changed();
     }
@@ -552,16 +565,17 @@ impl WindowHost {
             Action::Paste => {
                 let mut guard = target.terminal.lock();
                 let terminal = &mut *guard;
+                let mut host_bytes = Vec::new();
 
                 paste_from_clipboard(
                     &mut terminal.clipboard,
-                    &mut terminal.output.pending_output,
+                    &mut host_bytes,
                     terminal.modes.c1_mode,
                     terminal.modes.bracketed_paste,
                     ClipboardKind::Clipboard,
                 );
                 drop(guard);
-                self.flush_target_output(target);
+                self.write_host_bytes(target, host_bytes, true);
                 true
             }
             Action::OpenSearch => {
@@ -795,12 +809,13 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let mut terminal = target.terminal.lock();
+            let terminal = target.terminal.lock();
             let c1_mode = terminal.modes.c1_mode;
             let mouse_tracking = terminal.modes.mouse_tracking;
             let mouse_encoding = terminal.modes.mouse_encoding;
+            let mut host_bytes = Vec::new();
             host::mouse_report(
-                &mut terminal.output,
+                &mut host_bytes,
                 c1_mode,
                 mouse_tracking,
                 mouse_encoding,
@@ -811,7 +826,7 @@ impl WindowHost {
                 self.mouse_modifiers(),
             );
             drop(terminal);
-            self.flush_target_output(target);
+            self.write_host_bytes(target, host_bytes, true);
             self.notify_interaction_changed();
             return;
         }
@@ -983,12 +998,13 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let mut terminal = target.terminal.lock();
+            let terminal = target.terminal.lock();
             let c1_mode = terminal.modes.c1_mode;
             let mouse_tracking = terminal.modes.mouse_tracking;
             let mouse_encoding = terminal.modes.mouse_encoding;
+            let mut host_bytes = Vec::new();
             host::mouse_report(
-                &mut terminal.output,
+                &mut host_bytes,
                 c1_mode,
                 mouse_tracking,
                 mouse_encoding,
@@ -999,7 +1015,7 @@ impl WindowHost {
                 self.mouse_modifiers(),
             );
             drop(terminal);
-            self.flush_target_output(target);
+            self.write_host_bytes(target, host_bytes, true);
             self.notify_interaction_changed();
             return;
         }
@@ -1070,16 +1086,20 @@ impl WindowHost {
                         terminal.selection = None;
                     } else {
                         view::reset_viewport(&mut terminal.active);
+                        let mut host_bytes = Vec::new();
                         paste_from_clipboard(
                             &mut terminal.clipboard,
-                            &mut terminal.output.pending_output,
+                            &mut host_bytes,
                             terminal.modes.c1_mode,
                             terminal.modes.bracketed_paste,
                             ClipboardKind::Clipboard,
                         );
+                        drop(guard);
+                        self.write_host_bytes(target, host_bytes, false);
+                        self.notify_interaction_changed();
+                        return;
                     }
                     drop(guard);
-                    self.flush_target_output(target);
                 }
                 self.notify_interaction_changed();
             }
@@ -1111,14 +1131,15 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let mut terminal = target.terminal.lock();
+            let terminal = target.terminal.lock();
             let c1_mode = terminal.modes.c1_mode;
             let mouse_tracking = terminal.modes.mouse_tracking;
             let mouse_encoding = terminal.modes.mouse_encoding;
+            let mut host_bytes = Vec::new();
             if y_lines < 0 {
                 for _ in 0..y_lines.unsigned_abs() {
                     host::mouse_report(
-                        &mut terminal.output,
+                        &mut host_bytes,
                         c1_mode,
                         mouse_tracking,
                         mouse_encoding,
@@ -1132,7 +1153,7 @@ impl WindowHost {
             } else if y_lines > 0 {
                 for _ in 0..y_lines as u32 {
                     host::mouse_report(
-                        &mut terminal.output,
+                        &mut host_bytes,
                         c1_mode,
                         mouse_tracking,
                         mouse_encoding,
@@ -1147,7 +1168,7 @@ impl WindowHost {
             if x_lines < 0 {
                 for _ in 0..x_lines.unsigned_abs() {
                     host::mouse_report(
-                        &mut terminal.output,
+                        &mut host_bytes,
                         c1_mode,
                         mouse_tracking,
                         mouse_encoding,
@@ -1161,7 +1182,7 @@ impl WindowHost {
             } else if x_lines > 0 {
                 for _ in 0..x_lines as u32 {
                     host::mouse_report(
-                        &mut terminal.output,
+                        &mut host_bytes,
                         c1_mode,
                         mouse_tracking,
                         mouse_encoding,
@@ -1174,7 +1195,7 @@ impl WindowHost {
                 }
             }
             drop(terminal);
-            self.flush_target_output(target);
+            self.write_host_bytes(target, host_bytes, true);
             self.notify_interaction_changed();
             return;
         }
@@ -1264,15 +1285,16 @@ impl WindowHost {
                     let cmd = cmd.trim().to_owned();
                     terminal.selection = None;
                     view::reset_viewport(&mut terminal.active);
+                    let mut host_bytes = Vec::new();
                     paste(
-                        &mut terminal.output.pending_output,
+                        &mut host_bytes,
                         terminal.modes.c1_mode,
                         terminal.modes.bracketed_paste,
                         &format!("{cmd}\r"),
                     );
+                    drop(guard);
+                    self.write_host_bytes(target, host_bytes, false);
                 }
-                drop(guard);
-                self.flush_target_output(target);
             }
             1 => {
                 let mut guard = target.terminal.lock();
@@ -1591,13 +1613,8 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 }
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
-            AppEvent::FlushTerminalOutput(tab_id) => {
-                self.flush_tab_output(tab_id);
-            }
-            AppEvent::RequestTerminalResize { tab_id, cols, rows } => {
-                if self.active_input_tab == Some(tab_id) {
-                    self.request_window_grid_size(cols, rows);
-                }
+            AppEvent::ApplyTerminalEffects { tab_id, effects } => {
+                self.apply_terminal_effects(tab_id, effects);
             }
             AppEvent::RegisterInputEndpoint {
                 tab_id,
@@ -1984,17 +2001,10 @@ fn main() {
         }),
         Box::new({
             let proxy = proxy.clone();
-            move || {
-                let _ = proxy.send_event(AppEvent::FlushTerminalOutput(TabId(0)));
-            }
-        }),
-        Box::new({
-            let proxy = proxy.clone();
-            move |cols, rows| {
-                let _ = proxy.send_event(AppEvent::RequestTerminalResize {
+            move |effects| {
+                let _ = proxy.send_event(AppEvent::ApplyTerminalEffects {
                     tab_id: TabId(0),
-                    cols,
-                    rows,
+                    effects,
                 });
             }
         }),

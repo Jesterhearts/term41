@@ -160,6 +160,7 @@ fn resize_tab_to_grid(
 pub enum RenderEvent {
     #[default]
     None,
+    Bell(TabId),
     Resized {
         width: u32,
         height: u32,
@@ -433,6 +434,7 @@ impl RenderHost {
     ) {
         match event {
             RenderEvent::None => {}
+            RenderEvent::Bell(tab_id) => self.handle_bell(*tab_id),
             RenderEvent::Resized { width, height } => {
                 self.window_size = (*width, *height);
                 self.handle_resize(*width, *height);
@@ -828,17 +830,10 @@ impl RenderHost {
             }),
             Box::new({
                 let proxy = self.proxy.clone();
-                move || {
-                    let _ = proxy.send_event(AppEvent::FlushTerminalOutput(id));
-                }
-            }),
-            Box::new({
-                let proxy = self.proxy.clone();
-                move |cols, rows| {
-                    let _ = proxy.send_event(AppEvent::RequestTerminalResize {
+                move |effects| {
+                    let _ = proxy.send_event(AppEvent::ApplyTerminalEffects {
                         tab_id: id,
-                        cols,
-                        rows,
+                        effects,
                     });
                 }
             }),
@@ -1078,7 +1073,6 @@ impl RenderHost {
         }
 
         self.sync_window_title();
-        self.dispatch_bell();
 
         let active_idx = self
             .tabs
@@ -1207,10 +1201,11 @@ impl RenderHost {
         self.applied_title = want;
     }
 
-    fn dispatch_bell(&mut self) {
-        if let Some(tab) = self.active_tab_mut()
-            && !host::take_bell_pending(&mut tab.terminal.lock().output)
-        {
+    fn handle_bell(
+        &mut self,
+        tab_id: TabId,
+    ) {
+        if self.active_tab_id != tab_id {
             return;
         }
         match self.config.bell {

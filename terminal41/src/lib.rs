@@ -134,19 +134,33 @@ impl CommandMeta {
     }
 }
 
-/// Terminal-produced side effects that the host drains or reacts to after
-/// applying escape-sequence actions.
+/// Host-facing side effects produced while applying terminal input.
 #[derive(Debug, Default)]
-pub struct TerminalOutput {
-    /// Bytes produced by the terminal itself that must be written back to
-    /// the PTY — responses to queries like OSC 52 `?` reads.
-    pub pending_output: Vec<u8>,
-    /// Host-driven window geometry request produced by VT controls such as
-    /// DECSNLS / DECSCPP. Drained by the host after each processing batch.
-    pub pending_host_resize: Option<(u32, u32)>,
-    /// Latched true whenever at least one BEL arrived since the last host
-    /// drain. Kept private so `take_bell_pending()` stays the only drain path.
-    bell_pending: bool,
+pub struct TerminalEffects {
+    /// Bytes that must be written back to the PTY, such as query replies.
+    pub host_bytes: Vec<u8>,
+    /// Latest host-driven geometry request emitted by VT controls such as
+    /// DECSNLS / DECSCPP.
+    pub resize_request: Option<(u32, u32)>,
+    /// True if at least one BEL was seen while producing this batch.
+    pub bell: bool,
+}
+
+impl TerminalEffects {
+    pub fn is_empty(&self) -> bool {
+        self.host_bytes.is_empty() && self.resize_request.is_none() && !self.bell
+    }
+
+    pub fn extend(
+        &mut self,
+        other: Self,
+    ) {
+        self.host_bytes.extend(other.host_bytes);
+        if other.resize_request.is_some() {
+            self.resize_request = other.resize_request;
+        }
+        self.bell |= other.bell;
+    }
 }
 
 /// Shell/app metadata derived from OSC and window-title sequences.
@@ -323,9 +337,6 @@ pub struct Terminal {
     /// copy/paste paths.
     pub clipboard: Clipboard,
 
-    /// Terminal-produced side effects that the host drains or reacts to.
-    pub output: TerminalOutput,
-
     /// Terminal-level modes toggled by escape sequences (DECSET/DECRST,
     /// mode 2004, mode 2026, etc.) and reset together by RIS.
     pub modes: TerminalModes,
@@ -427,7 +438,6 @@ impl Terminal {
             on_alt_screen: false,
             cell_height,
             clipboard: Clipboard::new(),
-            output: TerminalOutput::default(),
             modes: TerminalModes::new(),
             selection: None,
             search: SearchState::new(),
@@ -552,6 +562,7 @@ impl Terminal {
     fn apply(
         &mut self,
         action: Action<'_>,
+        effects: &mut TerminalEffects,
     ) -> dispatch::PendingApplication {
         match dispatch::decode_action(self.modes.vt52_mode, &mut self.vt52_cursor_addr, action) {
             DecodedAction::Ignore => dispatch::PendingApplication::None,
@@ -610,7 +621,7 @@ impl Terminal {
                 dispatch::apply_execute(
                     &mut self.active,
                     &self.viewport,
-                    &mut self.output.bell_pending,
+                    &mut effects.bell,
                     self.modes.newline_mode,
                     byte,
                 );
@@ -623,7 +634,7 @@ impl Terminal {
                 .palette(&mut self.palette)
                 .base_palette(&self.base_palette)
                 .dec_color(&mut self.dec_color)
-                .pending_output(&mut self.output.pending_output)
+                .pending_output(&mut effects.host_bytes)
                 .c1_mode(self.modes.c1_mode)
                 .feature_permissions(&self.protocol.feature_permissions)
                 .foreground_processes(&self.protocol.foreground_processes)
@@ -645,8 +656,8 @@ impl Terminal {
                     .on_alt_screen(&mut self.on_alt_screen)
                     .modes(&mut self.modes)
                     .kitty_keyboard(&mut self.kitty_keyboard)
-                    .pending_output(&mut self.output.pending_output)
-                    .pending_resize(&mut self.output.pending_host_resize)
+                    .pending_output(&mut effects.host_bytes)
+                    .pending_resize(&mut effects.resize_request)
                     .cursor_style(&mut self.cursor_style)
                     .cell_width(self.cell_width)
                     .cell_height(self.cell_height)
@@ -655,7 +666,7 @@ impl Terminal {
                     .current_title(&mut self.metadata.current_title)
                     .saved_modes(&mut self.saved_private_modes)
                     .current_prompt_row(&mut self.metadata.current_prompt_row)
-                    .bell_pending(&mut self.output.bell_pending)
+                    .bell_pending(&mut effects.bell)
                     .vt52_cursor_addr(&mut self.vt52_cursor_addr)
                     .macros(&mut self.protocol.macros)
                     .feature_permissions(&self.protocol.feature_permissions)
@@ -683,12 +694,12 @@ impl Terminal {
                     .title_stack(&mut self.metadata.title_stack)
                     .saved_modes(&mut self.saved_private_modes)
                     .current_prompt_row(&mut self.metadata.current_prompt_row)
-                    .bell_pending(&mut self.output.bell_pending)
+                    .bell_pending(&mut effects.bell)
                     .palette(&mut self.palette)
                     .base_palette(&self.base_palette)
                     .dec_color(&mut self.dec_color)
                     .default_status_display(&mut self.default_status_display)
-                    .pending_output(&mut self.output.pending_output)
+                    .pending_output(&mut effects.host_bytes)
                     .vt52_cursor_addr(&mut self.vt52_cursor_addr)
                     .macros(&mut self.protocol.macros)
                     .drcs(&mut self.protocol.drcs)
@@ -701,7 +712,7 @@ impl Terminal {
                 handle_osc()
                     .payload(&data)
                     .clipboard(&mut self.clipboard)
-                    .pending_output(&mut self.output.pending_output)
+                    .pending_output(&mut effects.host_bytes)
                     .c1_mode(self.modes.c1_mode)
                     .current_directory(&mut self.metadata.current_directory)
                     .hyperlinks(&mut self.hyperlinks)
@@ -739,7 +750,7 @@ impl Terminal {
                     self.cell_height,
                     self.cell_width,
                     self.modes.c1_mode,
-                    &mut self.output.pending_output,
+                    &mut effects.host_bytes,
                     &data,
                 );
                 dispatch::PendingApplication::None
@@ -842,8 +853,7 @@ impl TerminalThread {
         render_thread_handle: Arc<OnceLock<Thread>>,
         startup_redraw: Option<Box<dyn Fn() + Send + Sync>>,
         tee_read: Box<dyn Fn(&[u8]) + Send + Sync>,
-        output_ready: Box<dyn Fn() + Send + Sync>,
-        host_resize: Box<dyn Fn(u32, u32) + Send + Sync>,
+        deliver_effects: Box<dyn Fn(TerminalEffects) + Send + Sync>,
     ) {
         if self.thread_handle.get().is_some() {
             error!("terminal thread already running");
@@ -866,8 +876,7 @@ impl TerminalThread {
                     render_thread_handle,
                     startup_redraw,
                     tee_read,
-                    output_ready,
-                    host_resize,
+                    deliver_effects,
                 );
             })
             .expect("spawn terminal thread");
@@ -902,6 +911,7 @@ mod tests {
     struct TestTerm {
         inner: Terminal,
         processor: TerminalProcessor,
+        effects: TerminalEffects,
     }
 
     impl TestTerm {
@@ -925,6 +935,7 @@ mod tests {
                     ColorPalette::default(),
                 ),
                 processor: TerminalProcessor::new(),
+                effects: TerminalEffects::default(),
             }
         }
 
@@ -949,6 +960,7 @@ mod tests {
                     ColorPalette::default(),
                 ),
                 processor: TerminalProcessor::new(),
+                effects: TerminalEffects::default(),
             }
         }
 
@@ -956,7 +968,8 @@ mod tests {
             &mut self,
             data: &[u8],
         ) {
-            self.processor.process_bytes(&mut self.inner, data);
+            let effects = self.processor.process_bytes(&mut self.inner, data);
+            self.effects.extend(effects);
         }
 
         fn set_foreground_programs(
@@ -969,16 +982,20 @@ mod tests {
                     ForegroundProgram::from_exe_path(PathBuf::from(path)).expect("exe path")
                 })
                 .collect();
-            self.inner
-                .set_foreground_processes(Some(ForegroundProcessSet { programs }));
+            settings::set_foreground_processes(
+                &mut self.inner.protocol,
+                Some(ForegroundProcessSet { programs }),
+            );
         }
 
         fn set_macro_permissions(
             &mut self,
             macros: ProgramAllowlist,
         ) {
-            self.inner
-                .set_feature_permissions(FeaturePermissions { macros });
+            settings::set_feature_permissions(
+                &mut self.inner.protocol,
+                FeaturePermissions { macros },
+            );
         }
     }
 
@@ -999,7 +1016,6 @@ mod tests {
     trait ViewTestExt {
         fn total_rows(&self) -> u32;
         fn status_line_visible(&self) -> bool;
-        fn status_line_row(&self) -> Option<&Row>;
         fn indicator_status_text(&self) -> Option<String>;
         fn visible_row(
             &self,
@@ -1038,14 +1054,6 @@ mod tests {
             &mut self,
             palette: ColorPalette,
         );
-        fn set_feature_permissions(
-            &mut self,
-            permissions: FeaturePermissions,
-        );
-        fn set_foreground_processes(
-            &mut self,
-            processes: Option<ForegroundProcessSet>,
-        );
         fn set_scrollback_policy(
             &mut self,
             limit: u32,
@@ -1057,28 +1065,24 @@ mod tests {
         );
     }
 
-    impl ViewTestExt for Terminal {
+    impl ViewTestExt for TestTerm {
         fn total_rows(&self) -> u32 {
-            view::total_rows(&self.active, &self.viewport)
+            view::total_rows(&self.inner.active, &self.inner.viewport)
         }
 
         fn status_line_visible(&self) -> bool {
-            view::status_line_visible(&self.active)
-        }
-
-        fn status_line_row(&self) -> Option<&Row> {
-            view::status_line_row(&self.active)
+            view::status_line_visible(&self.inner.active)
         }
 
         fn indicator_status_text(&self) -> Option<String> {
-            view::indicator_status_text(&self.metadata, &self.active)
+            view::indicator_status_text(&self.inner.metadata, &self.inner.active)
         }
 
         fn visible_row(
             &self,
             row: u32,
         ) -> &Row {
-            view::visible_row(&self.active, &self.viewport, row)
+            view::visible_row(&self.inner.active, &self.inner.viewport, row)
         }
 
         fn hyperlink_at(
@@ -1086,46 +1090,57 @@ mod tests {
             row: u32,
             col: u32,
         ) -> Option<&str> {
-            view::hyperlink_at(&self.active, &self.viewport, &self.hyperlinks, row, col)
+            view::hyperlink_at(
+                &self.inner.active,
+                &self.inner.viewport,
+                &self.inner.hyperlinks,
+                row,
+                col,
+            )
         }
 
         fn scroll_to_prev_prompt(&mut self) {
-            let viewport = self.viewport;
-            view::scroll_to_prev_prompt(&mut self.active, &viewport)
+            let viewport = self.inner.viewport;
+            view::scroll_to_prev_prompt(&mut self.inner.active, &viewport)
         }
 
         fn scroll_to_next_prompt(&mut self) {
-            let viewport = self.viewport;
-            view::scroll_to_next_prompt(&mut self.active, &viewport)
+            let viewport = self.inner.viewport;
+            view::scroll_to_next_prompt(&mut self.inner.active, &viewport)
         }
 
         fn is_synchronized_update_active(&self) -> bool {
-            host::synchronized_update_active(self.modes.synchronized_update_since)
+            host::synchronized_update_active(self.inner.modes.synchronized_update_since)
         }
 
         fn take_bell_pending(&mut self) -> bool {
-            host::take_bell_pending(&mut self.output)
+            std::mem::replace(&mut self.effects.bell, false)
         }
 
         fn report_focus_change(
             &mut self,
             focused: bool,
         ) {
-            let c1_mode = self.modes.c1_mode;
-            let focus_reporting = self.modes.focus_reporting;
-            host::report_focus_change(&mut self.output, c1_mode, focus_reporting, focused)
+            let c1_mode = self.inner.modes.c1_mode;
+            let focus_reporting = self.inner.modes.focus_reporting;
+            host::report_focus_change(
+                &mut self.effects.host_bytes,
+                c1_mode,
+                focus_reporting,
+                focused,
+            )
         }
 
         fn take_pending_output(&mut self) -> Vec<u8> {
-            host::take_pending_output(&mut self.output)
+            std::mem::take(&mut self.effects.host_bytes)
         }
 
         fn open_search(&mut self) {
-            selection::open_search(&mut self.search)
+            selection::open_search(&mut self.inner.search)
         }
 
         fn search_active(&self) -> bool {
-            selection::search_active(&self.search)
+            selection::search_active(&self.inner.search)
         }
 
         fn mouse_report(
@@ -1136,11 +1151,11 @@ mod tests {
             row: u32,
             mods: MouseModifiers,
         ) -> bool {
-            let c1_mode = self.modes.c1_mode;
-            let mouse_tracking = self.modes.mouse_tracking;
-            let mouse_encoding = self.modes.mouse_encoding;
+            let c1_mode = self.inner.modes.c1_mode;
+            let mouse_tracking = self.inner.modes.mouse_tracking;
+            let mouse_encoding = self.inner.modes.mouse_encoding;
             host::mouse_report(
-                &mut self.output,
+                &mut self.effects.host_bytes,
                 c1_mode,
                 mouse_tracking,
                 mouse_encoding,
@@ -1153,14 +1168,14 @@ mod tests {
         }
 
         fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
-            host::take_pending_host_resize(&mut self.output)
+            self.effects.resize_request.take()
         }
 
         fn set_default_cursor_style(
             &mut self,
             style: CursorStyle,
         ) {
-            settings::set_default_cursor_style(&mut self.cursor_style, style)
+            settings::set_default_cursor_style(&mut self.inner.cursor_style, style)
         }
 
         fn set_palette(
@@ -1174,7 +1189,7 @@ mod tests {
                 base_palette,
                 dec_color,
                 ..
-            } = self;
+            } = &mut self.inner;
             settings::set_palette(
                 active,
                 stash,
@@ -1183,20 +1198,6 @@ mod tests {
                 dec_color,
                 palette,
             )
-        }
-
-        fn set_feature_permissions(
-            &mut self,
-            permissions: FeaturePermissions,
-        ) {
-            settings::set_feature_permissions(&mut self.protocol, permissions)
-        }
-
-        fn set_foreground_processes(
-            &mut self,
-            processes: Option<ForegroundProcessSet>,
-        ) {
-            settings::set_foreground_processes(&mut self.protocol, processes)
         }
 
         fn set_scrollback_policy(
@@ -1210,7 +1211,7 @@ mod tests {
                 viewport,
                 strict_altscreen_scrollback: strict_flag,
                 ..
-            } = self;
+            } = &mut self.inner;
             settings::set_scrollback_policy(
                 active,
                 stash,
@@ -1232,197 +1233,7 @@ mod tests {
                 palette,
                 default_status_display,
                 ..
-            } = self;
-            settings::set_default_status_display(
-                active,
-                stash,
-                viewport,
-                palette,
-                default_status_display,
-                status_display,
-            )
-        }
-    }
-
-    impl<T> ViewTestExt for T
-    where
-        T: std::ops::Deref<Target = Terminal> + std::ops::DerefMut<Target = Terminal>,
-    {
-        fn total_rows(&self) -> u32 {
-            view::total_rows(&self.active, &self.viewport)
-        }
-
-        fn status_line_visible(&self) -> bool {
-            view::status_line_visible(&self.active)
-        }
-
-        fn status_line_row(&self) -> Option<&Row> {
-            view::status_line_row(&self.active)
-        }
-
-        fn indicator_status_text(&self) -> Option<String> {
-            view::indicator_status_text(&self.metadata, &self.active)
-        }
-
-        fn visible_row(
-            &self,
-            row: u32,
-        ) -> &Row {
-            view::visible_row(&self.active, &self.viewport, row)
-        }
-
-        fn hyperlink_at(
-            &self,
-            row: u32,
-            col: u32,
-        ) -> Option<&str> {
-            view::hyperlink_at(&self.active, &self.viewport, &self.hyperlinks, row, col)
-        }
-
-        fn scroll_to_prev_prompt(&mut self) {
-            let viewport = self.viewport;
-            view::scroll_to_prev_prompt(&mut self.active, &viewport)
-        }
-
-        fn scroll_to_next_prompt(&mut self) {
-            let viewport = self.viewport;
-            view::scroll_to_next_prompt(&mut self.active, &viewport)
-        }
-
-        fn is_synchronized_update_active(&self) -> bool {
-            host::synchronized_update_active(self.modes.synchronized_update_since)
-        }
-
-        fn take_bell_pending(&mut self) -> bool {
-            host::take_bell_pending(&mut self.output)
-        }
-
-        fn report_focus_change(
-            &mut self,
-            focused: bool,
-        ) {
-            let c1_mode = self.modes.c1_mode;
-            let focus_reporting = self.modes.focus_reporting;
-            host::report_focus_change(&mut self.output, c1_mode, focus_reporting, focused)
-        }
-
-        fn take_pending_output(&mut self) -> Vec<u8> {
-            host::take_pending_output(&mut self.output)
-        }
-
-        fn open_search(&mut self) {
-            selection::open_search(&mut self.search)
-        }
-
-        fn search_active(&self) -> bool {
-            selection::search_active(&self.search)
-        }
-
-        fn mouse_report(
-            &mut self,
-            kind: MouseEventKind,
-            button: MouseButton,
-            col: u32,
-            row: u32,
-            mods: MouseModifiers,
-        ) -> bool {
-            let c1_mode = self.modes.c1_mode;
-            let mouse_tracking = self.modes.mouse_tracking;
-            let mouse_encoding = self.modes.mouse_encoding;
-            host::mouse_report(
-                &mut self.output,
-                c1_mode,
-                mouse_tracking,
-                mouse_encoding,
-                kind,
-                button,
-                col,
-                row,
-                mods,
-            )
-        }
-
-        fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
-            host::take_pending_host_resize(&mut self.output)
-        }
-
-        fn set_default_cursor_style(
-            &mut self,
-            style: CursorStyle,
-        ) {
-            settings::set_default_cursor_style(&mut self.cursor_style, style)
-        }
-
-        fn set_palette(
-            &mut self,
-            palette: ColorPalette,
-        ) {
-            let Terminal {
-                active,
-                stash,
-                palette: current_palette,
-                base_palette,
-                dec_color,
-                ..
-            } = &mut **self;
-            settings::set_palette(
-                active,
-                stash,
-                current_palette,
-                base_palette,
-                dec_color,
-                palette,
-            )
-        }
-
-        fn set_feature_permissions(
-            &mut self,
-            permissions: FeaturePermissions,
-        ) {
-            settings::set_feature_permissions(&mut self.protocol, permissions)
-        }
-
-        fn set_foreground_processes(
-            &mut self,
-            processes: Option<ForegroundProcessSet>,
-        ) {
-            settings::set_foreground_processes(&mut self.protocol, processes)
-        }
-
-        fn set_scrollback_policy(
-            &mut self,
-            limit: u32,
-            strict_altscreen_scrollback: bool,
-        ) {
-            let Terminal {
-                active,
-                stash,
-                viewport,
-                strict_altscreen_scrollback: strict_flag,
-                ..
-            } = &mut **self;
-            settings::set_scrollback_policy(
-                active,
-                stash,
-                viewport,
-                strict_flag,
-                limit,
-                strict_altscreen_scrollback,
-            )
-        }
-
-        fn set_default_status_display(
-            &mut self,
-            status_display: StatusDisplayKind,
-        ) {
-            let Terminal {
-                active,
-                stash,
-                viewport,
-                palette,
-                default_status_display,
-                ..
-            } = &mut **self;
+            } = &mut self.inner;
             settings::set_default_status_display(
                 active,
                 stash,
@@ -1437,7 +1248,7 @@ mod tests {
     fn visible_text(term: &Terminal) -> String {
         let mut s = String::new();
         for r in 0..term.viewport.rows {
-            let row = term.visible_row(r);
+            let row = view::visible_row(&term.active, &term.viewport, r);
             for cell in &row.cells {
                 s.push_str(cell);
             }
@@ -1453,7 +1264,7 @@ mod tests {
     }
 
     fn status_line_text(term: &Terminal) -> Option<String> {
-        term.status_line_row().map(|row| row.cells.concat())
+        view::status_line_row(&term.active).map(|row| row.cells.concat())
     }
 
     #[test]
@@ -1721,7 +1532,7 @@ mod tests {
     fn paste_default_is_raw() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         paste(
-            &mut term.inner.output.pending_output,
+            &mut term.effects.host_bytes,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "hello\n",
@@ -1735,7 +1546,7 @@ mod tests {
         term.process(b"\x1b[?2004h");
         assert!(term.modes.bracketed_paste);
         paste(
-            &mut term.inner.output.pending_output,
+            &mut term.effects.host_bytes,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "hello\n",
@@ -1748,7 +1559,7 @@ mod tests {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h\x1b G");
         paste(
-            &mut term.inner.output.pending_output,
+            &mut term.effects.host_bytes,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "hello\n",
@@ -1763,7 +1574,7 @@ mod tests {
         term.process(b"\x1b[?2004l");
         assert!(!term.modes.bracketed_paste);
         paste(
-            &mut term.inner.output.pending_output,
+            &mut term.effects.host_bytes,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "hi",
@@ -1778,7 +1589,7 @@ mod tests {
         // The clipboard tries to break out of the bracket — the injected
         // `\x1b[201~` is stripped and everything else comes through.
         paste(
-            &mut term.inner.output.pending_output,
+            &mut term.effects.host_bytes,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "evil\x1b[201~injection",
@@ -1958,7 +1769,7 @@ mod tests {
         term.clipboard.set(ClipboardKind::Clipboard, "hello");
         paste_from_clipboard(
             &mut term.inner.clipboard,
-            &mut term.inner.output.pending_output,
+            &mut term.effects.host_bytes,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             ClipboardKind::Clipboard,
@@ -1972,7 +1783,7 @@ mod tests {
         term.clipboard = Clipboard::in_memory();
         paste_from_clipboard(
             &mut term.inner.clipboard,
-            &mut term.inner.output.pending_output,
+            &mut term.effects.host_bytes,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             ClipboardKind::Clipboard,
@@ -3284,11 +3095,11 @@ mod tests {
     fn decrqss_reports_page_geometry_settings() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[36*|\x1b[72t\x1b[132$|");
-        report::handle_decrqss(b"t", &mut term.inner);
+        report::handle_decrqss(b"t", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r72t\x1b\\");
-        report::handle_decrqss(b"*|", &mut term.inner);
+        report::handle_decrqss(b"*|", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r36*|\x1b\\");
-        report::handle_decrqss(b"$|", &mut term.inner);
+        report::handle_decrqss(b"$|", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r132$|\x1b\\");
     }
 
@@ -3296,18 +3107,18 @@ mod tests {
     fn decrqss_reports_status_and_attr_change_state() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[2$~\x1b[1$}\x1b[2*x");
-        report::handle_decrqss(b"$~", &mut term.inner);
+        report::handle_decrqss(b"$~", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r2$~\x1b\\");
-        report::handle_decrqss(b"$}", &mut term.inner);
+        report::handle_decrqss(b"$}", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r1$}\x1b\\");
-        report::handle_decrqss(b"*x", &mut term.inner);
+        report::handle_decrqss(b"*x", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r2*x\x1b\\");
     }
 
     #[test]
     fn decrqss_reports_normal_text_color_assignment() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
-        report::handle_decrqss(b"1,|", &mut term.inner);
+        report::handle_decrqss(b"1,|", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r1;7;0,|\x1b\\");
     }
 
@@ -3315,7 +3126,7 @@ mod tests {
     fn decrqss_reports_window_frame_color_assignment() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[2;4;5,|");
-        report::handle_decrqss(b"2,|", &mut term.inner);
+        report::handle_decrqss(b"2,|", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r2;4;5,|\x1b\\");
     }
 
@@ -3323,7 +3134,7 @@ mod tests {
     fn decrqss_reports_alternate_text_color_assignment() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[13;4;5,}");
-        report::handle_decrqss(b"13,}", &mut term.inner);
+        report::handle_decrqss(b"13,}", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r13;4;5,}\x1b\\");
     }
 
@@ -3361,7 +3172,7 @@ mod tests {
         assert_eq!(term.active.grid.rows[0].fg[0], term.dec_color.table[4]);
         assert_eq!(term.active.grid.rows[0].bg[0], term.dec_color.table[7]);
 
-        report::handle_decrqss(b"1,|", &mut term.inner);
+        report::handle_decrqss(b"1,|", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r1;4;7,|\x1b\\");
     }
 
@@ -3593,11 +3404,11 @@ mod tests {
         let mut custom = term.inner.palette.clone();
         custom.bg = Srgb::new(24, 32, 48);
         custom.fg = Srgb::new(220, 210, 200);
-        term.inner.set_palette(custom.clone());
+        term.set_palette(custom.clone());
         term.process(b"\x1b[1;4;7,|\x1bP2$p4;2;8;9;10\x1b\\");
         term.process(b"\x1bc");
 
-        report::handle_decrqss(b"1,|", &mut term.inner);
+        report::handle_decrqss(b"1,|", &mut term.inner, &mut term.effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1bP1$r1;7;0,|\x1b\\");
         assert_eq!(term.palette.fg, custom.fg);
         assert_eq!(term.palette.bg, custom.bg);
@@ -3608,8 +3419,7 @@ mod tests {
     #[test]
     fn status_line_demo_ris_round_trip_keeps_visible_rows_in_bounds() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
-        term.inner
-            .set_default_status_display(StatusDisplayKind::Indicator);
+        term.set_default_status_display(StatusDisplayKind::Indicator);
 
         term.process(b"\x1b[?1049h");
         term.process(b"\x1b[?1049l");
@@ -3629,7 +3439,7 @@ mod tests {
             term.inner.viewport.rows
         );
         for row in 0..term.inner.viewport.rows {
-            let _ = term.inner.visible_row(row);
+            let _ = view::visible_row(&term.inner.active, &term.inner.viewport, row);
         }
     }
 

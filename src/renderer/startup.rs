@@ -14,7 +14,6 @@ use softbuffer::Context;
 use softbuffer::Surface;
 use terminal41::CursorShape;
 use terminal41::LineAttr;
-use terminal41::host;
 use unicode_segmentation::UnicodeSegmentation;
 use winit::window::Window;
 
@@ -109,18 +108,16 @@ impl StartupPresenter {
             return;
         }
 
-        let (title, snap, pending) = {
-            let mut terminal = target.terminal.lock();
+        let (title, snap) = {
+            let terminal = target.terminal.lock();
             let title = terminal
                 .metadata
                 .current_title
                 .clone()
                 .unwrap_or_else(|| "Shell".to_string());
             let snap = snapshot_terminal(&terminal);
-            let pending = host::take_pending_output(&mut terminal.output);
-            (title, snap, pending)
+            (title, snap)
         };
-        target.writer.borrow_mut().write(&pending).ok();
 
         let mut buffer = match self.surface.buffer_mut() {
             Ok(buffer) => buffer,

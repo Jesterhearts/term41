@@ -7,8 +7,8 @@ use terminal41::ColorPalette;
 use terminal41::FeaturePermissions;
 use terminal41::LineAttr;
 use terminal41::Terminal;
+use terminal41::TerminalEffects;
 use terminal41::TerminalProcessor;
-use terminal41::host;
 use terminal41::view;
 
 // ---------------------------------------------------------------------------
@@ -18,6 +18,7 @@ use terminal41::view;
 struct VtTerm {
     terminal: Terminal,
     processor: TerminalProcessor,
+    effects: TerminalEffects,
 }
 
 impl VtTerm {
@@ -38,6 +39,7 @@ impl VtTerm {
                 ColorPalette::default(),
             ),
             processor: TerminalProcessor::new(),
+            effects: TerminalEffects::default(),
         }
     }
 
@@ -49,11 +51,12 @@ impl VtTerm {
         &mut self,
         data: &[u8],
     ) {
-        self.processor.process_bytes(&mut self.terminal, data);
+        let effects = self.processor.process_bytes(&mut self.terminal, data);
+        self.effects.extend(effects);
     }
 
     fn pending_output(&mut self) -> Vec<u8> {
-        host::take_pending_output(&mut self.terminal.output)
+        std::mem::take(&mut self.effects.host_bytes)
     }
 
     fn row_text(

@@ -10,8 +10,7 @@ pub(crate) fn run_terminal_thread(
     render_thread_handle: Arc<OnceLock<Thread>>,
     startup_redraw: Option<Box<dyn Fn() + Send + Sync>>,
     tee_read: Box<dyn Fn(&[u8]) + Send + Sync>,
-    output_ready: Box<dyn Fn() + Send + Sync>,
-    host_resize: Box<dyn Fn(u32, u32) + Send + Sync>,
+    deliver_effects: Box<dyn Fn(TerminalEffects) + Send + Sync>,
 ) {
     let mut processor = TerminalProcessor::new();
     let mut buf = [0u8; MAX_READ_CHUNK];
@@ -20,6 +19,7 @@ pub(crate) fn run_terminal_thread(
         pty_reader.clear_pending();
         let mut did_work = false;
         let mut hit_budget = false;
+        let mut batch_effects = TerminalEffects::default();
         let batch_start = std::time::Instant::now();
         loop {
             let n = pty_reader.read(&mut buf);
@@ -31,15 +31,12 @@ pub(crate) fn run_terminal_thread(
             trace!("Read {n} bytes from PTY, foreground processes: {foreground_processes:?}");
             tee_read(&buf[..n]);
 
-            let pending_host_resize = {
+            let effects = {
                 let mut terminal = terminal.lock();
                 settings::set_foreground_processes(&mut terminal.protocol, foreground_processes);
-                processor.process_bytes(&mut terminal, &buf[..n]);
-                host::take_pending_host_resize(&mut terminal.output)
+                processor.process_bytes(&mut terminal, &buf[..n])
             };
-            if let Some((cols, rows)) = pending_host_resize {
-                host_resize(cols, rows);
-            }
+            batch_effects.extend(effects);
             if terminal_batch_budget_exhausted(batch_start) {
                 hit_budget = true;
                 break;
@@ -49,8 +46,8 @@ pub(crate) fn run_terminal_thread(
         if did_work && let Some(request_redraw) = startup_redraw.as_ref() {
             request_redraw();
         }
-        if did_work {
-            output_ready();
+        if did_work && !batch_effects.is_empty() {
+            deliver_effects(batch_effects);
         }
         if did_work && let Some(thread) = render_thread_handle.get() {
             thread.unpark();
