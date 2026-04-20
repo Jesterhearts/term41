@@ -20,6 +20,7 @@ pub enum DemoId {
     Charset,
     Drcs,
     SixelLifecycle,
+    HyperlinkLifecycle,
     LineAttrs,
     Tabs,
     CursorMarginsEdit,
@@ -86,6 +87,13 @@ pub fn catalog() -> Vec<Demo> {
             detail: "Exercises whether sixel images survive the transitions they should and get \
                      dropped by the ones that are supposed to clear them.",
             id: DemoId::SixelLifecycle,
+        },
+        Demo {
+            title: "Hyperlink Lifecycle",
+            summary: "Opens OSC 8 links, then exercises clear, alt-screen, and reset cleanup.",
+            detail: "Exercises whether hyperlink spans survive the transitions they should and \
+                     get dropped when their line or screen is cleared.",
+            id: DemoId::HyperlinkLifecycle,
         },
         Demo {
             title: "DEC Line Attributes",
@@ -201,6 +209,7 @@ pub fn run_demo(
         DemoId::Charset => run_charset_demo(out),
         DemoId::Drcs => run_drcs_demo(out),
         DemoId::SixelLifecycle => run_sixel_lifecycle_demo(out),
+        DemoId::HyperlinkLifecycle => run_hyperlink_lifecycle_demo(out),
         DemoId::LineAttrs => run_line_attrs_demo(out),
         DemoId::Tabs => run_tabs_demo(out),
         DemoId::CursorMarginsEdit => run_cursor_margins_edit_demo(out),
@@ -507,6 +516,69 @@ fn run_sixel_lifecycle_demo(out: &mut impl Write) -> io::Result<()> {
     line(
         out,
         "RIS completed. The sixel should be gone and the terminal should be back in default state.",
+    )?;
+    out.flush()?;
+    Ok(())
+}
+
+fn run_hyperlink_lifecycle_demo(out: &mut impl Write) -> io::Result<()> {
+    heading(out, "Hyperlink Lifecycle")?;
+    line(
+        out,
+        "Opening an OSC 8 hyperlink span on the primary screen first.",
+    )?;
+    write!(out, "\x1b[4;4H\x1b]8;;https://example.com/primary\x07")?;
+    write!(out, "primary-screen link")?;
+    write!(out, "\x1b]8;;\x07")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Switching to the alternate screen. Returning should restore the primary-screen link.",
+    )?;
+    present_step(out)?;
+    write!(out, "\x1b[?1049h")?;
+    write!(out, "\x1b[2J\x1b[H")?;
+    write!(out, "\x1b]8;;https://example.com/alt\x07")?;
+    line(out, "alternate-screen link")?;
+    write!(out, "\x1b]8;;\x07")?;
+    line(
+        out,
+        "The primary-screen link should be hidden while the alt-screen link is visible.",
+    )?;
+    present_step(out)?;
+    write!(out, "\x1b[?1049l")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "EL 2 should clear the line and drop the hyperlink span on it.",
+    )?;
+    present_step(out)?;
+    write!(out, "\x1b[4;1H\x1b[2K")?;
+    line(
+        out,
+        "If EL 2 worked correctly, the earlier primary-screen hyperlink should now be gone.",
+    )?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Redrawing a link now so RIS can prove it also drops hyperlink state.",
+    )?;
+    write!(out, "\x1b[9;4H\x1b]8;;https://example.com/reset\x07")?;
+    write!(out, "reset-test link")?;
+    write!(out, "\x1b]8;;\x07")?;
+    present_step(out)?;
+    write!(out, "\x1bc")?;
+    heading(out, "Hyperlink Lifecycle")?;
+    line(
+        out,
+        "RIS completed. The hyperlink should be gone and the terminal should be back in default \
+         state.",
     )?;
     out.flush()?;
     Ok(())
