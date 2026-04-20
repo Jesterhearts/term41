@@ -399,10 +399,10 @@ fn normalized_drcs_script(script: &str) -> String {
 fn run_line_attrs_demo(out: &mut impl Write) -> io::Result<()> {
     heading(out, "DEC Line Attributes")?;
     line(out, "Single-width line")?;
-    write!(out, "\x1b#6Double-width line centered by the terminal")?;
-    write!(out, "\r\n\x1b#3Double-width and double-height top")?;
-    write!(out, "\r\n\x1b#4Double-width and double-height bottom")?;
-    write!(out, "\r\n\x1b#5Back to single width")?;
+    write!(out, "Double-width line centered by the terminal\x1b#6")?;
+    write!(out, "\r\nThis line should appear double-height\x1b#3")?;
+    write!(out, "\r\nThis line should appear double-height\x1b#4")?;
+    write!(out, "\r\nBack to single width\x1b#5")?;
     out.flush()?;
     Ok(())
 }
@@ -581,9 +581,9 @@ fn run_page_demo(
         "Creating page memory, writing to page 2, then copying back to page 1.",
     )?;
     write!(out, "\x1b[72t")?;
-    write!(out, "\x1b[2U\x1b[1;1HThis text is on page 2.")?;
-    write!(out, "\x1b[1V\x1b[1;1HBack on page 1.")?;
-    write!(out, "\x1b[1;1;1;18;2;3;1;1$v")?;
+    write!(out, "\x1b[2 P\x1b[6;1HThis text is on page 2.")?;
+    write!(out, "\x1b[1 P\x1b[8;1HBack on page 1.")?;
+    write!(out, "\x1b[6;1;6;18;2;10;1;1$v")?;
     blank(out)?;
     query_and_print(
         out,
