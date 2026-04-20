@@ -61,7 +61,7 @@ pub(crate) fn dispatch_hook(
     }
     if hook.action == 'q' && hook.intermediates.as_slice() == b"+" {
         let c1_mode = terminal.modes.c1_mode;
-        report::handle_xtgettcap(&hook.bytes, c1_mode, &mut terminal.pending_output);
+        report::handle_xtgettcap(&hook.bytes, c1_mode, &mut terminal.output.pending_output);
     } else if hook.action == 'q' && hook.intermediates.as_slice() == b"$" {
         report::handle_decrqss(&hook.bytes, terminal);
     } else if hook.action == 'q' && hook.intermediates.as_slice().is_empty() {
@@ -87,7 +87,7 @@ fn handle_dcs(
 ) {
     if action == 'q' && intermediates == b"+" {
         let c1_mode = terminal.modes.c1_mode;
-        report::handle_xtgettcap(payload, c1_mode, &mut terminal.pending_output);
+        report::handle_xtgettcap(payload, c1_mode, &mut terminal.output.pending_output);
     } else if action == 'q' && intermediates == b"$" {
         report::handle_decrqss(payload, terminal);
     } else if action == 'u' && intermediates == b"!" {

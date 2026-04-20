@@ -112,7 +112,7 @@ use crate::selection::search::SearchState;
 
 /// Per-prompt metadata recorded from OSC 133 B/C/D sequences. Keyed by
 /// the absolute row of the prompt (`A` mark) in
-/// [`Terminal::command_metas`]. Enables command selection, rerun, text
+/// [`TerminalMetadata::command_metas`]. Enables command selection, rerun, text
 /// extraction, and duration display in the gutter popup.
 #[derive(Debug)]
 pub struct CommandMeta {
@@ -140,6 +140,37 @@ impl CommandMeta {
             finished_at: None,
         }
     }
+}
+
+/// Terminal-produced side effects that the host drains or reacts to after
+/// applying escape-sequence actions.
+#[derive(Debug, Default)]
+pub struct TerminalOutput {
+    /// Bytes produced by the terminal itself that must be written back to
+    /// the PTY — responses to queries like OSC 52 `?` reads.
+    pub pending_output: Vec<u8>,
+    /// Host-driven window geometry request produced by VT controls such as
+    /// DECSNLS / DECSCPP. Drained by the host after each processing batch.
+    pub pending_host_resize: Option<(u32, u32)>,
+    /// Latched true whenever at least one BEL arrived since the last host
+    /// drain. Kept private so `take_bell_pending()` stays the only drain path.
+    bell_pending: bool,
+}
+
+/// Shell/app metadata derived from OSC and window-title sequences.
+#[derive(Debug, Default)]
+pub struct TerminalMetadata {
+    /// Last directory reported by the foreground shell via OSC 7.
+    pub current_directory: Option<PathBuf>,
+    /// Title last reported by the foreground app via OSC 0 / OSC 2.
+    pub current_title: Option<String>,
+    /// xterm title stack. CSI 22;0 t pushes, CSI 23;0 t pops.
+    pub title_stack: Vec<Option<String>>,
+    /// Absolute row index of the most recent OSC 133 `A` (prompt-start) mark.
+    pub current_prompt_row: Option<u64>,
+    /// Per-prompt metadata (command column, output row, timing) keyed by the
+    /// absolute row of the prompt's `A` mark.
+    pub command_metas: HashMap<u64, CommandMeta>,
 }
 
 /// State machine for absorbing the two parameter bytes of a VT52
@@ -269,11 +300,8 @@ pub struct Terminal {
     /// copy/paste paths.
     pub clipboard: Clipboard,
 
-    /// Bytes produced by the terminal itself that must be written back to
-    /// the PTY — responses to queries like OSC 52 `?` reads. Drained by the
-    /// event loop after each [`process`](Self::process) call.
-    pub pending_output: Vec<u8>,
-    pending_host_resize: Option<(u32, u32)>,
+    /// Terminal-produced side effects that the host drains or reacts to.
+    pub output: TerminalOutput,
 
     /// Terminal-level modes toggled by escape sequences (DECSET/DECRST,
     /// mode 2004, mode 2026, etc.) and reset together by RIS.
@@ -288,12 +316,6 @@ pub struct Terminal {
     /// instead of writing them to the PTY. Lives on the terminal so both
     /// the match renderer and the scroll-to-match navigator can touch it.
     pub search: SearchState,
-
-    /// Last directory reported by the foreground shell via OSC 7. None when
-    /// no shell has reported, or after a remote-session shell sent an empty
-    /// payload to disclaim its previous report. Useful for "open new window
-    /// here" and any title-bar surfacing of the current directory.
-    pub current_directory: Option<PathBuf>,
 
     /// Interns OSC 8 hyperlink targets so each cell only has to carry a
     /// 4-byte id. Lives on the terminal (not per-screen) so a link active
@@ -310,43 +332,11 @@ pub struct Terminal {
     /// blink phase itself is owned by the renderer.
     pub cursor_style: CursorStyle,
 
-    /// Title last reported by the foreground app via OSC 0 / OSC 2.
-    /// `None` means no app has set a title (or one explicitly cleared
-    /// it); the host applies its default ("term41") in that case.
-    pub current_title: Option<String>,
-
-    /// xterm title stack. CSI 22;0 t pushes, CSI 23;0 t pops. Capped at
-    /// 16 entries to bound memory from a misbehaving app.
-    title_stack: Vec<Option<String>>,
-
     /// Saved private mode states for XTSAVE/XTRESTORE (CSI ? Ps s / r).
     saved_private_modes: HashMap<u16, bool>,
 
-    /// Latched true whenever the parser sees a BEL byte (0x07). The host
-    /// drains this each frame via [`Self::take_bell_pending`] so it can
-    /// flash the screen, ping the compositor, etc. Latched (not
-    /// counted) because reacting once per frame is the right grain — a
-    /// noisy app that bells in a tight loop should still get one
-    /// per-frame response, not a queue that backs up forever.
-    bell_pending: bool,
-
-    /// Absolute row index of the most recent OSC 133 `A` (prompt-start)
-    /// mark. An OSC 133 `D` resolves to this row and stamps its exit code
-    /// there, so the success/failure indicator sits next to the prompt
-    /// line — the anchor the user scrolls to — rather than the end of the
-    /// command's output. `None` before any shell-integration prompt has
-    /// been seen.
-    ///
-    /// Lives on `Terminal` rather than per-`Screen` because a prompt is
-    /// meaningful only on the primary screen; an app on the alt screen
-    /// that emits OSC 133 would still write into this slot, but the marks
-    /// land on alt's grid and disappear with the alt-screen teardown.
-    current_prompt_row: Option<u64>,
-
-    /// Per-prompt metadata (command column, output row, timing). Keyed by
-    /// the absolute row of the prompt's `A` mark. Stale entries are pruned
-    /// when their rows fall off the front of scrollback.
-    pub command_metas: HashMap<u64, CommandMeta>,
+    /// Shell/app metadata surfaced to the host and prompt-selection tools.
+    pub metadata: TerminalMetadata,
 
     /// Kitty graphics protocol image store. Images transmitted via `a=t`
     /// live here until placed or deleted.
@@ -428,21 +418,15 @@ impl Terminal {
             cell_height,
             next_image_id: 0,
             clipboard: Clipboard::new(),
-            pending_output: Vec::new(),
-            pending_host_resize: None,
+            output: TerminalOutput::default(),
             modes: TerminalModes::new(),
             selection: None,
             search: SearchState::new(),
-            current_directory: None,
             hyperlinks: HyperlinkRegistry::new(),
             kitty_keyboard: KittyKeyboardState::new(),
             cursor_style: CursorStyle::default(),
-            current_title: None,
-            title_stack: Vec::new(),
             saved_private_modes: HashMap::new(),
-            bell_pending: false,
-            current_prompt_row: None,
-            command_metas: HashMap::new(),
+            metadata: TerminalMetadata::default(),
             kitty_images: image41::kitty::KittyImageStore::new(),
             kitty_chunked: image41::kitty::ChunkedTransmission::new(),
             iterm_chunked: image41::iterm::ChunkedTransmission::new(),
@@ -478,7 +462,7 @@ impl Terminal {
     /// has arrived since the last call, leaving the flag cleared so the
     /// next frame starts fresh.
     pub fn take_bell_pending(&mut self) -> bool {
-        std::mem::replace(&mut self.bell_pending, false)
+        std::mem::replace(&mut self.output.bell_pending, false)
     }
 
     /// Override the default cursor style. Called once at startup so the
@@ -650,7 +634,7 @@ impl Terminal {
         focused: bool,
     ) {
         lifecycle_ops::report_focus_change(
-            &mut self.pending_output,
+            &mut self.output.pending_output,
             self.modes.c1_mode,
             self.modes.focus_reporting,
             focused,
@@ -677,9 +661,9 @@ impl Terminal {
         (self.active.status_display == StatusDisplayKind::Indicator)
             .then(|| {
                 prompt::format_indicator_status(
-                    self.current_directory.as_deref(),
-                    self.current_prompt_row,
-                    &self.command_metas,
+                    self.metadata.current_directory.as_deref(),
+                    self.metadata.current_prompt_row,
+                    &self.metadata.command_metas,
                     &self.active,
                 )
             })
@@ -707,7 +691,7 @@ impl Terminal {
     /// Drain bytes the terminal itself has queued for the PTY (e.g. OSC 52
     /// query responses). Called by the event loop after each `process` call.
     pub fn take_pending_output(&mut self) -> Vec<u8> {
-        lifecycle_ops::take_pending_output(&mut self.pending_output)
+        lifecycle_ops::take_pending_output(&mut self.output.pending_output)
     }
 
     /// Returns true if the app has requested any mouse tracking mode.
@@ -745,7 +729,7 @@ impl Terminal {
         mods: MouseModifiers,
     ) -> bool {
         lifecycle_ops::mouse_report(
-            &mut self.pending_output,
+            &mut self.output.pending_output,
             self.modes.c1_mode,
             self.modes.mouse_tracking,
             self.modes.mouse_encoding,
@@ -852,7 +836,7 @@ impl Terminal {
     }
 
     pub fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
-        lifecycle_ops::take_pending_host_resize(&mut self.pending_host_resize)
+        lifecycle_ops::take_pending_host_resize(&mut self.output.pending_host_resize)
     }
 
     /// Apply a single parsed VTE action to the terminal state. Called by the
@@ -989,7 +973,7 @@ impl Terminal {
                     execute_status(
                         &mut self.active,
                         byte,
-                        &mut self.bell_pending,
+                        &mut self.output.bell_pending,
                         self.modes.newline_mode,
                     );
                 } else {
@@ -998,7 +982,7 @@ impl Terminal {
                         &mut self.active,
                         &view,
                         byte,
-                        &mut self.bell_pending,
+                        &mut self.output.bell_pending,
                         self.modes.newline_mode,
                     );
                 }
@@ -1068,12 +1052,15 @@ impl Terminal {
                         1 => {
                             let payload = report::dectsr_payload(&self.active);
                             conformance::push_dcs_prefix(
-                                &mut self.pending_output,
+                                &mut self.output.pending_output,
                                 self.modes.c1_mode,
                             );
-                            self.pending_output.extend_from_slice(b"1$s");
-                            self.pending_output.extend_from_slice(&payload);
-                            conformance::push_st(&mut self.pending_output, self.modes.c1_mode);
+                            self.output.pending_output.extend_from_slice(b"1$s");
+                            self.output.pending_output.extend_from_slice(&payload);
+                            conformance::push_st(
+                                &mut self.output.pending_output,
+                                self.modes.c1_mode,
+                            );
                         }
                         2 => {
                             let space = groups
@@ -1083,7 +1070,7 @@ impl Terminal {
                             if let Some(space) = DecColorSpace::from_param(Some(space)) {
                                 let report = report_color_table(&self.dec_color, space);
                                 conformance::write_dcs(
-                                    &mut self.pending_output,
+                                    &mut self.output.pending_output,
                                     self.modes.c1_mode,
                                     format_args!("2$s{report}"),
                                 );
@@ -1101,19 +1088,19 @@ impl Terminal {
                     on_alt_screen: &mut self.on_alt_screen,
                     modes: &mut self.modes,
                     kitty_keyboard: &mut self.kitty_keyboard,
-                    pending_output: &mut self.pending_output,
-                    pending_resize: &mut self.pending_host_resize,
+                    pending_output: &mut self.output.pending_output,
+                    pending_resize: &mut self.output.pending_host_resize,
                     cursor_style: &mut self.cursor_style,
                     cell_width: self.cell_width,
                     cell_height: self.cell_height,
                     palette: &mut self.palette,
                     base_palette: &self.base_palette,
                     default_status_display: &mut self.default_status_display,
-                    title_stack: &mut self.title_stack,
-                    current_title: &mut self.current_title,
+                    title_stack: &mut self.metadata.title_stack,
+                    current_title: &mut self.metadata.current_title,
                     saved_modes: &mut self.saved_private_modes,
-                    current_prompt_row: &mut self.current_prompt_row,
-                    bell_pending: &mut self.bell_pending,
+                    current_prompt_row: &mut self.metadata.current_prompt_row,
+                    bell_pending: &mut self.output.bell_pending,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
                     macros: &mut self.macros,
                     dec_color: &mut self.dec_color,
@@ -1135,15 +1122,15 @@ impl Terminal {
                     modes: &mut self.modes,
                     kitty_keyboard: &mut self.kitty_keyboard,
                     cursor_style: &mut self.cursor_style,
-                    current_title: &mut self.current_title,
-                    title_stack: &mut self.title_stack,
+                    current_title: &mut self.metadata.current_title,
+                    title_stack: &mut self.metadata.title_stack,
                     saved_modes: &mut self.saved_private_modes,
-                    current_prompt_row: &mut self.current_prompt_row,
-                    bell_pending: &mut self.bell_pending,
+                    current_prompt_row: &mut self.metadata.current_prompt_row,
+                    bell_pending: &mut self.output.bell_pending,
                     palette: &mut self.palette,
                     base_palette: &self.base_palette,
                     default_status_display: &mut self.default_status_display,
-                    pending_output: &mut self.pending_output,
+                    pending_output: &mut self.output.pending_output,
                     vt52_cursor_addr: &mut self.vt52_cursor_addr,
                     macros: &mut self.macros,
                     dec_color: &mut self.dec_color,
@@ -1171,15 +1158,15 @@ impl Terminal {
                 } else {
                     let mut ctx = OscContext {
                         clipboard: &mut self.clipboard,
-                        pending_output: &mut self.pending_output,
+                        pending_output: &mut self.output.pending_output,
                         c1_mode: self.modes.c1_mode,
-                        current_directory: &mut self.current_directory,
+                        current_directory: &mut self.metadata.current_directory,
                         hyperlinks: &mut self.hyperlinks,
                         active_screen: &mut self.active,
                         viewport: &self.viewport,
-                        current_title: &mut self.current_title,
-                        current_prompt_row: &mut self.current_prompt_row,
-                        command_metas: &mut self.command_metas,
+                        current_title: &mut self.metadata.current_title,
+                        current_prompt_row: &mut self.metadata.current_prompt_row,
+                        command_metas: &mut self.metadata.command_metas,
                         palette: &self.palette,
                         cell_width: self.cell_width,
                         cell_height: self.cell_height,
@@ -1198,7 +1185,7 @@ impl Terminal {
                     self.cell_height,
                     self.cell_width,
                     self.modes.c1_mode,
-                    &mut self.pending_output,
+                    &mut self.output.pending_output,
                 );
             }
             // Hook/Put/Unhook are accumulated by the terminal thread and
@@ -1263,7 +1250,11 @@ impl Terminal {
         &mut self,
         popped_before: usize,
     ) {
-        lifecycle_ops::track_scroll(&mut self.active, &mut self.command_metas, popped_before)
+        lifecycle_ops::track_scroll(
+            &mut self.active,
+            &mut self.metadata.command_metas,
+            popped_before,
+        )
     }
 }
 
@@ -1496,7 +1487,7 @@ mod tests {
     #[test]
     fn indicator_status_formats_path_and_running_command() {
         let mut term = TestTerm::new(16, 4, 100, 16, 8);
-        term.current_directory = Some(PathBuf::from("/tmp/project"));
+        term.metadata.current_directory = Some(PathBuf::from("/tmp/project"));
         term.process(b"\x1b[1$~");
         term.process(b"\x1b]133;A\x07");
         term.process(b"$ ");
@@ -1513,7 +1504,7 @@ mod tests {
     #[test]
     fn indicator_status_omits_command_when_not_running() {
         let mut term = TestTerm::new(16, 4, 100, 16, 8);
-        term.current_directory = Some(PathBuf::from("/tmp/project"));
+        term.metadata.current_directory = Some(PathBuf::from("/tmp/project"));
         term.process(b"\x1b[1$~");
         term.process(b"\x1b]133;A\x07");
         term.process(b"$ ");
@@ -1758,7 +1749,7 @@ mod tests {
     fn paste_default_is_raw() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         paste(
-            &mut term.inner.pending_output,
+            &mut term.inner.output.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "hello\n",
@@ -1772,7 +1763,7 @@ mod tests {
         term.process(b"\x1b[?2004h");
         assert!(term.modes.bracketed_paste);
         paste(
-            &mut term.inner.pending_output,
+            &mut term.inner.output.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "hello\n",
@@ -1785,7 +1776,7 @@ mod tests {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h\x1b G");
         paste(
-            &mut term.inner.pending_output,
+            &mut term.inner.output.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "hello\n",
@@ -1800,7 +1791,7 @@ mod tests {
         term.process(b"\x1b[?2004l");
         assert!(!term.modes.bracketed_paste);
         paste(
-            &mut term.inner.pending_output,
+            &mut term.inner.output.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "hi",
@@ -1815,7 +1806,7 @@ mod tests {
         // The clipboard tries to break out of the bracket — the injected
         // `\x1b[201~` is stripped and everything else comes through.
         paste(
-            &mut term.inner.pending_output,
+            &mut term.inner.output.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             "evil\x1b[201~injection",
@@ -1995,7 +1986,7 @@ mod tests {
         term.clipboard.set(ClipboardKind::Clipboard, "hello");
         paste_from_clipboard(
             &mut term.inner.clipboard,
-            &mut term.inner.pending_output,
+            &mut term.inner.output.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             ClipboardKind::Clipboard,
@@ -2009,7 +2000,7 @@ mod tests {
         term.clipboard = Clipboard::in_memory();
         paste_from_clipboard(
             &mut term.inner.clipboard,
-            &mut term.inner.pending_output,
+            &mut term.inner.output.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
             ClipboardKind::Clipboard,
@@ -2509,7 +2500,7 @@ mod tests {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b]7;file://localhost/tmp/work\x1b\\");
         assert_eq!(
-            term.current_directory.as_deref(),
+            term.metadata.current_directory.as_deref(),
             Some(std::path::Path::new("/tmp/work"))
         );
     }
@@ -2643,14 +2634,14 @@ mod tests {
     fn osc_2_updates_terminal_title() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b]2;build ok\x1b\\");
-        assert_eq!(term.current_title.as_deref(), Some("build ok"));
+        assert_eq!(term.metadata.current_title.as_deref(), Some("build ok"));
     }
 
     #[test]
     fn osc_0_updates_terminal_title() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b]0;hi\x1b\\");
-        assert_eq!(term.current_title.as_deref(), Some("hi"));
+        assert_eq!(term.metadata.current_title.as_deref(), Some("hi"));
     }
 
     // ---- Bell ----

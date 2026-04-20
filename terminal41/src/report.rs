@@ -7,7 +7,7 @@ pub(crate) fn handle_decrqss(
     selector: &[u8],
     terminal: &mut Terminal,
 ) {
-    let out = &mut terminal.pending_output;
+    let out = &mut terminal.output.pending_output;
     let c1_mode = terminal.modes.c1_mode;
 
     match selector {

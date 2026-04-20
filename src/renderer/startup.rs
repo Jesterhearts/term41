@@ -111,6 +111,7 @@ impl StartupPresenter {
         let (title, snap, pending) = {
             let mut terminal = target.terminal.lock().unwrap();
             let title = terminal
+                .metadata
                 .current_title
                 .clone()
                 .unwrap_or_else(|| "Shell".to_string());

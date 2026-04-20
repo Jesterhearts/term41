@@ -540,7 +540,7 @@ impl WindowHost {
 
                 paste_from_clipboard(
                     &mut terminal.clipboard,
-                    &mut terminal.pending_output,
+                    &mut terminal.output.pending_output,
                     terminal.modes.c1_mode,
                     terminal.modes.bracketed_paste,
                     ClipboardKind::Clipboard,
@@ -562,7 +562,13 @@ impl WindowHost {
                 true
             }
             Action::OpenNewWindow => {
-                let cwd = target.terminal.lock().unwrap().current_directory.clone();
+                let cwd = target
+                    .terminal
+                    .lock()
+                    .unwrap()
+                    .metadata
+                    .current_directory
+                    .clone();
                 spawn_new_window(cwd);
                 true
             }
@@ -1040,7 +1046,7 @@ impl WindowHost {
                         terminal.reset_viewport();
                         paste_from_clipboard(
                             &mut terminal.clipboard,
-                            &mut terminal.pending_output,
+                            &mut terminal.output.pending_output,
                             terminal.modes.c1_mode,
                             terminal.modes.bracketed_paste,
                             ClipboardKind::Clipboard,
@@ -1180,11 +1186,11 @@ impl WindowHost {
         select_command_at(
             &mut terminal.selection,
             prompt_abs,
-            &terminal.command_metas,
+            &terminal.metadata.command_metas,
             &terminal.active,
         );
         let duration_text =
-            command_duration_at(prompt_abs, &terminal.command_metas).map(format_duration);
+            command_duration_at(prompt_abs, &terminal.metadata.command_metas).map(format_duration);
         drop(guard);
         self.update_gutter_popup(Some(renderer::GutterPopup {
             prompt_abs_row: prompt_abs,
@@ -1212,14 +1218,14 @@ impl WindowHost {
                 let terminal = &mut *guard;
                 if let Some(cmd) = command_text_at(
                     popup.prompt_abs_row,
-                    &terminal.command_metas,
+                    &terminal.metadata.command_metas,
                     &terminal.active,
                 ) {
                     let cmd = cmd.trim().to_owned();
                     terminal.selection = None;
                     terminal.reset_viewport();
                     paste(
-                        &mut terminal.pending_output,
+                        &mut terminal.output.pending_output,
                         terminal.modes.c1_mode,
                         terminal.modes.bracketed_paste,
                         &format!("{cmd}\r"),
@@ -1233,7 +1239,7 @@ impl WindowHost {
                 let terminal = &mut *guard;
                 if let Some(text) = command_text_at(
                     popup.prompt_abs_row,
-                    &terminal.command_metas,
+                    &terminal.metadata.command_metas,
                     &terminal.active,
                 ) {
                     copy_to_clipboard(&mut terminal.clipboard, text.trim());
@@ -1244,7 +1250,7 @@ impl WindowHost {
                 let mut terminal = target.terminal.lock().unwrap();
                 if let Some(text) = command_and_output_text_at(
                     popup.prompt_abs_row,
-                    &terminal.command_metas,
+                    &terminal.metadata.command_metas,
                     &terminal.active,
                 ) {
                     copy_to_clipboard(&mut terminal.clipboard, text.trim());
@@ -1255,7 +1261,7 @@ impl WindowHost {
                 let mut terminal = target.terminal.lock().unwrap();
                 if let Some(text) = output_text_at(
                     popup.prompt_abs_row,
-                    &terminal.command_metas,
+                    &terminal.metadata.command_metas,
                     &terminal.active,
                 ) {
                     copy_to_clipboard(&mut terminal.clipboard, text.trim());

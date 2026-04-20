@@ -534,12 +534,21 @@ fn decckm_tracked_by_screen() {
 fn title_push_pop() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b]2;Original\x1b\\"); // set title
-    assert_eq!(t.terminal.current_title.as_deref(), Some("Original"));
+    assert_eq!(
+        t.terminal.metadata.current_title.as_deref(),
+        Some("Original")
+    );
     t.process(b"\x1b[22;0t"); // push
     t.process(b"\x1b]2;Temporary\x1b\\"); // change
-    assert_eq!(t.terminal.current_title.as_deref(), Some("Temporary"));
+    assert_eq!(
+        t.terminal.metadata.current_title.as_deref(),
+        Some("Temporary")
+    );
     t.process(b"\x1b[23;0t"); // pop
-    assert_eq!(t.terminal.current_title.as_deref(), Some("Original"));
+    assert_eq!(
+        t.terminal.metadata.current_title.as_deref(),
+        Some("Original")
+    );
 }
 
 // ---------------------------------------------------------------------------

@@ -752,7 +752,12 @@ impl RenderHost {
         self.next_tab_id += 1;
 
         let cwd = if let Some(tab) = self.active_tab() {
-            tab.terminal.lock().unwrap().current_directory.clone()
+            tab.terminal
+                .lock()
+                .unwrap()
+                .metadata
+                .current_directory
+                .clone()
         } else {
             Default::default()
         };
@@ -1056,6 +1061,7 @@ impl RenderHost {
                         .terminal
                         .lock()
                         .unwrap()
+                        .metadata
                         .current_title
                         .clone()
                         .unwrap_or_else(|| "Shell".to_owned());
@@ -1127,7 +1133,7 @@ impl RenderHost {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let base = tab.terminal.lock().unwrap().current_title.clone();
+        let base = tab.terminal.lock().unwrap().metadata.current_title.clone();
         let want = if self.tabs.len() > 1 {
             let idx = self
                 .tabs
