@@ -561,7 +561,12 @@ impl Terminal {
         action: Action<'_>,
         effects: &mut TerminalEffects,
     ) -> dispatch::PendingApplication {
-        match dispatch::classify_action(&self.modes, &mut self.vt52_cursor_addr, action) {
+        match dispatch::classify_action(
+            &self.active,
+            &self.modes,
+            &mut self.vt52_cursor_addr,
+            action,
+        ) {
             TerminalAction::Ignore => dispatch::PendingApplication::None,
             TerminalAction::Basic(action) => {
                 dispatch::apply_basic_action(

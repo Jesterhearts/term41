@@ -122,6 +122,7 @@ pub(crate) enum PendingApplication {
 }
 
 pub(super) fn classify_action<'a>(
+    screen: &Screen,
     modes: &TerminalModes,
     vt52_cursor_addr: &mut Vt52CursorAddr,
     action: Action<'a>,
@@ -144,7 +145,13 @@ pub(super) fn classify_action<'a>(
             params,
             intermediates,
             action,
-        } => TerminalAction::Csi(classify_csi_action(params, intermediates, action)),
+        } => TerminalAction::Csi(classify_csi_action(
+            screen,
+            modes,
+            params,
+            intermediates,
+            action,
+        )),
         Action::EscDispatch {
             intermediates,
             byte,
@@ -652,6 +659,8 @@ fn classify_vt52_cursor_action<'a>(
 }
 
 fn classify_csi_action(
+    screen: &Screen,
+    modes: &TerminalModes,
     params: Params,
     intermediates: Intermediates,
     action: char,
@@ -686,7 +695,15 @@ fn classify_csi_action(
             }
             _ => return CsiAction::Ignore,
         },
-        _ => return CsiAction::Parsed(csi_parse(params, intermediates.as_slice(), action)),
+        _ => {
+            return CsiAction::Parsed(csi_parse(
+                screen,
+                modes,
+                params,
+                intermediates.as_slice(),
+                action,
+            ));
+        }
     };
     CsiAction::Special(special)
 }
@@ -790,19 +807,34 @@ fn first_triplet(params: Params) -> Option<(u16, u16, u16)> {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::color;
+    use crate::parser::MainCsiAction;
+    use crate::screen::Screen;
+
+    fn screen() -> Screen {
+        Screen::new(
+            10,
+            4,
+            100,
+            color::default_fg(),
+            color::default_bg(),
+            color::default_fg(),
+            color::default_bg(),
+        )
+    }
 
     #[test]
     fn classify_standard_csi_as_csi_dispatch() {
         let mut parser = vtepp::Parser::new();
         let action = parser.parse(b"\x1b[31m").next().expect("parsed action");
         let modes = TerminalModes::new();
-        let classified = classify_action(&modes, &mut Vt52CursorAddr::Idle, action);
+        let screen = screen();
+        let classified = classify_action(&screen, &modes, &mut Vt52CursorAddr::Idle, action);
         assert!(matches!(
             classified,
-            TerminalAction::Csi(CsiAction::Parsed(ParsedCsiAction::Plain {
-                action: 'm',
-                ..
-            }))
+            TerminalAction::Csi(CsiAction::Parsed(ParsedCsiAction::Main(
+                MainCsiAction::SetGraphicsRendition { .. }
+            )))
         ));
     }
 
@@ -811,7 +843,8 @@ mod tests {
         let mut parser = vtepp::Parser::new();
         let action = parser.parse(b"\x1b[1$u").next().expect("parsed action");
         let modes = TerminalModes::new();
-        let classified = classify_action(&modes, &mut Vt52CursorAddr::Idle, action);
+        let screen = screen();
+        let classified = classify_action(&screen, &modes, &mut Vt52CursorAddr::Idle, action);
         assert!(matches!(
             classified,
             TerminalAction::Csi(CsiAction::Special(SpecialCsi::ReportTerminalState))
@@ -826,7 +859,8 @@ mod tests {
             .next()
             .expect("parsed action");
         let modes = TerminalModes::new();
-        let classified = classify_action(&modes, &mut Vt52CursorAddr::Idle, action);
+        let screen = screen();
+        let classified = classify_action(&screen, &modes, &mut Vt52CursorAddr::Idle, action);
         assert!(matches!(
             classified,
             TerminalAction::Osc(OscAction::ItermGraphics(_))
@@ -837,7 +871,9 @@ mod tests {
     fn classify_vt52_cursor_bytes_as_vt52_action() {
         let mut state = Vt52CursorAddr::AwaitingRow;
         let modes = TerminalModes::new();
-        let classified = classify_action(&modes, &mut state, Action::PrintAscii(b"!\"rest"));
+        let screen = screen();
+        let classified =
+            classify_action(&screen, &modes, &mut state, Action::PrintAscii(b"!\"rest"));
         match classified {
             TerminalAction::Vt52(Vt52Action::CursorPosition {
                 row,
@@ -858,7 +894,8 @@ mod tests {
         let mut parser = vtepp::Parser::new();
         let action = parser.parse(b"\x1bc").next().expect("parsed action");
         let modes = TerminalModes::new();
-        let classified = classify_action(&modes, &mut Vt52CursorAddr::Idle, action);
+        let screen = screen();
+        let classified = classify_action(&screen, &modes, &mut Vt52CursorAddr::Idle, action);
         assert!(matches!(
             classified,
             TerminalAction::Esc(EscAction::Parsed(ParsedEscAction::HardReset))
