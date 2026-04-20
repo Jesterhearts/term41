@@ -23,6 +23,7 @@ pub enum DemoId {
     CursorMarginsEdit,
     EraseProtection,
     PasteFocus,
+    ScrollWrap,
     Rectangles,
     AltScreen,
     OscShell,
@@ -39,7 +40,7 @@ const DEMO_STEP_PAUSE: Duration = Duration::from_millis(1200);
 type ReadReplyFn<'a> = dyn FnMut(Duration) -> io::Result<Vec<u8>> + 'a;
 
 pub fn catalog() -> Vec<Demo> {
-    vec![
+    let mut demos = vec![
         Demo {
             title: "Identity & Queries",
             summary: "DA1, DSR, DECRQM, DECRQSS, DECRQPSR, DECRQTSR, and DECCTR queries.",
@@ -103,6 +104,13 @@ pub fn catalog() -> Vec<Demo> {
             id: DemoId::PasteFocus,
         },
         Demo {
+            title: "Scroll & Wrap",
+            summary: "IND, NEL, RI, DECAWM on/off, REP, and scroll-region movement.",
+            detail: "Exercises the core scrolling and wrapping behaviors that many fullscreen \
+                     apps depend on, with visible intermediate states.",
+            id: DemoId::ScrollWrap,
+        },
+        Demo {
             title: "Rectangular Ops",
             summary: "DECERA, DECFRA, DECCRA, DECSERA, DECCARA, DECRARA, and DECSACE.",
             detail: "Exercises the full VT420 rectangular-area family with visible mutations.",
@@ -156,7 +164,9 @@ pub fn catalog() -> Vec<Demo> {
             detail: "Exercises VT52 mode entry, VT52 cursor sequences, DECSCL, and S7C1T/S8C1T.",
             id: DemoId::Vt52,
         },
-    ]
+    ];
+    demos.sort_by_key(|demo| demo.title);
+    demos
 }
 
 pub fn run_demo(
@@ -176,6 +186,7 @@ pub fn run_demo(
         DemoId::CursorMarginsEdit => run_cursor_margins_edit_demo(out),
         DemoId::EraseProtection => run_erase_protection_demo(out),
         DemoId::PasteFocus => run_paste_focus_placeholder(out),
+        DemoId::ScrollWrap => run_scroll_wrap_demo(out),
         DemoId::Rectangles => run_rectangles_demo(out),
         DemoId::AltScreen => run_alt_screen_demo(out),
         DemoId::OscShell => run_osc_shell_demo(out, read_reply),
@@ -529,6 +540,85 @@ fn run_paste_focus_placeholder(out: &mut impl Write) -> io::Result<()> {
         out,
         "This demo is handled by terminal_io because it needs a live raw-byte capture loop.",
     )?;
+    Ok(())
+}
+
+fn run_scroll_wrap_demo(out: &mut impl Write) -> io::Result<()> {
+    heading(out, "Scroll & Wrap")?;
+    line(
+        out,
+        "Filling the screen tail, then using IND / NEL / RI and autowrap transitions.",
+    )?;
+    write!(out, "\x1b[6;1Hrow 6 seed")?;
+    write!(out, "\x1b[7;1Hrow 7 seed")?;
+    write!(out, "\x1b[8;1Hrow 8 seed")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "IND should move down in the current column and scroll at the bottom margin.",
+    )?;
+    write!(out, "\x1b[8;5H\x1bDIND")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(out, "NEL should move to the next line at column 1.")?;
+    write!(out, "\x1b[7;12H\x1bENEL")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "RI should move upward and scroll backward at the top margin.",
+    )?;
+    write!(out, "\x1b[6;20H\x1bMRI")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Autowrap on: a run at the right edge should continue on the next line.",
+    )?;
+    write!(out, "\x1b[?7h")?;
+    write!(out, "\x1b[12;36HWRAP-ON-ABCDE")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Autowrap off: the rightmost column should be overwritten instead of wrapping.",
+    )?;
+    write!(out, "\x1b[?7l")?;
+    write!(out, "\x1b[14;36HWRAP-OFF-ABCDE")?;
+    write!(out, "\x1b[?7h")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "REP should repeat the last graphic character across the row.",
+    )?;
+    write!(out, "\x1b[16;1H*\x1b[10b")?;
+    present_step(out)?;
+
+    line(out, "")?;
+    line(
+        out,
+        "Now restricting the scroll region and exercising IND/RI inside it.",
+    )?;
+    write!(out, "\x1b[18;22r")?;
+    write!(out, "\x1b[18;1Hregion top")?;
+    write!(out, "\x1b[19;1Hregion mid")?;
+    write!(out, "\x1b[20;1Hregion low")?;
+    write!(out, "\x1b[21;1Hregion bot")?;
+    present_step(out)?;
+
+    write!(out, "\x1b[22;12H\x1bDinside region via IND")?;
+    present_step(out)?;
+    write!(out, "\x1b[18;22H\x1bMinside region via RI")?;
+    write!(out, "\x1b[r")?;
+    out.flush()?;
     Ok(())
 }
 
