@@ -67,26 +67,9 @@ impl TerminalSession {
         let out = self.terminal.backend_mut();
         write!(out, "\x1b[c")?;
         out.flush()?;
-
-        #[cfg(unix)]
-        if let Some(report) =
-            probe_capabilities_from_stdin(Instant::now() + Duration::from_millis(250))?
-        {
+        let bytes = read_reply_bytes(Duration::from_millis(250))?;
+        if let Some(report) = capabilities::parse_da1_reply(&bytes) {
             return Ok(report);
-        }
-
-        let deadline = Instant::now() + Duration::from_millis(250);
-        let mut bytes = Vec::new();
-        while Instant::now() < deadline {
-            let remaining = deadline.saturating_duration_since(Instant::now());
-            if !event::poll(remaining.min(Duration::from_millis(25)))? {
-                continue;
-            }
-            let event = event::read()?;
-            collect_reply_bytes(&mut bytes, &event);
-            if let Some(report) = capabilities::parse_da1_reply(&bytes) {
-                return Ok(report);
-            }
         }
         Ok(capabilities::fallback_report())
     }
@@ -99,7 +82,8 @@ impl TerminalSession {
         self.suspend_tui()?;
         {
             let out = self.terminal.backend_mut();
-            demo::run_demo(out, demo_id, capabilities)?;
+            let mut read_reply = |timeout: Duration| read_reply_bytes(timeout);
+            demo::run_demo(out, demo_id, capabilities, &mut read_reply)?;
         }
         wait_for_keypress()?;
         {
@@ -125,8 +109,18 @@ impl TerminalSession {
     }
 }
 
+pub fn read_reply_bytes(timeout: Duration) -> io::Result<Vec<u8>> {
+    #[cfg(unix)]
+    {
+        return read_reply_bytes_from_stdin(Instant::now() + timeout);
+    }
+
+    #[allow(unreachable_code)]
+    read_reply_bytes_from_events(Instant::now() + timeout)
+}
+
 #[cfg(unix)]
-fn probe_capabilities_from_stdin(deadline: Instant) -> io::Result<Option<CapabilityReport>> {
+fn read_reply_bytes_from_stdin(deadline: Instant) -> io::Result<Vec<u8>> {
     let stdin = io::stdin();
     let stdin = stdin.lock();
     let fd = stdin.as_fd();
@@ -147,11 +141,21 @@ fn probe_capabilities_from_stdin(deadline: Instant) -> io::Result<Option<Capabil
             continue;
         }
         bytes.extend_from_slice(&buf[..read]);
-        if let Some(report) = capabilities::parse_da1_reply(&bytes) {
-            return Ok(Some(report));
-        }
     }
-    Ok(None)
+    Ok(bytes)
+}
+
+fn read_reply_bytes_from_events(deadline: Instant) -> io::Result<Vec<u8>> {
+    let mut bytes = Vec::new();
+    while Instant::now() < deadline {
+        let remaining = deadline.saturating_duration_since(Instant::now());
+        if !event::poll(remaining.min(Duration::from_millis(25)))? {
+            continue;
+        }
+        let event = event::read()?;
+        collect_reply_bytes(&mut bytes, &event);
+    }
+    Ok(bytes)
 }
 
 impl Drop for TerminalSession {
