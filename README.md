@@ -6,8 +6,9 @@
 
 A GPU-accelerated terminal emulator written in Rust.
 
-> **Note:** This project was in some portions vibe-coded, in other portions
-> hand-written where vibe-coding broke down/produced poor code.
+> **Note:** This project uses a decent amount of vibe coding. VTEs have a huge
+> feature surface, and implementing it in a reasonable time frame is only
+> possible thanks to LLM assistance.
 
 ## Why?
 
@@ -16,9 +17,27 @@ term41 is the product of one such experiment. I know there are many other
 terminal emulators and this one is nothing special, but I've always wanted to
 write my own, with the features I prefer.
 
+## Objections
+1. You use AI.
+  - Fair enough.
+2. It's ugly.
+   - I don't think it's that bad, but only using the same graphics primitives
+     for menus/modals as the rest of the terminal does give it a certain
+     character. Maybe someday it won't be.
+3. It doesn't support `$feature` from the VT feature set.
+   - I probably haven't implemented it yet, or it has security concerns and I'm
+     leery of implementing it.
+4. It lies about being iTerm, and breaks my app because you don't support
+   `$extension`.
+   - I'd like to add `$extension` so your app isn't broken. Please file a bug :)
+   - I lie about being iTerm because testing for e.g. iTerm's image support
+     feature in terminals is hardcoded by terminal host name sometimes, and it
+     seemed like the most reasonable choice to lie about so they use the iTerm
+     image API.
+
 ## Overview
 
-term41 is a desktop terminal emulator with:
+What I wanted out of this terminal was pretty straightforward:
 
 - GPU rendering via `wgpu`
 - Unicode shaping and fallback fonts
@@ -27,7 +46,7 @@ term41 is a desktop terminal emulator with:
   status lines, and macro support
 - shell integration, tabs, scrollback search, hyperlinks, and background images
 
-The project is split into a few focused crates:
+The codebase is split into a few focused crates:
 
 - `term41`: windowing, rendering, config, input, and app orchestration
 - `terminal41`: terminal state machine and escape-sequence behavior
@@ -36,12 +55,16 @@ The project is split into a few focused crates:
 
 ## Building
 
+If you just want to build it and run it:
+
 ```sh
 cargo build --release
 cargo run --release
 ```
 
 ### Installing
+
+If you'd rather install it into your cargo bin dir:
 
 ```sh
 cargo install --path .
@@ -55,7 +78,7 @@ cargo install --path .
 | `vulkan`               | off     | Uses Vulkan instead of OpenGL for rendering. |
 | `wayland-data-control` | on      | Enables `zwlr_data_control_manager_v1` clipboard access on Wayland compositors that support it. |
 
-For a smaller build without ffmpeg or Wayland data-control:
+If you want a smaller build without ffmpeg or Wayland data-control:
 
 ```sh
 cargo build --release --no-default-features
@@ -63,33 +86,38 @@ cargo build --release --no-default-features
 
 ### Logging
 
+If something is broken and you want to get more diagnostics:
+
 ```sh
 RUST_LOG=info cargo run --release
 ```
 
 ## Security Model
 
-term41 treats ordinary terminal text output as the baseline capability. Features
-that let the target do more than draw the current text screen are treated as
-privileged.
+While there is a broad feature set implemented, certain features carry security
+considerations because they go beyond ordinary terminal text output and could
+potentially be used for spoofing, injection, system fingerprinting, or data
+exfiltration.
 
-In particular, extensions that allow either of these are intended to be
-default-deny:
+In practice, extensions that allow either of these should be default-deny:
 
 1. Target-controlled content outside standard text output
 2. Target-controlled emulator behavior
 
-That means the safe default is "do nothing unless the user explicitly opted in
-or the feature has an authorization path." The current concrete example is
-VT420 macros: they are denied unless the foreground process set is identified
-and matches the configured allowlist. On Linux and macOS that process identity
-comes from the PTY foreground process group; on Windows there is no equivalent
-trusted probe yet, so users must opt into broad allow rules themselves if they
-want them.
+So the default is: do nothing unless the user explicitly opted in, or the
+feature has a real authorization path.
 
-This is the project direction for new privileged extensions as well: they
-should not silently become available just because a remote program emitted an
-escape sequence.
+The concrete example today is VT420 macros. They stay denied unless the
+foreground process set is identified and matches the configured allowlist. On
+Linux and macOS that identity comes from the PTY foreground process group. On
+Windows there isn't an equivalent trusted probe yet, so if you want broad allow
+rules there you have to opt into them yourself.
+
+An example of a grey area is clipboard integration. I currently don't gate it
+behind an allowlist because I think it would be surprising if it was broken due
+to this. I'd really like to move it behind a gate if it turns out restricting it
+wouldn't hurt too bad.
+
 
 <details>
 <summary><strong>Feature Set</strong></summary>
@@ -115,8 +143,8 @@ escape sequence.
 - scroll regions, hardware tab stops, DECSCUSR cursor styles
 - DA1/DA2, DSR, DECRQSS, window-size queries
 - OSC 0/2 titles, OSC 7 cwd tracking, OSC 8 hyperlinks, OSC 52 clipboard
-- DEC character-set engine including NRC sets, GL/GR invocation, UTF-8 and
-  8-bit text modes
+- DEC character-set engine including NRC sets, GL/GR invocation, UTF-8 and 8-bit
+  text modes
 - VT420 page/geometry controls, rectangular-area controls, and DEC status lines
 - VT420 macros with allowlist-based gating
 
@@ -147,8 +175,13 @@ Configuration is loaded from:
 $XDG_CONFIG_HOME/term41/config.toml
 ```
 
-On Linux this is usually `~/.config/term41/config.toml`. All fields are
-optional. If the file is missing or unparseable, built-in defaults are used.
+On Linux this is usually `~/.config/term41/config.toml`.
+
+Everything is optional. If the file is missing or broken, term41 falls back to
+built-in defaults. It tries hard to parse the config, so a failure in one
+setting shouldn't break all the others. If something isn't working correctly,
+try running with `warning` level logging, as parsing issues should be logged.
+
 Most settings live-reload on save.
 
 Example:
