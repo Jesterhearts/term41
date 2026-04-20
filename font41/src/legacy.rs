@@ -1408,7 +1408,7 @@ mod tests {
         let g = rasterize(0x2510, w, h, 20.0);
         let mid_y = (h / 2) as usize;
         let left = (mid_y * w as usize) * 4 + 3;
-        let down = ((mid_y * w as usize + (w / 2) as usize) * 4 + 3) as usize;
+        let down = ((mid_y * w as usize + (w / 2) as usize) * 4 + 3);
         assert!(g.bitmap[left] > 0, "corner missing horizontal arm");
         assert!(g.bitmap[down] > 0, "corner missing vertical arm");
     }
