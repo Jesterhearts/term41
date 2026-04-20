@@ -613,7 +613,37 @@ impl Terminal {
                 );
                 dispatch::PendingApplication::None
             }
-            DecodedAction::SpecialCsi(special) => dispatch::apply_special_csi(self, special),
+            DecodedAction::SpecialCsi(special) => {
+                let Terminal {
+                    active,
+                    stash,
+                    palette,
+                    base_palette,
+                    dec_color,
+                    output,
+                    modes,
+                    protocol,
+                    ..
+                } = self;
+                dispatch::apply_special_csi(
+                    dispatch::SpecialCsiContext {
+                        active,
+                        stash,
+                        palette,
+                        base_palette,
+                        dec_color,
+                        pending_output: &mut output.pending_output,
+                        c1_mode: modes.c1_mode,
+                        macros: dispatch::MacroInvocationContext {
+                            feature_permissions: &protocol.feature_permissions,
+                            foreground_processes: &protocol.foreground_processes,
+                            macros: &protocol.macros,
+                            macro_invocation_depth: protocol.macro_invocation_depth,
+                        },
+                    },
+                    special,
+                )
+            }
             DecodedAction::Csi {
                 params,
                 intermediates,

@@ -10,7 +10,6 @@ use crate::C1Mode;
 use crate::DecColorSpace;
 use crate::DecColorState;
 use crate::FeaturePermissions;
-use crate::Terminal;
 use crate::TerminalModes;
 use crate::Vt52CursorAddr;
 use crate::color::ColorPalette;
@@ -90,6 +89,24 @@ pub(super) enum DecodedAction<'a> {
 pub(crate) enum PendingApplication {
     None,
     Bytes(Vec<u8>),
+}
+
+pub(super) struct MacroInvocationContext<'a> {
+    pub feature_permissions: &'a FeaturePermissions,
+    pub foreground_processes: &'a Option<ForegroundProcessSet>,
+    pub macros: &'a crate::dec::r#macro::MacroStore,
+    pub macro_invocation_depth: usize,
+}
+
+pub(super) struct SpecialCsiContext<'a> {
+    pub active: &'a mut Screen,
+    pub stash: &'a mut Screen,
+    pub palette: &'a mut ColorPalette,
+    pub base_palette: &'a ColorPalette,
+    pub dec_color: &'a mut DecColorState,
+    pub pending_output: &'a mut Vec<u8>,
+    pub c1_mode: C1Mode,
+    pub macros: MacroInvocationContext<'a>,
 }
 
 pub(super) fn decode_action<'a>(
@@ -231,18 +248,28 @@ pub(super) fn apply_execute(
 }
 
 pub(super) fn apply_special_csi(
-    terminal: &mut Terminal,
+    ctx: SpecialCsiContext<'_>,
     special: SpecialCsi,
 ) -> PendingApplication {
+    let SpecialCsiContext {
+        active,
+        stash,
+        palette,
+        base_palette,
+        dec_color,
+        pending_output,
+        c1_mode,
+        macros,
+    } = ctx;
     match special {
-        SpecialCsi::InvokeMacro(id) => invoke_macro(terminal, id),
+        SpecialCsi::InvokeMacro(id) => invoke_macro(macros, id),
         SpecialCsi::AssignDecColor { item, fg, bg } => {
             assign_dec_color(
-                &mut terminal.active,
-                &mut terminal.stash,
-                &mut terminal.palette,
-                &terminal.base_palette,
-                &mut terminal.dec_color,
+                active,
+                stash,
+                palette,
+                base_palette,
+                dec_color,
                 item,
                 fg,
                 bg,
@@ -250,28 +277,19 @@ pub(super) fn apply_special_csi(
             PendingApplication::None
         }
         SpecialCsi::AssignDecAlternateTextColor { item, fg, bg } => {
-            dec_assign_alternate_text_color(&mut terminal.dec_color, item, fg, bg);
+            dec_assign_alternate_text_color(dec_color, item, fg, bg);
             PendingApplication::None
         }
         SpecialCsi::SelectDecLookupTable(selection) => {
-            dec_select_lookup_table(&mut terminal.dec_color, selection);
+            dec_select_lookup_table(dec_color, selection);
             PendingApplication::None
         }
         SpecialCsi::ReportTerminalState => {
-            write_terminal_state_report(
-                &terminal.active,
-                &mut terminal.output.pending_output,
-                terminal.modes.c1_mode,
-            );
+            write_terminal_state_report(active, pending_output, c1_mode);
             PendingApplication::None
         }
         SpecialCsi::ReportColorTable(space) => {
-            write_color_table_report(
-                &terminal.dec_color,
-                &mut terminal.output.pending_output,
-                terminal.modes.c1_mode,
-                space,
-            );
+            write_color_table_report(dec_color, pending_output, c1_mode, space);
             PendingApplication::None
         }
     }
@@ -623,19 +641,16 @@ fn apply_dec_color_defaults(
 }
 
 fn invoke_macro(
-    terminal: &mut Terminal,
+    ctx: MacroInvocationContext<'_>,
     id: u16,
 ) -> PendingApplication {
     let enabled = crate::feature::macro_feature_enabled(
-        &terminal.protocol.feature_permissions,
-        terminal.protocol.foreground_processes.as_ref(),
+        ctx.feature_permissions,
+        ctx.foreground_processes.as_ref(),
     );
-    let Some(bytes) = crate::feature::invoke_macro(
-        enabled,
-        &terminal.protocol.macros,
-        terminal.protocol.macro_invocation_depth,
-        id,
-    ) else {
+    let Some(bytes) =
+        crate::feature::invoke_macro(enabled, ctx.macros, ctx.macro_invocation_depth, id)
+    else {
         return PendingApplication::None;
     };
     PendingApplication::Bytes(bytes)
