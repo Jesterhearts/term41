@@ -213,17 +213,16 @@ impl Background {
         //   4. Thread continues in its steady-state loop, shipping subsequent frames
         //      through `frame_tx`.
 
-        let (size_tx, size_rx) = mpsc::sync_channel::<Frame>(1);
         let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(FRAME_BUFFER_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));
         let shutdown_ = shutdown.clone();
         let path_for_thread = path.clone();
         std::thread::Builder::new()
             .name("bg-decoder".into())
-            .spawn(move || decoder_thread(bytes, size_tx, frame_tx, &path_for_thread, shutdown_))
+            .spawn(move || decoder_thread(bytes, frame_tx, &path_for_thread, shutdown_))
             .ok()?;
 
-        let meta = size_rx.recv().ok()?;
+        let meta = frame_rx.recv().ok()?;
         let delay = meta.delay;
 
         Some(Self::build(
@@ -652,7 +651,6 @@ fn write_png_rgba(
 #[cfg(feature = "ffmpeg")]
 fn decoder_thread(
     bytes: Vec<u8>,
-    size_tx: mpsc::SyncSender<Frame>,
     frame_tx: mpsc::SyncSender<Frame>,
     path_for_log: &Path,
     shutdown: Arc<AtomicBool>,
@@ -663,25 +661,6 @@ fn decoder_thread(
 
     let width = reader.width;
     let height = reader.height;
-    let Some((pixels, delay)) = reader.next_frame_looping() else {
-        warn!(
-            "background image: no decodable frames in {}",
-            path_for_log.display()
-        );
-        return;
-    };
-
-    if size_tx
-        .send(Frame {
-            pixels,
-            delay,
-            width,
-            height,
-        })
-        .is_err()
-    {
-        return;
-    };
 
     loop {
         let (pixels, delay) = match reader.next_frame_looping() {
