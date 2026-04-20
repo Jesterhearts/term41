@@ -74,7 +74,7 @@ pub struct MouseModifiers {
 /// Tracking modes are modeled as a single state (enabling a new tracking
 /// mode replaces the prior one; disabling the tracking bit turns it fully
 /// off). That matches how xterm-compatible apps actually use these flags.
-pub(super) fn apply_mouse_mode(
+pub fn apply_mouse_mode(
     mode: u16,
     enable: bool,
     tracking: &mut MouseTracking,
@@ -113,7 +113,7 @@ pub(super) fn apply_mouse_mode(
 /// Decide whether the given event should be forwarded under the current
 /// tracking mode. Release + motion reports under X10, motion reports under
 /// Normal, and motion-without-button under ButtonEvent are all suppressed.
-pub(super) fn should_report(
+pub fn should_report(
     tracking: MouseTracking,
     kind: MouseEventKind,
     button: MouseButton,
@@ -196,7 +196,7 @@ fn push_utf8_coord(
 }
 
 /// Encode a mouse event using the active protocol and push it into `out`.
-pub(super) fn encode_mouse_event(
+pub fn encode_mouse_event(
     c1_mode: C1Mode,
     encoding: MouseEncoding,
     kind: MouseEventKind,

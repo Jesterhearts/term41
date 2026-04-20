@@ -30,11 +30,11 @@ use crate::drcs::Store as DrcsStore;
 use crate::feature::FeaturePermissions;
 use crate::grid;
 use crate::grid::Viewport;
-use crate::keyboard::KittyKeyboardState;
-use crate::keyboard::handle_kitty_keyboard;
+use crate::io::keyboard::KittyKeyboardState;
+use crate::io::keyboard::handle_kitty_keyboard;
+use crate::io::mouse::MouseTracking;
+use crate::io::mouse::apply_mouse_mode;
 use crate::mode;
-use crate::mouse::MouseTracking;
-use crate::mouse::apply_mouse_mode;
 use crate::row::LineAttr;
 use crate::row::Row;
 use crate::screen;
@@ -3321,7 +3321,7 @@ mod tests {
 
     use super::*;
     use crate::cursor::CursorStyle;
-    use crate::keyboard::KittyKeyboardState;
+    use crate::io::keyboard::KittyKeyboardState;
     use crate::screen::Screen;
 
     const TEST_COLS: u32 = 10;

@@ -195,7 +195,7 @@ mod tests {
 /// Dispatcher for `CSI <intermediate> <params> u`. The intermediate (one of
 /// `>`, `<`, `=`, `?`) selects which kitty operation runs; query writes its
 /// reply through `pending_output`.
-pub(super) fn handle_kitty_keyboard(
+pub fn handle_kitty_keyboard(
     intermediate: u8,
     params: &Params,
     state: &mut KittyKeyboardState,

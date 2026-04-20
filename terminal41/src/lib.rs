@@ -5,7 +5,6 @@
 extern crate log;
 
 mod charset;
-pub mod clipboard;
 mod color;
 mod conformance;
 mod cursor;
@@ -18,10 +17,9 @@ mod graphics;
 mod grid;
 mod hyperlink;
 mod image;
-mod keyboard;
+pub mod io;
 mod lifecycle_ops;
 mod mode;
-mod mouse;
 mod osc;
 mod palette_sync;
 mod parser;
@@ -74,16 +72,16 @@ pub use self::grid::Viewport;
 pub use self::hyperlink::HyperlinkRegistry;
 pub use self::image::PlacedImage;
 pub use self::image::VisibleImage;
-pub use self::keyboard::KittyFlags;
-pub use self::keyboard::KittyKeyboardState;
-pub use self::keyboard::KittyKeys;
-pub use self::mouse::MouseButton;
-pub use self::mouse::MouseEncoding;
-pub use self::mouse::MouseEventKind;
-pub use self::mouse::MouseModifiers;
-pub use self::mouse::MouseTracking;
-use self::mouse::encode_mouse_event;
-use self::mouse::should_report;
+pub use self::io::keyboard::KittyFlags;
+pub use self::io::keyboard::KittyKeyboardState;
+pub use self::io::keyboard::KittyKeys;
+pub use self::io::mouse::MouseButton;
+pub use self::io::mouse::MouseEncoding;
+pub use self::io::mouse::MouseEventKind;
+pub use self::io::mouse::MouseModifiers;
+pub use self::io::mouse::MouseTracking;
+use self::io::mouse::encode_mouse_event;
+use self::io::mouse::should_report;
 use self::osc::OscContext;
 use self::osc::handle_osc;
 use self::palette_sync::apply_screen_palette;
@@ -1363,6 +1361,8 @@ mod tests {
     use vtepp::Parser;
 
     use super::*;
+    use crate::io::clipboard::paste;
+    use crate::io::clipboard::paste_from_clipboard;
     use crate::selection::SelectionMode;
 
     /// Test wrapper that bundles a `Terminal` with its own `Parser` so tests
@@ -1766,7 +1766,7 @@ mod tests {
     #[test]
     fn paste_default_is_raw() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
-        clipboard::paste(
+        paste(
             &mut term.inner.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
@@ -1780,7 +1780,7 @@ mod tests {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h");
         assert!(term.modes.bracketed_paste);
-        clipboard::paste(
+        paste(
             &mut term.inner.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
@@ -1793,7 +1793,7 @@ mod tests {
     fn paste_wraps_with_8bit_csi_after_s8c1t() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h\x1b G");
-        clipboard::paste(
+        paste(
             &mut term.inner.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
@@ -1808,7 +1808,7 @@ mod tests {
         term.process(b"\x1b[?2004h");
         term.process(b"\x1b[?2004l");
         assert!(!term.modes.bracketed_paste);
-        clipboard::paste(
+        paste(
             &mut term.inner.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
@@ -1823,7 +1823,7 @@ mod tests {
         term.process(b"\x1b[?2004h");
         // The clipboard tries to break out of the bracket — the injected
         // `\x1b[201~` is stripped and everything else comes through.
-        clipboard::paste(
+        paste(
             &mut term.inner.pending_output,
             term.inner.modes.c1_mode,
             term.inner.modes.bracketed_paste,
@@ -2002,7 +2002,7 @@ mod tests {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
         term.clipboard.set(ClipboardKind::Clipboard, "hello");
-        clipboard::paste_from_clipboard(
+        paste_from_clipboard(
             &mut term.inner.clipboard,
             &mut term.inner.pending_output,
             term.inner.modes.c1_mode,
@@ -2016,7 +2016,7 @@ mod tests {
     fn paste_from_clipboard_ignores_empty_selection() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
-        clipboard::paste_from_clipboard(
+        paste_from_clipboard(
             &mut term.inner.clipboard,
             &mut term.inner.pending_output,
             term.inner.modes.c1_mode,
