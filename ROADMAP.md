@@ -178,16 +178,17 @@ Missing or incomplete:
 
 - [x] `DECTST`
 - [ ] `DECSR` / `DECSRC`
-- [ ] `DECRPM`
-- [ ] broader `DECRQSS`
-- [ ] `DECRQPSR` / `DECCIR`
+- [x] `DECRPM`
+- [x] broader `DECRQSS`
+- [x] `DECRQPSR` / `DECCIR`
 - [x] `DECRQTSR` / `DECRSTS`
-- [ ] `DECRSPS`
+- [x] `DECRSPS`
 
 Why it matters:
 
 - A complete VT420/VT520 implementation needs more than DA/DSR. DEC terminals
   expose richer report, restore, and self-test behavior.
+- The remaining gap in this family is narrow now: `DECSR` / `DECSRC`.
 
 Security:
 
