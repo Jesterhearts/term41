@@ -569,6 +569,18 @@ pub(super) fn clear_visible(
     }
 }
 
+fn reset_alt_entry_state(screen: &mut Screen) {
+    screen.cursor = Cursor::default();
+    screen.fg = screen.grid.default_fg;
+    screen.bg = screen.grid.default_bg;
+    screen.attrs = CellAttrs::default();
+    screen.underline = UnderlineStyle::None;
+    screen.underline_color = None;
+    screen.current_hyperlink = None;
+    screen.cursor_visible = true;
+    screen.last_char = None;
+}
+
 pub(super) fn ensure_visible_rows(
     screen: &mut Screen,
     viewport: &Viewport,
@@ -639,6 +651,10 @@ pub(super) fn set_private_mode(
                 clear_visible(active, viewport);
             }
             switch_screen(enable, active, stash, viewport, on_alt);
+            if enable && *on_alt {
+                clear_visible(active, viewport);
+                reset_alt_entry_state(active);
+            }
         }
         mode::SAVE_CURSOR => {
             if enable {
@@ -657,6 +673,7 @@ pub(super) fn set_private_mode(
                 }
                 switch_screen(true, active, stash, viewport, on_alt);
                 clear_visible(active, viewport);
+                reset_alt_entry_state(active);
             } else {
                 if *on_alt {
                     clear_visible(active, viewport);

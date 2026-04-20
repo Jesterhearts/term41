@@ -1943,6 +1943,25 @@ mod tests {
         assert!(!term.active.images.contains_key(&id));
     }
 
+    #[test]
+    fn alt_screen_reentry_resets_cursor_and_pen_state() {
+        let mut term = TestTerm::new(10, 4, 0, 16, 8);
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[3;4H\x1b[30;46m");
+        term.process(b"\x1b[?25l");
+        term.process(b"\x1b[?1049l");
+        term.process(b"\x1b[?1049h");
+
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
+        assert_eq!(term.active.fg, term.active.grid.default_fg);
+        assert_eq!(term.active.bg, term.active.grid.default_bg);
+        assert_eq!(term.active.attrs, font41::attrs::CellAttrs::default());
+        assert_eq!(term.active.underline, font41::attrs::UnderlineStyle::None);
+        assert_eq!(term.active.underline_color, None);
+        assert!(term.active.cursor_visible);
+    }
+
     // ---- Synchronized output (mode 2026) ----
 
     #[test]
