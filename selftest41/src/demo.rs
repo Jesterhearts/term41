@@ -532,11 +532,12 @@ fn run_vt525_color_demo(out: &mut impl Write) -> io::Result<()> {
     write!(out, "\x1bP2$p0;2;12;12;12/4;2;33;33;44/7;2;90;90;90\x1b\\")?;
     line(out, "Normal text under DECAC.")?;
     out.write_all(b"\x1b[1;4;0,}")?;
-    out.write_all(b"\x1b[3){")?;
+    out.write_all(b"\x1b[1){")?;
     line(out, "\x1b[1mAlternate-color bold text\x1b[0m")?;
+    out.write_all(b"\x1b[?114h")?;
     out.write_all(b"\x1b[4;2;1,}")?;
     line(out, "\x1b[4mAlternate-color underline text\x1b[0m")?;
-    write!(out, "\x1b[?114l\x1b[?115l\x1b[?116h\x1b[?117h")?;
+    write!(out, "\x1b[?115l\x1b[?116h\x1b[?117h")?;
     line(
         out,
         "DECATCUM/DECATCBM/DECBBSM/DECECM toggled for this row.",
