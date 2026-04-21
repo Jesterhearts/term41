@@ -47,7 +47,7 @@ pub enum Action {
     /// active tab's working directory (via OSC 7) when available.
     NewTab,
     /// Close the active tab. If it's the last tab, exit the application.
-    CloseTab,
+    CloseActiveTab,
     /// Switch to the next tab (wraps around).
     NextTab,
     /// Switch to the previous tab (wraps around).
@@ -145,7 +145,7 @@ impl Keybindings {
                 Keybinding {
                     key: KeySpec::Char('w'),
                     mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
-                    action: Action::CloseTab,
+                    action: Action::CloseActiveTab,
                 },
                 Keybinding {
                     key: KeySpec::Named(NamedKey::PageDown),

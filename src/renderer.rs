@@ -130,6 +130,7 @@ pub(crate) const TAB_MENU_WIDTH_CELLS: f32 = 16.0;
 /// State of the tab context popup while it is open.
 #[derive(Clone)]
 pub(crate) struct TabContextMenu {
+    pub tab_idx: usize,
     /// Pixel position where the popup was opened (used for placement).
     pub x: f32,
     /// Currently hovered menu-item index.
@@ -174,7 +175,8 @@ pub enum RenderEvent {
     },
     Action(Action),
     SetActiveTab(usize),
-    CloseOtherTabs,
+    CloseTab(usize),
+    CloseOtherTabs(usize),
     /// The window's DPI scale factor changed (e.g. moved to a different
     /// monitor). The render thread rescales font metrics and re-rasterizes
     /// glyphs.
@@ -505,8 +507,9 @@ impl RenderHost {
             RenderEvent::Action(action) => {
                 self.run_action(*action);
             }
-            RenderEvent::SetActiveTab(idx) => self.set_active_tab(*idx),
-            RenderEvent::CloseOtherTabs => self.close_other_tabs(),
+            RenderEvent::SetActiveTab(tab_idx) => self.set_active_tab(*tab_idx),
+            RenderEvent::CloseOtherTabs(tab_idx) => self.close_other_tabs(*tab_idx),
+            RenderEvent::CloseTab(tab_idx) => self.close_tab(*tab_idx),
             RenderEvent::ScaleFactorChanged { scale_factor } => {
                 self.handle_scale_factor_changed(*scale_factor);
             }
@@ -578,7 +581,7 @@ impl RenderHost {
             Action::NewTab => {
                 self.spawn_new_tab();
             }
-            Action::CloseTab => {
+            Action::CloseActiveTab => {
                 self.close_active_tab();
             }
             Action::NextTab => {
@@ -930,23 +933,11 @@ impl RenderHost {
     }
 
     fn close_active_tab(&mut self) {
-        let tab_id = self.active_tab_id;
-        let Some(idx) = self.tabs.iter().position(|t| t.id == tab_id) else {
+        let Some(idx) = self.tabs.iter().position(|t| t.id == self.active_tab_id) else {
             return;
         };
-        self.tabs.remove(idx);
-        let _ = self.proxy.send_event(AppEvent::RemoveInputEndpoint(tab_id));
-        if self.tabs.is_empty() {
-            self.sync_input_state();
-            self.sync_active_input_tab();
-            self.should_exit = true;
-            return;
-        }
-        let new_idx = idx.min(self.tabs.len() - 1);
-        self.active_tab_id = self.tabs[new_idx].id;
-        self.recalculate_grid_size();
-        self.sync_input_state();
-        self.sync_active_input_tab();
+
+        self.close_tab(idx);
     }
 
     fn switch_tab(
@@ -1309,17 +1300,17 @@ impl RenderHost {
 
     fn set_active_tab(
         &mut self,
-        idx: usize,
+        tab_idx: usize,
     ) {
-        self.activate_tab_idx(idx);
+        self.activate_tab_idx(tab_idx);
     }
 
     fn activate_tab_idx(
         &mut self,
-        idx: usize,
+        tab_idx: usize,
     ) {
         let Some((cols, rows)) = self.current_window_grid_size() else {
-            if let Some(tab) = self.tabs.get(idx) {
+            if let Some(tab) = self.tabs.get(tab_idx) {
                 self.active_tab_id = tab.id;
                 self.sync_input_state();
                 self.sync_active_input_tab();
@@ -1328,7 +1319,7 @@ impl RenderHost {
         };
 
         let epoch = self.window_resize_epoch;
-        let Some(tab) = self.tabs.get_mut(idx) else {
+        let Some(tab) = self.tabs.get_mut(tab_idx) else {
             return;
         };
         if tab.window_sync_epoch < epoch {
@@ -1340,17 +1331,44 @@ impl RenderHost {
         self.sync_active_input_tab();
     }
 
-    fn close_other_tabs(&mut self) {
-        let keep = self.active_tab_id;
-        for tab in &self.tabs {
-            if tab.id != keep {
+    fn close_other_tabs(
+        &mut self,
+        keep: usize,
+    ) {
+        for (idx, tab) in self.tabs.iter().enumerate() {
+            if idx != keep {
                 let _ = self.proxy.send_event(AppEvent::RemoveInputEndpoint(tab.id));
             }
         }
+
+        let keep = if let Some(tab) = self.tabs.get(keep) {
+            tab.id
+        } else {
+            return;
+        };
+
         self.tabs.retain(|t| t.id == keep);
         self.recalculate_grid_size();
         self.sync_input_state();
         self.sync_active_input_tab();
+    }
+
+    fn close_tab(
+        &mut self,
+        tab_idx: usize,
+    ) {
+        let Some(tab_id) = self.tabs.get(tab_idx).map(|t| t.id) else {
+            return;
+        };
+        self.tabs.remove(tab_idx);
+        let _ = self.proxy.send_event(AppEvent::RemoveInputEndpoint(tab_id));
+        if self.tabs.is_empty() {
+            self.sync_input_state();
+            self.sync_active_input_tab();
+            self.should_exit = true;
+            return;
+        }
+        self.activate_tab_idx(tab_idx.min(self.tabs.len() - 1));
     }
 }
 

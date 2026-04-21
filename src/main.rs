@@ -746,7 +746,7 @@ impl WindowHost {
                 true
             }
             Action::NewTab
-            | Action::CloseTab
+            | Action::CloseActiveTab
             | Action::NextTab
             | Action::PrevTab
             | Action::PasteAsBackground
@@ -911,7 +911,7 @@ impl WindowHost {
         let hovered_button = self.tab_bar_hover_at();
         self.update_hovered_tab_bar_button(hovered_button);
 
-        let hovered_menu_item = self.tab_menu_item_at(x, y).map(|(_, idx)| idx);
+        let hovered_menu_item = self.tab_menu_item_at(x, y).map(|(_, _, idx)| idx);
         {
             let mut state = self.input_state.lock();
             if let Some(menu) = state.tab_context_menu.as_mut() {
@@ -1072,6 +1072,16 @@ impl WindowHost {
             return;
         }
 
+        if pressed && button == MouseButton::Middle && self.is_in_tab_bar() {
+            self.close_gutter_popup();
+            self.update_tab_context_menu(None);
+            if let Some(idx) = self.tab_at_mouse() {
+                self.send(RenderEvent::CloseTab(idx));
+            }
+            self.notify_interaction_changed();
+            return;
+        }
+
         if pressed && button == MouseButton::Right && self.is_in_tab_bar() {
             let has_menu = self.input_state.lock().tab_context_menu.is_some();
             if has_menu {
@@ -1084,7 +1094,8 @@ impl WindowHost {
                     w.show_window_menu(pos);
                 }
             } else {
-                self.update_tab_context_menu(Some(TabContextMenu {
+                self.update_tab_context_menu(self.tab_at_mouse().map(|idx| TabContextMenu {
+                    tab_idx: idx,
                     x: self.mouse_pos.0 as f32,
                     hovered_item: None,
                 }));
@@ -1097,8 +1108,10 @@ impl WindowHost {
             && button == MouseButton::Left
             && self.input_state.lock().tab_context_menu.is_some()
         {
-            if let Some((action, _)) = self.tab_menu_item_at(self.mouse_pos.0, self.mouse_pos.1) {
-                self.execute_tab_menu_action(action);
+            if let Some((action, tab_idx, _)) =
+                self.tab_menu_item_at(self.mouse_pos.0, self.mouse_pos.1)
+            {
+                self.execute_tab_menu_action(action, tab_idx);
             }
             self.update_tab_context_menu(None);
             self.notify_interaction_changed();
@@ -1340,11 +1353,14 @@ impl WindowHost {
     fn execute_tab_menu_action(
         &mut self,
         action: TabMenuActionLocal,
+        tab_idx: usize,
     ) {
         match action {
             TabMenuActionLocal::NewTab => self.send(RenderEvent::Action(Action::NewTab)),
-            TabMenuActionLocal::CloseTab => self.send(RenderEvent::Action(Action::CloseTab)),
-            TabMenuActionLocal::CloseOtherTabs => self.send(RenderEvent::CloseOtherTabs),
+            TabMenuActionLocal::CloseTab => self.send(RenderEvent::CloseTab(tab_idx)),
+            TabMenuActionLocal::CloseOtherTabs => {
+                self.send(RenderEvent::CloseOtherTabs(tab_idx));
+            }
         }
     }
 
@@ -1586,7 +1602,7 @@ impl WindowHost {
         &self,
         mx: f64,
         my: f64,
-    ) -> Option<(TabMenuActionLocal, usize)> {
+    ) -> Option<(TabMenuActionLocal, usize, usize)> {
         let state = self.input_state.lock();
         let menu = state.tab_context_menu.as_ref()?;
         let pw = state.cell_width as f32 * TAB_MENU_WIDTH_CELLS;
@@ -1605,7 +1621,7 @@ impl WindowHost {
             2 => TabMenuActionLocal::CloseOtherTabs,
             _ => return None,
         };
-        Some((action, idx))
+        Some((action, menu.tab_idx, idx))
     }
 
     fn is_in_gutter(&self) -> bool {
