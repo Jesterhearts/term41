@@ -383,7 +383,6 @@ pub struct Terminal {
     /// survives the per-action dispatch boundary.
     vt52_cursor_addr: Vt52CursorAddr,
     pub default_status_display: StatusDisplayKind,
-    pub strict_altscreen_scrollback: bool,
     pub protocol: TerminalProtocolState,
 }
 
@@ -399,7 +398,6 @@ impl Terminal {
         rows: u32,
         scrollback_limit: u32,
         default_status_display: StatusDisplayKind,
-        strict_altscreen_scrollback: bool,
         feature_permissions: FeaturePermissions,
         cell_height: u32,
         cell_width: u32,
@@ -424,7 +422,7 @@ impl Terminal {
             stash: Screen::new(
                 cols,
                 rows,
-                feature::alt_scrollback_limit(scrollback_limit, strict_altscreen_scrollback),
+                0,
                 palette.fg,
                 palette.bg,
                 palette.status_line_fg,
@@ -449,7 +447,6 @@ impl Terminal {
             dec_color,
             vt52_cursor_addr: Vt52CursorAddr::Idle,
             default_status_display,
-            strict_altscreen_scrollback,
             protocol: TerminalProtocolState {
                 feature_permissions,
                 ..TerminalProtocolState::default()

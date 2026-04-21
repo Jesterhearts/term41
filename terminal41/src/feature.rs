@@ -122,17 +122,6 @@ pub(crate) fn apply_status_display_mode(
     new_rows
 }
 
-pub(crate) fn alt_scrollback_limit(
-    scrollback_limit: u32,
-    strict_altscreen_scrollback: bool,
-) -> u32 {
-    if strict_altscreen_scrollback {
-        0
-    } else {
-        scrollback_limit
-    }
-}
-
 pub(crate) fn apply_scrollback_limit(
     screen: &mut Screen,
     viewport: &Viewport,

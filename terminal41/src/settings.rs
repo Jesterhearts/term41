@@ -46,16 +46,10 @@ pub fn set_cell_dimensions(
 
 pub fn set_scrollback_policy(
     active: &mut Screen,
-    stash: &mut Screen,
     viewport: &Viewport,
-    strict_altscreen_scrollback: &mut bool,
     limit: u32,
-    strict: bool,
 ) {
-    *strict_altscreen_scrollback = strict;
     feature::apply_scrollback_limit(active, viewport, limit);
-    let alt_limit = feature::alt_scrollback_limit(limit, *strict_altscreen_scrollback);
-    feature::apply_scrollback_limit(stash, viewport, alt_limit);
 }
 
 pub fn set_default_status_display(
@@ -101,7 +95,7 @@ mod tests {
         for i in 0..50u32 {
             term.process(format!("line{i}\n").as_bytes());
         }
-        term.set_scrollback_policy(5, false);
+        term.set_scrollback_policy(5);
         for i in 0..20u32 {
             term.process(format!("after{i}\n").as_bytes());
         }

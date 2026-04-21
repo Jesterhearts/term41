@@ -1964,7 +1964,6 @@ fn main() {
         INITIAL_ROWS,
         config.scrollback_lines,
         config.status_line.display_kind(),
-        config.strict_altscreen_scrollback,
         config.feature_permissions.clone(),
         cell_height,
         cell_width,

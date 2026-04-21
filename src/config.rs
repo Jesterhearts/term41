@@ -280,12 +280,6 @@ struct ConfigFile {
     #[serde(deserialize_with = "status_line_mode_opt")]
     #[serde(default)]
     status_line: Option<StatusLineMode>,
-    /// When true, the alternate screen uses zero scrollback like a strict
-    /// xterm-style implementation. When false (the default), the alternate
-    /// screen gets the same scrollback budget as the primary screen.
-    #[serde(deserialize_with = "strict_altscreen_scrollback_opt")]
-    #[serde(default)]
-    strict_altscreen_scrollback: Option<bool>,
     /// Cursor shape: `block`, `underline`, or `beam`.
     #[serde(deserialize_with = "cursor_shape_opt")]
     #[serde(default)]
@@ -363,7 +357,6 @@ pub struct Config {
     pub font_size: f32,
     pub scrollback_lines: u32,
     pub status_line: StatusLineMode,
-    pub strict_altscreen_scrollback: bool,
     pub cursor_style: CursorStyle,
     pub keybindings: Keybindings,
     pub bell: BellMode,
@@ -394,7 +387,6 @@ impl Default for Config {
             font_size: 24.0,
             scrollback_lines: DEFAULT_SCROLLBACK,
             status_line: StatusLineMode::Off,
-            strict_altscreen_scrollback: false,
             cursor_style: CursorStyle::default(),
             keybindings: Keybindings::defaults(),
             bell: BellMode::default(),
@@ -450,7 +442,6 @@ fn parse_config(
         font_size: file.font_size.unwrap_or(24.0).max(1.0),
         scrollback_lines: file.scrollback_lines.unwrap_or(DEFAULT_SCROLLBACK),
         status_line: file.status_line.unwrap_or_default(),
-        strict_altscreen_scrollback: file.strict_altscreen_scrollback.unwrap_or(false),
         cursor_style,
         keybindings,
         bell: file.bell.unwrap_or_default(),
@@ -668,19 +659,6 @@ where
     }
 }
 
-fn strict_altscreen_scrollback_opt<'de, D>(deserializer: D) -> Result<Option<bool>, D::Error>
-where
-    D: serde::Deserializer<'de>,
-{
-    match Option::<bool>::deserialize(deserializer) {
-        Ok(opt) => Ok(opt),
-        Err(e) => {
-            warn!("failed to parse strict_altscreen_scrollback in config: {e}");
-            Ok(None)
-        }
-    }
-}
-
 fn status_line_mode_opt<'de, D>(deserializer: D) -> Result<Option<StatusLineMode>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -780,16 +758,6 @@ mod tests {
     #[test]
     fn gutter_honours_explicit_true() {
         assert!(parse("gutter = true").gutter);
-    }
-
-    #[test]
-    fn strict_altscreen_scrollback_defaults_to_false() {
-        assert!(!parse("").strict_altscreen_scrollback);
-    }
-
-    #[test]
-    fn strict_altscreen_scrollback_honours_explicit_true() {
-        assert!(parse("strict_altscreen_scrollback = true").strict_altscreen_scrollback);
     }
 
     #[test]

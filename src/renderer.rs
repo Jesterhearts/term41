@@ -790,7 +790,6 @@ impl RenderHost {
             rows,
             scrollback,
             self.config.status_line.display_kind(),
-            self.config.strict_altscreen_scrollback,
             self.config.feature_permissions.clone(),
             self.font_system.cell_height,
             self.font_system.cell_width,
@@ -947,7 +946,6 @@ impl RenderHost {
                 base_palette,
                 dec_color,
                 default_status_display,
-                strict_altscreen_scrollback,
                 protocol,
                 ..
             } = terminal;
@@ -960,14 +958,7 @@ impl RenderHost {
                 default_status_display,
                 cfg.status_line.display_kind(),
             );
-            settings::set_scrollback_policy(
-                active,
-                stash,
-                viewport,
-                strict_altscreen_scrollback,
-                cfg.scrollback_lines,
-                cfg.strict_altscreen_scrollback,
-            );
+            settings::set_scrollback_policy(active, viewport, cfg.scrollback_lines);
             settings::set_feature_permissions(protocol, cfg.feature_permissions.clone());
             settings::set_palette(
                 active,
@@ -984,7 +975,6 @@ impl RenderHost {
         self.config.scrollback_lines = cfg.scrollback_lines;
         let status_line_changed = cfg.status_line != self.config.status_line;
         self.config.status_line = cfg.status_line;
-        self.config.strict_altscreen_scrollback = cfg.strict_altscreen_scrollback;
         self.config.palette = cfg.palette.clone();
         self.config.feature_permissions = cfg.feature_permissions.clone();
 

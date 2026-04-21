@@ -985,19 +985,8 @@ mod integration_tests {
     }
 
     #[test]
-    fn alt_screen_inherits_scrollback_by_default() {
-        let mut term = TestTerm::new(8, 3, 100, 16, 8);
-        term.process(b"\x1b[?1049h");
-
-        for _ in 0..10 {
-            term.process(b"line\n");
-        }
-        assert!(term.active.grid.scrollback_len(&term.viewport) > 0);
-    }
-
-    #[test]
     fn strict_alt_screen_has_no_scrollback() {
-        let mut term = TestTerm::new_with_alt_scrollback_policy(8, 3, 100, true, 16, 8);
+        let mut term = TestTerm::new_with_alt_scrollback_policy(8, 3, 100, 16, 8);
         term.process(b"\x1b[?1049h");
 
         for _ in 0..10 {

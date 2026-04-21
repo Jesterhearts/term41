@@ -38,14 +38,13 @@ impl TestTerm {
         cell_h: u32,
         cell_w: u32,
     ) -> Self {
-        Self::new_with_alt_scrollback_policy(cols, rows, scrollback, false, cell_h, cell_w)
+        Self::new_with_alt_scrollback_policy(cols, rows, scrollback, cell_h, cell_w)
     }
 
     pub fn new_with_alt_scrollback_policy(
         cols: u32,
         rows: u32,
         scrollback: u32,
-        strict_altscreen_scrollback: bool,
         cell_h: u32,
         cell_w: u32,
     ) -> Self {
@@ -55,7 +54,6 @@ impl TestTerm {
                 rows,
                 scrollback,
                 StatusDisplayKind::None,
-                strict_altscreen_scrollback,
                 FeaturePermissions::default(),
                 cell_h,
                 cell_w,
@@ -257,23 +255,11 @@ impl TestTerm {
     pub fn set_scrollback_policy(
         &mut self,
         limit: u32,
-        strict_altscreen_scrollback: bool,
     ) {
         let Terminal {
-            active,
-            stash,
-            viewport,
-            strict_altscreen_scrollback: strict_flag,
-            ..
+            active, viewport, ..
         } = &mut self.inner;
-        settings::set_scrollback_policy(
-            active,
-            stash,
-            viewport,
-            strict_flag,
-            limit,
-            strict_altscreen_scrollback,
-        )
+        settings::set_scrollback_policy(active, viewport, limit)
     }
 
     pub fn set_default_status_display(
