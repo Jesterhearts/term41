@@ -1,21 +1,36 @@
-use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
-use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use palette::Srgb;
-use smol_str::SmolStr;
 
-use crate::image::PlacedImage;
-use crate::image::clear_in_range;
-use crate::image::shift_in_region;
-use crate::screen::row::LineAttr;
 use crate::screen::row::Row;
 
-fn reset_row_after_full_clear(row: &mut Row) {
-    row.wrapped = false;
-    row.line_attr = LineAttr::Normal;
-}
+mod edit;
+mod rect;
+mod reflow;
+mod scroll;
+
+pub(crate) use self::edit::delete_chars as delete_chars_op;
+pub(crate) use self::edit::erase_chars as erase_chars_op;
+pub(crate) use self::edit::erase_in_display as erase_in_display_op;
+pub(crate) use self::edit::erase_in_display_selective as erase_in_display_selective_op;
+pub(crate) use self::edit::erase_in_line as erase_in_line_op;
+pub(crate) use self::edit::erase_in_line_selective as erase_in_line_selective_op;
+pub(crate) use self::edit::insert_chars as insert_chars_op;
+pub(crate) use self::rect::change_attrs_rect as change_attrs_rect_op;
+pub(crate) use self::rect::copy_rect as copy_rect_op;
+pub(crate) use self::rect::erase_rect as erase_rect_op;
+pub(crate) use self::rect::erase_rect_selective as erase_rect_selective_op;
+pub(crate) use self::rect::fill_rect as fill_rect_op;
+pub(crate) use self::rect::reverse_attrs_rect as reverse_attrs_rect_op;
+pub(crate) use self::reflow::reflow as reflow_op;
+pub(crate) use self::scroll::delete_cols as delete_cols_op;
+pub(crate) use self::scroll::insert_cols as insert_cols_op;
+pub(crate) use self::scroll::scroll_down_in_rect as scroll_down_in_rect_op;
+pub(crate) use self::scroll::scroll_down_in_region as scroll_down_in_region_op;
+pub(crate) use self::scroll::scroll_left as scroll_left_op;
+pub(crate) use self::scroll::scroll_right as scroll_right_op;
+pub(crate) use self::scroll::scroll_up_in_rect as scroll_up_in_rect_op;
+pub(crate) use self::scroll::scroll_up_in_region as scroll_up_in_region_op;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
@@ -91,331 +106,6 @@ impl Grid {
         }
     }
 
-    pub fn erase_in_display(
-        &mut self,
-        cursor: &Cursor,
-        viewport: &Viewport,
-        images: &mut BTreeMap<u64, PlacedImage>,
-        mode: u16,
-    ) {
-        let active = self.active_row_index(cursor, viewport);
-        let first_visible = viewport.top_index(self.rows.len());
-        let col = cursor.col as usize;
-
-        match mode {
-            // Erase from cursor to end of screen.
-            0 => {
-                let cols = self.rows[active].cells.len();
-                self.rows[active].clear_range(col..cols, self.default_fg, self.default_bg);
-                for r in (active + 1)..self.rows.len() {
-                    self.rows[r].clear(self.default_fg, self.default_bg);
-                }
-            }
-            // Erase from start of screen to cursor (inclusive).
-            1 => {
-                for r in first_visible..active {
-                    self.rows[r].clear(self.default_fg, self.default_bg);
-                }
-                self.rows[active].clear_range(0..col + 1, self.default_fg, self.default_bg);
-            }
-            // Erase entire screen — cells *and* any images sitting on them.
-            // Without the image sweep an app that draws sixels, calls ED 2,
-            // and redraws would stack ghost copies over every cycle.
-            2 => {
-                for r in first_visible..self.rows.len() {
-                    self.rows[r].clear(self.default_fg, self.default_bg);
-                    reset_row_after_full_clear(&mut self.rows[r]);
-                }
-                clear_in_range(images, first_visible, self.rows.len());
-            }
-            // Erase scrollback buffer. Images anchored inside scrollback
-            // ride out on the existing `total_popped` adjustment in
-            // `Terminal::process`, so no explicit sweep is needed here.
-            3 => {
-                self.total_popped += first_visible;
-                self.rows.drain(0..first_visible);
-            }
-            _ => {}
-        }
-    }
-
-    /// DECSED — Selective Erase in Display. Same semantics as
-    /// [`erase_in_display`] but cells with the `PROTECTED` attribute are
-    /// left untouched. Mode 3 (erase scrollback) is not selective — it
-    /// always clears the entire scrollback.
-    pub fn erase_in_display_selective(
-        &mut self,
-        cursor: &Cursor,
-        viewport: &Viewport,
-        images: &mut BTreeMap<u64, PlacedImage>,
-        mode: u16,
-    ) {
-        let active = self.active_row_index(cursor, viewport);
-        let first_visible = viewport.top_index(self.rows.len());
-        let col = cursor.col as usize;
-
-        match mode {
-            0 => {
-                let cols = self.rows[active].cells.len();
-                self.rows[active].clear_range_selective(
-                    col..cols,
-                    self.default_fg,
-                    self.default_bg,
-                );
-                for r in (active + 1)..self.rows.len() {
-                    self.rows[r].clear_selective(self.default_fg, self.default_bg);
-                }
-            }
-            1 => {
-                for r in first_visible..active {
-                    self.rows[r].clear_selective(self.default_fg, self.default_bg);
-                }
-                self.rows[active].clear_range_selective(
-                    0..col + 1,
-                    self.default_fg,
-                    self.default_bg,
-                );
-            }
-            2 => {
-                for r in first_visible..self.rows.len() {
-                    self.rows[r].clear_selective(self.default_fg, self.default_bg);
-                }
-                clear_in_range(images, first_visible, self.rows.len());
-            }
-            _ => {}
-        }
-    }
-
-    /// DECSEL — Selective Erase in Line. Same semantics as
-    /// [`erase_in_line`] but cells with the `PROTECTED` attribute are
-    /// left untouched.
-    pub fn erase_in_line_selective(
-        &mut self,
-        cursor: &Cursor,
-        viewport: &Viewport,
-        mode: u16,
-    ) {
-        let active = self.active_row_index(cursor, viewport);
-        let cols = self.rows[active].cells.len();
-        let col = cursor.col as usize;
-
-        match mode {
-            0 => {
-                self.rows[active].clear_range_selective(col..cols, self.default_fg, self.default_bg)
-            }
-            1 => self.rows[active].clear_range_selective(
-                0..col + 1,
-                self.default_fg,
-                self.default_bg,
-            ),
-            2 => self.rows[active].clear_selective(self.default_fg, self.default_bg),
-            _ => {}
-        }
-    }
-
-    pub fn erase_in_line(
-        &mut self,
-        cursor: &Cursor,
-        viewport: &Viewport,
-        mode: u16,
-    ) {
-        let active = self.active_row_index(cursor, viewport);
-        let cols = self.rows[active].cells.len();
-        let col = cursor.col as usize;
-
-        match mode {
-            // Erase from cursor to end of line.
-            0 => self.rows[active].clear_range(col..cols, self.default_fg, self.default_bg),
-            // Erase from start of line to cursor (inclusive).
-            1 => self.rows[active].clear_range(0..col + 1, self.default_fg, self.default_bg),
-            // Erase entire line.
-            2 => self.rows[active].clear(self.default_fg, self.default_bg),
-            _ => {}
-        }
-    }
-
-    pub fn delete_chars(
-        &mut self,
-        cursor: &Cursor,
-        viewport: &Viewport,
-        n: u16,
-    ) {
-        let active = self.active_row_index(cursor, viewport);
-        let cols = self.rows[active].cells.len();
-        let col = cursor.col as usize;
-        let count = (n as usize).min(cols - col);
-
-        self.rows[active].copy_within(col + count..cols, col);
-        self.rows[active].clear_range(cols - count..cols, self.default_fg, self.default_bg);
-    }
-
-    pub fn insert_chars(
-        &mut self,
-        cursor: &Cursor,
-        viewport: &Viewport,
-        n: u16,
-    ) {
-        let active = self.active_row_index(cursor, viewport);
-        let cols = self.rows[active].cells.len();
-        let col = cursor.col as usize;
-        let count = (n as usize).min(cols - col);
-
-        self.rows[active].copy_within(col..cols - count, col + count);
-        self.rows[active].clear_range(col..col + count, self.default_fg, self.default_bg);
-    }
-
-    pub fn erase_chars(
-        &mut self,
-        cursor: &Cursor,
-        viewport: &Viewport,
-        n: u16,
-    ) {
-        let active = self.active_row_index(cursor, viewport);
-        let cols = self.rows[active].cells.len();
-        let col = cursor.col as usize;
-        let end = (col + n as usize).min(cols);
-
-        self.rows[active].clear_range(col..end, self.default_fg, self.default_bg);
-    }
-
-    /// Scroll content up within a region: remove line at `top`, insert blank
-    /// at `bottom`. Both are viewport-relative row indices. Images anchored
-    /// inside the region shift up with the content; images pushed out the
-    /// top are dropped (matches xterm's "scrolled off = gone" rule).
-    pub(crate) fn scroll_up_in_region(
-        &mut self,
-        viewport: &Viewport,
-        images: &mut BTreeMap<u64, PlacedImage>,
-        top: u32,
-        bottom: u32,
-        n: u32,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let abs_top = first_visible + top as usize;
-        let abs_bottom = first_visible + bottom as usize;
-        let n = (n as usize).min(abs_bottom - abs_top + 1);
-        for _ in 0..n {
-            self.rows.remove(abs_top);
-            self.rows.insert(
-                abs_bottom,
-                Row::new(viewport.cols, self.default_fg, self.default_bg),
-            );
-        }
-        shift_in_region(images, abs_top, abs_bottom, -(n as i64));
-    }
-
-    /// Scroll content down within a region: insert blank at `top`, remove
-    /// line at `bottom`. Both are viewport-relative row indices. Images
-    /// anchored inside the region shift down with the content; images
-    /// pushed out the bottom are dropped.
-    pub(crate) fn scroll_down_in_region(
-        &mut self,
-        viewport: &Viewport,
-        images: &mut BTreeMap<u64, PlacedImage>,
-        top: u32,
-        bottom: u32,
-        n: u32,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let abs_top = first_visible + top as usize;
-        let abs_bottom = first_visible + bottom as usize;
-        let n = (n as usize).min(abs_bottom - abs_top + 1);
-        for _ in 0..n {
-            self.rows.remove(abs_bottom);
-            self.rows.insert(
-                abs_top,
-                Row::new(viewport.cols, self.default_fg, self.default_bg),
-            );
-        }
-        shift_in_region(images, abs_top, abs_bottom, n as i64);
-    }
-
-    /// Scroll content up within a rectangular sub-region defined by rows
-    /// `top..=bottom` and columns `left..=right`. Each row copies the
-    /// column range from n rows below; the bottom n rows' column range is
-    /// cleared. Used by IL/DL/IND when DECLRMM is active.
-    pub(crate) fn scroll_up_in_rect(
-        &mut self,
-        viewport: &Viewport,
-        top: u32,
-        bottom: u32,
-        left: u32,
-        right: u32,
-        n: u32,
-    ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
-        let abs_top = first_visible + top as usize;
-        let abs_bottom = first_visible + bottom as usize;
-        let l = left as usize;
-        let r = (right as usize + 1).min(self.rows[abs_top].cells.len());
-        let n = (n as usize).min(abs_bottom - abs_top + 1);
-
-        for row in abs_top..=(abs_bottom - n) {
-            let src = row + n;
-            let cells: Vec<_> = self.rows[src].cells[l..r].to_vec();
-            let fg: Vec<_> = self.rows[src].fg[l..r].to_vec();
-            let bg: Vec<_> = self.rows[src].bg[l..r].to_vec();
-            let attrs: Vec<_> = self.rows[src].attrs[l..r].to_vec();
-            let ul: Vec<_> = self.rows[src].underline[l..r].to_vec();
-            let ul_color: Vec<_> = self.rows[src].underline_color[l..r].to_vec();
-            let links: Vec<_> = self.rows[src].links[l..r].to_vec();
-
-            self.rows[row].cells[l..r].clone_from_slice(&cells);
-            self.rows[row].fg[l..r].copy_from_slice(&fg);
-            self.rows[row].bg[l..r].copy_from_slice(&bg);
-            self.rows[row].attrs[l..r].copy_from_slice(&attrs);
-            self.rows[row].underline[l..r].copy_from_slice(&ul);
-            self.rows[row].underline_color[l..r].copy_from_slice(&ul_color);
-            self.rows[row].links[l..r].clone_from_slice(&links);
-        }
-
-        for row in (abs_bottom - n + 1)..=abs_bottom {
-            self.rows[row].clear_range(l..r, self.default_fg, self.default_bg);
-        }
-    }
-
-    /// Scroll content down within a rectangular sub-region. Mirrors
-    /// [`scroll_up_in_rect`] but shifts content downward.
-    pub(crate) fn scroll_down_in_rect(
-        &mut self,
-        viewport: &Viewport,
-        top: u32,
-        bottom: u32,
-        left: u32,
-        right: u32,
-        n: u32,
-    ) {
-        let first_visible = self.rows.len() - viewport.rows as usize;
-        let abs_top = first_visible + top as usize;
-        let abs_bottom = first_visible + bottom as usize;
-        let l = left as usize;
-        let r = (right as usize + 1).min(self.rows[abs_top].cells.len());
-        let n = (n as usize).min(abs_bottom - abs_top + 1);
-
-        for row in ((abs_top + n)..=abs_bottom).rev() {
-            let src = row - n;
-            let cells: Vec<_> = self.rows[src].cells[l..r].to_vec();
-            let fg: Vec<_> = self.rows[src].fg[l..r].to_vec();
-            let bg: Vec<_> = self.rows[src].bg[l..r].to_vec();
-            let attrs: Vec<_> = self.rows[src].attrs[l..r].to_vec();
-            let ul: Vec<_> = self.rows[src].underline[l..r].to_vec();
-            let ul_color: Vec<_> = self.rows[src].underline_color[l..r].to_vec();
-            let links: Vec<_> = self.rows[src].links[l..r].to_vec();
-
-            self.rows[row].cells[l..r].clone_from_slice(&cells);
-            self.rows[row].fg[l..r].copy_from_slice(&fg);
-            self.rows[row].bg[l..r].copy_from_slice(&bg);
-            self.rows[row].attrs[l..r].copy_from_slice(&attrs);
-            self.rows[row].underline[l..r].copy_from_slice(&ul);
-            self.rows[row].underline_color[l..r].copy_from_slice(&ul_color);
-            self.rows[row].links[l..r].clone_from_slice(&links);
-        }
-
-        for row in abs_top..(abs_top + n) {
-            self.rows[row].clear_range(l..r, self.default_fg, self.default_bg);
-        }
-    }
-
     pub fn active_row_index(
         &self,
         cursor: &Cursor,
@@ -423,503 +113,71 @@ impl Grid {
     ) -> usize {
         viewport.top_index(self.rows.len()) + cursor.row as usize
     }
-
-    pub(crate) fn reflow(
-        &mut self,
-        new_width: u32,
-    ) {
-        if self.rows.is_empty() {
-            return;
-        }
-
-        if self.rows[0].len() == new_width {
-            return;
-        }
-
-        if new_width > self.rows[0].len() {
-            let new_width = new_width as usize;
-            let fg = self.default_fg;
-            let bg = self.default_bg;
-            let mut dst = 0;
-            let mut dst_col = self.rows[0].content_len() as usize;
-            let mut src = 1;
-            let mut src_col: usize = 0;
-
-            while dst < self.rows.len() && src < self.rows.len() {
-                self.rows[dst].resize(new_width as u32, fg, bg);
-
-                if !self.rows[dst].wrapped {
-                    dst += 1;
-                    dst_col = if dst == src && self.rows[dst].wrapped {
-                        self.rows[dst].content_len() as usize
-                    } else {
-                        0
-                    };
-                    if dst == src {
-                        src += 1;
-                    }
-                    continue;
-                }
-
-                // Pull one chunk from src into dst.
-                let (d, s) = self.split_current_next(dst, src);
-                let s_content = s.content_len() as usize;
-                let n = d.copy_from(s, src_col..s_content, dst_col);
-                dst_col += n;
-                src_col += n;
-
-                // If src exhausted: inherit its wrap state, clear it, advance.
-                if src_col >= s_content {
-                    d.wrapped = s.wrapped;
-                    s.clear(fg, bg);
-                    s.wrapped = true;
-                    src += 1;
-                    src_col = 0;
-                }
-
-                // If dst full: advance to next row.
-                if dst_col >= new_width {
-                    if src_col > 0 {
-                        self.rows[dst].wrapped = true;
-                    }
-                    dst += 1;
-                    dst_col = 0;
-                    if dst == src {
-                        // Collision: dst caught up to partially-consumed src.
-                        // Shift remaining content to front and advance src.
-                        self.rows[dst].copy_within(src_col.., 0);
-                        let len = self.rows[dst].len() as usize;
-                        self.rows[dst].clear_range(len - src_col..len, fg, bg);
-                        dst_col = len - src_col;
-                        src += 1;
-                        src_col = 0;
-                    }
-                }
-            }
-
-            self.rows[dst].resize(new_width as u32, fg, bg);
-            self.rows
-                .truncate(dst + if self.rows[dst].wrapped { 0 } else { 1 });
-        } else {
-            let mut row = 0;
-            while row < self.rows.len() {
-                if self.rows[row].len() > new_width {
-                    if self.rows[row].content_len() > new_width {
-                        let overflow = Row {
-                            cells: self.rows[row].cells.split_off(new_width as usize),
-                            fg: self.rows[row].fg.split_off(new_width as usize),
-                            bg: self.rows[row].bg.split_off(new_width as usize),
-                            attrs: self.rows[row].attrs.split_off(new_width as usize),
-                            underline: self.rows[row].underline.split_off(new_width as usize),
-                            underline_color: self.rows[row]
-                                .underline_color
-                                .split_off(new_width as usize),
-                            links: self.rows[row].links.split_off(new_width as usize),
-                            wrapped: self.rows[row].wrapped,
-                            // Semantic marks only live on the head of a
-                            // logical line; the overflow continuation is
-                            // never the head, so it carries no marks.
-                            prompt_start: false,
-                            output_start: false,
-                            exit_status: None,
-                            // The overflow row is a reflow artifact, not a
-                            // DEC-attributed line, so it gets no line attr.
-                            line_attr: LineAttr::Normal,
-                        };
-
-                        self.rows[row].wrapped = true;
-                        self.rows.insert(row + 1, overflow);
-                    } else {
-                        self.rows[row].wrapped = false;
-                        self.rows[row].truncate(new_width);
-                    }
-                } else {
-                    let mut content = self.rows[row].len() as usize;
-                    self.rows[row].resize(new_width, self.default_fg, self.default_bg);
-
-                    // Pull content from continuation rows to fill space left
-                    // by a short overflow. This maintains the invariant that
-                    // only the last row in a wrapped sequence is partially
-                    // filled.
-                    while self.rows[row].wrapped && row + 1 < self.rows.len() {
-                        let room = new_width as usize - content;
-                        if room == 0 {
-                            break;
-                        }
-
-                        let next = row + 1;
-                        let next_content = self.rows[next].content_len() as usize;
-                        let to_copy = room.min(next_content);
-
-                        if to_copy > 0 {
-                            let (dst, src) = self.split_current_next(row, next);
-                            for i in 0..to_copy {
-                                dst.cells[content + i] = src.cells[i].clone();
-                            }
-                            dst.fg[content..content + to_copy].copy_from_slice(&src.fg[..to_copy]);
-                            dst.bg[content..content + to_copy].copy_from_slice(&src.bg[..to_copy]);
-                        }
-
-                        if to_copy >= next_content {
-                            // Fully consumed the next row — inherit its wrap
-                            // state and remove it.
-                            let next_wrapped = self.rows[next].wrapped;
-                            self.rows.remove(next);
-                            self.rows[row].wrapped = next_wrapped;
-                            content += to_copy;
-                        } else {
-                            // Partially consumed — shift remaining content left
-                            // and trim to its new length so the main loop can
-                            // process it correctly.
-                            self.rows[next].copy_within(to_copy.., 0);
-                            let remaining = self.rows[next].len() as usize - to_copy;
-                            self.rows[next].truncate(remaining as u32);
-                            break;
-                        }
-                    }
-                }
-                row += 1;
-            }
-        }
-    }
-
-    /// Scroll every row in [top, bottom] left by `n` columns (SL, `CSI SP @`).
-    /// Cells on the right edge are cleared. Viewport-relative row indices.
-    pub(crate) fn scroll_left(
-        &mut self,
-        viewport: &Viewport,
-        top: u32,
-        bottom: u32,
-        n: u32,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let cols = viewport.cols as usize;
-        let n = (n as usize).min(cols);
-        if n == 0 {
-            return;
-        }
-        for r in top..=bottom {
-            let abs = first_visible + r as usize;
-            self.rows[abs].copy_within(n..cols, 0);
-            self.rows[abs].clear_range(cols - n..cols, self.default_fg, self.default_bg);
-        }
-    }
-
-    /// Scroll every row in [top, bottom] right by `n` columns (SR, `CSI SP A`).
-    /// Cells on the left edge are cleared. Viewport-relative row indices.
-    pub(crate) fn scroll_right(
-        &mut self,
-        viewport: &Viewport,
-        top: u32,
-        bottom: u32,
-        n: u32,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let cols = viewport.cols as usize;
-        let n = (n as usize).min(cols);
-        if n == 0 {
-            return;
-        }
-        for r in top..=bottom {
-            let abs = first_visible + r as usize;
-            self.rows[abs].copy_within(0..cols - n, n);
-            self.rows[abs].clear_range(0..n, self.default_fg, self.default_bg);
-        }
-    }
-
-    /// Insert `n` blank columns at the cursor column in every row of the
-    /// scroll region (DECIC, `CSI ' }`). Columns from cursor to right margin
-    /// shift right; columns pushed off the right edge are lost.
-    /// `cursor_col` and `top`/`bottom` are viewport-relative.
-    pub(crate) fn insert_cols(
-        &mut self,
-        viewport: &Viewport,
-        cursor_col: u32,
-        top: u32,
-        bottom: u32,
-        n: u32,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let cols = viewport.cols as usize;
-        let col = cursor_col as usize;
-        let n = (n as usize).min(cols - col);
-        if n == 0 {
-            return;
-        }
-        for r in top..=bottom {
-            let abs = first_visible + r as usize;
-            self.rows[abs].copy_within(col..cols - n, col + n);
-            self.rows[abs].clear_range(col..col + n, self.default_fg, self.default_bg);
-        }
-    }
-
-    /// Delete `n` columns at the cursor column in every row of the scroll
-    /// region (DECDC, `CSI ' ~`). Columns after the cursor shift left;
-    /// columns vacated on the right edge are cleared.
-    /// `cursor_col` and `top`/`bottom` are viewport-relative.
-    pub(crate) fn delete_cols(
-        &mut self,
-        viewport: &Viewport,
-        cursor_col: u32,
-        top: u32,
-        bottom: u32,
-        n: u32,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let cols = viewport.cols as usize;
-        let col = cursor_col as usize;
-        let n = (n as usize).min(cols - col);
-        if n == 0 {
-            return;
-        }
-        for r in top..=bottom {
-            let abs = first_visible + r as usize;
-            self.rows[abs].copy_within(col + n..cols, col);
-            self.rows[abs].clear_range(cols - n..cols, self.default_fg, self.default_bg);
-        }
-    }
-
-    /// Erase (fill with blank default-color cells) a rectangular region
-    /// (DECERA, `CSI $ z`). All coordinates are 0-based, viewport-relative,
-    /// inclusive on all four sides.
-    pub(crate) fn erase_rect(
-        &mut self,
-        viewport: &Viewport,
-        top: u32,
-        left: u32,
-        bottom: u32,
-        right: u32,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let left = left as usize;
-        let right_excl = (right as usize + 1).min(viewport.cols as usize);
-        for r in top..=bottom {
-            let abs = first_visible + r as usize;
-            self.rows[abs].clear_range(left..right_excl, self.default_fg, self.default_bg);
-        }
-    }
-
-    /// Selective erase rectangular area (DECSERA, `CSI $ {`). Same as
-    /// [`erase_rect`] but leaves `PROTECTED` cells untouched.
-    pub(crate) fn erase_rect_selective(
-        &mut self,
-        viewport: &Viewport,
-        top: u32,
-        left: u32,
-        bottom: u32,
-        right: u32,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let left = left as usize;
-        let right_excl = (right as usize + 1).min(viewport.cols as usize);
-        for r in top..=bottom {
-            let abs = first_visible + r as usize;
-            self.rows[abs].clear_range_selective(
-                left..right_excl,
-                self.default_fg,
-                self.default_bg,
-            );
-        }
-    }
-
-    /// Fill a rectangular region with `ch` using the provided SGR attributes
-    /// (DECFRA, `CSI $ x`). Only characters 32–126 and 160–255 are valid;
-    /// other code points are a no-op. Coordinates are 0-based, viewport-
-    /// relative, inclusive on all four sides.
-    #[allow(clippy::too_many_arguments)]
-    pub(crate) fn fill_rect(
-        &mut self,
-        viewport: &Viewport,
-        top: u32,
-        left: u32,
-        bottom: u32,
-        right: u32,
-        ch: SmolStr,
-        fg: Srgb<u8>,
-        bg: Srgb<u8>,
-        attrs: CellAttrs,
-        underline: UnderlineStyle,
-        underline_color: Option<Srgb<u8>>,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        let left = left as usize;
-        let right_excl = (right as usize + 1).min(viewport.cols as usize);
-        for r in top..=bottom {
-            let abs = first_visible + r as usize;
-            let row = &mut self.rows[abs];
-            for c in left..right_excl {
-                row.cells[c] = ch.clone();
-                row.fg[c] = fg;
-                row.bg[c] = bg;
-                row.attrs[c] = attrs;
-                row.underline[c] = underline;
-                row.underline_color[c] = underline_color;
-                row.links[c] = None;
-            }
-        }
-    }
-
-    /// Copy a rectangular region to a destination position (DECCRA,
-    /// `CSI $ v`). Takes a full snapshot of the source first so that
-    /// overlapping source and destination produce well-defined results.
-    /// All coordinates are 0-based, viewport-relative; the copy is clipped
-    /// to viewport bounds.
-    pub(crate) fn copy_rect(
-        &mut self,
-        src_viewport: &Viewport,
-        src_top: u32,
-        src_left: u32,
-        src_bottom: u32,
-        src_right: u32,
-        dst_top: u32,
-        dst_left: u32,
-        dst_viewport: &Viewport,
-    ) {
-        let src_first_visible = src_viewport.top_index(self.rows.len());
-        let dst_first_visible = dst_viewport.top_index(self.rows.len());
-        let src_rows = src_viewport.rows as usize;
-        let src_cols = src_viewport.cols as usize;
-        let dst_rows = dst_viewport.rows as usize;
-        let dst_cols = dst_viewport.cols as usize;
-
-        let src_left = src_left as usize;
-        let src_right_excl = (src_right as usize + 1).min(src_cols);
-        let dst_left = dst_left as usize;
-
-        // Snapshot all source rows before writing anything.
-        let snaps: Vec<_> = (src_top..=src_bottom)
-            .filter(|&r| (r as usize) < src_rows)
-            .map(|r| {
-                let abs = src_first_visible + r as usize;
-                self.rows[abs].snap_range(src_left, src_right_excl)
-            })
-            .collect();
-
-        for (i, snap) in snaps.iter().enumerate() {
-            let dst_r = dst_top as usize + i;
-            if dst_r >= dst_rows || dst_left >= dst_cols {
-                break;
-            }
-            let abs = dst_first_visible + dst_r;
-            self.rows[abs].paste_range(snap, dst_left);
-        }
-    }
-
-    /// Apply SGR attribute changes to a rectangular region (DECCARA,
-    /// `CSI $ r`). Coordinates are 0-based, viewport-relative, inclusive.
-    pub(crate) fn change_attrs_rect(
-        &mut self,
-        viewport: &Viewport,
-        top: u32,
-        left: u32,
-        bottom: u32,
-        right: u32,
-        sgr_params: &[u16],
-        extent: AttrChangeExtent,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        match extent {
-            AttrChangeExtent::Rectangle => {
-                let left = left as usize;
-                let right_excl = (right as usize + 1).min(viewport.cols as usize);
-                for r in top..=bottom {
-                    let abs = first_visible + r as usize;
-                    self.rows[abs].apply_attrs_in_range(left, right_excl, sgr_params);
-                }
-            }
-            AttrChangeExtent::Stream => {
-                let cols = viewport.cols as usize;
-                for r in top..=bottom {
-                    let abs = first_visible + r as usize;
-                    let row = &mut self.rows[abs];
-                    let start = if r == top { left as usize } else { 0 };
-                    let end_excl = if r == bottom {
-                        (right as usize + 1).min(cols)
-                    } else {
-                        cols
-                    };
-                    for c in start..end_excl {
-                        if row.has_drawn_cell_at(c) {
-                            row.apply_attrs_at(c, sgr_params);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    /// Reverse (toggle) SGR attributes in a rectangular region (DECRARA,
-    /// `CSI $ t`). Coordinates are 0-based, viewport-relative, inclusive.
-    pub(crate) fn reverse_attrs_rect(
-        &mut self,
-        viewport: &Viewport,
-        top: u32,
-        left: u32,
-        bottom: u32,
-        right: u32,
-        sgr_params: &[u16],
-        extent: AttrChangeExtent,
-    ) {
-        let first_visible = viewport.top_index(self.rows.len());
-        match extent {
-            AttrChangeExtent::Rectangle => {
-                let left = left as usize;
-                let right_excl = (right as usize + 1).min(viewport.cols as usize);
-                for r in top..=bottom {
-                    let abs = first_visible + r as usize;
-                    self.rows[abs].toggle_attrs_in_range(left, right_excl, sgr_params);
-                }
-            }
-            AttrChangeExtent::Stream => {
-                let cols = viewport.cols as usize;
-                for r in top..=bottom {
-                    let abs = first_visible + r as usize;
-                    let row = &mut self.rows[abs];
-                    let start = if r == top { left as usize } else { 0 };
-                    let end_excl = if r == bottom {
-                        (right as usize + 1).min(cols)
-                    } else {
-                        cols
-                    };
-                    for c in start..end_excl {
-                        if row.has_drawn_cell_at(c) {
-                            row.toggle_attrs_at(c, sgr_params);
-                        }
-                    }
-                }
-            }
-        }
-    }
-
-    fn split_current_next(
-        &mut self,
-        row: usize,
-        next: usize,
-    ) -> (&mut Row, &mut Row) {
-        let (front, back) = self.rows.as_mut_slices();
-
-        if row < front.len() && next >= front.len() {
-            let next = next - front.len();
-            (&mut front[row], &mut back[next])
-        } else if next < front.len() && row >= front.len() {
-            (&mut back[row - front.len()], &mut front[next])
-        } else if next < front.len() {
-            let (first, second) = front.split_at_mut(next);
-            (&mut first[row], &mut second[0])
-        } else {
-            let (first, second) = back.split_at_mut(next - front.len());
-            (&mut first[row - front.len()], &mut second[0])
-        }
-    }
 }
 
 #[cfg(test)]
 mod tests {
+    use std::collections::BTreeMap;
+
     use palette::Srgb;
 
     use super::*;
     use crate::color::default_bg;
     use crate::color::default_fg;
+
+    trait GridTestOps {
+        fn reflow(
+            &mut self,
+            new_width: u32,
+        );
+        fn scroll_up_in_region(
+            &mut self,
+            viewport: &Viewport,
+            images: &mut BTreeMap<u64, crate::image::PlacedImage>,
+            top: u32,
+            bottom: u32,
+            n: u32,
+        );
+        fn scroll_down_in_region(
+            &mut self,
+            viewport: &Viewport,
+            images: &mut BTreeMap<u64, crate::image::PlacedImage>,
+            top: u32,
+            bottom: u32,
+            n: u32,
+        );
+    }
+
+    impl GridTestOps for Grid {
+        fn reflow(
+            &mut self,
+            new_width: u32,
+        ) {
+            reflow_op(self, new_width);
+        }
+
+        fn scroll_up_in_region(
+            &mut self,
+            viewport: &Viewport,
+            images: &mut BTreeMap<u64, crate::image::PlacedImage>,
+            top: u32,
+            bottom: u32,
+            n: u32,
+        ) {
+            scroll_up_in_region_op(self, viewport, images, top, bottom, n);
+        }
+
+        fn scroll_down_in_region(
+            &mut self,
+            viewport: &Viewport,
+            images: &mut BTreeMap<u64, crate::image::PlacedImage>,
+            top: u32,
+            bottom: u32,
+            n: u32,
+        ) {
+            scroll_down_in_region_op(self, viewport, images, top, bottom, n);
+        }
+    }
 
     /// Build a grid from `(text, wrapped)` pairs. Each row is padded to `width`
     /// with spaces.

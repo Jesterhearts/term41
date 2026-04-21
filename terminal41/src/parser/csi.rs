@@ -805,12 +805,16 @@ fn apply_main_csi(
             screen.cursor.col = col.min(cols - 1);
         }
         MainCsiAction::EraseInDisplay { mode } => {
-            screen
-                .grid
-                .erase_in_display(&screen.cursor, &viewport, &mut screen.images, mode);
+            grid::erase_in_display_op(
+                &mut screen.grid,
+                &screen.cursor,
+                &viewport,
+                &mut screen.images,
+                mode,
+            );
         }
         MainCsiAction::EraseInLine { mode } => {
-            screen.grid.erase_in_line(&screen.cursor, &viewport, mode);
+            grid::erase_in_line_op(&mut screen.grid, &screen.cursor, &viewport, mode);
         }
         MainCsiAction::SetGraphicsRendition { params } => {
             apply_sgr_groups(
@@ -858,7 +862,8 @@ fn apply_main_csi(
             if screen.cursor.row >= screen.scroll_top && screen.cursor.row <= screen.scroll_bottom {
                 let top = screen.cursor.row;
                 if modes.declrmm {
-                    screen.grid.scroll_down_in_rect(
+                    grid::scroll_down_in_rect_op(
+                        &mut screen.grid,
                         &viewport,
                         top,
                         screen.scroll_bottom,
@@ -867,7 +872,8 @@ fn apply_main_csi(
                         n,
                     );
                 } else {
-                    screen.grid.scroll_down_in_region(
+                    grid::scroll_down_in_region_op(
+                        &mut screen.grid,
                         &viewport,
                         &mut screen.images,
                         top,
@@ -882,7 +888,8 @@ fn apply_main_csi(
             if screen.cursor.row >= screen.scroll_top && screen.cursor.row <= screen.scroll_bottom {
                 let top = screen.cursor.row;
                 if modes.declrmm {
-                    screen.grid.scroll_up_in_rect(
+                    grid::scroll_up_in_rect_op(
+                        &mut screen.grid,
                         &viewport,
                         top,
                         screen.scroll_bottom,
@@ -891,7 +898,8 @@ fn apply_main_csi(
                         n,
                     );
                 } else {
-                    screen.grid.scroll_up_in_region(
+                    grid::scroll_up_in_region_op(
+                        &mut screen.grid,
                         &viewport,
                         &mut screen.images,
                         top,
@@ -902,19 +910,13 @@ fn apply_main_csi(
             }
         }
         MainCsiAction::DeleteChars { count } => {
-            screen
-                .grid
-                .delete_chars(&screen.cursor, &viewport, count.max(1));
+            grid::delete_chars_op(&mut screen.grid, &screen.cursor, &viewport, count.max(1));
         }
         MainCsiAction::InsertChars { count } => {
-            screen
-                .grid
-                .insert_chars(&screen.cursor, &viewport, count.max(1));
+            grid::insert_chars_op(&mut screen.grid, &screen.cursor, &viewport, count.max(1));
         }
         MainCsiAction::EraseChars { count } => {
-            screen
-                .grid
-                .erase_chars(&screen.cursor, &viewport, count.max(1));
+            grid::erase_chars_op(&mut screen.grid, &screen.cursor, &viewport, count.max(1));
         }
         MainCsiAction::ScrollUp { count } => {
             let n = count.max(1) as u32;
@@ -925,7 +927,8 @@ fn apply_main_csi(
                     screen.grid.push_visible_row(&viewport);
                 }
             } else {
-                screen.grid.scroll_up_in_region(
+                grid::scroll_up_in_region_op(
+                    &mut screen.grid,
                     &viewport,
                     &mut screen.images,
                     screen.scroll_top,
@@ -935,7 +938,8 @@ fn apply_main_csi(
             }
         }
         MainCsiAction::ScrollDown { count } => {
-            screen.grid.scroll_down_in_region(
+            grid::scroll_down_in_region_op(
+                &mut screen.grid,
                 &viewport,
                 &mut screen.images,
                 screen.scroll_top,
@@ -1231,15 +1235,17 @@ pub(crate) fn csi_apply(
         }
         ParsedCsiAction::SelectiveEraseDisplay { mode } => {
             let view = screen::screen_viewport(screen, viewport);
-            screen
-                .grid
-                .erase_in_display_selective(&screen.cursor, &view, &mut screen.images, mode);
+            grid::erase_in_display_selective_op(
+                &mut screen.grid,
+                &screen.cursor,
+                &view,
+                &mut screen.images,
+                mode,
+            );
         }
         ParsedCsiAction::SelectiveEraseLine { mode } => {
             let view = screen::screen_viewport(screen, viewport);
-            screen
-                .grid
-                .erase_in_line_selective(&screen.cursor, &view, mode);
+            grid::erase_in_line_selective_op(&mut screen.grid, &screen.cursor, &view, mode);
         }
         ParsedCsiAction::KittyKeyboard {
             intermediate,
@@ -1398,7 +1404,8 @@ pub(crate) fn csi_apply(
                 }
                 let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
                 match action {
-                    ParsedCsiAction::ChangeRectAttrs { .. } => screen.grid.change_attrs_rect(
+                    ParsedCsiAction::ChangeRectAttrs { .. } => grid::change_attrs_rect_op(
+                        &mut screen.grid,
                         &view,
                         start_row,
                         start_col,
@@ -1407,7 +1414,8 @@ pub(crate) fn csi_apply(
                         &sgr,
                         screen.attr_change_extent,
                     ),
-                    ParsedCsiAction::ReverseRectAttrs { .. } => screen.grid.reverse_attrs_rect(
+                    ParsedCsiAction::ReverseRectAttrs { .. } => grid::reverse_attrs_rect_op(
+                        &mut screen.grid,
                         &view,
                         start_row,
                         start_col,
@@ -1434,12 +1442,18 @@ pub(crate) fn csi_apply(
 
             match action {
                 ParsedCsiAction::EraseRect { .. } => {
-                    screen
-                        .grid
-                        .erase_rect(&view, rect_top, rect_left, rect_bottom, rect_right);
+                    grid::erase_rect_op(
+                        &mut screen.grid,
+                        &view,
+                        rect_top,
+                        rect_left,
+                        rect_bottom,
+                        rect_right,
+                    );
                 }
                 ParsedCsiAction::SelectiveEraseRect { .. } => {
-                    screen.grid.erase_rect_selective(
+                    grid::erase_rect_selective_op(
+                        &mut screen.grid,
                         &view,
                         rect_top,
                         rect_left,
@@ -1453,7 +1467,8 @@ pub(crate) fn csi_apply(
                     if valid && let Some(ch) = char::from_u32(ch_code) {
                         let mut buf = [0u8; 4];
                         let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
-                        screen.grid.fill_rect(
+                        grid::fill_rect_op(
+                            &mut screen.grid,
                             &view,
                             rect_top,
                             rect_left,
@@ -1482,7 +1497,8 @@ pub(crate) fn csi_apply(
                     let Some(dst_view) = screen::page_viewport(screen, viewport, dst_page) else {
                         return;
                     };
-                    screen.grid.copy_rect(
+                    grid::copy_rect_op(
+                        &mut screen.grid,
                         &src_view,
                         rect_top,
                         rect_left,
@@ -1495,7 +1511,8 @@ pub(crate) fn csi_apply(
                 }
                 ParsedCsiAction::ChangeRectAttrs { .. } => {
                     let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                    screen.grid.change_attrs_rect(
+                    grid::change_attrs_rect_op(
+                        &mut screen.grid,
                         &view,
                         rect_top,
                         rect_left,
@@ -1507,7 +1524,8 @@ pub(crate) fn csi_apply(
                 }
                 ParsedCsiAction::ReverseRectAttrs { .. } => {
                     let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                    screen.grid.reverse_attrs_rect(
+                    grid::reverse_attrs_rect_op(
+                        &mut screen.grid,
                         &view,
                         rect_top,
                         rect_left,
@@ -1558,16 +1576,24 @@ pub(crate) fn csi_apply(
         ParsedCsiAction::ScrollLeft { count } => {
             let view = screen::screen_viewport(screen, viewport);
             let n = count.max(1) as u32;
-            screen
-                .grid
-                .scroll_left(&view, screen.scroll_top, screen.scroll_bottom, n);
+            grid::scroll_left_op(
+                &mut screen.grid,
+                &view,
+                screen.scroll_top,
+                screen.scroll_bottom,
+                n,
+            );
         }
         ParsedCsiAction::ScrollRight { count } => {
             let view = screen::screen_viewport(screen, viewport);
             let n = count.max(1) as u32;
-            screen
-                .grid
-                .scroll_right(&view, screen.scroll_top, screen.scroll_bottom, n);
+            grid::scroll_right_op(
+                &mut screen.grid,
+                &view,
+                screen.scroll_top,
+                screen.scroll_bottom,
+                n,
+            );
         }
         ParsedCsiAction::SelectPage { page } => {
             let view = screen::screen_viewport(screen, viewport);
@@ -1606,7 +1632,8 @@ pub(crate) fn csi_apply(
         },
         ParsedCsiAction::InsertColumns { count } => {
             let view = screen::screen_viewport(screen, viewport);
-            screen.grid.insert_cols(
+            grid::insert_cols_op(
+                &mut screen.grid,
                 &view,
                 screen.cursor.col,
                 screen.scroll_top,
@@ -1616,7 +1643,8 @@ pub(crate) fn csi_apply(
         }
         ParsedCsiAction::DeleteColumns { count } => {
             let view = screen::screen_viewport(screen, viewport);
-            screen.grid.delete_cols(
+            grid::delete_cols_op(
+                &mut screen.grid,
                 &view,
                 screen.cursor.col,
                 screen.scroll_top,

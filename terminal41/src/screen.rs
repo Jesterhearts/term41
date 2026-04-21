@@ -737,7 +737,7 @@ pub(super) fn resize_screen(
             grid.rows.len().saturating_sub(effective_old_rows) + cursor.row as usize;
         let old_distance_from_bottom = grid.rows.len().saturating_sub(cursor_abs_now + 1);
 
-        grid.reflow(new_cols);
+        self::grid::reflow_op(grid, new_cols);
 
         while grid.rows.len() > max_rows {
             grid.rows.pop_front();

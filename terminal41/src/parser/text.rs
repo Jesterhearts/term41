@@ -18,7 +18,8 @@ pub(crate) fn execute(
                 if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
                     screen.grid.push_visible_row(viewport);
                 } else {
-                    screen.grid.scroll_up_in_region(
+                    grid::scroll_up_in_region_op(
+                        &mut screen.grid,
                         viewport,
                         &mut screen.images,
                         screen.scroll_top,

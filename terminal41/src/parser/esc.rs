@@ -158,7 +158,8 @@ fn apply_vt52_esc(
         }
         Vt52EscAction::ReverseIndex => {
             if screen.cursor.row == screen.scroll_top {
-                screen.grid.scroll_down_in_region(
+                grid::scroll_down_in_region_op(
+                    &mut screen.grid,
                     viewport,
                     &mut screen.images,
                     screen.scroll_top,
@@ -170,12 +171,16 @@ fn apply_vt52_esc(
             }
         }
         Vt52EscAction::EraseToEndOfScreen => {
-            screen
-                .grid
-                .erase_in_display(&screen.cursor, viewport, &mut screen.images, 0);
+            grid::erase_in_display_op(
+                &mut screen.grid,
+                &screen.cursor,
+                viewport,
+                &mut screen.images,
+                0,
+            );
         }
         Vt52EscAction::EraseToEndOfLine => {
-            screen.grid.erase_in_line(&screen.cursor, viewport, 0);
+            grid::erase_in_line_op(&mut screen.grid, &screen.cursor, viewport, 0);
         }
         Vt52EscAction::DirectCursorAddressStart => {
             *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
@@ -253,7 +258,8 @@ fn apply_esc_index(
                 screen.grid.push_visible_row(screen_view);
             }
         } else {
-            screen.grid.scroll_up_in_region(
+            grid::scroll_up_in_region_op(
+                &mut screen.grid,
                 screen_view,
                 &mut screen.images,
                 screen.scroll_top,
@@ -280,7 +286,8 @@ fn apply_esc_next_line(
                 screen.grid.push_visible_row(screen_view);
             }
         } else {
-            screen.grid.scroll_up_in_region(
+            grid::scroll_up_in_region_op(
+                &mut screen.grid,
                 screen_view,
                 &mut screen.images,
                 screen.scroll_top,
@@ -299,7 +306,8 @@ fn apply_esc_reverse_index(
     screen_view: &Viewport,
 ) {
     if screen.cursor.row == screen.scroll_top {
-        screen.grid.scroll_down_in_region(
+        grid::scroll_down_in_region_op(
+            &mut screen.grid,
             screen_view,
             &mut screen.images,
             screen.scroll_top,
@@ -316,9 +324,13 @@ fn apply_esc_back_index(
     screen_view: &Viewport,
 ) {
     if screen.cursor.col == 0 {
-        screen
-            .grid
-            .scroll_right(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
+        grid::scroll_right_op(
+            &mut screen.grid,
+            screen_view,
+            screen.scroll_top,
+            screen.scroll_bottom,
+            1,
+        );
     } else {
         screen.cursor.col -= 1;
     }
@@ -329,9 +341,13 @@ fn apply_esc_forward_index(
     screen_view: &Viewport,
 ) {
     if screen.cursor.col >= current_row_display_cols(screen, screen_view) - 1 {
-        screen
-            .grid
-            .scroll_left(screen_view, screen.scroll_top, screen.scroll_bottom, 1);
+        grid::scroll_left_op(
+            &mut screen.grid,
+            screen_view,
+            screen.scroll_top,
+            screen.scroll_bottom,
+            1,
+        );
     } else {
         screen.cursor.col += 1;
     }
