@@ -215,7 +215,7 @@ pub struct FontSystem {
     plan_cache: HashMap<PlanKey, ShapePlan>,
     pub cell_width: u32,
     pub cell_height: u32,
-    pub supersample: i32,
+    pub supersample: u32,
     pub font_size: f32,
     ascent: f32,
     /// The user-configured font size before DPI scaling.
@@ -226,7 +226,7 @@ impl FontSystem {
     pub fn new(
         fonts_config: Option<String>,
         font_size: f32,
-        supersample: i32,
+        supersample: u32,
     ) -> Self {
         // Kick off font loading in the background so the window appears
         // immediately. FONTS/FAMILIES start empty; shape_row falls through
@@ -265,7 +265,7 @@ impl FontSystem {
         &mut self,
         fonts_config: Option<String>,
         font_size: f32,
-        supersample: i32,
+        supersample: u32,
     ) {
         load_and_install_fonts(fonts_config);
         let scale = self.font_size / self.base_font_size;
@@ -630,7 +630,13 @@ impl FontSystem {
         // cells. See `legacy` for the full codepoint list.
         if font_index == legacy::FONT_INDEX {
             debug!("rasterizing legacy glyph {glyph_index} for cell span {cells_wide}");
-            return legacy::rasterize(glyph_index, self.cell_width, self.cell_height, self.ascent);
+            return legacy::rasterize(
+                glyph_index,
+                self.cell_width,
+                self.cell_height,
+                self.ascent,
+                self.supersample,
+            );
         }
         if font_index == drcs::FONT_INDEX {
             debug!("rasterizing DRCS glyph {glyph_index} for cell span {cells_wide}");
@@ -945,7 +951,7 @@ fn charmap_lookup(
 fn rasterize_simple_glyph(
     simple: &SimpleGlyph,
     scale: f32,
-    supersample: i32,
+    supersample: u32,
 ) -> RasterizedGlyph {
     // 1× bounds — these define the output size and bearing so the glyph
     // lands at the same position it would without supersampling.
@@ -959,7 +965,7 @@ fn rasterize_simple_glyph(
     }
 
     // Rasterize at SS× resolution then downsample.
-    let ss = supersample;
+    let ss = supersample as i32;
     let ss_scale = scale * ss as f32;
     let ss_w = width * ss;
     let ss_h = height * ss;
@@ -1004,6 +1010,18 @@ fn downsample_alpha(
     out_h: i32,
     ss: i32,
 ) -> Vec<u8> {
+    let pixels_u8: Vec<u8> = pixels.iter().flat_map(|&p| p.to_le_bytes()).collect();
+    downsample_alpha_u8(&pixels_u8, ss_w, ss_h, out_w, out_h, ss)
+}
+
+fn downsample_alpha_u8(
+    pixels: &[u8],
+    ss_w: i32,
+    ss_h: i32,
+    out_w: i32,
+    out_h: i32,
+    ss: i32,
+) -> Vec<u8> {
     let mut bitmap = vec![0u8; (out_w * out_h * 4) as usize];
     let area = (ss * ss) as u32;
     for y in 0..out_h {
@@ -1014,13 +1032,13 @@ fn downsample_alpha(
                     let sx = x * ss + dx;
                     let sy = y * ss + dy;
                     if sx < ss_w && sy < ss_h {
-                        let idx = (sy * ss_w + sx) as usize;
-                        // raqote stores ARGB in u32; alpha is the top 8 bits.
-                        alpha_sum += pixels[idx] >> 24;
+                        let idx = (sy * ss_w + sx) as usize * 4;
+                        alpha_sum += pixels[idx + 3] as u32;
                     }
                 }
             }
-            bitmap[((y * out_w + x) * 4 + 3) as usize] = (alpha_sum / area) as u8;
+            let idx = (y * out_w + x) as usize * 4;
+            bitmap[idx + 3] = (alpha_sum / area) as u8;
         }
     }
     bitmap
@@ -1108,7 +1126,7 @@ fn rasterize_composite_glyph(
     loca: &Loca,
     glyf: &read_fonts::tables::glyf::Glyf,
     scale: f32,
-    supersample: i32,
+    supersample: u32,
 ) -> RasterizedGlyph {
     // 1× bounds for output.
     let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
@@ -1129,7 +1147,7 @@ fn rasterize_composite_glyph(
     }
 
     // Rasterize at SS× resolution then downsample.
-    let ss = supersample;
+    let ss = supersample as i32;
     let ss_scale = scale * ss as f32;
     let ss_w = width * ss;
     let ss_h = height * ss;

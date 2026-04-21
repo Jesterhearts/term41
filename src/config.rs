@@ -373,7 +373,7 @@ pub struct Config {
     /// Supersampling factor for font rasterization. Higher values produce
     /// smoother results at the cost of increased CPU usage and memory
     /// consumption. Default is 4.
-    pub font_supersampling: i32,
+    pub font_supersampling: u32,
     /// Color palette (ANSI 16 colors, default fg/bg, cursor, selection).
     pub palette: ColorPalette,
     pub feature_permissions: FeaturePermissions,
@@ -451,7 +451,7 @@ fn parse_config(
         dpi_scale: file.dpi_scale.map(|v| v.max(0.25)),
         background_image: file.background_image.map(expand_path),
         background_opacity: file.background_opacity.unwrap_or(1.0),
-        font_supersampling: file.font_supersampling.unwrap_or(4) as i32,
+        font_supersampling: file.font_supersampling.unwrap_or(4),
         palette,
         feature_permissions: FeaturePermissions {
             macros: file

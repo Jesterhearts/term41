@@ -206,7 +206,7 @@ struct WindowHost {
     cell_height: u32,
     startup_fonts: Option<String>,
     startup_font_size: f32,
-    startup_supersampling: i32,
+    startup_supersampling: u32,
     startup_dpi_scale: Option<f32>,
     startup_gutter: bool,
     render_thread_handle: Arc<OnceLock<std::thread::Thread>>,

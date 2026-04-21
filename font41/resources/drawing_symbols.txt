@@ -12,19 +12,6 @@ Lower N/8 fill (ramp 1..8):
 Left N/8 fill (ramp 1..8):
 ▏▎▍▌▋▊▉█▉▊▋▌▍▎▏
 
-Upper 1/8 and right 1/8:
-▔▔▔▔  ▕▕▕▕
-
-Shades (25% / 50% / 75%):
-░░░░ ▒▒▒▒ ▓▓▓▓ ████
-░▒▓█▓▒░
-░░▒▒▓▓██▓▓▒▒░░
-
-Quadrants — all 16 combinations, row by row:
- ▘▝▀▖▌▞▛▗▚▐▜▄▙▟█
-▘▝▖▗  ▘▖  ▝▗  ▘▗  ▝▖
-▙▛▜▟  ▚▞  ▀▄  ▌▐  ██
-
 Quadrant corners making a filled rectangle outline:
 ▛▀▀▀▜
 ▌   ▐
@@ -39,125 +26,18 @@ Full-cell braille (should tile as a solid block, no gaps):
 ⣿⣿⣿⣿⣿⣿
 ⣿⣿⣿⣿⣿⣿
 
-Partial braille — rows of dots:
-⠁⠁⠁⠁  ⠂⠂⠂⠂  ⠄⠄⠄⠄  ⡀⡀⡀⡀
-⠉⠉⠉⠉  ⠒⠒⠒⠒  ⠤⠤⠤⠤  ⣀⣀⣀⣀
-⠋⠉⠉⠉⠉⠛  (rounded top-row bar)
-⡇    ⢸  (left + right verticals)
-⣇⣀⣀⣀⣀⣸  (rounded bottom-row bar)
-
-Braille diagonal sweep:
-⠁⠂⠄⡀⠈⠐⠠⢀
-⠃⠆⡄⣀⠉⠒⠤⣀
-⠇⡆⣄⣀⠋⠖⡤⣀
-
-== Sextants (U+1FB00–U+1FB3B) ==
-
-Sample row of sextants (2×3 tile grid):
-🬀🬁🬂🬃🬄🬅🬆🬇🬈🬉🬊🬋🬌🬍🬎🬏🬐🬑🬒🬓🬔🬕🬖🬗🬘🬙🬚🬛🬜🬝🬞🬟
-🬠🬡🬢🬣🬤🬥🬦🬧🬨🬩🬪🬫🬬🬭🬮🬯🬰🬱🬲🬳🬴🬵🬶🬷🬸🬹🬺🬻
-
-Sextant rectangle (rows of top/middle/bottom filled tiles):
-🬃🬂🬃🬂🬃  (top row filled)
-🬎🬎🬎🬎🬎  (middle row)
-🬶🬶🬶🬶🬶  (bottom row)
-
-== SFLC 1/8 blocks (U+1FB70–U+1FB80, U+1FB82–U+1FB8F) ==
-
-Vertical 1/8 column sweep (col 1..8 with left & right edge blocks):
-▏🭰🭱🭲🭳🭴🭵▕
-Full horizontal sweep:
-▏🭰🭱🭲🭳🭴🭵▕🭰🭱🭲🭳🭴🭵▕
-
-Horizontal 1/8 row sweep (top..bottom):
-▔
-🭶
-🭷
-🭸
-🭹
-🭺
-🭻
-▁
-
 L-shaped 1/8 frames:
 🭽▔▔▔🭾
 ▏   ▕
 ▏   ▕
 🭼▁▁▁🭿
 
-Upper N/8 ramp (1/8..7/8):
-▔🭶🭷🭸🭹🭺🭻▁   (1/8 top, grading to 1/8 bottom via horizontals)
-▔🭸🭺▁        (compact ramp)
-▔🮂🮃▀🮄🮅🮆█    (upper 1..8/8 progression — U+2594, 1FB82, 1FB83, 2580, 1FB84, 1FB85, 1FB86, 2588)
-
 Right N/8 ramp:
 ▕🮇🮈▐🮉🮊🮋█    (right 1..8/8 — U+2595, 1FB87, 1FB88, 2590, 1FB89, 1FB8A, 1FB8B, 2588)
 
-Shaded halves (half-block geometry at medium density):
-🮌🮌🮌🮌   (left)
-🮍🮍🮍🮍   (right)
-🮎🮎🮎🮎   (upper)
-🮏🮏🮏🮏   (lower)
-
-== Smooth-mosaic wedge shapes (U+1FB3C–U+1FB67) ==
-
-Lower-left triangles, smallest to largest (5 sizes):
-🬼🬽🬾🬿🭀
-
-Lower-left complements (full cell minus upper-left triangle):
-🭁🭂🭃🭄🭅
-
-Lower-right triangles:
-🭇🭈🭉🭊🭋
-
-Lower-right complements:
-🭌🭍🭎🭏🭐
-
-Upper-left triangles:
-🭗🭘🭙🭚🭛
-
-Upper-left complements:
-🭝🭞🭟🭠🭡
-
-Upper-right triangles:
-🭢🭣🭤🭥🭦
-
-Upper-right complements:
-🭒🭓🭔🭕🭖
-
-Diagonal band trapezoids (one per corner):
-🭆🭑🭜🭧
-
-Triangle + complement pairs (each pair tiles the full cell):
-🬼🭒  🬽🭓  🬾🭔  🬿🭕  🭀🭖
-
-All 44 wedge shapes in codepoint order:
-🬼🬽🬾🬿🭀🭁🭂🭃🭄🭅🭆🭇🭈🭉🭊🭋🭌🭍🭎🭏🭐🭑
-🭒🭓🭔🭕🭖🭗🭘🭙🭚🭛🭜🭝🭞🭟🭠🭡🭢🭣🭤🭥🭦🭧
-
-Beveled rectangle outline (wedge corners + block edges):
-🭘▀▀▀▀▀🭣
-▌     ▐
-▌     ▐
-🭈▄▄▄▄▄🭌
-
-Steep beveled rectangle (larger corner triangles):
-🭚▀▀▀▀▀🭥
-🭛     🭦
-🬿▄▄▄▄▄🭏
-
-== Block diagonal shapes (U+1FB68–U+1FB6F) ==
-
-Quarter-cell triangles (left, upper, right, lower):
-🭬🭭🭮🭯
-
-Three-quarter fills (cell minus left, upper, right, lower):
-🭨🭩🭪🭫
-
 Diamond from quarter triangles (3×3 with spaces):
- 🭭
-🭬 🭮
- 🭯
+
+🭬🮚🭮
 
 Diagonal half-block splits — bowtie / hourglass patterns:
 🮚🮚🮚🮚🮚🮚🮚🮚  (upper + lower triangles)
@@ -198,23 +78,6 @@ Shade gradient using triangular shade + solid halves:
 🮜▀▀▀🮝
 🮟▄▄▄🮞
 
-== Diagonal box-drawing lines (U+1FBA0–U+1FBAF) ==
-
-Single segments (UL, UR, LL, LR):
-🮠  🮡  🮢  🮣
-
-Zigzags (left, right):
-🮤🮤🮤🮤  🮥🮥🮥🮥
-
-V-shapes (bottom, top):
-🮦🮦🮦🮦  🮧🮧🮧🮧
-
-X-patterns (backslash pair, slash pair):
-🮨🮨🮨🮨  🮩🮩🮩🮩
-
-Three-segment combinations:
-🮪🮫🮬🮭
-
 Full diamond (all four segments, should tile into a lattice):
 🮮🮮🮮🮮🮮🮮🮮🮮
 🮮🮮🮮🮮🮮🮮🮮🮮
@@ -222,44 +85,11 @@ Full diamond (all four segments, should tile into a lattice):
 Plus / cross (horizontal + vertical through centre):
 🮯🮯🮯🮯🮯🮯🮯🮯
 
-Diamond lattice border:
-🮧🮧🮧🮧🮧🮧🮧🮧
-🮤      🮥
-🮤      🮥
-🮦🮦🮦🮦🮦🮦🮦🮦
-
 == Adjacency / tiling torture tests ==
 
 Horizontal tiling of left 1/8 blocks (should form a solid horizontal line
 at the very top of the row, no gaps, no seams):
 ████████████████████████
-
-Vertical tiling of upper 1/8 blocks across four rows:
-▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔▔
-🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶🭶
-🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸🭸
-▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁▁
-
-Quadrant checkerboard (no seams between cells):
-▘▝▘▝▘▝▘▝
-▖▗▖▗▖▗▖▗
-
-Braille wall (full cell) plus partial border:
-⣿⣿⣿⣿⣿⣿⣿⣿
-⣿⡀⠀⠀⠀⠀⢀⣿
-⣿⠀⠀⠀⠀⠀⠀⣿
-⣿⠁⠀⠀⠀⠀⠈⣿
-⣿⣿⣿⣿⣿⣿⣿⣿
-
-Sextant wall plus partial interior:
-🬛🬛🬛🬛🬛🬛🬛🬛
-🬛🬀🬁🬂🬃🬄🬅🬛
-🬛🬆🬇🬈🬉🬊🬋🬛
-🬛🬛🬛🬛🬛🬛🬛🬛
-
-Wedge complement tiling (triangle + complement = full cell, no seams):
-🬼🭒🬼🭒🬼🭒🬼🭒
-🭀🭖🭀🭖🭀🭖🭀🭖
 
 Checkerboard + inverse checkerboard (together = full cell):
 🮕🮖🮕🮖🮕🮖🮕🮖
@@ -268,10 +98,6 @@ Checkerboard + inverse checkerboard (together = full cell):
 Diamond lattice tiling (should form a continuous grid):
 🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮
 🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮🮮
-
-Block diagonal quarters (all four = full cell, no gaps):
-🭬🭮🭬🭮🭬🭮🭬🭮
-🭯🭭🭯🭭🭯🭭🭯🭭
 
 Diagonal hatching tiling (stripes should continue across cells):
 🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘🮘
@@ -284,3 +110,20 @@ Diagonal hatching tiling (stripes should continue across cells):
 ▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓▓
 ▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒▒
 ░░░░░░░░░░░░░░░░
+
+🬀  🬁  🬂  🬃  🬄  🬅  🬆  🬇  🬈  🬉  🬊  🬋  🬌  🬍  🬎  🬏
+🬐  🬑  🬒  🬓  🬔  🬕  🬖  🬗  🬘  🬙  🬚  🬛  🬜  🬝  🬞  🬟
+🬠  🬡  🬢  🬣  🬤  🬥  🬦  🬧  🬨  🬩  🬪  🬫  🬬  🬭  🬮  🬯
+🬰  🬱  🬲  🬳  🬴  🬵  🬶  🬷  🬸  🬹  🬺  🬻  🬼  🬽  🬾  🬿
+🭀  🭁  🭂  🭃  🭄  🭅  🭆  🭇  🭈  🭉  🭊  🭋  🭌  🭍  🭎  🭏
+🭐  🭑  🭒  🭓  🭔  🭕  🭖  🭗  🭘  🭙  🭚  🭛  🭜  🭝  🭞  🭟
+🭠  🭡  🭢  🭣  🭤  🭥  🭦  🭧  🭨  🭩  🭪  🭫  🭬  🭭  🭮  🭯
+🭰  🭱  🭲  🭳  🭴  🭵  🭶  🭷  🭸  🭹  🭺  🭻  🭼  🭽  🭾  🭿
+🮀  🮁  🮂  🮃  🮄  🮅  🮆  🮇  🮈  🮉  🮊  🮋  🮌  🮍  🮎  🮏
+🮐  🮑  🮒   🮔  🮕  🮖  🮗  🮘  🮙  🮚  🮛  🮜  🮝  🮞  🮟
+🮠  🮡  🮢  🮣  🮤  🮥  🮦  🮧  🮨  🮩  🮪  🮫  🮬  🮭  🮮  🮯
+🮰  🮱  🮲  🮳  🮴  🮵  🮶  🮷  🮸  🮹  🮺  🮻  🮼  🮽  🮾  🮿
+🯀  🯁  🯂  🯃  🯄  🯅  🯆  🯇  🯈  🯉  🯊  🯋  🯌  🯍  🯎  🯏
+🯐  🯑  🯒  🯓  🯔  🯕  🯖  🯗  🯘  🯙  🯚  🯛  🯜  🯝  🯞  🯟
+🯠  🯡  🯢  🯣  🯤  🯥  🯦  🯧  🯨  🯩  🯪  🯫  🯬  🯭  🯮  🯯
+🯰  🯱  🯲  🯳  🯴  🯵  🯶  🯷  🯸  🯹  🯺

@@ -35,6 +35,7 @@
 //! font glyphs since `FONT_INDEX` can never collide with a fontdb slot.
 
 use super::RasterizedGlyph;
+use crate::downsample_alpha_u8;
 
 /// Sentinel `font_index` marking a shaped glyph that should be rasterised by
 /// [`rasterize`] instead of going through a loaded font. Set to `usize::MAX`
@@ -86,13 +87,14 @@ pub fn rasterize(
     cell_width: u32,
     cell_height: u32,
     ascent_px: f32,
+    supersample: u32,
 ) -> RasterizedGlyph {
     if cell_width == 0 || cell_height == 0 {
         return empty();
     }
 
-    let w = cell_width as usize;
-    let h = cell_height as usize;
+    let w = (cell_width * supersample) as usize;
+    let h = (cell_height * supersample) as usize;
     let mut alpha = vec![0u8; w * h];
 
     match decode(glyph_id) {
@@ -116,6 +118,15 @@ pub fn rasterize(
     for (i, a) in alpha.into_iter().enumerate() {
         bitmap[i * 4 + 3] = a;
     }
+
+    let bitmap = downsample_alpha_u8(
+        &bitmap,
+        w as i32,
+        h as i32,
+        cell_width as i32,
+        cell_height as i32,
+        supersample as i32,
+    );
 
     RasterizedGlyph {
         bitmap,
@@ -984,7 +995,7 @@ mod tests {
 
     #[test]
     fn full_block_fills_entire_cell() {
-        let g = rasterize(0x2588, 8, 12, 10.0);
+        let g = rasterize(0x2588, 8, 12, 10.0, 1);
         assert_eq!(g.bitmap.len(), 8 * 12 * 4);
         for chunk in g.bitmap.chunks_exact(4) {
             assert_eq!(chunk[3], 0xFF);
@@ -996,7 +1007,7 @@ mod tests {
         // U+28FF is the braille pattern with every dot set; when drawn
         // as solid tiles it must cover the whole cell so adjacent
         // full-braille cells form one continuous block.
-        let g = rasterize(0x28FF, 8, 12, 10.0);
+        let g = rasterize(0x28FF, 8, 12, 10.0, 1);
         for chunk in g.bitmap.chunks_exact(4) {
             assert_eq!(chunk[3], 0xFF, "expected full coverage for U+28FF");
         }
@@ -1004,7 +1015,7 @@ mod tests {
 
     #[test]
     fn empty_braille_has_no_coverage() {
-        let g = rasterize(0x2800, 8, 12, 10.0);
+        let g = rasterize(0x2800, 8, 12, 10.0, 1);
         for chunk in g.bitmap.chunks_exact(4) {
             assert_eq!(chunk[3], 0);
         }
@@ -1016,7 +1027,7 @@ mod tests {
         // exactly w/2 × h/2 pixels, so fully-set coverage is half the cell.
         let w = 10u32;
         let h = 12u32;
-        let g = rasterize(0x259E, w, h, 10.0);
+        let g = rasterize(0x259E, w, h, 10.0, 1);
         let set: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
         assert_eq!(set, 2 * (w as usize / 2) * (h as usize / 2));
     }
@@ -1025,7 +1036,7 @@ mod tests {
     fn shade_midlevel_alpha() {
         // Medium shade fills every pixel at alpha 0x80 — a flat density
         // level that tints uniformly via the fg colour.
-        let g = rasterize(0x2592, 8, 12, 10.0);
+        let g = rasterize(0x2592, 8, 12, 10.0, 1);
         for chunk in g.bitmap.chunks_exact(4) {
             assert_eq!(chunk[3], 0x80);
         }
@@ -1047,7 +1058,7 @@ mod tests {
         // The bottom-right tile (bit 5) is set.
         let w = 8u32;
         let h = 12u32;
-        let g = rasterize(0xFB3B, w, h, 10.0);
+        let g = rasterize(0xFB3B, w, h, 10.0, 1);
         let idx = |x: u32, y: u32| ((y * w + x) * 4 + 3) as usize;
         assert_eq!(g.bitmap[idx(0, 0)], 0, "top-left empty");
         assert_eq!(g.bitmap[idx(w - 1, h - 1)], 0xFF, "bottom-right covered");
@@ -1074,17 +1085,17 @@ mod tests {
         let mx_bot = w - mx_top; // left of right stripe
 
         // Half blocks: first check the canonical stripe boundaries hold.
-        let top = rasterize(0x2580, w, h, 10.0);
-        let bot = rasterize(0x2584, w, h, 10.0);
-        let left = rasterize(0x258C, w, h, 10.0);
-        let right = rasterize(0x2590, w, h, 10.0);
+        let top = rasterize(0x2580, w, h, 10.0, 1);
+        let bot = rasterize(0x2584, w, h, 10.0, 1);
+        let left = rasterize(0x258C, w, h, 10.0, 1);
+        let right = rasterize(0x2590, w, h, 10.0, 1);
         assert!(cov(&top, 0, my_top - 1) && !cov(&top, 0, my_top));
         assert!(cov(&bot, 0, my_bot) && !cov(&bot, 0, my_bot - 1));
         assert!(cov(&left, mx_top - 1, 0) && !cov(&left, mx_top, 0));
         assert!(cov(&right, mx_bot, 0) && !cov(&right, mx_bot - 1, 0));
 
         // ▛ UL+UR+LL — right column isolates UR (top stripe).
-        let tl = rasterize(0x259B, w, h, 10.0);
+        let tl = rasterize(0x259B, w, h, 10.0, 1);
         assert!(cov(&tl, w - 1, my_top - 1), "▛ UR fills through top_end");
         assert!(!cov(&tl, w - 1, my_top), "▛ UR stops at top_end");
         // Bottom row isolates LL (left stripe).
@@ -1092,7 +1103,7 @@ mod tests {
         assert!(!cov(&tl, mx_top, h - 1), "▛ LL stops at left_end");
 
         // ▜ UL+UR+LR — left column isolates UL (top stripe).
-        let tr = rasterize(0x259C, w, h, 10.0);
+        let tr = rasterize(0x259C, w, h, 10.0, 1);
         assert!(cov(&tr, 0, my_top - 1), "▜ UL fills through top_end");
         assert!(!cov(&tr, 0, my_top), "▜ UL stops at top_end");
         // Bottom row isolates LR (right stripe).
@@ -1100,7 +1111,7 @@ mod tests {
         assert!(!cov(&tr, mx_bot - 1, h - 1), "▜ LR gap before right_start");
 
         // ▙ UL+LL+LR — top row isolates UL (left stripe).
-        let bl = rasterize(0x2599, w, h, 10.0);
+        let bl = rasterize(0x2599, w, h, 10.0, 1);
         assert!(cov(&bl, mx_top - 1, 0), "▙ UL fills through left_end");
         assert!(!cov(&bl, mx_top, 0), "▙ UL stops at left_end");
         // Right column isolates LR (bottom stripe).
@@ -1108,7 +1119,7 @@ mod tests {
         assert!(!cov(&bl, w - 1, my_bot - 1), "▙ LR gap before bot_start");
 
         // ▟ UR+LL+LR — top row isolates UR (right stripe).
-        let br = rasterize(0x259F, w, h, 10.0);
+        let br = rasterize(0x259F, w, h, 10.0, 1);
         assert!(cov(&br, mx_bot, 0), "▟ UR starts at right_start");
         assert!(!cov(&br, mx_bot - 1, 0), "▟ UR gap before right_start");
         // Left column isolates LL (bottom stripe).
@@ -1126,8 +1137,8 @@ mod tests {
         // the outline's bottom edge is straight across the seam.
         let w = 9u32;
         let h = 13u32; // deliberately odd
-        let q = rasterize(0x259B, w, h, 10.0); // ▛ UL+UR+LL
-        let hb = rasterize(0x2580, w, h, 10.0); // ▀ upper half
+        let q = rasterize(0x259B, w, h, 10.0, 1); // ▛ UL+UR+LL
+        let hb = rasterize(0x2580, w, h, 10.0, 1); // ▀ upper half
 
         // Last filled y on the right column of ▛ (UR quadrant) must equal
         // last filled y anywhere in ▀ (the whole cell shares the same top
@@ -1155,8 +1166,8 @@ mod tests {
         // next cell's column-2 tile.
         let w = 16usize;
         let h = 12u32;
-        let g1 = rasterize(0x258F, w as u32, h, 10.0);
-        let g2 = rasterize(0xFB70, w as u32, h, 10.0);
+        let g1 = rasterize(0x258F, w as u32, h, 10.0, 1);
+        let g2 = rasterize(0xFB70, w as u32, h, 10.0, 1);
         // Column where g1 ends must equal column where g2 begins.
         let g1_end = (0..w)
             .rposition(|x| g1.bitmap[(x * 4) + 3] == 0xFF)
@@ -1188,8 +1199,8 @@ mod tests {
         // together must cover every pixel exactly once.
         let w = 8u32;
         let h = 12u32;
-        let tri = rasterize(0xFB3C, w, h, 10.0);
-        let comp = rasterize(0xFB52, w, h, 10.0);
+        let tri = rasterize(0xFB3C, w, h, 10.0, 1);
+        let comp = rasterize(0xFB52, w, h, 10.0, 1);
         for i in 0..(w * h) as usize {
             let ta = tri.bitmap[i * 4 + 3];
             let ca = comp.bitmap[i * 4 + 3];
@@ -1233,8 +1244,8 @@ mod tests {
         let w = 10u32;
         let h = 15u32;
         for (a_id, b_id) in pairs {
-            let a = rasterize(a_id, w, h, 12.0);
-            let b = rasterize(b_id, w, h, 12.0);
+            let a = rasterize(a_id, w, h, 12.0, 1);
+            let b = rasterize(b_id, w, h, 12.0, 1);
             for i in 0..(w * h) as usize {
                 assert_eq!(
                     a.bitmap[i * 4 + 3] as u16 + b.bitmap[i * 4 + 3] as u16,
@@ -1249,7 +1260,7 @@ mod tests {
     fn block_diagonal_quarter_fills_quarter_cell() {
         let w = 16u32;
         let h = 24u32;
-        let g = rasterize(0xFB6C, w, h, 20.0); // LEFT quarter
+        let g = rasterize(0xFB6C, w, h, 20.0, 1); // LEFT quarter
         let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
         let total = (w * h) as usize;
         let quarter = total / 4;
@@ -1264,8 +1275,8 @@ mod tests {
         let w = 12u32;
         let h = 18u32;
         // LEFT quarter (0x1FB6C) + its complement (0x1FB68).
-        let q = rasterize(0xFB6C, w, h, 14.0);
-        let c = rasterize(0xFB68, w, h, 14.0);
+        let q = rasterize(0xFB6C, w, h, 14.0, 1);
+        let c = rasterize(0xFB68, w, h, 14.0, 1);
         for i in 0..(w * h) as usize {
             assert_eq!(
                 q.bitmap[i * 4 + 3] as u16 + c.bitmap[i * 4 + 3] as u16,
@@ -1279,7 +1290,7 @@ mod tests {
     fn diagonal_half_blocks_are_bowties() {
         let w = 16u32;
         let h = 24u32;
-        let g = rasterize(0xFB9A, w, h, 20.0); // upper + lower
+        let g = rasterize(0xFB9A, w, h, 20.0, 1); // upper + lower
         let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
         let total = (w * h) as usize;
         let half = total / 2;
@@ -1293,7 +1304,7 @@ mod tests {
     fn checkerboard_is_half_filled() {
         let w = 8u32;
         let h = 12u32;
-        let g = rasterize(0xFB95, w, h, 10.0);
+        let g = rasterize(0xFB95, w, h, 10.0, 1);
         let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
         assert_eq!(filled, (w * h / 2) as usize);
     }
@@ -1302,8 +1313,8 @@ mod tests {
     fn inverse_checkerboard_complements_checkerboard() {
         let w = 8u32;
         let h = 12u32;
-        let a = rasterize(0xFB95, w, h, 10.0);
-        let b = rasterize(0xFB96, w, h, 10.0);
+        let a = rasterize(0xFB95, w, h, 10.0, 1);
+        let b = rasterize(0xFB96, w, h, 10.0, 1);
         for i in 0..(w * h) as usize {
             assert_eq!(
                 a.bitmap[i * 4 + 3] as u16 + b.bitmap[i * 4 + 3] as u16,
@@ -1317,7 +1328,7 @@ mod tests {
     fn diagonal_line_produces_output() {
         let w = 16u32;
         let h = 24u32;
-        let g = rasterize(0xFBA0, w, h, 20.0); // single diagonal segment
+        let g = rasterize(0xFBA0, w, h, 20.0, 1); // single diagonal segment
         let any_filled = g.bitmap.chunks_exact(4).any(|c| c[3] > 0);
         assert!(any_filled, "diagonal line should produce visible output");
     }
@@ -1326,7 +1337,7 @@ mod tests {
     fn all_four_diagonal_lines_fill_diamond() {
         let w = 16u32;
         let h = 24u32;
-        let g = rasterize(0xFBAE, w, h, 20.0); // all 4 segments
+        let g = rasterize(0xFBAE, w, h, 20.0, 1); // all 4 segments
         // Should produce roughly a diamond shape; check 4 quadrants have coverage.
         let qw = w / 2;
         let qh = h / 2;
@@ -1351,7 +1362,7 @@ mod tests {
     fn triangular_medium_shade_is_half_alpha() {
         let w = 16u32;
         let h = 24u32;
-        let g = rasterize(0xFB9C, w, h, 20.0); // upper-left triangular medium shade
+        let g = rasterize(0xFB9C, w, h, 20.0, 1); // upper-left triangular medium shade
         let shaded: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0x80).count();
         let total = (w * h) as usize;
         let half = total / 2;
@@ -1365,7 +1376,7 @@ mod tests {
     fn plus_cross_has_horizontal_and_vertical() {
         let w = 16u32;
         let h = 24u32;
-        let g = rasterize(0xFBAF, w, h, 20.0);
+        let g = rasterize(0xFBAF, w, h, 20.0, 1);
         // Check centre row has coverage and centre column has coverage.
         let mid_y = h / 2;
         let mid_x = w / 2;
@@ -1379,7 +1390,7 @@ mod tests {
     fn mixed_shade_half_has_both_regions() {
         let w = 8u32;
         let h = 12u32;
-        let g = rasterize(0xFB91, w, h, 10.0); // upper solid + lower shade
+        let g = rasterize(0xFB91, w, h, 10.0, 1); // upper solid + lower shade
         let solid: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
         let shade: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0x80).count();
         assert!(solid > 0, "missing solid region");
@@ -1391,7 +1402,7 @@ mod tests {
     fn box_vertical_line_touches_top_and_bottom_edges() {
         let w = 16u32;
         let h = 24u32;
-        let g = rasterize(0x2502, w, h, 20.0);
+        let g = rasterize(0x2502, w, h, 20.0, 1);
         let mid_x = (w / 2) as usize;
         assert!(
             g.bitmap[mid_x * 4 + 3] > 0,
@@ -1405,7 +1416,7 @@ mod tests {
     fn box_top_right_corner_connects_left_and_down() {
         let w = 16u32;
         let h = 24u32;
-        let g = rasterize(0x2510, w, h, 20.0);
+        let g = rasterize(0x2510, w, h, 20.0, 1);
         let mid_y = (h / 2) as usize;
         let left = (mid_y * w as usize) * 4 + 3;
         let down = (mid_y * w as usize + (w / 2) as usize) * 4 + 3;

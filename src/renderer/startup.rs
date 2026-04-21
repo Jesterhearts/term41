@@ -79,7 +79,7 @@ impl StartupPresenter {
         window: Arc<Window>,
         fonts: Option<String>,
         font_size: f32,
-        supersampling: i32,
+        supersampling: u32,
         scale_factor: f64,
         gutter_enabled: bool,
         background_path: Option<PathBuf>,
