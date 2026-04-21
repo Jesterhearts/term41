@@ -1115,6 +1115,26 @@ mod tests {
     }
 
     #[test]
+    fn backspace_guard_absorbs_zwj_width_overcount() {
+        // Reproduces the bash/readline over-backspace pattern for 👩‍💻:
+        // host codepoint widths sum to 4 (2 + 0 + 2), but terminal cell
+        // width is 2. We should absorb the two extra BS bytes so the prompt
+        // prefix is not overwritten.
+        let (mut screen, mut viewport) = setup();
+        feed("ab👩\u{200D}💻".as_bytes(), &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.col, 4);
+
+        feed(b"\x08\x08\x08\x08", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.col, 2, "extra BS bytes are absorbed");
+
+        feed(b"X", &mut screen, &mut viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "a");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "b");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "X");
+    }
+
+    #[test]
     fn put_char_regional_indicators_get_separate_cells() {
         let (mut screen, mut viewport) = setup();
         // `unicode-width` reports width 1 for each regional indicator, so
@@ -1213,21 +1233,48 @@ mod tests {
     }
 
     #[test]
-    fn put_char_zwj_emoji_keeps_components_in_separate_wide_cells() {
+    fn put_char_zwj_emoji_merges_into_previous_wide_cell() {
         let (mut screen, mut viewport) = setup();
-        // 👨‍💻 = 👨 ZWJ 💻. wcswidth = 2+0+2 = 4, so the shell expects the
-        // cursor to advance by 4. The ZWJ folds into `👨` (width 0 → fold),
-        // but the second emoji starts a new wide cell of its own. The font
-        // shaper still sees the full ZWJ sequence in `row_text` and renders
-        // the ligature if the font has one.
-        feed("👨\u{200D}💻".as_bytes(), &mut screen, &mut viewport);
+        // 👩‍💻 = 👩 ZWJ 💻. Once the ZWJ has folded into the previous cell,
+        // the following emoji should also extend that same grapheme cluster
+        // instead of starting a fresh wide glyph cell of its own.
+        feed("👩\u{200D}💻".as_bytes(), &mut screen, &mut viewport);
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
-        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👨\u{200D}");
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👩\u{200D}💻");
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "");
-        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "💻");
-        assert_eq!(screen.grid.rows[r].cells[3].as_str(), "");
-        assert_eq!(screen.cursor.col, 4);
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), " ");
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn put_char_write_after_zwj_emoji_preserves_full_cluster() {
+        let (mut screen, mut viewport) = setup();
+        feed("👩\u{200D}💻X".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👩\u{200D}💻");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "X");
+        assert_eq!(screen.cursor.col, 3);
+    }
+
+    #[test]
+    fn erase_from_zwj_continuation_clears_full_cluster_without_touching_prefix() {
+        let (mut screen, mut viewport) = setup();
+        feed("> 👩\u{200D}💻".as_bytes(), &mut screen, &mut viewport);
+
+        execute(&mut screen, &viewport, BS, &mut false, false);
+        assert_eq!(screen.cursor.col, 3);
+
+        feed(b"\x1b[K", &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), ">");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), " ");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), " ");
+        assert_eq!(screen.grid.rows[r].cells[3].as_str(), " ");
+        assert_eq!(screen.cursor.col, 3);
     }
 
     // -- execute ------------------------------------------------------------

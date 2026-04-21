@@ -233,7 +233,14 @@ fn put_char_impl(
 ) {
     let raw_width = UnicodeWidthStr::width(s.as_str());
     if raw_width == 0 {
-        try_extend_prev_cell(screen, target, &s);
+        if let Some(combined) = try_extend_prev_cell(screen, target, &s) {
+            set_target_last_char(screen, target, combined);
+        }
+        return;
+    }
+
+    if let Some(combined) = try_extend_prev_zwj_cell(screen, target, &s) {
+        set_target_last_char(screen, target, combined);
         return;
     }
 
@@ -680,10 +687,21 @@ fn try_extend_prev_cell(
     screen: &mut Screen,
     target: WriteTarget<'_>,
     s: &str,
-) {
+) -> Option<SmolStr> {
     match target {
         WriteTarget::Main(viewport) => try_extend_prev_main_cell(screen, viewport, s),
         WriteTarget::Status => try_extend_prev_status_cell(screen, s),
+    }
+}
+
+fn try_extend_prev_zwj_cell(
+    screen: &mut Screen,
+    target: WriteTarget<'_>,
+    s: &str,
+) -> Option<SmolStr> {
+    match target {
+        WriteTarget::Main(viewport) => try_extend_prev_main_zwj_cell(screen, viewport, s),
+        WriteTarget::Status => try_extend_prev_status_zwj_cell(screen, s),
     }
 }
 
@@ -691,20 +709,20 @@ fn try_extend_prev_main_cell(
     screen: &mut Screen,
     viewport: &Viewport,
     s: &str,
-) {
+) -> Option<SmolStr> {
     let (prev_row, mut prev_col) = if screen.cursor.col > 0 && screen.cursor.col <= viewport.cols {
         let row = screen::active_row_index(screen, viewport);
         (row, (screen.cursor.col - 1) as usize)
     } else if screen.cursor.col == 0 {
         let row = screen::active_row_index(screen, viewport);
         if row == 0 || !screen.grid.rows[row].wrapped {
-            return;
+            return None;
         }
         let prev_row = row - 1;
         let last_col = screen.grid.rows[prev_row].cells.len().saturating_sub(1);
         (prev_row, last_col)
     } else {
-        return;
+        return None;
     };
 
     while prev_col > 0 && screen.grid.rows[prev_row].cells[prev_col].is_empty() {
@@ -712,33 +730,73 @@ fn try_extend_prev_main_cell(
     }
 
     let row = &mut screen.grid.rows[prev_row];
-    let _ = try_extend_row_cell(row, prev_col, s);
+    try_extend_row_cell(row, prev_col, s, false)
+}
+
+fn try_extend_prev_main_zwj_cell(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    s: &str,
+) -> Option<SmolStr> {
+    let (prev_row, mut prev_col) = if screen.cursor.col > 0 && screen.cursor.col <= viewport.cols {
+        let row = screen::active_row_index(screen, viewport);
+        (row, (screen.cursor.col - 1) as usize)
+    } else if screen.cursor.col == 0 {
+        let row = screen::active_row_index(screen, viewport);
+        if row == 0 || !screen.grid.rows[row].wrapped {
+            return None;
+        }
+        let prev_row = row - 1;
+        let last_col = screen.grid.rows[prev_row].cells.len().saturating_sub(1);
+        (prev_row, last_col)
+    } else {
+        return None;
+    };
+
+    while prev_col > 0 && screen.grid.rows[prev_row].cells[prev_col].is_empty() {
+        prev_col -= 1;
+    }
+
+    let row = &mut screen.grid.rows[prev_row];
+    try_extend_row_cell(row, prev_col, s, true)
 }
 
 fn try_extend_prev_status_cell(
     screen: &mut Screen,
     s: &str,
-) {
-    let Some(status) = status_line_mut(screen) else {
-        return;
-    };
+) -> Option<SmolStr> {
+    let status = status_line_mut(screen)?;
     let col = status.cursor.col as usize;
     if col == 0 {
-        return;
+        return None;
     }
-    let _ = try_extend_row_cell(&mut status.row, col - 1, s);
+    try_extend_row_cell(&mut status.row, col - 1, s, false)
+}
+
+fn try_extend_prev_status_zwj_cell(
+    screen: &mut Screen,
+    s: &str,
+) -> Option<SmolStr> {
+    let status = status_line_mut(screen)?;
+    let col = status.cursor.col as usize;
+    if col == 0 {
+        return None;
+    }
+    try_extend_row_cell(&mut status.row, col - 1, s, true)
 }
 
 fn try_extend_row_cell(
     row: &mut Row,
     col: usize,
     s: &str,
-) -> bool {
-    let Some(prev) = row.cells.get(col) else {
-        return false;
-    };
+    require_trailing_zwj: bool,
+) -> Option<SmolStr> {
+    let prev = row.cells.get(col)?;
     if prev.as_str() == " " || prev.is_empty() {
-        return false;
+        return None;
+    }
+    if require_trailing_zwj && !prev.ends_with('\u{200D}') {
+        return None;
     }
 
     let mut combined = SmolStrBuilder::new();
@@ -746,11 +804,11 @@ fn try_extend_row_cell(
     combined.push_str(s);
     let combined = combined.finish();
     if combined.graphemes(true).count() != 1 {
-        return false;
+        return None;
     }
 
-    row.cells[col] = combined;
-    true
+    row.cells[col] = combined.clone();
+    Some(combined)
 }
 
 fn soft_wrap(

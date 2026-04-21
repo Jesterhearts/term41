@@ -487,7 +487,6 @@ impl FontSystem {
             .enumerate()
             .all(|(i, &has)| has || cells[i] == " " || cells[i].is_empty());
         if all_covered {
-            assign_cells_wide(&mut result, cells.len() as u16);
             return result;
         }
 
@@ -580,9 +579,12 @@ impl FontSystem {
                     } else {
                         col_map.len()
                     };
+                    let mut max_col = col;
                     for byte in cluster..end_byte {
                         if byte < col_map.len() {
-                            has_glyph[col_map[byte] as usize] = true;
+                            let consumed_col = col_map[byte];
+                            has_glyph[consumed_col as usize] = true;
+                            max_col = max_col.max(consumed_col);
                         }
                     }
 
@@ -590,8 +592,7 @@ impl FontSystem {
                         glyph_id,
                         font_index: font_idx,
                         col,
-                        // Refined once shaping completes — see `assign_cells_wide`.
-                        cells_wide: 1,
+                        cells_wide: glyph_cells_wide(cells, col, max_col),
                         x_offset: pos.x_offset as f32 * scale,
                         y_offset: pos.y_offset as f32 * scale,
                     });
@@ -602,13 +603,11 @@ impl FontSystem {
                     .enumerate()
                     .all(|(i, &has)| has || cells[i] == " " || cells[i].is_empty());
                 if all_covered {
-                    assign_cells_wide(&mut result, cells.len() as u16);
                     return result;
                 }
             }
         }
 
-        assign_cells_wide(&mut result, cells.len() as u16);
         result
     }
 
@@ -695,33 +694,19 @@ impl FontSystem {
     }
 }
 
-/// Walk the shaped output left-to-right and stamp each glyph with the
-/// number of terminal cells it occupies. The span is the gap between this
-/// glyph's column and the next *strictly later* glyph's column (or the row
-/// end). Glyphs that share a column — base + combining marks, or one
-/// cluster that produced multiple glyphs — all get the same span, which is
-/// what colour rasterisers need to size emoji to their visual footprint.
-fn assign_cells_wide(
-    result: &mut [ShapedGlyph],
-    n_cells: u16,
-) {
-    result.sort_by(|a, b| {
-        a.col.cmp(&b.col).then(
-            a.x_offset
-                .partial_cmp(&b.x_offset)
-                .unwrap_or(std::cmp::Ordering::Equal),
-        )
-    });
-    for i in 0..result.len() {
-        let here = result[i].col;
-        let next_after = result[i + 1..]
-            .iter()
-            .find(|s| s.col > here)
-            .map(|s| s.col)
-            .unwrap_or(n_cells);
-        let span = next_after.saturating_sub(here).max(1);
-        result[i].cells_wide = span.min(u8::MAX as u16) as u8;
+fn glyph_cells_wide(
+    cells: &[SmolStr],
+    start_col: u16,
+    max_consumed_col: u16,
+) -> u8 {
+    let start = start_col as usize;
+    let mut end_excl = max_consumed_col as usize + 1;
+
+    while end_excl < cells.len() && cells[end_excl].is_empty() {
+        end_excl += 1;
     }
+
+    end_excl.saturating_sub(start).clamp(1, u8::MAX as usize) as u8
 }
 
 /// Heuristic: true when a cluster is likely meant to render as a colour
@@ -1331,5 +1316,25 @@ mod tests {
                 );
             }
         }
+    }
+
+    #[test]
+    fn glyph_cells_wide_uses_consumed_columns_and_continuations() {
+        let trailing = vec![
+            SmolStr::new("👩\u{200D}💻"),
+            SmolStr::default(),
+            SmolStr::new(" "),
+        ];
+        assert_eq!(glyph_cells_wide(&trailing, 0, 0), 2);
+
+        let followed = vec![
+            SmolStr::new("👩\u{200D}💻"),
+            SmolStr::default(),
+            SmolStr::new("X"),
+        ];
+        assert_eq!(glyph_cells_wide(&followed, 0, 0), 2);
+
+        let ligature = vec![SmolStr::new("🇺"), SmolStr::new("🇸"), SmolStr::new(" ")];
+        assert_eq!(glyph_cells_wide(&ligature, 0, 1), 2);
     }
 }

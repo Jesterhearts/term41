@@ -175,6 +175,10 @@ impl Row {
         fg: Srgb<u8>,
         bg: Srgb<u8>,
     ) {
+        let range = self.expand_grapheme_erase_range(range);
+        if range.is_empty() {
+            return;
+        }
         self.cells[range.clone()].fill(blank_cell());
         self.fg[range.clone()].fill(fg);
         self.bg[range.clone()].fill(bg);
@@ -192,6 +196,7 @@ impl Row {
         fg: Srgb<u8>,
         bg: Srgb<u8>,
     ) {
+        let range = self.expand_grapheme_erase_range(range);
         for i in range {
             if !self.attrs[i].contains(CellAttrs::PROTECTED) {
                 self.cells[i] = blank_cell();
@@ -213,6 +218,66 @@ impl Row {
         bg: Srgb<u8>,
     ) {
         self.clear_range_selective(0..self.cells.len(), fg, bg);
+    }
+
+    fn expand_grapheme_erase_range(
+        &self,
+        range: std::ops::Range<usize>,
+    ) -> std::ops::Range<usize> {
+        let mut start = range.start.min(self.cells.len());
+        let mut end = range.end.min(self.cells.len());
+        if start >= end {
+            return start..start;
+        }
+
+        loop {
+            let expanded_start = self
+                .grapheme_span_at(start)
+                .map_or(start, |span| span.start.min(start));
+            let expanded_end = self
+                .grapheme_span_at(end - 1)
+                .map_or(end, |span| span.end.max(end));
+            if expanded_start == start && expanded_end == end {
+                break;
+            }
+            start = expanded_start;
+            end = expanded_end.min(self.cells.len());
+        }
+
+        start..end
+    }
+
+    fn grapheme_span_at(
+        &self,
+        col: usize,
+    ) -> Option<std::ops::Range<usize>> {
+        if col >= self.cells.len() {
+            return None;
+        }
+
+        if self.is_wide_anchor_at(col) {
+            return Some(col..(col + 2).min(self.cells.len()));
+        }
+
+        if col > 0 && self.cells[col].is_empty() && self.is_wide_anchor_at(col - 1) {
+            return Some((col - 1)..(col + 1).min(self.cells.len()));
+        }
+
+        None
+    }
+
+    fn is_wide_anchor_at(
+        &self,
+        col: usize,
+    ) -> bool {
+        let Some(anchor) = self.cells.get(col) else {
+            return false;
+        };
+        let Some(right) = self.cells.get(col + 1) else {
+            return false;
+        };
+        let anchor = anchor.as_str();
+        !anchor.is_empty() && anchor != " " && right.is_empty()
     }
 
     pub(crate) fn copy_within<R>(
@@ -516,6 +581,20 @@ mod tests {
         }
         row.clear_range(1..4, default_fg(), default_bg());
         assert_eq!(row_text(&row), "a   e");
+    }
+
+    #[test]
+    fn row_clear_range_expands_over_wide_cell_continuation() {
+        let mut row = Row::new(4, default_fg(), default_bg());
+        row.cells[0] = SmolStr::new("👩\u{200D}💻");
+        row.cells[1] = SmolStr::default();
+        set_cell(&mut row, 2, 'x');
+
+        row.clear_range(1..2, default_fg(), default_bg());
+
+        assert_eq!(row.cells[0].as_str(), " ");
+        assert_eq!(row.cells[1].as_str(), " ");
+        assert_eq!(row.cells[2].as_str(), "x");
     }
 
     #[test]
