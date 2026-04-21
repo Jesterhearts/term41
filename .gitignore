@@ -7,3 +7,5 @@ perf.data
 *.log
 massif.out.*
 REFACTOR.md
+emojis.txt
+__pycache__/
