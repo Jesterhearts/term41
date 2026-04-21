@@ -11,7 +11,6 @@ use crate::HostMouse;
 use crate::MouseButton;
 use crate::MouseEventKind;
 use crate::MouseModifiers;
-use crate::ProgramAllowlist;
 use crate::Row;
 use crate::StatusDisplayKind;
 use crate::Terminal;
@@ -32,16 +31,6 @@ pub struct TestTerm {
 
 impl TestTerm {
     pub fn new(
-        cols: u32,
-        rows: u32,
-        scrollback: u32,
-        cell_h: u32,
-        cell_w: u32,
-    ) -> Self {
-        Self::new_with_alt_scrollback_policy(cols, rows, scrollback, cell_h, cell_w)
-    }
-
-    pub fn new_with_alt_scrollback_policy(
         cols: u32,
         rows: u32,
         scrollback: u32,
@@ -74,13 +63,6 @@ impl TestTerm {
     ) {
         let effects = self.processor.process_bytes(&mut self.inner, data);
         self.effects.extend(effects);
-    }
-
-    pub fn set_macro_permissions(
-        &mut self,
-        macros: ProgramAllowlist,
-    ) {
-        settings::set_feature_permissions(&mut self.inner.protocol, FeaturePermissions { macros });
     }
 
     pub fn total_rows(&self) -> u32 {
@@ -138,16 +120,6 @@ impl TestTerm {
         )
     }
 
-    pub fn scroll_to_prev_prompt(&mut self) {
-        let viewport = self.inner.viewport;
-        view::scroll_to_prev_prompt(&mut self.inner.active, &viewport)
-    }
-
-    pub fn scroll_to_next_prompt(&mut self) {
-        let viewport = self.inner.viewport;
-        view::scroll_to_next_prompt(&mut self.inner.active, &viewport)
-    }
-
     pub fn is_synchronized_update_active(&self) -> bool {
         crate::host::synchronized_update_active(self.inner.modes.synchronized_update_since)
     }
@@ -156,20 +128,8 @@ impl TestTerm {
         std::mem::replace(&mut self.effects.bell, false)
     }
 
-    pub fn report_focus_change(
-        &mut self,
-        focused: bool,
-    ) {
-        let effects = apply_host_input(&mut self.inner, HostInput::FocusChanged { focused });
-        self.effects.host_bytes.extend(effects.host_bytes);
-    }
-
     pub fn take_pending_output(&mut self) -> Vec<u8> {
         std::mem::take(&mut self.effects.host_bytes)
-    }
-
-    pub fn pending_output(&mut self) -> Vec<u8> {
-        self.take_pending_output()
     }
 
     pub fn open_search(&mut self) {

@@ -134,7 +134,8 @@ mod tests {
     #[test]
     fn focus_change_silent_when_reporting_disabled() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
-        term.report_focus_change(true);
+        let effects = apply_host_input(&mut term.inner, HostInput::FocusChanged { focused: true });
+        term.effects.host_bytes.extend(effects.host_bytes);
         assert!(term.take_pending_output().is_empty());
     }
 
@@ -142,8 +143,10 @@ mod tests {
     fn focus_change_emits_csi_i_o_when_enabled() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[?1004h");
-        term.report_focus_change(true);
-        term.report_focus_change(false);
+        let effects = apply_host_input(&mut term.inner, HostInput::FocusChanged { focused: true });
+        term.effects.host_bytes.extend(effects.host_bytes);
+        let effects = apply_host_input(&mut term.inner, HostInput::FocusChanged { focused: false });
+        term.effects.host_bytes.extend(effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x1b[I\x1b[O");
     }
 
@@ -151,8 +154,10 @@ mod tests {
     fn focus_change_uses_8bit_csi_after_s8c1t() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[?1004h\x1b G");
-        term.report_focus_change(true);
-        term.report_focus_change(false);
+        let effects = apply_host_input(&mut term.inner, HostInput::FocusChanged { focused: true });
+        term.effects.host_bytes.extend(effects.host_bytes);
+        let effects = apply_host_input(&mut term.inner, HostInput::FocusChanged { focused: false });
+        term.effects.host_bytes.extend(effects.host_bytes);
         assert_eq!(term.take_pending_output(), b"\x9bI\x9bO");
     }
 
@@ -160,7 +165,8 @@ mod tests {
     fn decrst_1004_disables_focus_reporting() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.process(b"\x1b[?1004h\x1b[?1004l");
-        term.report_focus_change(true);
+        let effects = apply_host_input(&mut term.inner, HostInput::FocusChanged { focused: true });
+        term.effects.host_bytes.extend(effects.host_bytes);
         assert!(term.take_pending_output().is_empty());
     }
 

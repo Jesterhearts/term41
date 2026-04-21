@@ -247,6 +247,7 @@ mod tests {
     use std::path::PathBuf;
 
     use crate::test_support::TestTerm;
+    use crate::view;
 
     fn emit_prompt(
         term: &mut TestTerm,
@@ -306,7 +307,8 @@ mod tests {
         emit_prompt(&mut term, "$ b", 3, 0);
         emit_prompt(&mut term, "$ c", 3, 0);
         let before = term.active.offset;
-        term.scroll_to_prev_prompt();
+        let viewport = term.inner.viewport;
+        view::scroll_to_prev_prompt(&mut term.inner.active, &viewport);
         assert!(term.active.offset > before);
     }
 
@@ -315,7 +317,8 @@ mod tests {
         let mut term = TestTerm::new(10, 4, 100, 16, 8);
         term.process(b"plain\noutput\nwithout\nshell integration\n");
         let before = term.active.offset;
-        term.scroll_to_prev_prompt();
+        let viewport = term.inner.viewport;
+        view::scroll_to_prev_prompt(&mut term.inner.active, &viewport);
         assert_eq!(term.active.offset, before);
     }
 
@@ -327,7 +330,8 @@ mod tests {
         emit_prompt(&mut term, "$ c", 3, 0);
         term.active.offset = term.active.grid.scrollback_len(&term.viewport);
         let start = term.active.offset;
-        term.scroll_to_next_prompt();
+        let viewport = term.inner.viewport;
+        view::scroll_to_next_prompt(&mut term.inner.active, &viewport);
         assert!(term.active.offset < start);
     }
 
@@ -336,7 +340,8 @@ mod tests {
         let mut term = TestTerm::new(10, 4, 200, 16, 8);
         emit_prompt(&mut term, "$ only", 3, 0);
         let before = term.active.offset;
-        term.scroll_to_next_prompt();
+        let viewport = term.inner.viewport;
+        view::scroll_to_next_prompt(&mut term.inner.active, &viewport);
         assert_eq!(term.active.offset, before);
     }
 }

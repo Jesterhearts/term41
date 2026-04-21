@@ -383,7 +383,7 @@ fn scs_g0_ascii_restores_normal() {
 fn da1_responds() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[c");
-    let out = t.pending_output();
+    let out = t.take_pending_output();
     assert!(out.starts_with(b"\x1b[?63;"));
 }
 
@@ -391,7 +391,7 @@ fn da1_responds() {
 fn da2_responds() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[>c");
-    let out = t.pending_output();
+    let out = t.take_pending_output();
     assert!(out.starts_with(b"\x1b[>41;"));
 }
 
@@ -400,7 +400,7 @@ fn dsr_cursor_position_report() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[5;10H");
     t.process(b"\x1b[6n");
-    let out = t.pending_output();
+    let out = t.take_pending_output();
     assert_eq!(out, b"\x1b[5;10R");
 }
 
@@ -409,10 +409,10 @@ fn decrqm_reports_known_modes() {
     let mut t = VtTerm::new_80x24();
     // Mode 25 (cursor visible) default = set
     t.process(b"\x1b[?25$p");
-    assert_eq!(t.pending_output(), b"\x1b[?25;1$y");
+    assert_eq!(t.take_pending_output(), b"\x1b[?25;1$y");
     // Mode 7 (autowrap) default = set
     t.process(b"\x1b[?7$p");
-    assert_eq!(t.pending_output(), b"\x1b[?7;1$y");
+    assert_eq!(t.take_pending_output(), b"\x1b[?7;1$y");
 }
 
 // ---------------------------------------------------------------------------
@@ -423,7 +423,7 @@ fn decrqm_reports_known_modes() {
 fn osc_1337_report_cell_size() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b]1337;ReportCellSize\x1b\\");
-    let out = t.pending_output();
+    let out = t.take_pending_output();
     // Response: OSC 1337 ; ReportCellSize=<h>;<w> ST
     let s = String::from_utf8(out).unwrap();
     assert!(
@@ -594,7 +594,7 @@ fn bs_inside_csi_executes_and_sequence_completes() {
 fn osc_10_query_returns_fg() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b]10;?\x1b\\");
-    let out = t.pending_output();
+    let out = t.take_pending_output();
     assert!(out.starts_with(b"\x1b]10;rgb:"));
 }
 
@@ -602,7 +602,7 @@ fn osc_10_query_returns_fg() {
 fn osc_11_query_returns_bg() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b]11;?\x1b\\");
-    let out = t.pending_output();
+    let out = t.take_pending_output();
     assert!(out.starts_with(b"\x1b]11;rgb:"));
 }
 

@@ -1114,7 +1114,9 @@ pub(super) mod test_support {
 #[cfg(test)]
 mod integration_tests {
     use crate::ConformanceLevel;
+    use crate::FeaturePermissions;
     use crate::ProgramAllowlist;
+    use crate::settings;
     use crate::test_support::TestTerm;
 
     fn visible_text(term: &TestTerm) -> String {
@@ -1220,7 +1222,8 @@ mod integration_tests {
     #[test]
     fn ris_clears_stored_macros() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
-        term.set_macro_permissions(ProgramAllowlist::AllowAll);
+        let macros = ProgramAllowlist::AllowAll;
+        settings::set_feature_permissions(&mut term.inner.protocol, FeaturePermissions { macros });
         term.process(b"\x1bP1;1;1!z414243\x1b\\");
         term.process(b"\x1bc");
         term.process(b"\x1b[1*z");
