@@ -345,11 +345,11 @@ fn put_char_impl(
         return;
     }
 
-    if target_last_char_ends_with_zwj(screen, target) {
-        if let Some(combined) = try_extend_prev_zwj_cell(screen, target, &s) {
-            set_target_last_char(screen, target, combined);
-            return;
-        }
+    if target_last_char_ends_with_zwj(screen, target)
+        && let Some(combined) = try_extend_prev_zwj_cell(screen, target, &s)
+    {
+        set_target_last_char(screen, target, combined);
+        return;
     }
 
     screen.charset.single_shift = None;

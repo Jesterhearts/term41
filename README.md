@@ -9,7 +9,9 @@
   </video>
 </p>
 
-A GPU-accelerated terminal emulator written in Rust.
+A GPU-accelerated terminal emulator written in Rust. It features fast startup
+times (target <100ms TTFP on my machine) and responsive handling (target <1
+frame of delay even under heavy load).
 
 > **Note:** This project uses a decent amount of vibe coding. VTEs have a huge
 > feature surface, and implementing it in a reasonable time frame is only
@@ -22,7 +24,7 @@ term41 is the product of one such experiment. I know there are many other
 terminal emulators and this one is nothing special, but I've always wanted to
 write my own, with the features I prefer.
 
-## Objections
+## Possible Objections
 1. You use AI.
    - Fair enough.
 2. It's ugly.
