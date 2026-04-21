@@ -43,7 +43,6 @@ use std::time::Instant;
 
 use clip41::Clipboard;
 use parking_lot::Mutex;
-use pty_pipe41::ForegroundProcessSet;
 use pty_pipe41::MAX_READ_CHUNK;
 use pty_pipe41::PtyReader;
 pub use vte_mode41::TextMode;
@@ -181,12 +180,6 @@ pub struct TerminalMetadata {
 pub struct TerminalProtocolState {
     /// Host-configured permission gates for optional terminal features.
     pub feature_permissions: FeaturePermissions,
-    /// Best-effort snapshot of the PTY foreground process set used for
-    /// allowlist checks on security-sensitive extensions.
-    pub foreground_processes: Option<ForegroundProcessSet>,
-    /// Suppresses duplicate foreground-process log spam until the process
-    /// set changes.
-    foreground_processes_logged: bool,
     /// VT420 macro definitions accumulated from DECDMAC / related controls.
     pub macros: MacroStore,
     /// Tracks nested macro expansion depth to prevent runaway recursion.
@@ -504,10 +497,7 @@ impl Terminal {
     }
 
     pub fn macro_feature_enabled(&self) -> bool {
-        feature::macro_feature_enabled(
-            &self.protocol.feature_permissions,
-            self.protocol.foreground_processes.as_ref(),
-        )
+        feature::macro_feature_enabled(&self.protocol.feature_permissions)
     }
 
     fn define_macro(
@@ -612,7 +602,6 @@ impl Terminal {
                 &mut self.protocol.macros,
                 self.protocol.macro_invocation_depth,
                 &self.protocol.feature_permissions,
-                &self.protocol.foreground_processes,
                 &mut self.protocol.drcs,
                 &mut self.palette,
                 &self.base_palette,
@@ -823,7 +812,6 @@ mod tests {
 
     use clip41::ClipboardKind;
     use palette::Srgb;
-    use pty_pipe41::ForegroundProgram;
 
     use super::*;
     use crate::io::clipboard::paste;
@@ -895,22 +883,6 @@ mod tests {
         ) {
             let effects = self.processor.process_bytes(&mut self.inner, data);
             self.effects.extend(effects);
-        }
-
-        fn set_foreground_programs(
-            &mut self,
-            paths: &[&str],
-        ) {
-            let programs = paths
-                .iter()
-                .map(|path| {
-                    ForegroundProgram::from_exe_path(PathBuf::from(path)).expect("exe path")
-                })
-                .collect();
-            settings::set_foreground_processes(
-                &mut self.inner.protocol,
-                Some(ForegroundProcessSet { programs }),
-            );
         }
 
         fn set_macro_permissions(
@@ -2715,39 +2687,6 @@ mod tests {
     #[test]
     fn da1_downgrades_when_macros_are_not_allowlisted() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
-        term.set_macro_permissions(ProgramAllowlist::Programs(vec!["vtrex".into()]));
-        term.process(b"\x1b[c");
-        assert_eq!(term.take_pending_output(), b"\x1b[?63;7;21;22;28;29c");
-    }
-
-    #[test]
-    fn da1_reports_level4_when_allowlisted_program_is_foreground() {
-        let mut term = TestTerm::new(20, 3, 100, 16, 8);
-        term.set_macro_permissions(ProgramAllowlist::Programs(vec!["vtrex".into()]));
-        term.set_foreground_programs(&["/usr/bin/vtrex"]);
-        term.process(b"\x1b[c");
-        assert_eq!(term.take_pending_output(), b"\x1b[?64;7;21;22;28;29;32c");
-    }
-
-    #[test]
-    fn macro_definition_and_invocation_require_allowlisted_foreground_processes() {
-        let mut term = TestTerm::new(20, 3, 100, 16, 8);
-        term.set_macro_permissions(ProgramAllowlist::Programs(vec!["vtrex".into()]));
-        term.process(b"\x1bP1;1;1!z414243\x1b\\");
-        term.process(b"\x1b[1*z");
-        assert!(visible_text(&term).trim().is_empty());
-
-        term.set_foreground_programs(&["/usr/bin/vtrex"]);
-        term.process(b"\x1bP1;1;1!z414243\x1b\\");
-        term.process(b"\x1b[1*z");
-        assert!(visible_text(&term).contains("ABC"));
-    }
-
-    #[test]
-    fn macro_permissions_require_all_foreground_processes_to_match() {
-        let mut term = TestTerm::new(20, 3, 100, 16, 8);
-        term.set_macro_permissions(ProgramAllowlist::Programs(vec!["vtrex".into()]));
-        term.set_foreground_programs(&["/usr/bin/vtrex", "/usr/bin/helper"]);
         term.process(b"\x1b[c");
         assert_eq!(term.take_pending_output(), b"\x1b[?63;7;21;22;28;29c");
     }
@@ -2756,7 +2695,6 @@ mod tests {
     fn ris_clears_stored_macros() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         term.set_macro_permissions(ProgramAllowlist::AllowAll);
-        term.set_foreground_programs(&["/usr/bin/vtrex"]);
         term.process(b"\x1bP1;1;1!z414243\x1b\\");
         term.process(b"\x1bc");
         term.process(b"\x1b[1*z");

@@ -107,11 +107,12 @@ In practice, extensions that allow either of these should be default-deny:
 So the default is: do nothing unless the user explicitly opted in, or the
 feature has a real authorization path.
 
-The concrete example today is VT420 macros. They stay denied unless the
-foreground process set is identified and matches the configured allowlist. On
-Linux and macOS that identity comes from the PTY foreground process group. On
-Windows there isn't an equivalent trusted probe yet, so if you want broad allow
-rules there you have to opt into them yourself.
+The concrete example today is VT420 macros. They stay denied unless you
+explicitly allow them. This is currently a binary toggle between None/All
+processes. As far as I know, there's no reliable way to say "these bytes in the
+pty came from this process", so there's no safe way to authenticate that some
+set of bytes in the input is from `good` vs `evil`. If such a way becomes
+available, I'm open to adding a per-process allowlist.
 
 An example of a grey area is clipboard integration. I currently don't gate it
 behind an allowlist because I think it would be surprising if it was broken due

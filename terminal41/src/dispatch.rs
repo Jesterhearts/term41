@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clip41::Clipboard;
-use pty_pipe41::ForegroundProcessSet;
 use smol_str::SmolStr;
 use vtepp::Action;
 use vtepp::Intermediates;
@@ -226,7 +225,6 @@ pub(super) fn apply_csi_action(
     macros: &mut MacroStore,
     macro_invocation_depth: usize,
     feature_permissions: &FeaturePermissions,
-    foreground_processes: &Option<ForegroundProcessSet>,
     drcs: &mut crate::drcs::Store,
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
@@ -244,7 +242,6 @@ pub(super) fn apply_csi_action(
             .pending_output(pending_output)
             .c1_mode(modes.c1_mode)
             .feature_permissions(feature_permissions)
-            .foreground_processes(foreground_processes)
             .macros(macros)
             .macro_invocation_depth(macro_invocation_depth)
             .call(),
@@ -271,7 +268,6 @@ pub(super) fn apply_csi_action(
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .macros(macros)
                 .feature_permissions(feature_permissions)
-                .foreground_processes(foreground_processes)
                 .drcs(drcs)
                 .palette(palette)
                 .base_palette(base_palette)
@@ -522,18 +518,13 @@ pub(super) fn apply_special_csi(
     pending_output: &mut Vec<u8>,
     c1_mode: C1Mode,
     feature_permissions: &FeaturePermissions,
-    foreground_processes: &Option<ForegroundProcessSet>,
     macros: &crate::dec::r#macro::MacroStore,
     macro_invocation_depth: usize,
 ) -> PendingApplication {
     match special {
-        SpecialCsi::InvokeMacro(id) => invoke_macro(
-            feature_permissions,
-            foreground_processes,
-            macros,
-            macro_invocation_depth,
-            id,
-        ),
+        SpecialCsi::InvokeMacro(id) => {
+            invoke_macro(feature_permissions, macros, macro_invocation_depth, id)
+        }
         SpecialCsi::AssignDecColor { item, fg, bg } => {
             assign_dec_color(
                 active,
@@ -776,13 +767,11 @@ fn apply_dec_color_defaults(
 
 fn invoke_macro(
     feature_permissions: &FeaturePermissions,
-    foreground_processes: &Option<ForegroundProcessSet>,
     macros: &crate::dec::r#macro::MacroStore,
     macro_invocation_depth: usize,
     id: u16,
 ) -> PendingApplication {
-    let enabled =
-        crate::feature::macro_feature_enabled(feature_permissions, foreground_processes.as_ref());
+    let enabled = crate::feature::macro_feature_enabled(feature_permissions);
     let Some(bytes) = crate::feature::invoke_macro(enabled, macros, macro_invocation_depth, id)
     else {
         return PendingApplication::None;

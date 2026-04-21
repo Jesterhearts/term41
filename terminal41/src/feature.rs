@@ -1,5 +1,4 @@
-use pty_pipe41::ForegroundProcessSet;
-use pty_pipe41::ForegroundProgram;
+use serde::Deserialize;
 
 use crate::ColorPalette;
 use crate::DrcsStore;
@@ -16,79 +15,26 @@ pub struct FeaturePermissions {
     pub macros: ProgramAllowlist,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub enum ProgramAllowlist {
     #[default]
+    #[serde(alias = "none", alias = "deny")]
     DenyAll,
+    #[serde(alias = "*", alias = "all")]
     AllowAll,
-    Programs(Vec<String>),
 }
 
 impl ProgramAllowlist {
-    pub fn allows_programs(
-        &self,
-        processes: Option<&ForegroundProcessSet>,
-    ) -> bool {
-        let Some(processes) = processes else {
-            return false;
-        };
-        if processes.is_empty() {
-            return false;
-        }
-
-        trace!("Checking allowlist {self:?} against foreground processes {processes:?}");
-
+    pub fn allow(&self) -> bool {
         match self {
             Self::DenyAll => false,
             Self::AllowAll => true,
-            Self::Programs(entries) => processes
-                .programs
-                .iter()
-                .all(|program| entries.iter().any(|entry| program_matches(entry, program))),
         }
     }
 }
 
-fn program_matches(
-    entry: &str,
-    program: &ForegroundProgram,
-) -> bool {
-    trace!("Matching program entry {entry:?} against foreground program {program:?}");
-    if entry.contains('/') {
-        program.exe_path == std::path::Path::new(entry)
-    } else {
-        program.exe_name == entry
-    }
-}
-
-pub(crate) fn log_foreground_process_probe(
-    permissions: &FeaturePermissions,
-    processes: Option<&ForegroundProcessSet>,
-) {
-    let macro_state = if permissions.macros.allows_programs(processes) {
-        "allow"
-    } else {
-        "deny"
-    };
-    match processes {
-        Some(processes) if !processes.programs.is_empty() => {
-            let programs = processes
-                .programs
-                .iter()
-                .map(|program| program.exe_name.as_str())
-                .collect::<Vec<_>>()
-                .join(", ");
-            info!("Foreground PTY processes: [{programs}] macros={macro_state}");
-        }
-        _ => info!("Foreground PTY processes: [unresolved] macros={macro_state}"),
-    }
-}
-
-pub(crate) fn macro_feature_enabled(
-    permissions: &FeaturePermissions,
-    foreground_processes: Option<&ForegroundProcessSet>,
-) -> bool {
-    permissions.macros.allows_programs(foreground_processes)
+pub(crate) fn macro_feature_enabled(permissions: &FeaturePermissions) -> bool {
+    permissions.macros.allow()
 }
 
 pub(crate) fn define_macro(

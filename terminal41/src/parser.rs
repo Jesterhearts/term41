@@ -4,7 +4,6 @@ use std::time::Instant;
 
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
-use pty_pipe41::ForegroundProcessSet;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
 use unicode_segmentation::UnicodeSegmentation;
@@ -700,7 +699,6 @@ mod tests {
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
         let mut default_status_display = StatusDisplayKind::None;
         let feature_permissions = FeaturePermissions::default();
-        let foreground_processes: Option<ForegroundProcessSet> = None;
         let mut macros = MacroStore::default();
         let mut drcs = DrcsStore::default();
 
@@ -808,7 +806,6 @@ mod tests {
                         .cell_width(8)
                         .cell_height(16)
                         .feature_permissions(&feature_permissions)
-                        .foreground_processes(&foreground_processes)
                         .call();
                 }
                 Action::EscDispatch {
@@ -1797,7 +1794,6 @@ mod tests {
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
         let mut default_status_display = StatusDisplayKind::None;
         let feature_permissions = FeaturePermissions::default();
-        let foreground_processes: Option<ForegroundProcessSet> = None;
         let mut macros = MacroStore::default();
         let mut drcs = DrcsStore::default();
 
@@ -1905,7 +1901,6 @@ mod tests {
                         .intermediates(intermediates.as_slice())
                         .action(action)
                         .feature_permissions(&feature_permissions)
-                        .foreground_processes(&foreground_processes)
                         .call();
                 }
                 Action::EscDispatch {
@@ -2524,7 +2519,6 @@ mod tests {
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
         let mut default_status_display = StatusDisplayKind::None;
         let feature_permissions = FeaturePermissions::default();
-        let foreground_processes: Option<ForegroundProcessSet> = None;
         let mut macros = MacroStore::default();
         let mut drcs = DrcsStore::default();
 
@@ -2581,7 +2575,6 @@ mod tests {
                             .intermediates(intermediates.as_slice())
                             .action(action)
                             .feature_permissions(&feature_permissions)
-                            .foreground_processes(&foreground_processes)
                             .call();
                     }
                     Action::EscDispatch {

@@ -238,8 +238,7 @@ Why it matters:
 
 - VT420 supports downloadable macros as a first-class feature.
 - This is now implemented with a stricter security model than a stock DEC
-  terminal: macro support is only exposed when the current foreground process
-  set is known and allowlisted.
+  terminal: macro support is only exposed if explicitly enabled.
 
 Security:
 
@@ -248,9 +247,7 @@ Security:
   later invokes one, it can inject arbitrary text or escape sequences into the
   active session.
 - This is one of the clearest shell-injection vectors in the DEC feature set.
-- `term41` therefore keeps the feature default-deny and only enables it for
-  explicitly allowlisted programs, using kernel-backed foreground process-set
-  probes on Linux and macOS.
+- `term41` therefore keeps the feature default-deny.
 
 ### [ ] 10. Answerback and auto-answerback
 

@@ -698,21 +698,8 @@ fn program_allowlist_opt<'de, D>(deserializer: D) -> Result<Option<ProgramAllowl
 where
     D: serde::Deserializer<'de>,
 {
-    #[derive(Deserialize)]
-    #[serde(untagged)]
-    enum RawAllowlist {
-        Single(String),
-        Many(Vec<String>),
-    }
-
-    match Option::<RawAllowlist>::deserialize(deserializer) {
-        Ok(opt) => Ok(opt.map(|value| match value {
-            RawAllowlist::Single(value) if value == "*" || value.eq_ignore_ascii_case("all") => {
-                ProgramAllowlist::AllowAll
-            }
-            RawAllowlist::Single(value) => ProgramAllowlist::Programs(vec![value]),
-            RawAllowlist::Many(values) => ProgramAllowlist::Programs(values),
-        })),
+    match Option::<ProgramAllowlist>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
         Err(e) => {
             warn!("failed to parse feature allowlist in config: {e}");
             Ok(None)
@@ -839,16 +826,6 @@ mod tests {
                 .feature_permissions
                 .macros,
             ProgramAllowlist::AllowAll
-        );
-    }
-
-    #[test]
-    fn macros_allowlist_accepts_program_list() {
-        assert_eq!(
-            parse("[allow_features]\nmacros = [\"vtrex\", \"/usr/bin/foo\"]\n")
-                .feature_permissions
-                .macros,
-            ProgramAllowlist::Programs(vec!["vtrex".into(), "/usr/bin/foo".into()])
         );
     }
 

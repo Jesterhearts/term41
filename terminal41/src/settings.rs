@@ -34,17 +34,6 @@ pub fn set_feature_permissions(
     protocol.feature_permissions = permissions;
 }
 
-pub fn set_foreground_processes(
-    protocol: &mut TerminalProtocolState,
-    processes: Option<ForegroundProcessSet>,
-) {
-    if !protocol.foreground_processes_logged || protocol.foreground_processes != processes {
-        feature::log_foreground_process_probe(&protocol.feature_permissions, processes.as_ref());
-        protocol.foreground_processes_logged = true;
-    }
-    protocol.foreground_processes = processes;
-}
-
 pub fn set_cell_dimensions(
     cell_width: &mut u32,
     cell_height: &mut u32,

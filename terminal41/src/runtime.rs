@@ -27,13 +27,11 @@ pub(crate) fn run_terminal_thread(
                 break;
             }
             did_work = true;
-            let foreground_processes = pty_reader.foreground_processes();
-            trace!("Read {n} bytes from PTY, foreground processes: {foreground_processes:?}");
+            trace!("Read {n} bytes from PTY");
             tee_read(&buf[..n]);
 
             let effects = {
                 let mut terminal = terminal.lock();
-                settings::set_foreground_processes(&mut terminal.protocol, foreground_processes);
                 processor.process_bytes(&mut terminal, &buf[..n])
             };
             batch_effects.extend(effects);

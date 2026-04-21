@@ -626,7 +626,6 @@ fn apply_main_csi(
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
     feature_permissions: &FeaturePermissions,
-    foreground_processes: &Option<ForegroundProcessSet>,
     drcs: &mut DrcsStore,
 ) {
     let pending_output = &mut *pending_output;
@@ -665,9 +664,7 @@ fn apply_main_csi(
             }
         }
         MainCsiAction::ReportPrimaryDeviceAttrs => {
-            let macro_allowed = feature_permissions
-                .macros
-                .allows_programs(foreground_processes.as_ref());
+            let macro_allowed = feature_permissions.macros.allow();
             let level = if macro_allowed {
                 modes.conformance_level.da1_code()
             } else {
@@ -1054,7 +1051,6 @@ pub(crate) fn csi_apply(
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
     feature_permissions: &FeaturePermissions,
-    foreground_processes: &Option<ForegroundProcessSet>,
     drcs: &mut DrcsStore,
 ) {
     clamp_cursor_to_row_width(screen, viewport);
@@ -1090,7 +1086,6 @@ pub(crate) fn csi_apply(
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .macros(macros)
                 .feature_permissions(feature_permissions)
-                .foreground_processes(foreground_processes)
                 .drcs(drcs)
                 .call();
         }
@@ -1747,7 +1742,6 @@ pub(crate) fn csi_dispatch(
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
     feature_permissions: &FeaturePermissions,
-    foreground_processes: &Option<ForegroundProcessSet>,
     drcs: &mut DrcsStore,
 ) {
     let action = csi_parse(screen, modes, *params, intermediates, action);
@@ -1776,7 +1770,6 @@ pub(crate) fn csi_dispatch(
         .vt52_cursor_addr(vt52_cursor_addr)
         .macros(macros)
         .feature_permissions(feature_permissions)
-        .foreground_processes(foreground_processes)
         .drcs(drcs)
         .call();
 }
