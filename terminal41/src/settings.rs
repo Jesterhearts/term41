@@ -1,7 +1,10 @@
+//! Runtime settings mutation helpers.
+
 use super::*;
 use crate::screen::palette_sync::apply_screen_palette;
 use crate::screen::palette_sync::sync_screen_erase_defaults;
 
+/// Replace the default cursor style.
 pub fn set_default_cursor_style(
     cursor_style: &mut CursorStyle,
     style: CursorStyle,
@@ -9,6 +12,8 @@ pub fn set_default_cursor_style(
     *cursor_style = style;
 }
 
+/// Replace the base palette and rebase DEC color-table entries that still
+/// matched the old theme defaults.
 pub fn set_palette(
     active: &mut Screen,
     stash: &mut Screen,
@@ -27,6 +32,7 @@ pub fn set_palette(
     }
 }
 
+/// Replace terminal feature-permission gates.
 pub fn set_feature_permissions(
     protocol: &mut TerminalProtocolState,
     permissions: FeaturePermissions,
@@ -34,6 +40,7 @@ pub fn set_feature_permissions(
     protocol.feature_permissions = permissions;
 }
 
+/// Replace the stored cell pixel dimensions.
 pub fn set_cell_dimensions(
     cell_width: &mut u32,
     cell_height: &mut u32,
@@ -44,6 +51,7 @@ pub fn set_cell_dimensions(
     *cell_height = new_cell_height;
 }
 
+/// Apply a new scrollback row limit to the active screen.
 pub fn set_scrollback_policy(
     active: &mut Screen,
     viewport: &Viewport,
@@ -52,6 +60,7 @@ pub fn set_scrollback_policy(
     feature::apply_scrollback_limit(active, viewport, limit);
 }
 
+/// Replace the default status-line display mode and resize screens as needed.
 pub fn set_default_status_display(
     active: &mut Screen,
     stash: &mut Screen,

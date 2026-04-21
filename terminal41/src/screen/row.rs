@@ -17,10 +17,14 @@ pub(crate) const fn blank_cell() -> SmolStr {
 /// double-width). Applies to the whole row; per-cell attrs are separate.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum LineAttr {
+    /// Normal single-width, single-height row.
     #[default]
     Normal,
+    /// Double-width row.
     DoubleWidth,
+    /// Top half of a double-height row pair.
     DoubleHeightTop,
+    /// Bottom half of a double-height row pair.
     DoubleHeightBottom,
 }
 
@@ -29,8 +33,11 @@ pub enum LineAttr {
 /// 23 bytes), so combining marks are stored alongside their base character.
 #[derive(Debug, Default)]
 pub struct Row {
+    /// Grapheme cluster stored in each cell.
     pub cells: Vec<SmolStr>,
+    /// Per-cell foreground colors.
     pub fg: Vec<Srgb<u8>>,
+    /// Per-cell background colors.
     pub bg: Vec<Srgb<u8>>,
     /// Per-cell text attributes (bold/italic/strikethrough). Set from
     /// `screen.attrs` at write time alongside `fg`/`bg`.
@@ -69,6 +76,7 @@ pub struct Row {
 }
 
 impl Row {
+    /// Create a blank row of `cols` cells using the provided default colors.
     pub fn new(
         cols: u32,
         fg: Srgb<u8>,

@@ -1,9 +1,13 @@
+//! Clipboard-to-host byte conversion helpers.
+
 use clip41::Clipboard;
 use clip41::ClipboardKind;
 use vte_mode41::C1Mode;
 
 use crate::conformance;
 
+/// Append pasted text to `pending_output`, wrapping it in bracketed-paste
+/// markers when mode 2004 is active.
 pub fn paste(
     pending_output: &mut Vec<u8>,
     c1_mode: C1Mode,
@@ -24,6 +28,7 @@ pub fn paste(
     }
 }
 
+/// Read from the selected clipboard and append paste bytes if text exists.
 pub fn paste_from_clipboard(
     clipboard: &mut Clipboard,
     pending_output: &mut Vec<u8>,
@@ -38,6 +43,7 @@ pub fn paste_from_clipboard(
     }
 }
 
+/// Copy text into the ordinary system clipboard.
 pub fn copy_to_clipboard(
     clipboard: &mut Clipboard,
     text: &str,

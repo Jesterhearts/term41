@@ -1,3 +1,5 @@
+//! Helpers for shell-integration prompt metadata.
+
 use std::collections::HashMap;
 use std::time::Duration;
 
@@ -53,6 +55,7 @@ fn running_command_text(
     (!flattened.is_empty()).then_some(flattened)
 }
 
+/// Find the nearest prompt marker at or above a viewport row.
 pub fn find_prompt_for_screen_row(
     screen: &Screen,
     viewport: &Viewport,
@@ -83,6 +86,7 @@ fn find_next_prompt_after(
     None
 }
 
+/// Return the absolute row where the command block ends.
 pub fn command_end_abs(
     prompt_abs: u64,
     screen: &Screen,
@@ -134,6 +138,7 @@ fn extract_rows_text(
     out
 }
 
+/// Extract the command text associated with a prompt row.
 pub fn command_text_at(
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
@@ -166,6 +171,7 @@ fn command_text_end(
     prompt_abs
 }
 
+/// Extract command output associated with a prompt row.
 pub fn output_text_at(
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
@@ -180,6 +186,7 @@ pub fn output_text_at(
     if text.is_empty() { None } else { Some(text) }
 }
 
+/// Extract command text plus output associated with a prompt row.
 pub fn command_and_output_text_at(
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
@@ -196,6 +203,7 @@ pub fn command_and_output_text_at(
     if text.is_empty() { None } else { Some(text) }
 }
 
+/// Return the recorded runtime for a completed command.
 pub fn command_duration_at(
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
@@ -206,6 +214,7 @@ pub fn command_duration_at(
     Some(end.duration_since(start))
 }
 
+/// Replace the current selection with the command text at a prompt row.
 pub fn select_command_at(
     selection: &mut Option<Selection>,
     prompt_abs: u64,

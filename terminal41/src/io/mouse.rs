@@ -40,8 +40,11 @@ pub enum MouseEncoding {
 /// Kind of event the app is being told about.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseEventKind {
+    /// Button press.
     Press,
+    /// Button release.
     Release,
+    /// Pointer motion.
     Motion,
 }
 
@@ -49,21 +52,32 @@ pub enum MouseEventKind {
 /// reports when no button is held.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseButton {
+    /// Primary button.
     Left,
+    /// Middle button.
     Middle,
+    /// Secondary button.
     Right,
+    /// Vertical wheel up.
     WheelUp,
+    /// Vertical wheel down.
     WheelDown,
+    /// Horizontal wheel left.
     WheelLeft,
+    /// Horizontal wheel right.
     WheelRight,
+    /// No button is currently pressed.
     None,
 }
 
 /// Keyboard modifiers captured alongside a mouse event.
 #[derive(Clone, Copy, Debug, Default)]
 pub struct MouseModifiers {
+    /// Shift modifier.
     pub shift: bool,
+    /// Alt/Meta modifier.
     pub alt: bool,
+    /// Control modifier.
     pub ctrl: bool,
 }
 

@@ -10,21 +10,28 @@ use crate::dec::r#macro::MacroEncoding;
 use crate::dec::r#macro::MacroStore;
 use crate::screen;
 
+/// Permission gates for terminal features that can execute stored data or
+/// otherwise need explicit host approval.
 #[derive(Debug, Clone, PartialEq, Eq, Default)]
 pub struct FeaturePermissions {
+    /// Permission gate for VT420 programmable macros.
     pub macros: ProgramAllowlist,
 }
 
+/// Coarse allow/deny gate for a protocol feature.
 #[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
 pub enum ProgramAllowlist {
+    /// Deny all requests for this feature.
     #[default]
     #[serde(alias = "none", alias = "deny")]
     DenyAll,
+    /// Allow all requests for this feature.
     #[serde(alias = "*", alias = "all")]
     AllowAll,
 }
 
 impl ProgramAllowlist {
+    /// Whether this gate allows the protected feature.
     pub fn allow(&self) -> bool {
         match self {
             Self::DenyAll => false,

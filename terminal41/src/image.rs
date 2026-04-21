@@ -6,9 +6,12 @@ use image41::DecodedImage;
 
 use crate::screen::row::Row;
 
+/// Inline image placed in the terminal grid.
 #[derive(Debug, Clone)]
 pub struct PlacedImage {
+    /// Decoded image pixels and frames.
     pub image: DecodedImage,
+    /// Terminal-local image id used for storage and renderer diffing.
     pub id: u64,
     /// Absolute row index in `grid.rows` where the image top-left is placed.
     pub row: usize,
@@ -29,7 +32,9 @@ pub struct PlacedImage {
 
 /// A snapshot of an image visible in the current viewport.
 pub struct VisibleImage {
+    /// Decoded image pixels and frames.
     pub image: DecodedImage,
+    /// Terminal-local image id.
     pub id: u64,
     /// Row of the image's top edge relative to the top of the viewport.
     /// Negative when the image's top is scrolled above the viewport; the

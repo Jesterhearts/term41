@@ -36,14 +36,19 @@ pub(crate) use self::scroll::scroll_up_in_region_with_scrollback_policy as scrol
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
+    /// Zero-based column.
     pub col: u32,
+    /// Zero-based row.
     pub row: u32,
 }
 
+/// Whether DECCARA/DECRARA treat the range as a character stream or rectangle.
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub enum AttrChangeExtent {
+    /// Walk row-by-row as a stream of character positions.
     #[default]
     Stream,
+    /// Treat coordinates as an inclusive rectangle.
     Rectangle,
 }
 
@@ -52,13 +57,16 @@ pub enum AttrChangeExtent {
 /// [`super::Screen`].
 #[derive(Debug, Default, Clone, Copy)]
 pub struct Viewport {
+    /// Visible row count.
     pub rows: u32,
+    /// Visible column count.
     pub cols: u32,
     /// Local-row index of the top visible row inside the backing grid.
     pub top: usize,
 }
 
 impl Viewport {
+    /// Clamp and return the top visible row index for a backing row count.
     pub fn top_index(
         &self,
         total_rows: usize,
@@ -67,9 +75,12 @@ impl Viewport {
     }
 }
 
+/// Backing row storage plus scrollback accounting.
 #[derive(Debug)]
 pub struct Grid {
+    /// Rows in storage order, including scrollback and visible rows.
     pub rows: VecDeque<Row>,
+    /// Maximum number of scrollback rows retained.
     pub scrollback_limit: u32,
     /// Running count of rows popped from the front (for image position
     /// tracking).
@@ -81,6 +92,7 @@ pub struct Grid {
 }
 
 impl Grid {
+    /// Number of rows currently above the visible viewport.
     pub fn scrollback_len(
         &self,
         viewport: &Viewport,
@@ -88,6 +100,7 @@ impl Grid {
         (self.rows.len() as u32).saturating_sub(viewport.rows)
     }
 
+    /// Push a new blank row at the live bottom, recycling scrollback when full.
     pub fn push_visible_row(
         &mut self,
         viewport: &Viewport,
@@ -108,6 +121,7 @@ impl Grid {
         }
     }
 
+    /// Convert a cursor row to the local backing-row index.
     pub fn active_row_index(
         &self,
         cursor: &Cursor,

@@ -62,16 +62,23 @@ impl PageMemory {
     }
 }
 
+/// Which display surface receives host output.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ActiveDisplay {
+    /// Main terminal screen.
     Main,
+    /// Host-writable status line.
     Status,
 }
 
+/// Status-line display mode.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum StatusDisplayKind {
+    /// No status line is visible.
     None,
+    /// Emulator-owned indicator line.
     Indicator,
+    /// Host-writable status line.
     HostWritable,
 }
 
@@ -123,9 +130,13 @@ pub struct BackspaceGuard {
 /// a single [`std::mem::swap`] on the alt-screen mode transitions.
 #[derive(Debug)]
 pub struct Screen {
+    /// Backing rows, including visible rows and scrollback.
     pub grid: Grid,
+    /// Cursor position within the active visible display.
     pub cursor: Cursor,
+    /// Current foreground color for new cell writes.
     pub fg: Srgb<u8>,
+    /// Current background color for new cell writes.
     pub bg: Srgb<u8>,
     /// Current text attributes (bold/italic/strikethrough) applied to new cell
     /// writes. Managed via SGR — updated by `apply_sgr`, snapshotted into
@@ -149,7 +160,9 @@ pub struct Screen {
     /// positive = scrolled into history. Alt screens keep this at 0 since
     /// their grid has no scrollback.
     pub offset: u32,
+    /// Images placed on this screen, keyed by terminal-local image id.
     pub images: BTreeMap<u64, PlacedImage>,
+    /// Saved cursor slot for DECSC/DECRC and related private modes.
     pub saved_cursor: Option<SavedCursor>,
     /// Hyperlink id currently associated with new cell writes (set by OSC 8).
     /// Lives on the screen, not the terminal, so a link span open on the

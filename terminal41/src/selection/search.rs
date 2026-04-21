@@ -10,12 +10,16 @@
 /// still count as one column each, matching how the row stores them.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct MatchSpan {
+    /// Absolute row containing the match.
     pub row: u64,
+    /// Inclusive start column.
     pub start_col: u32,
+    /// Inclusive end column.
     pub end_col: u32,
 }
 
 impl MatchSpan {
+    /// Whether this span covers the given absolute cell.
     pub fn contains(
         &self,
         row: u64,
@@ -41,6 +45,7 @@ pub struct SearchState {
 }
 
 impl SearchState {
+    /// Create an inactive empty search state.
     pub fn new() -> Self {
         Self::default()
     }

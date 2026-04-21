@@ -32,6 +32,7 @@ struct HyperlinkKey {
 }
 
 impl HyperlinkRegistry {
+    /// Create an empty hyperlink registry.
     pub fn new() -> Self {
         Self::default()
     }
@@ -59,6 +60,7 @@ impl HyperlinkRegistry {
         id
     }
 
+    /// Resolve a hyperlink id to its URI.
     pub fn get(
         &self,
         id: HyperlinkId,

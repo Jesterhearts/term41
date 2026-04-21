@@ -43,10 +43,14 @@ pub enum SelectionMode {
     Line,
 }
 
+/// Active selection state.
 #[derive(Clone, Debug)]
 pub struct Selection {
+    /// Fixed endpoint where selection began.
     pub anchor: SelectionPoint,
+    /// Moving endpoint.
     pub head: SelectionPoint,
+    /// Expansion mode for this selection.
     pub mode: SelectionMode,
     /// The cell the user originally clicked. Carried so Word/Line selections
     /// can pick the correct word/line boundary as the head end when the
@@ -193,6 +197,7 @@ pub(crate) fn absolute_row_to_local(
 }
 
 #[must_use]
+/// Start a selection at a viewport cell.
 pub fn start_selection(
     screen: &Screen,
     viewport: &Viewport,
@@ -244,6 +249,7 @@ pub fn start_selection(
 }
 
 #[must_use]
+/// Extend an existing selection to a new viewport cell.
 pub fn extend_selection(
     selection: &Selection,
     screen: &Screen,
@@ -327,6 +333,7 @@ pub fn extend_selection(
     })
 }
 
+/// Whether a viewport cell is covered by the current selection.
 pub fn is_cell_selected(
     selection: Option<&Selection>,
     screen: &Screen,
@@ -347,6 +354,7 @@ pub fn is_cell_selected(
     })
 }
 
+/// Close search and select the active match, if one exists.
 pub fn close_search(
     search: &mut SearchState,
     selection: &mut Option<Selection>,
@@ -373,6 +381,7 @@ pub fn close_search(
     search.active_idx = 0;
 }
 
+/// Open search and reset any prior query/matches.
 pub fn open_search(search: &mut SearchState) {
     search.active = true;
     search.query.clear();
@@ -380,15 +389,18 @@ pub fn open_search(search: &mut SearchState) {
     search.active_idx = 0;
 }
 
+/// Whether search is currently active.
 pub fn search_active(search: &SearchState) -> bool {
     search.active
 }
 
+/// Return search state only while search is active.
 pub fn search_state(search: &SearchState) -> Option<&SearchState> {
     if search.active { Some(search) } else { None }
 }
 
 #[must_use]
+/// Append text to the search query and return the next viewport offset.
 pub fn search_append(
     search: &mut SearchState,
     screen: &Screen,
@@ -403,6 +415,8 @@ pub fn search_append(
 }
 
 #[must_use]
+/// Remove one character from the search query and return the next viewport
+/// offset.
 pub fn search_backspace(
     search: &mut SearchState,
     screen: &Screen,
@@ -416,6 +430,7 @@ pub fn search_backspace(
 }
 
 #[must_use]
+/// Move to the next match and return the next viewport offset.
 pub fn search_step_next(
     search: &mut SearchState,
     screen: &Screen,
@@ -429,6 +444,7 @@ pub fn search_step_next(
 }
 
 #[must_use]
+/// Move to the previous match and return the next viewport offset.
 pub fn search_step_prev(
     search: &mut SearchState,
     screen: &Screen,
@@ -442,6 +458,7 @@ pub fn search_step_prev(
     scroll_to_active_match(search, screen, viewport)
 }
 
+/// Whether a viewport cell belongs to any search match.
 pub fn is_cell_match(
     search: &SearchState,
     screen: &Screen,
@@ -459,6 +476,7 @@ pub fn is_cell_match(
         .any(|m| m.contains(abs_row, screen_col))
 }
 
+/// Whether a viewport cell belongs to the active search match.
 pub fn is_cell_active_match(
     search: &SearchState,
     screen: &Screen,
@@ -567,6 +585,7 @@ fn scroll_to_active_match(
     next_offset.min(max_offset)
 }
 
+/// Extract selected text from the screen.
 pub fn selection_text(
     selection: Option<&Selection>,
     screen: &Screen,
@@ -631,6 +650,7 @@ pub fn selection_text(
     Some(out)
 }
 
+/// Copy selected text into the requested clipboard selection.
 pub fn copy_selection(
     clipboard: &mut Clipboard,
     selection: Option<&Selection>,

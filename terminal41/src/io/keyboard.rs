@@ -22,11 +22,16 @@ use crate::conformance;
 const MAX_STACK: usize = 16;
 
 bitflags::bitflags! {
+    /// Physical modifier keys carried by kitty keyboard protocol reports.
     #[derive(Debug, Clone, Copy, PartialEq, Eq)]
     pub struct KittyKeys: u8 {
+        /// Shift key.
         const SHIFT = 0b0000_0001;
+        /// Alt/Meta key.
         const ALT   = 0b0000_0010;
+        /// Control key.
         const CTRL  = 0b0000_0100;
+        /// Super/Command/Windows key.
         const SUPER = 0b0000_1000;
     }
 }
@@ -61,6 +66,7 @@ pub struct KittyKeyboardState {
 }
 
 impl KittyKeyboardState {
+    /// Create an empty kitty keyboard mode stack.
     pub fn new() -> Self {
         Self::default()
     }

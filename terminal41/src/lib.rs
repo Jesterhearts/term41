@@ -1,6 +1,14 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
+//! Terminal-emulation core for `term41`.
+//!
+//! This crate owns terminal state, parsing, screen buffers, host I/O protocol
+//! helpers, selection/search state, inline image placement, and DEC/xterm
+//! compatibility features. The application crate drives it by feeding PTY
+//! bytes through [`TerminalProcessor`] and routing host-originated events
+//! through [`HostInput`].
+
 #[macro_use]
 extern crate log;
 
@@ -14,22 +22,27 @@ mod dispatch;
 mod drcs;
 mod feature;
 mod graphics;
+/// Host-bound reports and event encoders.
 pub mod host;
 mod image;
+/// Host clipboard helpers plus keyboard/mouse protocol state reexports.
 pub mod io;
 mod lifecycle_ops;
 mod mode;
 mod osc;
 mod parser;
 mod processing;
+/// Shell-integration prompt metadata helpers.
 pub mod prompt;
 mod report;
 mod runtime;
 mod screen;
 pub mod selection;
+/// Runtime settings mutation helpers used by config reload and UI actions.
 pub mod settings;
 #[doc(hidden)]
 pub mod test_support;
+/// Read-only view/navigation helpers for renderer and UI code.
 pub mod view;
 
 use std::collections::HashMap;
@@ -149,10 +162,13 @@ pub struct TerminalEffects {
 }
 
 impl TerminalEffects {
+    /// Return whether this batch produced no host-visible side effects.
     pub fn is_empty(&self) -> bool {
         self.host_bytes.is_empty() && self.resize_request.is_none() && !self.bell
     }
 
+    /// Merge another batch into this one, preserving the latest resize
+    /// request and OR-ing bell state.
     pub fn extend(
         &mut self,
         other: Self,
@@ -311,10 +327,14 @@ impl TerminalModes {
     }
 }
 
+/// Complete mutable terminal state for one tab.
 #[derive(Debug)]
 pub struct Terminal {
+    /// Currently visible screen buffer.
     pub active: Screen,
+    /// Inactive screen buffer used for primary/alternate-screen swapping.
     pub stash: Screen,
+    /// Window-sized viewport shared by the active and stashed screens.
     pub viewport: Viewport,
 
     /// `true` when the alt screen is active, `false` when the primary
@@ -373,7 +393,9 @@ pub struct Terminal {
     /// Runtime color palette. Stored here so SGR resets, OSC color queries,
     /// and the renderer can all resolve themed colors.
     pub palette: ColorPalette,
+    /// User/theme palette before DEC color-table overrides are applied.
     pub base_palette: ColorPalette,
+    /// DEC color-table and lookup-mode state.
     pub dec_color: DecColorState,
 
     /// State machine for the VT52 `ESC Y Pr Pc` direct cursor address. After
@@ -381,7 +403,9 @@ pub struct Terminal {
     /// column values. This field persists across `apply` calls so the state
     /// survives the per-action dispatch boundary.
     vt52_cursor_addr: Vt52CursorAddr,
+    /// Configured status-line mode used when resetting screens.
     pub default_status_display: StatusDisplayKind,
+    /// Security-sensitive optional protocol state and feature storage.
     pub protocol: TerminalProtocolState,
 }
 
@@ -392,6 +416,7 @@ pub struct Terminal {
 const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
 
 impl Terminal {
+    /// Create a terminal with primary and alternate screen buffers.
     pub fn new(
         cols: u32,
         rows: u32,
@@ -490,14 +515,17 @@ impl Terminal {
         }
     }
 
+    /// Borrow the DEC color state currently affecting rendering.
     pub fn dec_color_state(&self) -> &DecColorState {
         &self.dec_color
     }
 
+    /// Return DRCS glyphs in the format expected by the font rasterizer.
     pub fn drcs_render_glyphs(&self) -> font41::DrcsGlyphMap {
         feature::drcs_render_glyphs(&self.protocol.drcs)
     }
 
+    /// Whether VT macro definition/invocation is allowed for this terminal.
     pub fn macro_feature_enabled(&self) -> bool {
         feature::macro_feature_enabled(&self.protocol.feature_permissions)
     }
@@ -515,18 +543,22 @@ impl Terminal {
         );
     }
 
+    /// Current cell width in pixels.
     pub fn cell_width(&self) -> u32 {
         self.cell_width
     }
 
+    /// Current cell height in pixels.
     pub fn cell_height(&self) -> u32 {
         self.cell_height
     }
 
+    /// Whether a non-empty selection is active.
     pub fn has_selection(&self) -> bool {
         self.selection.as_ref().is_some_and(|s| !s.is_empty())
     }
 
+    /// Resize the active/stashed screen buffers and viewport.
     pub fn resize(
         &mut self,
         cols: u32,
@@ -745,6 +777,7 @@ impl Terminal {
 /// Handle to a running terminal thread. Signals the thread to stop on drop.
 pub struct TerminalThread {
     stop: Arc<AtomicBool>,
+    /// Thread handle populated by the terminal thread after it starts.
     pub thread_handle: Arc<OnceLock<Thread>>,
 }
 

@@ -39,7 +39,9 @@ pub enum CursorShape {
 /// default of a blinking block.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct CursorStyle {
+    /// Cursor overlay geometry.
     pub shape: CursorShape,
+    /// Whether the renderer should blink the cursor.
     pub blink: bool,
 }
 

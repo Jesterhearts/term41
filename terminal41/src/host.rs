@@ -1,11 +1,16 @@
+//! Helpers for terminal-originated reports sent back to the foreground
+//! program.
+
 use std::time::Instant;
 
 use super::*;
 
+/// Whether synchronized-output mode is still within its safety deadline.
 pub fn synchronized_update_active(since: Option<Instant>) -> bool {
     since.is_some_and(|start| start.elapsed() < SYNCHRONIZED_UPDATE_TIMEOUT)
 }
 
+/// Emit a focus-in/focus-out report when focus reporting is enabled.
 pub fn report_focus_change(
     host_bytes: &mut Vec<u8>,
     c1_mode: C1Mode,
@@ -22,10 +27,14 @@ pub fn report_focus_change(
     );
 }
 
+/// Whether any mouse tracking mode is active.
 pub fn mouse_tracking_enabled(mouse_tracking: MouseTracking) -> bool {
     !matches!(mouse_tracking, MouseTracking::Off)
 }
 
+/// Encode and append a mouse report if the current tracking mode wants it.
+///
+/// Returns `true` when a report was emitted.
 pub fn mouse_report(
     host_bytes: &mut Vec<u8>,
     c1_mode: C1Mode,

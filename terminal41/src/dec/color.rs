@@ -8,48 +8,74 @@ use palette::Srgb;
 use crate::color;
 use crate::color::ColorPalette;
 
+/// DECRQCRA/DECATC assignment class for normal text colors.
 pub const TEXT_COLOR_ASSIGNMENT_CLASS: u16 = 1;
+/// DECRQCRA/DECATC assignment class for window-frame colors.
 pub const WINDOW_FRAME_ASSIGNMENT_CLASS: u16 = 2;
+/// Number of entries in the DEC color table.
 pub const DEC_COLOR_TABLE_SIZE: usize = 256;
+/// Number of DEC alternate text-color combinations.
 pub const DEC_ALT_TEXT_COMBINATIONS: usize = 16;
 const DEC_COLOR_SPACE_HLS: u16 = 1;
 const DEC_COLOR_SPACE_RGB: u16 = 2;
 const DEFAULT_TEXT_FG_INDEX: u8 = 7;
 const DEFAULT_TEXT_BG_INDEX: u8 = 0;
 
+/// DEC color lookup table selected by DECATC-style controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LookupTable {
+    /// Monochrome table; bold can map low ANSI colors to bright variants.
     Mono = 0,
+    /// Alternate text colors selected by cell attributes.
     AlternateWithAttrs = 1,
+    /// Alternate text colors, ignoring normal SGR foreground/background.
     Alternate = 2,
+    /// Normal ANSI/SGR palette lookup.
     AnsiSgr = 3,
 }
 
+/// Color-space encoding used by DEC color-table reports/restores.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum ColorSpace {
+    /// Hue/lightness/saturation percentages.
     Hls = 1,
+    /// Red/green/blue percentages.
     Rgb = 2,
 }
 
+/// Pair of palette-table indices used for foreground/background assignment.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub struct ColorAssignment {
+    /// Foreground color-table index.
     pub fg: u8,
+    /// Background color-table index.
     pub bg: u8,
 }
 
+/// DEC color-table state and color lookup mode.
 #[derive(Debug, Clone)]
 pub struct DecColorState {
+    /// Normal text foreground/background assignment.
     pub text: ColorAssignment,
+    /// Window-frame foreground/background assignment.
     pub window_frame: ColorAssignment,
+    /// Alternate text assignments indexed by bold/reverse/underline/blink.
     pub alternate_text: [ColorAssignment; DEC_ALT_TEXT_COMBINATIONS],
+    /// Active DEC color lookup table.
     pub lookup_table: LookupTable,
+    /// Whether blink participates in alternate text-color indexing.
     pub alternate_blink_text: bool,
+    /// Whether underline participates in alternate text-color indexing.
     pub alternate_underline_text: bool,
+    /// Whether bold/blink brightening also affects backgrounds.
     pub bold_blink_affects_background: bool,
+    /// Whether erase operations use the default screen background color.
     pub erase_to_screen: bool,
+    /// Full DEC color table.
     pub table: [Srgb<u8>; DEC_COLOR_TABLE_SIZE],
 }
 
+/// Build DEC color state from the current theme palette.
 pub fn state_from_palette(palette: &ColorPalette) -> DecColorState {
     let mut table = [Srgb::new(0, 0, 0); DEC_COLOR_TABLE_SIZE];
     for (idx, slot) in table.iter_mut().enumerate() {
@@ -141,6 +167,7 @@ pub fn report_color_assignment(
     Some(format!("{item};{};{},|", assignment.fg, assignment.bg))
 }
 
+/// Assign one alternate text-color pair.
 pub fn assign_alternate_text_color(
     state: &mut DecColorState,
     item: u16,
@@ -165,6 +192,7 @@ pub fn report_alternate_text_color(
     Some(format!("{item};{};{},}}", assignment.fg, assignment.bg))
 }
 
+/// Select the active DEC lookup table from a protocol parameter.
 pub fn select_lookup_table(
     state: &mut DecColorState,
     ps: u16,
@@ -241,6 +269,7 @@ pub fn report_color_table(
         .join("/")
 }
 
+/// Return a color table entry by index.
 pub fn table_color(
     state: &DecColorState,
     index: u8,
@@ -259,6 +288,7 @@ pub fn erase_background_color(
     }
 }
 
+/// Resolve alternate text-color assignment for the given cell style.
 pub fn alternate_assignment_for_style(
     state: &DecColorState,
     attrs: CellAttrs,
@@ -288,6 +318,7 @@ pub fn alternate_text_index(
 }
 
 impl ColorSpace {
+    /// Parse a DEC color-space parameter.
     pub fn from_param(value: Option<u16>) -> Option<Self> {
         match value? {
             DEC_COLOR_SPACE_HLS => Some(Self::Hls),
