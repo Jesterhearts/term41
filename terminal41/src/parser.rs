@@ -5,9 +5,7 @@ use std::time::Instant;
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
 use smol_str::SmolStr;
-use smol_str::SmolStrBuilder;
 use unicode_segmentation::UnicodeSegmentation;
-use unicode_width::UnicodeWidthStr;
 use vtepp::Params;
 
 use crate::C1Mode;
@@ -48,6 +46,7 @@ mod csi;
 mod esc;
 mod status;
 mod text;
+mod write;
 
 pub(crate) use self::csi::csi_apply;
 #[cfg(test)]
@@ -59,18 +58,16 @@ pub(crate) use self::esc::esc_dispatch;
 pub(crate) use self::esc::esc_parse;
 pub(crate) use self::status::apply_status_line_csi;
 pub(crate) use self::status::execute_status;
-pub(crate) use self::status::put_status_8bit_byte;
-pub(crate) use self::status::put_status_ascii_run;
-pub(crate) use self::status::put_status_printable;
-pub(crate) use self::status::put_status_text_run;
-pub(crate) use self::text::break_wide_glyphs_around_write;
 pub(crate) use self::text::execute;
-pub(crate) use self::text::put_8bit_byte;
-pub(crate) use self::text::put_ascii_run;
-pub(crate) use self::text::put_char;
-pub(crate) use self::text::put_printable;
-pub(crate) use self::text::put_text_run;
-pub(crate) use self::text::translated_codepoint;
+pub(crate) use self::write::put_8bit_byte;
+pub(crate) use self::write::put_ascii_run;
+pub(crate) use self::write::put_char;
+pub(crate) use self::write::put_printable;
+pub(crate) use self::write::put_status_8bit_byte;
+pub(crate) use self::write::put_status_ascii_run;
+pub(crate) use self::write::put_status_printable;
+pub(crate) use self::write::put_status_text_run;
+pub(crate) use self::write::put_text_run;
 
 /// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
 /// `put_ascii_run` clones out of this table instead of constructing a fresh
