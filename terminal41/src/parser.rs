@@ -290,47 +290,117 @@ pub(super) enum ParsedCsiAction {
 
 #[derive(Debug, Clone)]
 pub(super) enum MainCsiAction {
-    SelfTest { requested_tests: Vec<u16> },
+    SelfTest {
+        requested_tests: Vec<u16>,
+    },
     ReportPrimaryDeviceAttrs,
-    DeviceStatusReport { selector: u16 },
-    SetPageLines { lines: u16 },
+    DeviceStatusReport {
+        selector: u16,
+    },
+    SetPageLines {
+        lines: u16,
+    },
     PushTitle,
     PopTitle,
     ReportPixelSize,
     ReportCellSize,
     ReportTextSize,
-    RepeatLastChar { count: u16 },
-    CursorUp { count: u16 },
-    CursorDown { count: u16 },
-    CursorForward { count: u16 },
-    CursorBackward { count: u16 },
-    CursorNextLine { count: u16 },
-    CursorPreviousLine { count: u16 },
-    CursorPosition { row: u16, col: u16 },
-    EraseInDisplay { mode: u16 },
-    EraseInLine { mode: u16 },
-    SetGraphicsRendition { params: OwnedParams },
-    LinePositionAbsolute { row: u16 },
-    CursorHorizontalAbsolute { col: u16 },
-    CursorForwardRelative { count: u16 },
-    CursorVerticalRelative { count: u16 },
-    InsertLines { count: u16 },
-    DeleteLines { count: u16 },
-    DeleteChars { count: u16 },
-    InsertChars { count: u16 },
-    EraseChars { count: u16 },
-    ScrollUp { count: u16 },
-    ScrollDown { count: u16 },
-    SetScrollRegion { top: u16, bottom: Option<u16> },
-    SetLeftRightMargins { left: u16, right: Option<u16> },
+    RepeatLastChar {
+        count: u16,
+    },
+    CursorUp {
+        count: u16,
+    },
+    CursorDown {
+        count: u16,
+    },
+    CursorForward {
+        count: u16,
+    },
+    CursorBackward {
+        count: u16,
+    },
+    CursorNextLine {
+        count: u16,
+    },
+    CursorPreviousLine {
+        count: u16,
+    },
+    CursorPosition {
+        row: u16,
+        col: u16,
+    },
+    EraseInDisplay {
+        mode: u16,
+    },
+    EraseInLine {
+        mode: u16,
+    },
+    SetGraphicsRendition {
+        params: OwnedParams,
+    },
+    LinePositionAbsolute {
+        row: u16,
+    },
+    CursorHorizontalAbsolute {
+        col: u16,
+    },
+    CursorForwardRelative {
+        count: u16,
+    },
+    CursorVerticalRelative {
+        count: u16,
+    },
+    InsertLines {
+        count: u16,
+    },
+    DeleteLines {
+        count: u16,
+    },
+    DeleteChars {
+        count: u16,
+    },
+    InsertChars {
+        count: u16,
+    },
+    EraseChars {
+        count: u16,
+    },
+    ScrollUp {
+        count: u16,
+    },
+    ScrollDown {
+        count: u16,
+    },
+    SetScrollRegion {
+        top: u16,
+        bottom: Option<u16>,
+    },
+    SetLeftRightMargins {
+        left: u16,
+        right: Option<u16>,
+    },
     SaveCursor,
     RestoreCursor,
-    NextPage { count: u16 },
-    PrevPage { count: u16 },
-    CursorForwardTabulation { count: u16 },
-    CursorBackwardTabulation { count: u16 },
-    TabClear { mode: u16 },
-    SetAnsiModes { enable: bool, modes: Vec<u16> },
+    NextPage {
+        count: u16,
+    },
+    PrevPage {
+        count: u16,
+    },
+    CursorForwardTabulation {
+        count: u16,
+    },
+    CursorBackwardTabulation {
+        count: u16,
+    },
+    TabClear {
+        mode: u16,
+    },
+    SetAnsiModes {
+        enable: bool,
+        modes: Vec<mode::AnsiMode>,
+    },
 }
 
 #[derive(Debug, Clone)]
@@ -460,7 +530,7 @@ fn apply_hard_reset_state(
     cursor_style: &mut CursorStyle,
     current_title: &mut Option<String>,
     title_stack: &mut Vec<Option<String>>,
-    saved_modes: &mut std::collections::HashMap<u16, bool>,
+    saved_modes: &mut std::collections::HashMap<mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,

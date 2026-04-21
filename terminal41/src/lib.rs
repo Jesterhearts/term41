@@ -359,7 +359,7 @@ pub struct Terminal {
     pub cursor_style: CursorStyle,
 
     /// Saved private mode states for XTSAVE/XTRESTORE (CSI ? Ps s / r).
-    saved_private_modes: HashMap<u16, bool>,
+    saved_private_modes: HashMap<mode::PrivateMode, bool>,
 
     /// Shell/app metadata surfaced to the host and prompt-selection tools.
     pub metadata: TerminalMetadata,

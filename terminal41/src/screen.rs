@@ -641,7 +641,7 @@ fn switch_screen(
 /// false for `l` (reset). Only the alt-screen family (47/1047/1048/1049)
 /// is currently recognized; unknown modes are ignored.
 pub(super) fn set_private_mode(
-    mode: u16,
+    mode: mode::PrivateMode,
     enable: bool,
     active: &mut Screen,
     stash: &mut Screen,
@@ -649,22 +649,22 @@ pub(super) fn set_private_mode(
     on_alt: &mut bool,
 ) {
     match mode {
-        mode::DECCKM => active.app_cursor_keys = enable,
+        mode::PrivateMode::Decckm => active.app_cursor_keys = enable,
         // DECCOLM is handled in csi_dispatch where mutable viewport
         // access is available for the resize.
-        mode::DECOM => {
+        mode::PrivateMode::Decom => {
             active.origin_mode = enable;
             // Entering/leaving origin mode homes the cursor per DEC spec.
             active.cursor.row = if enable { active.scroll_top } else { 0 };
             active.cursor.col = 0;
         }
-        mode::DECAWM => active.autowrap = enable,
-        mode::DECNKM => active.app_keypad = enable,
-        mode::DECTCEM => active.cursor_visible = enable,
+        mode::PrivateMode::Decawm => active.autowrap = enable,
+        mode::PrivateMode::Decnkm => active.app_keypad = enable,
+        mode::PrivateMode::Dectcem => active.cursor_visible = enable,
         // DECLRMM does not need action here — the `declrmm` bool lives
         // on TerminalModes and is handled at the csi_dispatch level.
-        mode::ALT_SCREEN => switch_screen(enable, active, stash, viewport, on_alt),
-        mode::ALT_SCREEN_CLEAR => {
+        mode::PrivateMode::AltScreen => switch_screen(enable, active, stash, viewport, on_alt),
+        mode::PrivateMode::AltScreenClear => {
             // xterm clears the alt buffer when leaving via 1047l so stale
             // content isn't re-shown the next time it's entered.
             if !enable && *on_alt {
@@ -676,14 +676,14 @@ pub(super) fn set_private_mode(
                 reset_alt_entry_state(active);
             }
         }
-        mode::SAVE_CURSOR => {
+        mode::PrivateMode::SaveCursor => {
             if enable {
                 save_cursor_slot(active);
             } else {
                 restore_cursor_slot(active, viewport);
             }
         }
-        mode::ALT_SCREEN_SAVE => {
+        mode::PrivateMode::AltScreenSave => {
             if enable {
                 // Save into primary's DECSC slot before swapping, so the
                 // slot rides with primary into the stash and is there for

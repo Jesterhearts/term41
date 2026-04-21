@@ -192,6 +192,7 @@ fn parse_main_plain_csi(
             modes: params
                 .iter()
                 .filter_map(|group| group.first().copied())
+                .filter_map(|mode| mode::AnsiMode::try_from(mode).ok())
                 .collect(),
         }),
         'l' => ParsedCsiAction::Main(MainCsiAction::SetAnsiModes {
@@ -199,6 +200,7 @@ fn parse_main_plain_csi(
             modes: params
                 .iter()
                 .filter_map(|group| group.first().copied())
+                .filter_map(|mode| mode::AnsiMode::try_from(mode).ok())
                 .collect(),
         }),
         _ => ParsedCsiAction::Unsupported,
@@ -213,51 +215,51 @@ fn apply_private_mode(
     on_alt_screen: &mut bool,
     cursor_style: &mut CursorStyle,
     dec_color: &mut DecColorState,
-    mode: u16,
+    mode: mode::PrivateMode,
     enable: bool,
 ) {
-    if mode == mode::DECANM {
+    if mode == mode::PrivateMode::Decanm {
         modes.vt52_mode = !enable;
-    } else if mode == mode::DECSCNM {
+    } else if mode == mode::PrivateMode::Decscnm {
         modes.screen_reverse = enable;
-    } else if mode == mode::DECARM {
+    } else if mode == mode::PrivateMode::Decarm {
         modes.decarm = enable;
-    } else if mode == mode::ATT610_BLINK {
+    } else if mode == mode::PrivateMode::Att610Blink {
         cursor_style.blink = enable;
-    } else if mode == mode::DECNCSM {
+    } else if mode == mode::PrivateMode::Decncsm {
         modes.decncsm = enable;
-    } else if mode == mode::DECLRMM {
+    } else if mode == mode::PrivateMode::Declrmm {
         modes.declrmm = enable;
         if !enable {
             screen.left_margin = 0;
             screen.right_margin = viewport.cols.saturating_sub(1);
         }
-    } else if mode == mode::DECNRCM {
+    } else if mode == mode::PrivateMode::Decnrcm {
         modes.decnrcm = enable;
         for screen in [&mut *screen, &mut *stash] {
             screen.nrc_mode = enable;
             screen.charset = charset::CharsetState::new();
         }
-    } else if mode == mode::BRACKETED_PASTE {
+    } else if mode == mode::PrivateMode::BracketedPaste {
         modes.bracketed_paste = enable;
-    } else if mode == mode::FOCUS_REPORTING {
+    } else if mode == mode::PrivateMode::FocusReporting {
         modes.focus_reporting = enable;
-    } else if mode == mode::SYNCHRONIZED_UPDATE {
+    } else if mode == mode::PrivateMode::SynchronizedUpdate {
         modes.synchronized_update_since = enable.then(Instant::now);
-    } else if mode == mode::ALLOW_DECCOLM {
+    } else if mode == mode::PrivateMode::AllowDeccolm {
         modes.allow_deccolm = enable;
-    } else if mode == mode::DECATCUM {
+    } else if mode == mode::PrivateMode::Decatcum {
         dec_color.alternate_underline_text = enable;
-    } else if mode == mode::DECATCBM {
+    } else if mode == mode::PrivateMode::Decatcbm {
         dec_color.alternate_blink_text = enable;
-    } else if mode == mode::DECBBSM {
+    } else if mode == mode::PrivateMode::Decbbsm {
         dec_color.bold_blink_affects_background = enable;
-    } else if mode == mode::DECECM {
+    } else if mode == mode::PrivateMode::Dececm {
         dec_color.erase_to_screen = enable;
         for screen in [&mut *screen, &mut *stash] {
             sync_screen_erase_defaults(screen, dec_color);
         }
-    } else if mode == mode::DECCOLM {
+    } else if mode == mode::PrivateMode::Deccolm {
     } else if !apply_mouse_mode(
         mode,
         enable,
@@ -274,164 +276,187 @@ fn query_private_mode(
     on_alt_screen: bool,
     dec_color: &DecColorState,
     cursor_style: &CursorStyle,
-    ps: u16,
+    mode: mode::PrivateMode,
 ) -> u8 {
-    match ps {
-        mode::DECANM => {
+    match mode {
+        mode::PrivateMode::Decanm => {
             if !modes.vt52_mode {
                 1
             } else {
                 2
             }
         }
-        mode::DECSCNM => {
+        mode::PrivateMode::Decscnm => {
             if modes.screen_reverse {
                 1
             } else {
                 2
             }
         }
-        mode::DECARM => {
+        mode::PrivateMode::Decarm => {
             if modes.decarm {
                 1
             } else {
                 2
             }
         }
-        mode::ATT610_BLINK => {
+        mode::PrivateMode::Att610Blink => {
             if cursor_style.blink {
                 1
             } else {
                 2
             }
         }
-        mode::DECLRMM => {
+        mode::PrivateMode::Declrmm => {
             if modes.declrmm {
                 1
             } else {
                 2
             }
         }
-        mode::DECNRCM => {
+        mode::PrivateMode::Decnrcm => {
             if modes.decnrcm {
                 1
             } else {
                 2
             }
         }
-        mode::DECNCSM => {
+        mode::PrivateMode::Decncsm => {
             if modes.decncsm {
                 1
             } else {
                 2
             }
         }
-        mode::DECCKM => {
+        mode::PrivateMode::Decckm => {
             if screen.app_cursor_keys {
                 1
             } else {
                 2
             }
         }
-        mode::DECOM => {
+        mode::PrivateMode::Decom => {
             if screen.origin_mode {
                 1
             } else {
                 2
             }
         }
-        mode::DECAWM => {
+        mode::PrivateMode::Decawm => {
             if screen.autowrap {
                 1
             } else {
                 2
             }
         }
-        mode::ALLOW_DECCOLM => {
+        mode::PrivateMode::AllowDeccolm => {
             if modes.allow_deccolm {
                 1
             } else {
                 2
             }
         }
-        mode::DECATCUM => {
+        mode::PrivateMode::Decatcum => {
             if dec_color.alternate_underline_text {
                 1
             } else {
                 2
             }
         }
-        mode::DECATCBM => {
+        mode::PrivateMode::Decatcbm => {
             if dec_color.alternate_blink_text {
                 1
             } else {
                 2
             }
         }
-        mode::DECBBSM => {
+        mode::PrivateMode::Decbbsm => {
             if dec_color.bold_blink_affects_background {
                 1
             } else {
                 2
             }
         }
-        mode::DECECM => {
+        mode::PrivateMode::Dececm => {
             if dec_color.erase_to_screen {
                 1
             } else {
                 2
             }
         }
-        mode::DECTCEM => {
+        mode::PrivateMode::Dectcem => {
             if screen.cursor_visible {
                 1
             } else {
                 2
             }
         }
-        mode::DECNKM => {
+        mode::PrivateMode::Decnkm => {
             if screen.app_keypad {
                 1
             } else {
                 2
             }
         }
-        mode::ALT_SCREEN | mode::ALT_SCREEN_CLEAR | mode::ALT_SCREEN_SAVE => {
+        mode::PrivateMode::AltScreen
+        | mode::PrivateMode::AltScreenClear
+        | mode::PrivateMode::AltScreenSave => {
             if on_alt_screen {
                 1
             } else {
                 2
             }
         }
-        mode::X10_MOUSE => match_tracking(modes.mouse_tracking, MouseTracking::X10),
-        mode::NORMAL_MOUSE => match_tracking(modes.mouse_tracking, MouseTracking::Normal),
-        mode::BUTTON_EVENT_MOUSE => {
-            match_tracking(modes.mouse_tracking, MouseTracking::ButtonEvent)
+        mode::PrivateMode::X10Mouse => {
+            if modes.mouse_tracking == MouseTracking::X10 {
+                1
+            } else {
+                2
+            }
         }
-        mode::ANY_EVENT_MOUSE => match_tracking(modes.mouse_tracking, MouseTracking::AnyEvent),
-        mode::FOCUS_REPORTING => {
+        mode::PrivateMode::NormalMouse => {
+            if modes.mouse_tracking == MouseTracking::Normal {
+                1
+            } else {
+                2
+            }
+        }
+        mode::PrivateMode::ButtonEventMouse => {
+            if modes.mouse_tracking == MouseTracking::ButtonEvent {
+                1
+            } else {
+                2
+            }
+        }
+        mode::PrivateMode::AnyEventMouse => {
+            if modes.mouse_tracking == MouseTracking::AnyEvent {
+                1
+            } else {
+                2
+            }
+        }
+        mode::PrivateMode::FocusReporting => {
             if modes.focus_reporting {
                 1
             } else {
                 2
             }
         }
-        mode::SAVE_CURSOR => {
+        mode::PrivateMode::SaveCursor => {
             if screen.saved_cursor.is_some() {
                 1
             } else {
                 2
             }
         }
-        60 => 4,
-        mode::BRACKETED_PASTE => {
+        mode::PrivateMode::BracketedPaste => {
             if modes.bracketed_paste {
                 1
             } else {
                 2
             }
         }
-        mode::SYNCHRONIZED_UPDATE => {
+        mode::PrivateMode::SynchronizedUpdate => {
             if modes.synchronized_update_since.is_some() {
                 1
             } else {
@@ -442,11 +467,54 @@ fn query_private_mode(
     }
 }
 
-fn match_tracking(
-    current: MouseTracking,
-    target: MouseTracking,
+fn query_private_mode_by_id(
+    modes: &TerminalModes,
+    screen: &Screen,
+    on_alt_screen: bool,
+    dec_color: &DecColorState,
+    cursor_style: &CursorStyle,
+    ps: u16,
 ) -> u8 {
-    if current == target { 1 } else { 2 }
+    if ps == 60 {
+        return 4;
+    }
+    let Ok(mode) = mode::PrivateMode::try_from(ps) else {
+        return 0;
+    };
+    query_private_mode(modes, screen, on_alt_screen, dec_color, cursor_style, mode)
+}
+
+fn query_ansi_mode(
+    modes: &TerminalModes,
+    mode: mode::AnsiMode,
+) -> u8 {
+    match mode {
+        mode::AnsiMode::Mode4 => 4,
+        mode::AnsiMode::Irm => {
+            if modes.insert_mode {
+                1
+            } else {
+                2
+            }
+        }
+        mode::AnsiMode::Lnm => {
+            if modes.newline_mode {
+                1
+            } else {
+                2
+            }
+        }
+    }
+}
+
+fn query_ansi_mode_by_id(
+    modes: &TerminalModes,
+    ps: u16,
+) -> u8 {
+    let Ok(mode) = mode::AnsiMode::try_from(ps) else {
+        return 0;
+    };
+    query_ansi_mode(modes, mode)
 }
 
 pub(crate) fn csi_parse(
@@ -620,7 +688,7 @@ fn apply_main_csi(
     default_status_display: &mut StatusDisplayKind,
     title_stack: &mut Vec<Option<String>>,
     current_title: &mut Option<String>,
-    saved_modes: &mut HashMap<u16, bool>,
+    saved_modes: &mut HashMap<mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
@@ -1020,9 +1088,9 @@ fn apply_main_csi(
         } => {
             for m in mode_ids {
                 match m {
-                    mode::IRM => modes.insert_mode = enable,
-                    mode::LNM => modes.newline_mode = enable,
-                    _ => {}
+                    mode::AnsiMode::Irm => modes.insert_mode = enable,
+                    mode::AnsiMode::Lnm => modes.newline_mode = enable,
+                    mode::AnsiMode::Mode4 => {}
                 }
             }
         }
@@ -1049,7 +1117,7 @@ pub(crate) fn csi_apply(
     default_status_display: &mut StatusDisplayKind,
     title_stack: &mut Vec<Option<String>>,
     current_title: &mut Option<String>,
-    saved_modes: &mut HashMap<u16, bool>,
+    saved_modes: &mut HashMap<mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
@@ -1098,64 +1166,11 @@ pub(crate) fn csi_apply(
             modes: params,
         } => {
             for p in params.iter() {
-                match p[0] {
-                    mode::DECANM => {
-                        modes.vt52_mode = !enable;
-                    }
-                    mode::DECSCNM => {
-                        modes.screen_reverse = enable;
-                    }
-                    mode::DECARM => {
-                        modes.decarm = enable;
-                    }
-                    mode::ATT610_BLINK => {
-                        cursor_style.blink = enable;
-                    }
-                    mode::DECNCSM => {
-                        modes.decncsm = enable;
-                    }
-                    mode::DECLRMM => {
-                        modes.declrmm = enable;
-                        if !enable {
-                            screen.left_margin = 0;
-                            screen.right_margin = viewport.cols.saturating_sub(1);
-                        }
-                    }
-                    mode::DECNRCM => {
-                        modes.decnrcm = enable;
-                        for screen in [&mut *screen, &mut *stash] {
-                            screen.nrc_mode = enable;
-                            screen.charset = charset::CharsetState::new();
-                        }
-                    }
-                    mode::BRACKETED_PASTE => {
-                        modes.bracketed_paste = enable;
-                    }
-                    mode::FOCUS_REPORTING => {
-                        modes.focus_reporting = enable;
-                    }
-                    mode::SYNCHRONIZED_UPDATE => {
-                        modes.synchronized_update_since = enable.then(Instant::now);
-                    }
-                    mode::ALLOW_DECCOLM => {
-                        modes.allow_deccolm = enable;
-                    }
-                    mode::DECATCUM => {
-                        dec_color.alternate_underline_text = enable;
-                    }
-                    mode::DECATCBM => {
-                        dec_color.alternate_blink_text = enable;
-                    }
-                    mode::DECBBSM => {
-                        dec_color.bold_blink_affects_background = enable;
-                    }
-                    mode::DECECM => {
-                        dec_color.erase_to_screen = enable;
-                        for screen in [&mut *screen, &mut *stash] {
-                            sync_screen_erase_defaults(screen, dec_color);
-                        }
-                    }
-                    mode::DECCOLM => {
+                let Ok(mode) = mode::PrivateMode::try_from(p[0]) else {
+                    continue;
+                };
+                match mode {
+                    mode::PrivateMode::Deccolm => {
                         if !modes.allow_deccolm {
                             continue;
                         }
@@ -1181,29 +1196,25 @@ pub(crate) fn csi_apply(
                         screen.right_margin = viewport.cols.saturating_sub(1);
                         screen.cursor = grid::Cursor::default();
                     }
-                    mode => {
-                        if !apply_mouse_mode(
-                            mode,
-                            enable,
-                            &mut modes.mouse_tracking,
-                            &mut modes.mouse_encoding,
-                        ) {
-                            screen::set_private_mode(
-                                mode,
-                                enable,
-                                screen,
-                                stash,
-                                viewport,
-                                on_alt_screen,
-                            );
-                        }
-                    }
+                    mode => apply_private_mode(
+                        modes,
+                        screen,
+                        stash,
+                        viewport,
+                        on_alt_screen,
+                        cursor_style,
+                        dec_color,
+                        mode,
+                        enable,
+                    ),
                 }
             }
         }
         ParsedCsiAction::SavePrivateModes { modes: params } => {
             for p in params.iter() {
-                let mode = p[0];
+                let Ok(mode) = mode::PrivateMode::try_from(p[0]) else {
+                    continue;
+                };
                 let state = query_private_mode(
                     modes,
                     screen,
@@ -1217,7 +1228,9 @@ pub(crate) fn csi_apply(
         }
         ParsedCsiAction::RestorePrivateModes { modes: params } => {
             for p in params.iter() {
-                let mode = p[0];
+                let Ok(mode) = mode::PrivateMode::try_from(p[0]) else {
+                    continue;
+                };
                 if let Some(&saved) = saved_modes.get(&mode) {
                     apply_private_mode(
                         modes,
@@ -1277,7 +1290,14 @@ pub(crate) fn csi_apply(
             }
         }
         ParsedCsiAction::QueryPrivateMode { mode: ps } => {
-            let pm = query_private_mode(modes, screen, *on_alt_screen, dec_color, cursor_style, ps);
+            let pm = query_private_mode_by_id(
+                modes,
+                screen,
+                *on_alt_screen,
+                dec_color,
+                cursor_style,
+                ps,
+            );
             conformance::write_csi(pending_output, modes.c1_mode, format_args!("?{ps};{pm}$y"));
         }
         ParsedCsiAction::SelectActiveDisplay { mode } => {
@@ -1338,24 +1358,7 @@ pub(crate) fn csi_apply(
             _ => {}
         },
         ParsedCsiAction::QueryAnsiMode { mode: ps } => {
-            let pm = match ps {
-                mode::IRM => {
-                    if modes.insert_mode {
-                        1
-                    } else {
-                        2
-                    }
-                }
-                mode::LNM => {
-                    if modes.newline_mode {
-                        1
-                    } else {
-                        2
-                    }
-                }
-                1 | 5 | 7 | 10 | 11 | 13 | 14 | 15 | 16 | 17 | 18 | 19 => 4,
-                _ => 0,
-            };
+            let pm = query_ansi_mode_by_id(modes, ps);
             conformance::write_csi(pending_output, modes.c1_mode, format_args!("{ps};{pm}$y"));
         }
         ParsedCsiAction::ResizeColumns { cols } => {
@@ -1764,7 +1767,7 @@ pub(crate) fn csi_dispatch(
     default_status_display: &mut StatusDisplayKind,
     title_stack: &mut Vec<Option<String>>,
     current_title: &mut Option<String>,
-    saved_modes: &mut HashMap<u16, bool>,
+    saved_modes: &mut HashMap<mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,

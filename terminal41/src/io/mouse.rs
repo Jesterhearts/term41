@@ -75,16 +75,16 @@ pub struct MouseModifiers {
 /// mode replaces the prior one; disabling the tracking bit turns it fully
 /// off). That matches how xterm-compatible apps actually use these flags.
 pub fn apply_mouse_mode(
-    mode: u16,
+    mode: mode::PrivateMode,
     enable: bool,
     tracking: &mut MouseTracking,
     encoding: &mut MouseEncoding,
 ) -> bool {
     let tracking_target = match mode {
-        mode::X10_MOUSE => Some(MouseTracking::X10),
-        mode::NORMAL_MOUSE => Some(MouseTracking::Normal),
-        mode::BUTTON_EVENT_MOUSE => Some(MouseTracking::ButtonEvent),
-        mode::ANY_EVENT_MOUSE => Some(MouseTracking::AnyEvent),
+        mode::PrivateMode::X10Mouse => Some(MouseTracking::X10),
+        mode::PrivateMode::NormalMouse => Some(MouseTracking::Normal),
+        mode::PrivateMode::ButtonEventMouse => Some(MouseTracking::ButtonEvent),
+        mode::PrivateMode::AnyEventMouse => Some(MouseTracking::AnyEvent),
         _ => None,
     };
     if let Some(target) = tracking_target {
@@ -93,9 +93,9 @@ pub fn apply_mouse_mode(
     }
 
     let encoding_target = match mode {
-        mode::UTF8_MOUSE => Some(MouseEncoding::Utf8),
-        mode::SGR_MOUSE => Some(MouseEncoding::Sgr),
-        mode::URXVT_MOUSE => Some(MouseEncoding::Urxvt),
+        mode::PrivateMode::Utf8Mouse => Some(MouseEncoding::Utf8),
+        mode::PrivateMode::SgrMouse => Some(MouseEncoding::Sgr),
+        mode::PrivateMode::UrxvtMouse => Some(MouseEncoding::Urxvt),
         _ => None,
     };
     if let Some(target) = encoding_target {

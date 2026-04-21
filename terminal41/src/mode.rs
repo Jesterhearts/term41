@@ -1,157 +1,104 @@
 //! Named constants for DEC private modes, ANSI modes, and xterm extensions.
 //!
-//! These replace the raw numeric literals scattered across the VTE dispatch
-//! code, making it immediately obvious which feature a given CSI parameter
-//! selects.
+//! The canonical representation is typed enums with explicit `u16`
+//! discriminants and `TryFrom<u16>` conversion.
 
-// -- DEC private modes (CSI ? Ps h/l) ----------------------------------------
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum PrivateMode {
+    Decckm = 1,
+    Decanm = 2,
+    Deccolm = 3,
+    Decscnm = 5,
+    Decom = 6,
+    Decawm = 7,
+    Decarm = 8,
+    X10Mouse = 9,
+    Att610Blink = 12,
+    Dectcem = 25,
+    AllowDeccolm = 40,
+    Decnrcm = 42,
+    AltScreen = 47,
+    Decnkm = 66,
+    Declrmm = 69,
+    Decncsm = 95,
+    NormalMouse = 1000,
+    ButtonEventMouse = 1002,
+    AnyEventMouse = 1003,
+    FocusReporting = 1004,
+    Utf8Mouse = 1005,
+    SgrMouse = 1006,
+    UrxvtMouse = 1015,
+    AltScreenClear = 1047,
+    SaveCursor = 1048,
+    AltScreenSave = 1049,
+    Decatcum = 114,
+    Decatcbm = 115,
+    Decbbsm = 116,
+    Dececm = 117,
+    BracketedPaste = 2004,
+    SynchronizedUpdate = 2026,
+}
 
-/// DECCKM -- Application Cursor Keys. When set, cursor keys send
-/// application-mode sequences (`ESC O A`..`D`) instead of the normal
-/// `CSI A`..`D`.
-pub const DECCKM: u16 = 1;
+impl TryFrom<u16> for PrivateMode {
+    type Error = ();
 
-/// DECANM -- ANSI/VT52 Mode. Set = ANSI mode (normal); reset = VT52
-/// compatibility mode with a completely different escape vocabulary.
-pub const DECANM: u16 = 2;
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            1 => Ok(Self::Decckm),
+            2 => Ok(Self::Decanm),
+            3 => Ok(Self::Deccolm),
+            5 => Ok(Self::Decscnm),
+            6 => Ok(Self::Decom),
+            7 => Ok(Self::Decawm),
+            8 => Ok(Self::Decarm),
+            9 => Ok(Self::X10Mouse),
+            12 => Ok(Self::Att610Blink),
+            25 => Ok(Self::Dectcem),
+            40 => Ok(Self::AllowDeccolm),
+            42 => Ok(Self::Decnrcm),
+            47 => Ok(Self::AltScreen),
+            66 => Ok(Self::Decnkm),
+            69 => Ok(Self::Declrmm),
+            95 => Ok(Self::Decncsm),
+            1000 => Ok(Self::NormalMouse),
+            1002 => Ok(Self::ButtonEventMouse),
+            1003 => Ok(Self::AnyEventMouse),
+            1004 => Ok(Self::FocusReporting),
+            1005 => Ok(Self::Utf8Mouse),
+            1006 => Ok(Self::SgrMouse),
+            1015 => Ok(Self::UrxvtMouse),
+            1047 => Ok(Self::AltScreenClear),
+            1048 => Ok(Self::SaveCursor),
+            1049 => Ok(Self::AltScreenSave),
+            114 => Ok(Self::Decatcum),
+            115 => Ok(Self::Decatcbm),
+            116 => Ok(Self::Decbbsm),
+            117 => Ok(Self::Dececm),
+            2004 => Ok(Self::BracketedPaste),
+            2026 => Ok(Self::SynchronizedUpdate),
+            _ => Err(()),
+        }
+    }
+}
 
-/// DECCOLM -- 80/132 Column Mode. Set = 132 columns; reset = restore the
-/// saved column count. Switching clears the screen, resets margins, and
-/// homes the cursor.
-pub const DECCOLM: u16 = 3;
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum AnsiMode {
+    Irm = 4,
+    Lnm = 20,
+    Mode4 = 1,
+}
 
-/// DECARM -- Auto-Repeat Mode (mode 8). Terminal-level auto-repeat is
-/// always active (handled by the OS/windowing system), so this is a
-/// tracked no-op for DECRQM compatibility. Default is on.
-pub const DECARM: u16 = 8;
+impl TryFrom<u16> for AnsiMode {
+    type Error = ();
 
-/// att610 -- Cursor blink control (mode 12). When set, the cursor blinks;
-/// when reset, it is steady. This is an xterm extension (not a DEC mode)
-/// that overrides the blink axis of the DECSCUSR style.
-pub const ATT610_BLINK: u16 = 12;
-
-/// DECNKM -- Numeric Keypad Mode (mode 66). When set, the numeric keypad
-/// sends application sequences (same effect as DECKPAM / ESC =); when
-/// reset, it sends normal characters (same as DECKPNM / ESC >).
-pub const DECNKM: u16 = 66;
-
-/// Allow DECCOLM (mode 40). Gates whether mode 3 (DECCOLM) is honoured.
-/// Default is off, matching xterm — prevents unsolicited 80/132 column
-/// toggling which is both disruptive and expensive (grid resize + clear).
-pub const ALLOW_DECCOLM: u16 = 40;
-
-/// DECNRCM -- National Replacement Character Set Mode. When set, NRC
-/// designations replace ASCII positions in a 7-bit national environment.
-pub const DECNRCM: u16 = 42;
-
-/// DECSCNM -- Screen Mode (mode 5). When set, the screen displays in
-/// reverse video — default background becomes foreground and vice versa.
-/// Per-cell SGR 7 (REVERSE) stacks with this, so reversed cells appear
-/// normal under DECSCNM.
-pub const DECSCNM: u16 = 5;
-
-/// DECOM -- Origin Mode. When set, cursor addressing is relative to the
-/// scroll region; when reset, it is relative to the full screen.
-pub const DECOM: u16 = 6;
-
-/// DECAWM -- Auto-Wrap Mode. When set, writing past the right margin
-/// wraps to the next line; when reset, the cursor stays at the margin.
-pub const DECAWM: u16 = 7;
-
-/// X10 mouse tracking (mode 9). Reports button presses only, no releases
-/// or motion.
-pub const X10_MOUSE: u16 = 9;
-
-/// DECTCEM -- Text Cursor Enable Mode. When set, the text cursor is
-/// visible; when reset, it is hidden.
-pub const DECTCEM: u16 = 25;
-
-/// Alt screen buffer (mode 47). Switches to the alternate screen buffer
-/// on set and back to primary on reset.
-pub const ALT_SCREEN: u16 = 47;
-
-/// Normal mouse tracking (mode 1000). Reports button presses and releases
-/// but no motion.
-pub const NORMAL_MOUSE: u16 = 1000;
-
-/// Button-event mouse tracking (mode 1002). Reports presses, releases,
-/// and motion while a button is held.
-pub const BUTTON_EVENT_MOUSE: u16 = 1002;
-
-/// Any-event mouse tracking (mode 1003). Reports all presses, releases,
-/// and motion regardless of button state.
-pub const ANY_EVENT_MOUSE: u16 = 1003;
-
-/// Focus reporting (mode 1004). When set, the terminal sends `CSI I` on
-/// focus-in and `CSI O` on focus-out.
-pub const FOCUS_REPORTING: u16 = 1004;
-
-/// UTF-8 mouse encoding (mode 1005). Coordinates are UTF-8 encoded.
-pub const UTF8_MOUSE: u16 = 1005;
-
-/// SGR mouse encoding (mode 1006). `CSI < Pb;Px;Py M/m` format with
-/// a trailing `m` for release events.
-pub const SGR_MOUSE: u16 = 1006;
-
-/// urxvt mouse encoding (mode 1015). Decimal format without angle
-/// bracket; release is encoded with button code 3.
-pub const URXVT_MOUSE: u16 = 1015;
-
-/// Alt screen with clear-on-exit (mode 1047). Leaving the alt screen
-/// clears the alt buffer so stale content is not re-shown.
-pub const ALT_SCREEN_CLEAR: u16 = 1047;
-
-/// Save/restore cursor (mode 1048). Set performs DECSC, reset performs
-/// DECRC.
-pub const SAVE_CURSOR: u16 = 1048;
-
-/// Alt screen with save/restore cursor (mode 1049). Entering saves the
-/// cursor and switches to the alt screen; leaving restores and switches
-/// back.
-pub const ALT_SCREEN_SAVE: u16 = 1049;
-
-/// DECLRMM -- Left/Right Margin Mode (mode 69). When set, enables
-/// left and right margins set by DECSLRM (`CSI Pl ; Pr s`). Cursor
-/// movement, scrolling, and character insertion/deletion are bounded
-/// by these margins. Default is off.
-pub const DECLRMM: u16 = 69;
-
-/// DECNCSM -- No Clearing Screen on Column Mode change (mode 95). When
-/// set, switching DECCOLM (mode 3) does not clear the screen. Default
-/// is off (screen is cleared on DECCOLM change, per DEC spec).
-pub const DECNCSM: u16 = 95;
-
-/// DECATCUM -- when set, underline attributes still render as underlines in
-/// alternate-color mode. When reset, alternate-color mode changes only
-/// colours. VT525 only.
-pub const DECATCUM: u16 = 114;
-
-/// DECATCBM -- when set, blink attributes still animate in alternate-color
-/// mode. When reset, alternate-color mode changes only colours. VT525 only.
-pub const DECATCBM: u16 = 115;
-
-/// DECBBSM -- when set, bold/blink colour styling affects both foreground and
-/// background; when reset, foreground only. VT525 only.
-pub const DECBBSM: u16 = 116;
-
-/// DECECM -- when set, erase operations use the screen background; when reset,
-/// they use the current text background. VT525 only.
-pub const DECECM: u16 = 117;
-
-/// Bracketed paste (mode 2004). Pasted text is wrapped in
-/// `CSI 200~`..`CSI 201~` so apps can distinguish it from typed input.
-pub const BRACKETED_PASTE: u16 = 2004;
-
-/// Synchronized output (mode 2026). Batches rendering between BSU and
-/// ESU markers so the terminal can present a complete frame.
-pub const SYNCHRONIZED_UPDATE: u16 = 2026;
-
-// -- ANSI modes (CSI Ps h/l) --------------------------------------------------
-
-/// IRM -- Insert/Replace Mode (ANSI mode 4). When set, printing shifts
-/// existing text right before writing; when reset, printing overwrites.
-pub const IRM: u16 = 4;
-
-/// LNM -- Line Feed/New Line Mode (ANSI mode 20). When set, LF/VT/FF
-/// perform an implicit CR before the line feed.
-pub const LNM: u16 = 20;
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            1 | 5 | 7 | 10 | 11 | 13 | 14 | 15 | 16 | 17 | 18 | 19 => Ok(Self::Mode4),
+            4 => Ok(Self::Irm),
+            20 => Ok(Self::Lnm),
+            _ => Err(()),
+        }
+    }
+}
