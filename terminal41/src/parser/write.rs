@@ -1,4 +1,5 @@
 use smol_str::SmolStrBuilder;
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use super::*;
@@ -80,6 +81,7 @@ pub(crate) fn put_ascii_run(
     put_ascii_run_with_scrollback_policy(screen, viewport, run, insert_mode, true);
 }
 
+#[inline(always)]
 pub(crate) fn put_ascii_run_with_scrollback_policy(
     screen: &mut Screen,
     viewport: &Viewport,
@@ -116,6 +118,7 @@ pub(crate) fn put_char(
     put_char_with_scrollback_policy(screen, viewport, s, insert_mode, true);
 }
 
+#[inline(always)]
 pub(crate) fn put_char_with_scrollback_policy(
     screen: &mut Screen,
     viewport: &Viewport,
@@ -189,6 +192,7 @@ pub(crate) fn put_printable(
     put_printable_with_scrollback_policy(screen, viewport, s, insert_mode, true);
 }
 
+#[inline(always)]
 pub(crate) fn put_printable_with_scrollback_policy(
     screen: &mut Screen,
     viewport: &Viewport,
@@ -225,6 +229,7 @@ pub(crate) fn put_8bit_byte(
     put_8bit_byte_with_scrollback_policy(screen, viewport, byte, insert_mode, true);
 }
 
+#[inline(always)]
 pub(crate) fn put_8bit_byte_with_scrollback_policy(
     screen: &mut Screen,
     viewport: &Viewport,
@@ -261,6 +266,7 @@ pub(crate) fn put_text_run(
     put_text_run_with_scrollback_policy(screen, viewport, run, insert_mode, true);
 }
 
+#[inline(always)]
 pub(crate) fn put_text_run_with_scrollback_policy(
     screen: &mut Screen,
     viewport: &Viewport,
@@ -287,6 +293,7 @@ pub(crate) fn put_status_text_run(
     put_text_run_impl(screen, WriteTarget::Status, run, insert_mode);
 }
 
+#[inline(always)]
 fn put_ascii_run_impl(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -323,13 +330,14 @@ fn put_ascii_run_impl(
     put_ascii_run_fast(screen, target, run, insert_mode);
 }
 
+#[inline(always)]
 fn put_char_impl(
     screen: &mut Screen,
     target: WriteTarget<'_>,
     s: SmolStr,
     insert_mode: bool,
 ) {
-    let raw_width = UnicodeWidthStr::width(s.as_str());
+    let raw_width = text_cell_width(&s);
     if raw_width == 0 {
         if let Some(combined) = try_extend_prev_cell(screen, target, &s) {
             set_target_last_char(screen, target, combined);
@@ -337,9 +345,11 @@ fn put_char_impl(
         return;
     }
 
-    if let Some(combined) = try_extend_prev_zwj_cell(screen, target, &s) {
-        set_target_last_char(screen, target, combined);
-        return;
+    if target_last_char_ends_with_zwj(screen, target) {
+        if let Some(combined) = try_extend_prev_zwj_cell(screen, target, &s) {
+            set_target_last_char(screen, target, combined);
+            return;
+        }
     }
 
     screen.charset.single_shift = None;
@@ -348,6 +358,22 @@ fn put_char_impl(
     put_char_to_target(screen, target, s, width, insert_mode);
 }
 
+#[inline(always)]
+fn text_cell_width(s: &str) -> usize {
+    let mut chars = s.chars();
+    let Some(ch) = chars.next() else {
+        return 0;
+    };
+    if chars.next().is_none() {
+        if ch.is_ascii() {
+            return if ch.is_control() { 0 } else { 1 };
+        }
+        return UnicodeWidthChar::width(ch).unwrap_or(0);
+    }
+    UnicodeWidthStr::width(s)
+}
+
+#[inline(always)]
 fn put_printable_impl(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -366,6 +392,7 @@ fn put_printable_impl(
     put_char_impl(screen, target, s, insert_mode);
 }
 
+#[inline(always)]
 fn put_8bit_byte_impl(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -387,6 +414,7 @@ fn put_8bit_byte_impl(
     put_char_impl(screen, target, ch, insert_mode);
 }
 
+#[inline(always)]
 fn put_text_run_impl(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -437,20 +465,23 @@ fn put_text_run_impl(
             i += 1;
         }
         if i > start {
-            put_ascii_run_impl(screen, target, &bytes[start..i], insert_mode);
+            put_ascii_run_fast(screen, target, &bytes[start..i], insert_mode);
         }
         if i >= bytes.len() {
             break;
         }
         let len = utf8_char_len(bytes[i]);
-        let mut builder = SmolStrBuilder::new();
-        builder.push_str(&run[i..i + len]);
-        put_char_impl(screen, target, builder.finish(), insert_mode);
+        put_char_impl(
+            screen,
+            target,
+            SmolStr::new_inline(&run[i..i + len]),
+            insert_mode,
+        );
         i += len;
     }
 }
 
-#[inline]
+#[inline(always)]
 fn utf8_char_len(lead: u8) -> usize {
     match lead {
         0x00..=0x7F => 1,
@@ -460,6 +491,7 @@ fn utf8_char_len(lead: u8) -> usize {
     }
 }
 
+#[inline(always)]
 fn put_ascii_run_fast(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -502,6 +534,7 @@ fn put_ascii_run_fast(
     }
 }
 
+#[inline(always)]
 fn put_char_to_target(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -530,6 +563,7 @@ fn put_char_to_target(
     advance_target_cursor(screen, target, width as u32);
 }
 
+#[inline(always)]
 fn write_ascii_chunk(
     row: &mut Row,
     col: usize,
@@ -544,6 +578,7 @@ fn write_ascii_chunk(
     fill_row_style(row, col, chunk.len(), style);
 }
 
+#[inline(always)]
 fn write_styled_glyph(
     row: &mut Row,
     col: usize,
@@ -559,6 +594,7 @@ fn write_styled_glyph(
     }
 }
 
+#[inline(always)]
 fn fill_row_style(
     row: &mut Row,
     col: usize,
@@ -573,6 +609,7 @@ fn fill_row_style(
     row.links[col..col + width].fill(style.link);
 }
 
+#[inline(always)]
 fn screen_style(screen: &Screen) -> CellStyle {
     CellStyle {
         fg: screen.fg,
@@ -584,6 +621,7 @@ fn screen_style(screen: &Screen) -> CellStyle {
     }
 }
 
+#[inline(always)]
 fn status_style(status: &StatusLine) -> CellStyle {
     CellStyle {
         fg: status.fg,
@@ -595,12 +633,14 @@ fn status_style(status: &StatusLine) -> CellStyle {
     }
 }
 
+#[inline(always)]
 fn status_line_ref(screen: &Screen) -> Option<&StatusLine> {
     screen::status_line_writable(screen)
         .then_some(screen.status_line.as_ref())
         .flatten()
 }
 
+#[inline(always)]
 fn target_style(
     screen: &Screen,
     target: WriteTarget<'_>,
@@ -611,6 +651,7 @@ fn target_style(
     }
 }
 
+#[inline(always)]
 fn target_cols(
     screen: &Screen,
     target: WriteTarget<'_>,
@@ -621,6 +662,7 @@ fn target_cols(
     }
 }
 
+#[inline(always)]
 fn target_cursor_col(
     screen: &Screen,
     target: WriteTarget<'_>,
@@ -631,6 +673,7 @@ fn target_cursor_col(
     }
 }
 
+#[inline(always)]
 fn set_target_last_char(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -646,6 +689,19 @@ fn set_target_last_char(
     }
 }
 
+#[inline(always)]
+fn target_last_char_ends_with_zwj(
+    screen: &Screen,
+    target: WriteTarget<'_>,
+) -> bool {
+    let last_char = match target {
+        WriteTarget::Main { .. } => screen.last_char.as_ref(),
+        WriteTarget::Status => status_line_ref(screen).and_then(|status| status.last_char.as_ref()),
+    };
+    last_char.is_some_and(|last| last.ends_with('\u{200D}'))
+}
+
+#[inline(always)]
 fn prepare_ascii_cursor(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -678,6 +734,7 @@ fn prepare_ascii_cursor(
     }
 }
 
+#[inline(always)]
 fn fit_char_to_target(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -711,6 +768,7 @@ fn fit_char_to_target(
     }
 }
 
+#[inline(always)]
 fn target_insert_chars(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -728,6 +786,7 @@ fn target_insert_chars(
     }
 }
 
+#[inline(always)]
 fn target_row_mut<'a>(
     screen: &'a mut Screen,
     target: WriteTarget<'_>,
@@ -741,6 +800,7 @@ fn target_row_mut<'a>(
     }
 }
 
+#[inline(always)]
 fn advance_target_cursor(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -756,6 +816,7 @@ fn advance_target_cursor(
     }
 }
 
+#[inline(always)]
 fn is_wide_anchor_at(
     row: &Row,
     col: usize,
@@ -770,6 +831,7 @@ fn is_wide_anchor_at(
     !anchor_str.is_empty() && anchor_str != " " && right.as_str().is_empty()
 }
 
+#[inline(always)]
 pub(crate) fn break_wide_glyphs_around_write(
     row: &mut Row,
     col: usize,
@@ -787,6 +849,7 @@ pub(crate) fn break_wide_glyphs_around_write(
     }
 }
 
+#[inline(always)]
 fn try_extend_prev_cell(
     screen: &mut Screen,
     target: WriteTarget<'_>,
@@ -798,6 +861,7 @@ fn try_extend_prev_cell(
     }
 }
 
+#[inline(always)]
 fn try_extend_prev_zwj_cell(
     screen: &mut Screen,
     target: WriteTarget<'_>,
