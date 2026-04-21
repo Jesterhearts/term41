@@ -71,7 +71,8 @@ impl KittyKeyboardState {
     }
 
     /// `CSI > flags u`. Pushes a new entry. Trims the bottom of the stack
-    /// once we exceed [`MAX_STACK`] so a runaway pusher can't grow memory.
+    /// once we exceed the internal stack cap so a runaway pusher can't grow
+    /// memory.
     pub fn push(
         &mut self,
         flags: KittyFlags,

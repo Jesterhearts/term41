@@ -30,10 +30,14 @@ use crate::decode_image;
 /// literal `auto` (or anything unparseable) = use the intrinsic dimension.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
 pub enum Dimension {
+    /// Use the image's intrinsic size on this axis.
     #[default]
     Auto,
+    /// Size measured in terminal cells.
     Cells(u32),
+    /// Size measured in physical pixels.
     Pixels(u32),
+    /// Size as a percentage of the viewport on this axis.
     Percent(u32),
 }
 
@@ -60,13 +64,17 @@ impl Dimension {
 pub struct ItermCommand {
     /// Original filename, UTF-8 decoded from the base64 `name=` argument.
     pub name: Option<String>,
+    /// Requested display width.
     pub width: Dimension,
+    /// Requested display height.
     pub height: Dimension,
+    /// Preserve aspect ratio when only one dimension constrains the image.
     pub preserve_aspect_ratio: bool,
     /// iTerm2 defaults `inline` to 0 ("download silently"). Terminals that
     /// can't offer a download UI use this flag to decide whether to render
     /// — most senders explicitly set `inline=1`.
     pub inline: bool,
+    /// Leave the cursor in place after displaying the image.
     pub do_not_move_cursor: bool,
     /// Raw image bytes post-base64. Populated by `parse_file` and by
     /// [`ChunkedTransmission::finish`]; empty for a bare `MultipartFile=`.
@@ -224,6 +232,7 @@ pub struct ChunkedTransmission {
 }
 
 impl ChunkedTransmission {
+    /// Create an empty multi-part transmission accumulator.
     pub fn new() -> Self {
         Self::default()
     }

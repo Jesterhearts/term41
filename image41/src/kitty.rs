@@ -368,6 +368,7 @@ pub struct KittyImageStore {
 }
 
 impl KittyImageStore {
+    /// Create an empty image store with ids auto-assigned from 1 upward.
     pub fn new() -> Self {
         Self {
             images: HashMap::new(),
@@ -397,6 +398,7 @@ impl KittyImageStore {
         id
     }
 
+    /// Store or replace a decoded image under `id`.
     pub fn store(
         &mut self,
         id: u32,
@@ -405,6 +407,7 @@ impl KittyImageStore {
         self.images.insert(id, image);
     }
 
+    /// Return the image stored under `id`, if any.
     pub fn get(
         &self,
         id: u32,
@@ -412,6 +415,7 @@ impl KittyImageStore {
         self.images.get(&id)
     }
 
+    /// Remove one image id and any image-number aliases that resolve to it.
     pub fn remove(
         &mut self,
         id: u32,
@@ -420,6 +424,7 @@ impl KittyImageStore {
         self.number_to_id.retain(|_, v| *v != id);
     }
 
+    /// Drop all stored images and aliases.
     pub fn clear(&mut self) {
         self.images.clear();
         self.number_to_id.clear();
@@ -450,6 +455,7 @@ pub struct ChunkedTransmission {
 }
 
 impl ChunkedTransmission {
+    /// Create an empty chunk accumulator.
     pub fn new() -> Self {
         Self::default()
     }

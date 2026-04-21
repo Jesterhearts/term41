@@ -1,5 +1,11 @@
 #![allow(clippy::too_many_arguments)]
 
+//! PTY process plumbing for `term41`.
+//!
+//! Spawns a child process under `portable-pty`, splits the master side into
+//! read/write/control handles, and pumps output into a bounded ring buffer so
+//! huge bursts of PTY output cannot grow memory without limit.
+
 use std::io;
 use std::io::Read;
 use std::io::Write;
@@ -21,10 +27,12 @@ use portable_pty::native_pty_system;
 #[macro_use]
 extern crate log;
 
+/// Maximum number of bytes read from the PTY in one pump iteration.
 pub const MAX_READ_CHUNK: usize = 64 * 1024;
 // Keep PTY read-ahead modest so interactive control input (Ctrl+C, etc.)
 // doesn't end up visually stuck behind tens of megabytes of already-buffered
 // output during huge bursts like `cat bigfile`.
+/// Maximum bytes buffered between the PTY pump thread and terminal thread.
 pub const MAX_BUFFER: usize = MAX_READ_CHUNK * 2; // 128 KB
 
 /// Read half of a PTY connection. Owns the cueue ring-buffer consumer and the

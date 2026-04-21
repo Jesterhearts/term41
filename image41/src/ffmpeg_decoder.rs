@@ -2,7 +2,7 @@
 //! cargo feature so light builds (no libav* on the host) keep working.
 //!
 //! The decoder drives ffmpeg against the raw byte buffer via a custom
-//! [`AVIOContext`] — no temp files, no disk I/O, no symlink races. The
+//! `AVIOContext` — no temp files, no disk I/O, no symlink races. The
 //! flow is:
 //!   1. Allocate an IO buffer with `av_malloc` and wrap it plus a
 //!      `Cursor<Vec<u8>>` in an AVIOContext with read + seek callbacks.
@@ -19,7 +19,8 @@
 //! Teardown order matters: close `Input` first (leaves custom IO alone
 //! thanks to the flag), then free the AVIOContext (and its internal
 //! buffer, which ffmpeg may have reallocated), then drop the reader
-//! state. [`MemInput`] enforces this via field order + a manual `Drop`.
+//! state. The internal `MemInput` wrapper enforces this via field order plus
+//! a manual `Drop`.
 
 use std::ffi::c_void;
 use std::io::Cursor;
@@ -348,8 +349,9 @@ pub fn decode(data: &[u8]) -> Option<DecodedImage> {
 
 /// Pull-based video-stream reader. Owns the ffmpeg state (input,
 /// decoder, scaler) for one input and hands out decoded RGBA frames on
-/// demand. Build with [`FrameReader::open`], pull with [`next_frame`]
-/// (EOF-terminating) or [`next_frame_looping`] (seeks back to start on
+/// demand. Build with [`FrameReader::open`], pull with
+/// [`FrameReader::next_frame`] (EOF-terminating) or
+/// [`FrameReader::next_frame_looping`] (seeks back to start on
 /// EOF for endless playback).
 ///
 /// Designed for the background decoder thread: keep memory use bounded
@@ -357,7 +359,9 @@ pub fn decode(data: &[u8]) -> Option<DecodedImage> {
 /// frame in `pending_rgba` plus whatever the GPU upload path has
 /// buffered — not the whole movie.
 pub struct FrameReader {
+    /// Width of decoded frames in pixels.
     pub width: u32,
+    /// Height of decoded frames in pixels.
     pub height: u32,
     mem: MemInput,
     stream_index: usize,

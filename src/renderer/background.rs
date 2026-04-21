@@ -7,7 +7,7 @@
 //! Static images (PNG) decode once at load time; the texture is written
 //! and the job is done. Animated content (GIF, MP4, WebM, etc.) runs on
 //! a dedicated decoder thread that produces frames through a bounded
-//! [`sync_channel`]. The render thread drains the channel each cycle and
+//! `sync_channel`. The render thread drains the channel each cycle and
 //! uploads the newest buffered frame — so memory stays bounded at the
 //! channel capacity regardless of stream length. A 20-minute video uses
 //! the same RAM as a 2-second GIF.

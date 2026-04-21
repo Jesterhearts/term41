@@ -4,9 +4,8 @@
 //! [`Parser::parse`] and iterate over the resulting [`Action`] values.
 //!
 //! The hot path — scanning a contiguous run of printable ASCII bytes in the
-//! [`State::Ground`] state — is dispatched through [`pulp`] so runtime CPU
-//! detection picks AVX2 / SSE2 / scalar as available. See [`ScanPrintable`]
-//! for the range-test predicate.
+//! parser's ground state — is dispatched through [`pulp`] so runtime CPU
+//! detection picks AVX2 / SSE2 / scalar as available.
 
 use pulp::Simd;
 use smol_str::SmolStr;
@@ -40,12 +39,15 @@ pub struct Params {
     num_groups: u8,
 }
 
+/// Iterator over parameter groups in a [`Params`] value.
 pub struct ParamsIter<'a> {
     params: &'a Params,
     idx: u8,
 }
 
 impl Params {
+    /// Iterate over parameter groups, yielding one slice per `;`-separated
+    /// group. Subparameters split by `:` stay inside the same yielded slice.
     pub fn iter(&self) -> ParamsIter<'_> {
         ParamsIter {
             params: self,
@@ -84,6 +86,7 @@ pub struct Intermediates {
 }
 
 impl Intermediates {
+    /// Return the intermediate bytes in source order.
     pub fn as_slice(&self) -> &[u8] {
         &self.bytes[..self.len as usize]
     }
@@ -101,9 +104,9 @@ impl Intermediates {
 #[derive(Debug)]
 pub enum Action<'d> {
     /// A contiguous run of printable ASCII bytes (0x20..=0x7E), borrowed from
-    /// the input buffer. Emitted by the SIMD scanner in [`State::Ground`] for
-    /// the common case of a text run; callers can fast-path this without
-    /// grapheme or width reasoning since every byte is width-1.
+    /// the input buffer. Emitted by the SIMD scanner in the parser's ground
+    /// state for the common case of a text run; callers can fast-path this
+    /// without grapheme or width reasoning since every byte is width-1.
     PrintAscii(&'d [u8]),
     /// A contiguous run of validated UTF-8 text that includes at least one
     /// multi-byte codepoint. The payload may contain printable ASCII
@@ -111,11 +114,11 @@ pub enum Action<'d> {
     /// contains C0 controls, DEL, or standalone C1 controls (0x80..=0x9F).
     ///
     /// Emitted by the SIMD text scanner when the current byte in
-    /// [`State::Ground`] is a valid UTF-8 lead (0xC2..=0xFF). The scanner
-    /// finds the extent of the text region using SIMD (stopping at C0/DEL),
-    /// then validates UTF-8 structure via `std::str::from_utf8` (which is
-    /// itself SIMD-optimized). The validated `&str` is zero-copy from the
-    /// input buffer.
+    /// the parser's ground state is a valid UTF-8 lead (0xC2..=0xFF). The
+    /// scanner finds the extent of the text region using SIMD (stopping at
+    /// C0/DEL), then validates UTF-8 structure via `std::str::from_utf8`
+    /// (which is itself SIMD-optimized). The validated `&str` is zero-copy
+    /// from the input buffer.
     PrintText(&'d str),
     /// A single non-ASCII UTF-8 codepoint. The payload is the raw UTF-8 for
     /// the codepoint reassembled from `utf8_buf`; grapheme-cluster
@@ -130,13 +133,18 @@ pub enum Action<'d> {
     Execute(u8),
     /// A complete CSI (Control Sequence Introducer) sequence.
     CsiDispatch {
+        /// Parsed parameter groups.
         params: Params,
+        /// Intermediate bytes between parameters and the final byte.
         intermediates: Intermediates,
+        /// Final byte of the CSI sequence.
         action: char,
     },
     /// A complete ESC sequence.
     EscDispatch {
+        /// Intermediate bytes between ESC and the final byte.
         intermediates: Intermediates,
+        /// Final byte of the ESC sequence.
         byte: u8,
     },
     /// A complete OSC (Operating System Command) string.
@@ -155,8 +163,11 @@ pub enum Action<'d> {
     /// Start of a DCS (Device Control String) — parameters and intermediates
     /// are available, mirroring CSI dispatch.
     Hook {
+        /// Parsed DCS parameter groups.
         params: Params,
+        /// Intermediate bytes between parameters and the final byte.
         intermediates: Intermediates,
+        /// Final byte of the DCS introducer.
         action: char,
     },
     /// A contiguous run of DCS passthrough data, borrowed from the input
@@ -394,6 +405,7 @@ impl Default for Parser {
 }
 
 impl Parser {
+    /// Create a parser in ground state with UTF-8 text mode enabled.
     pub fn new() -> Self {
         Self {
             arch: pulp::Arch::new(),
@@ -432,6 +444,7 @@ impl Parser {
         }
     }
 
+    /// Current high-byte text interpretation mode.
     pub fn text_mode(&self) -> TextMode {
         self.text_mode
     }
@@ -1259,6 +1272,7 @@ impl<'a> Iterator for ParseIter<'a> {
 }
 
 impl<'a> ParseIter<'a> {
+    /// Number of input bytes consumed so far.
     pub fn tell(&self) -> usize {
         self.pos
     }

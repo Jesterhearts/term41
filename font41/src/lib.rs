@@ -1,5 +1,13 @@
 #![allow(clippy::too_many_arguments)]
 
+//! Font discovery, shaping, fallback, and glyph rasterization for `term41`.
+//!
+//! The renderer asks this crate to shape terminal rows into positioned glyphs
+//! and to rasterize individual glyph ids into RGBA bitmaps suitable for the
+//! GPU atlas. Font fallback is ordered by user configuration, with embedded
+//! Fairfax HD as the final fallback.
+
+/// Per-cell text attribute flags.
 pub mod attrs;
 mod bitmap;
 mod colr;
@@ -48,11 +56,17 @@ static FAIRFAX_HD: &[u8] = include_bytes!("../resources/fonts/FairfaxHD.ttf");
 /// atlas directly instead of tinting by the fg colour.
 #[derive(Debug, Clone)]
 pub struct RasterizedGlyph {
+    /// Row-major RGBA8 bitmap.
     pub bitmap: Vec<u8>,
+    /// Bitmap width in pixels.
     pub width: u32,
+    /// Bitmap height in pixels.
     pub height: u32,
+    /// Horizontal bearing from the cell origin to the bitmap origin.
     pub bearing_x: i32,
+    /// Vertical bearing from the baseline to the bitmap origin.
     pub bearing_y: i32,
+    /// Whether RGB channels carry color and should not be foreground-tinted.
     pub is_color: bool,
 }
 
@@ -66,8 +80,11 @@ pub use self::drcs::set_context as set_drcs_context;
 
 /// A shaped glyph with its position info, ready for rendering.
 pub struct ShapedGlyph {
+    /// Font-specific glyph id.
     pub glyph_id: u16,
+    /// Index into the loaded font list, or a sentinel for synthetic fonts.
     pub font_index: usize,
+    /// Terminal column where this glyph's cluster starts.
     pub col: u16,
     /// Number of terminal cells this glyph occupies horizontally — derived
     /// from the column gap to the next shaped glyph (or the row end). For a
@@ -76,7 +93,9 @@ pub struct ShapedGlyph {
     /// the emoji to fit its visual footprint instead of squashing it into a
     /// single cell.
     pub cells_wide: u8,
+    /// HarfBuzz horizontal positioning adjustment, in pixels.
     pub x_offset: f32,
+    /// HarfBuzz vertical positioning adjustment, in pixels.
     pub y_offset: f32,
 }
 
@@ -213,9 +232,13 @@ pub struct FontSystem {
     final_font: LoadedFont,
 
     plan_cache: HashMap<PlanKey, ShapePlan>,
+    /// Current terminal cell width in physical pixels.
     pub cell_width: u32,
+    /// Current terminal cell height in physical pixels.
     pub cell_height: u32,
+    /// Supersampling factor used while rasterizing outline glyphs.
     pub supersample: u32,
+    /// Effective font size after DPI scaling.
     pub font_size: f32,
     ascent: f32,
     /// The user-configured font size before DPI scaling.
@@ -223,6 +246,10 @@ pub struct FontSystem {
 }
 
 impl FontSystem {
+    /// Create a font system and start asynchronous system-font loading.
+    ///
+    /// Until loading completes, shaping falls through to the embedded
+    /// Fairfax HD fallback.
     pub fn new(
         fonts_config: Option<String>,
         font_size: f32,
@@ -352,6 +379,7 @@ impl FontSystem {
             .is_color
     }
 
+    /// Convert a pixel viewport into terminal grid dimensions.
     pub fn grid_dimensions(
         &self,
         pixel_width: u32,
@@ -362,6 +390,7 @@ impl FontSystem {
         (cols, rows)
     }
 
+    /// Baseline offset from the top of a cell, in pixels.
     pub fn baseline_offset(&self) -> f32 {
         self.ascent
     }

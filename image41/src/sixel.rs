@@ -1,3 +1,5 @@
+//! Sixel rasterizer.
+
 use atoi::FromRadix10;
 use palette::Hsla;
 use palette::IntoColor;
@@ -22,6 +24,7 @@ impl SixelRow {
     }
 }
 
+/// Parse DCS sixel parameters and payload bytes into a static RGBA image.
 pub fn parse_sixel(
     params: Params,
     string: Vec<u8>,

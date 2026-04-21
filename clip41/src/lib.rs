@@ -12,10 +12,14 @@ extern crate log;
 /// Which selection an OSC 52 or right-click-copy operation targets.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum ClipboardKind {
+    /// The ordinary system clipboard, usually pasted with Ctrl+V.
     Clipboard,
+    /// The X11/Wayland primary selection, usually pasted with middle click.
     Primary,
 }
 
+/// Clipboard facade with a real system backend when available and an
+/// in-memory fallback for headless or unsupported environments.
 pub struct Clipboard {
     backend: Backend,
 }
@@ -32,6 +36,10 @@ enum Backend {
 }
 
 impl Clipboard {
+    /// Create a clipboard backed by the platform clipboard when possible.
+    ///
+    /// If the platform backend cannot be initialized, this falls back to an
+    /// in-memory clipboard and logs a warning.
     pub fn new() -> Self {
         let backend = match ArboardClipboard::new() {
             Ok(cb) => Backend::Real(cb),
@@ -46,6 +54,10 @@ impl Clipboard {
         Self { backend }
     }
 
+    /// Create an isolated in-memory clipboard.
+    ///
+    /// Used by tests and by callers that need deterministic clipboard
+    /// behavior without touching the OS.
     pub fn in_memory() -> Self {
         Self {
             backend: Backend::InMemory {
@@ -55,6 +67,7 @@ impl Clipboard {
         }
     }
 
+    /// Store UTF-8 text in the requested selection.
     pub fn set(
         &mut self,
         kind: ClipboardKind,
@@ -78,6 +91,10 @@ impl Clipboard {
         }
     }
 
+    /// Read UTF-8 text from the requested selection.
+    ///
+    /// Returns `None` when the platform clipboard reports an error. The
+    /// in-memory fallback always returns the stored string, possibly empty.
     pub fn get(
         &mut self,
         kind: ClipboardKind,
@@ -185,8 +202,11 @@ fn raw_clipboard_bytes(mime: &str) -> Option<Vec<u8>> {
 /// else in the codebase, so the bytes can be re-encoded or passed
 /// through to the renderer without conversion.
 pub struct ClipboardImage {
+    /// Image width in pixels.
     pub width: u32,
+    /// Image height in pixels.
     pub height: u32,
+    /// Row-major RGBA8 pixels, `width * height * 4` bytes.
     pub rgba: Vec<u8>,
 }
 

@@ -1,3 +1,5 @@
+//! Text attribute types stored alongside terminal row cells.
+
 bitflags::bitflags! {
     /// Per-cell text rendering attributes. Packed as a small bitmask so it
     /// rides alongside `fg`/`bg` in the row's struct-of-arrays without
@@ -5,14 +7,23 @@ bitflags::bitflags! {
     /// `put_ascii_run`.
     #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
     pub struct CellAttrs: u16 {
+        /// SGR 1 bold/intense text.
         const BOLD          = 0b0000_0000_0001;
+        /// SGR 3 italic text.
         const ITALIC        = 0b0000_0000_0010;
+        /// SGR 7 reverse-video text.
         const REVERSE       = 0b0000_0000_0100;
+        /// SGR 2 faint/dim text.
         const DIM           = 0b0000_0000_1000;
+        /// SGR 9 strikethrough text.
         const STRIKETHROUGH = 0b0000_0001_0000;
+        /// SGR 53 overlined text.
         const OVERLINE      = 0b0000_0010_0000;
+        /// SGR 8 concealed text.
         const HIDDEN        = 0b0000_0100_0000;
+        /// SGR 5 slow blink.
         const BLINK         = 0b0000_1000_0000;
+        /// SGR 6 rapid blink.
         const RAPID_BLINK   = 0b0001_0000_0000;
         /// DECSCA character protection. Protected cells are skipped by
         /// DECSED (`CSI ? J`) and DECSEL (`CSI ? K`). Set via
@@ -27,12 +38,18 @@ bitflags::bitflags! {
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq, Hash)]
 #[repr(u8)]
 pub enum UnderlineStyle {
+    /// No underline.
     #[default]
     None = 0,
+    /// SGR 4:1 single underline.
     Single = 1,
+    /// SGR 4:2 double underline.
     Double = 2,
+    /// SGR 4:3 curly underline.
     Curly = 3,
+    /// SGR 4:4 dotted underline.
     Dotted = 4,
+    /// SGR 4:5 dashed underline.
     Dashed = 5,
 }
 

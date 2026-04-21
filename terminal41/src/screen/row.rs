@@ -43,8 +43,8 @@ pub struct Row {
     pub underline_color: Vec<Option<Srgb<u8>>>,
     /// Hyperlink id per cell, set from the screen's current OSC 8 span at
     /// write time. `None` for plain cells; reused ids share the same target
-    /// in [`HyperlinkRegistry`](super::HyperlinkRegistry) so adjacent cells
-    /// of one link render as one underlined region.
+    /// in the screen's hyperlink registry so adjacent cells of one link
+    /// render as one underlined region.
     pub links: Vec<Option<HyperlinkId>>,
     /// True if this row continues into the next row (soft wrap).
     pub wrapped: bool,

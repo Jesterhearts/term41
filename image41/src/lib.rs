@@ -2,6 +2,7 @@
 
 pub mod iterm;
 pub mod kitty;
+/// Sixel decoder.
 pub mod sixel;
 
 #[cfg(feature = "ffmpeg")]
@@ -24,10 +25,14 @@ pub struct Frame {
     pub delay: Duration,
 }
 
+/// Decoded image data in the renderer's RGBA frame format.
 #[derive(Debug, Clone)]
 pub struct DecodedImage {
+    /// Image width in pixels.
     pub width: u32,
+    /// Image height in pixels.
     pub height: u32,
+    /// Frames in display order. Static images contain exactly one frame.
     pub frames: Arc<[Frame]>,
 }
 
@@ -50,6 +55,7 @@ impl DecodedImage {
     }
 
     #[cfg_attr(not(test), allow(dead_code))]
+    /// Whether this image has more than one frame.
     pub fn is_animated(&self) -> bool {
         self.frames.len() > 1
     }

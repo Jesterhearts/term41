@@ -239,8 +239,7 @@ pub struct TerminalModes {
     pub focus_reporting: bool,
     /// Mode 2026 — Synchronized Output (BSU/ESU). `Some(t)` from the moment
     /// `CSI ? 2026 h` arrives until either `CSI ? 2026 l` clears it or the
-    /// [`SYNCHRONIZED_UPDATE_TIMEOUT`] safety deadline passes; otherwise
-    /// `None`.
+    /// internal synchronized-update safety deadline passes; otherwise `None`.
     pub synchronized_update_since: Option<Instant>,
     /// IRM (ANSI mode 4) — Insert/Replace mode. When `true`, printing a
     /// character shifts existing text right before writing. Default is

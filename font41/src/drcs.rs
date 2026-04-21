@@ -5,29 +5,45 @@ use std::sync::Arc;
 
 use crate::RasterizedGlyph;
 
+/// Sentinel font index used for DRCS glyphs in shaped output.
 pub const FONT_INDEX: usize = usize::MAX - 1;
+/// Number of glyph slots in one DEC DRCS character set.
 pub const GLYPHS_PER_SET: u16 = 128;
 const PUA_BASE: u32 = 0xF0000;
 
+/// Terminal geometry class used when selecting a DRCS glyph variant.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub enum GeometryClass {
+    /// 80 columns by 24 lines.
     Col80Line24,
+    /// 132 columns by 24 lines.
     Col132Line24,
+    /// 80 columns by 36 lines.
     Col80Line36,
+    /// 132 columns by 36 lines.
     Col132Line36,
+    /// 80 columns by 48 lines.
     Col80Line48,
+    /// 132 columns by 48 lines.
     Col132Line48,
 }
 
+/// One DRCS glyph definition decoded from the terminal protocol.
 #[derive(Debug, Clone)]
 pub struct GlyphDef {
+    /// Glyph id within the loaded DRCS set.
     pub glyph_id: u16,
+    /// Source glyph width in pixels.
     pub width: u8,
+    /// Source glyph height in pixels.
     pub height: u8,
+    /// Whether the glyph should scale to the full terminal cell.
     pub full_cell: bool,
+    /// Source bitmap coverage, one byte per source pixel.
     pub pixels: Vec<u8>,
 }
 
+/// Shared map of DRCS glyph definitions keyed by geometry and glyph id.
 pub type GlyphMap = Arc<HashMap<(GeometryClass, u16), GlyphDef>>;
 
 thread_local! {
@@ -35,6 +51,7 @@ thread_local! {
     static CURRENT_GLYPHS: RefCell<Option<GlyphMap>> = const { RefCell::new(None) };
 }
 
+/// Guard that restores the previous thread-local DRCS context on drop.
 pub struct GeometryGuard {
     geometry: Option<GeometryClass>,
     glyphs: Option<GlyphMap>,
@@ -47,6 +64,8 @@ impl Drop for GeometryGuard {
     }
 }
 
+/// Install the DRCS context used by subsequent glyph rasterization on this
+/// thread, returning a guard that restores the previous context.
 pub fn set_context(
     geometry: Option<GeometryClass>,
     glyphs: Option<GlyphMap>,
@@ -59,6 +78,7 @@ pub fn set_context(
     }
 }
 
+/// Encode a DRCS glyph id as a private-use Unicode scalar.
 pub fn encode_char(glyph_id: u16) -> Option<char> {
     char::from_u32(PUA_BASE + glyph_id as u32)
 }
