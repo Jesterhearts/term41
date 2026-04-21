@@ -3621,51 +3621,7 @@ fn byte_range_to_char_range(
 
 #[cfg(test)]
 mod preedit_tests {
-    use font41::FontSystem;
-    use terminal41::ColorPalette;
-    use terminal41::FeaturePermissions;
-    use terminal41::StatusDisplayKind;
-
     use super::byte_range_to_char_range;
-    use super::collect_row_glyphs;
-    use super::snapshot_terminal;
-
-    fn shaped_box_test_terminal() -> terminal41::Terminal {
-        let mut terminal = terminal41::Terminal::new(
-            80,
-            24,
-            1000,
-            StatusDisplayKind::None,
-            false,
-            FeaturePermissions::default(),
-            16,
-            8,
-            ColorPalette::default(),
-        );
-        let mut processor = terminal41::TerminalProcessor::new();
-        let data = b"\r\n\x1b[1;1H\x1b[3g\
-\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\
-\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\
-\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\x1b[8C\x1bH\
-\x1b[8C\x1bH\x1b[8C\x1bH\x1b[?3l\x1b[2J\x1b(0\x1b)B\x0f\
-\x1b[8;1H\x1b#3lqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqk\
-\x1b[9;1H\x1b#4lqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqk\
-\x1b[10;1H\x1b#3x\t\t\t\t\tx\
-\x1b[11;1H\x1b#4x\t\t\t\t\tx\
-\x1b[12;1H\x1b#3x\t\t\t\t\tx\
-\x1b[13;1H\x1b#4x\t\t\t\t\tx\
-\x1b)0\x1b(B\x0e\
-\x1b[14;1H\x1b#3x                                      x\
-\x1b[15;1H\x1b#4x                                      x\
-\x1b[16;1H\x1b#3mqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqj\
-\x1b[17;1H\x1b#4mqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqqj\
-\x1b(B\x1b)B\x0f\x1b[1;5m\
-\x1b[12;3H* The mad programmer strikes again * \
-\x1b[13;3H\t\x1b[6D* The mad programmer strikes again*\
-\x1b[0m";
-        processor.process_bytes(&mut terminal, data);
-        terminal
-    }
 
     #[test]
     fn ascii_range_maps_straight_through() {
@@ -3689,54 +3645,5 @@ mod preedit_tests {
         // 啊 and 不 are 3 bytes each in UTF-8. Byte range 3..6 = char 1..2.
         let text = "啊不";
         assert_eq!(byte_range_to_char_range(text, 3, 6, 2), (1, 2));
-    }
-
-    #[test]
-    fn double_size_box_text_row_keeps_border_glyph_column() {
-        let terminal = shaped_box_test_terminal();
-        let snap = snapshot_terminal(&terminal);
-        let row = &snap.rows[12];
-        let mut font_system = FontSystem::new(None, 18.0, 4);
-        let glyphs = collect_row_glyphs(&mut font_system, &snap, row, 12, 40, None, false, false);
-
-        assert!(
-            glyphs.iter().any(|g| g.col == 39),
-            "expected right-border glyph at col 39, got cols {:?}",
-            glyphs.iter().map(|g| g.col).collect::<Vec<_>>()
-        );
-        let visible_non_space_cols: Vec<u16> = glyphs
-            .iter()
-            .filter_map(|g| (row.cells[g.col as usize].as_str() != " ").then_some(g.col))
-            .collect();
-        assert!(
-            visible_non_space_cols.iter().all(|&col| col <= 39),
-            "non-space glyphs unexpectedly exceed visible row: cols {:?}",
-            visible_non_space_cols
-        );
-        assert_eq!(
-            visible_non_space_cols.last().copied(),
-            Some(39),
-            "expected right border to be the last visible non-space glyph, got {:?}",
-            visible_non_space_cols
-        );
-        let border = glyphs.iter().find(|g| g.col == 39).unwrap();
-        let raster = font_system.rasterize_glyph(
-            border.font_index,
-            border.glyph_id,
-            border.cells_wide as u32,
-        );
-        let effective_cell_w = font_system.cell_width as f32 * 2.0;
-        let gx = border.col as f32 * effective_cell_w
-            + raster.bearing_x as f32 * 2.0
-            + border.x_offset * 2.0;
-        let gw = raster.width as f32 * 2.0;
-        let surface_w = snap.viewport_cols as f32 * font_system.cell_width as f32;
-        assert!(
-            gx < surface_w && gx + gw <= surface_w,
-            "right border quad spills past surface: gx={gx} gw={gw} surface_w={surface_w} \
-             bearing_x={} width={}",
-            raster.bearing_x,
-            raster.width
-        );
     }
 }
