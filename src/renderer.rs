@@ -828,7 +828,11 @@ impl RenderHost {
             None,
             Box::new({
                 let recorder = recorder.clone();
-                move |bytes| recorder.write_chunk(bytes)
+                move |bytes| {
+                    #[cfg(feature = "testonly-perf-ctrl-c")]
+                    crate::perf_ctrl_c::observe_pty_output(id, bytes);
+                    recorder.write_chunk(bytes);
+                }
             }),
             Box::new({
                 let proxy = self.proxy.clone();

@@ -107,6 +107,10 @@ deadlock-detection   = ["parking_lot/deadlock_detection"]
 # built-in PNG path (animated GIF is the motivating case). Requires the
 # libav* dev packages on the host; leave off for lightweight builds.
 ffmpeg               = ["image41/ffmpeg"]
+# Adds a hook which tracks Ctrl+C hits in the PTY output stream, allowing us
+# to measure end-to-end latency of Ctrl+C for performance testing. Used only
+# for development.
+testonly-perf-ctrl-c = []
 # Pulls in the wgpu vulkan feature, enabling pipeline caching on Vulkan.
 # The cache can improve startup times by avoiding shader compilation,
 # but vulkan sometimes just takes O(seconds) to startup even with caching,

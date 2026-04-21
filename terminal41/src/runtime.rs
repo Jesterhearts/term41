@@ -1,7 +1,7 @@
 use super::*;
 
 pub(crate) const TERMINAL_BATCH_TIME_BUDGET: std::time::Duration =
-    std::time::Duration::from_millis(2);
+    std::time::Duration::from_millis(4);
 
 pub(crate) fn run_terminal_thread(
     terminal: Arc<Mutex<Terminal>>,

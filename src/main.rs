@@ -4,6 +4,7 @@
 mod config;
 mod keybindings;
 mod output_recording;
+mod perf_ctrl_c;
 mod renderer;
 
 use std::cell::RefCell;
@@ -682,6 +683,9 @@ impl WindowHost {
             };
 
             if let Some(byte) = byte {
+                if byte == 0x03 {
+                    crate::perf_ctrl_c::record_ctrl_c_hit(active_tab_id);
+                }
                 view::reset_viewport(&mut target.terminal.lock().active);
                 if self.modifiers.alt_key() {
                     let _ = target.writer.borrow_mut().write(&[0x1b, byte]);
@@ -1982,7 +1986,10 @@ fn main() {
         })),
         Box::new({
             let recorder = initial_recorder.clone();
-            move |bytes| recorder.write_chunk(bytes)
+            move |bytes| {
+                crate::perf_ctrl_c::observe_pty_output(TabId(0), bytes);
+                recorder.write_chunk(bytes);
+            }
         }),
         Box::new({
             let proxy = proxy.clone();
