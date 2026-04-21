@@ -272,7 +272,7 @@ impl Background {
         window_size: (u32, u32),
         startup_snapshot_size: (u32, u32),
     ) -> Self {
-        save_startup_snapshot(&path, &first, dim, startup_snapshot_size);
+        save_startup_snapshot(&first, dim, startup_snapshot_size);
         let texture = create_texture(device, first.width, first.height);
         upload_frame(queue, &texture, first.width, first.height, &first.pixels);
 
@@ -427,23 +427,17 @@ impl Background {
     }
 }
 
-pub(crate) fn startup_snapshot_path(
-    source_path: &Path,
-    window_size: (u32, u32),
-    dim: f32,
-) -> Option<PathBuf> {
+pub(crate) fn startup_snapshot_path() -> Option<PathBuf> {
     let dir = crate::renderer::term41_data_dir()?;
-    let key = startup_snapshot_key(source_path, window_size, dim);
-    Some(dir.join(format!("{STARTUP_SNAPSHOT_PREFIX}{key}.png")))
+    Some(dir.join(format!("{STARTUP_SNAPSHOT_PREFIX}.png")))
 }
 
 fn save_startup_snapshot(
-    source_path: &Path,
     frame: &Frame,
     dim: f32,
     window_size: (u32, u32),
 ) {
-    let Some(path) = startup_snapshot_path(source_path, window_size, dim) else {
+    let Some(path) = startup_snapshot_path() else {
         return;
     };
     let rgba =
@@ -452,12 +446,11 @@ fn save_startup_snapshot(
         return;
     }
 
-    if let Some(parent) = path.parent() {
-        if let Err(err) = std::fs::create_dir_all(parent) {
-            warn!("startup background snapshot: failed to create data dir: {err}");
-            return;
-        }
-        clear_old_startup_snapshots(parent, &path);
+    if let Some(parent) = path.parent()
+        && let Err(err) = std::fs::create_dir_all(parent)
+    {
+        warn!("startup background snapshot: failed to create data dir: {err}");
+        return;
     }
 
     let Ok(mut file) = atomic_write_file::AtomicWriteFile::options().open(&path) else {
@@ -481,51 +474,6 @@ fn save_startup_snapshot(
             path.display()
         );
     }
-}
-
-fn clear_old_startup_snapshots(
-    dir: &Path,
-    keep_path: &Path,
-) {
-    let Ok(entries) = std::fs::read_dir(dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        let path = entry.path();
-        if path == keep_path {
-            continue;
-        }
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|name| name.starts_with(STARTUP_SNAPSHOT_PREFIX))
-        {
-            let _ = std::fs::remove_file(path);
-        }
-    }
-}
-
-fn startup_snapshot_key(
-    source_path: &Path,
-    window_size: (u32, u32),
-    dim: f32,
-) -> String {
-    let mut hash = 0xcbf29ce484222325u64;
-    for &byte in source_path.to_string_lossy().as_bytes() {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    for byte in window_size
-        .0
-        .to_le_bytes()
-        .into_iter()
-        .chain(window_size.1.to_le_bytes())
-        .chain(dim.to_bits().to_le_bytes())
-    {
-        hash ^= byte as u64;
-        hash = hash.wrapping_mul(0x100000001b3);
-    }
-    format!("{hash:016x}")
 }
 
 fn render_startup_snapshot_rgba(

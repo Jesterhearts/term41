@@ -209,8 +209,6 @@ struct WindowHost {
     startup_supersampling: i32,
     startup_dpi_scale: Option<f32>,
     startup_gutter: bool,
-    startup_background_source: Option<PathBuf>,
-    startup_background_opacity: f32,
     render_thread_handle: Arc<OnceLock<std::thread::Thread>>,
     event_proxy: EventLoopProxy<AppEvent>,
     recording_popup: Option<RecordingPopupState>,
@@ -1832,13 +1830,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             .startup_dpi_scale
             .map(|s| s as f64)
             .unwrap_or_else(|| window.scale_factor());
-        let startup_background = self.startup_background_source.as_ref().and_then(|path| {
-            startup_snapshot_path(
-                path,
-                (startup_window_size.width, startup_window_size.height),
-                self.startup_background_opacity,
-            )
-        });
+        let startup_background = startup_snapshot_path();
         self.startup_presenter = StartupPresenter::new(
             window.clone(),
             self.startup_fonts.clone(),
@@ -2071,8 +2063,6 @@ fn main() {
     let startup_supersampling = config.font_supersampling;
     let startup_dpi_scale = config.dpi_scale;
     let startup_gutter = config.gutter;
-    let startup_background_source = crate::renderer::effective_bg_path(&config);
-    let startup_background_opacity = config.background_opacity;
     let startup_keybindings = config.keybindings.clone();
 
     // Channels.
@@ -2247,8 +2237,6 @@ fn main() {
         startup_supersampling,
         startup_dpi_scale,
         startup_gutter,
-        startup_background_source,
-        startup_background_opacity,
         render_thread_handle,
         event_proxy: proxy,
         recording_popup: None,

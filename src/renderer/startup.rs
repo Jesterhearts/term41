@@ -926,12 +926,34 @@ fn paint_cached_background(
     height: usize,
     background: &CachedBackground,
 ) {
-    if background.width as usize != width || background.height as usize != height {
-        return;
-    }
-    for (dst, src) in buffer.iter_mut().zip(background.pixels.chunks_exact(4)) {
-        *dst = blend_rgba_over(*dst, src[0], src[1], src[2], src[3]);
-    }
+    let aspect_buffer = background.width as f32 / background.height as f32;
+    let aspect_window = width as f32 / height as f32;
+    let (dst_x, dst_y, dst_w, dst_h) = if aspect_buffer > aspect_window {
+        let w = width as i32;
+        let h = (w as f32 / aspect_buffer).round() as i32;
+        let x = 0;
+        let y = ((height as i32 - h) / 2).max(0);
+        (x, y, w, h)
+    } else {
+        let h = height as i32;
+        let w = (h as f32 * aspect_buffer).round() as i32;
+        let x = ((width as i32 - w) / 2).max(0);
+        let y = 0;
+        (x, y, w, h)
+    };
+
+    blit_scaled_rgba(
+        buffer,
+        width,
+        height,
+        dst_x,
+        dst_y,
+        dst_w,
+        dst_h,
+        background.width as usize,
+        background.height as usize,
+        &background.pixels,
+    );
 }
 
 fn paint_visible_images(
