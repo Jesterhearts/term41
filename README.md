@@ -5,7 +5,7 @@
 # term41
 
 <p align="center">
-  <video src="https://github.com/user-attachments/assets/d5e13ecc-1adf-446e-8fee-8c09ca605df4">
+  <video src="https://github.com/user-attachments/assets/13ff206f-2e1a-4c82-b629-9257f3d9cf4d">
   </video>
 </p>
 
