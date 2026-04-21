@@ -249,6 +249,7 @@ fn apply_esc_line_attr(
 fn apply_esc_index(
     screen: &mut Screen,
     screen_view: &Viewport,
+    preserve_top_origin_scrollback: bool,
 ) {
     if screen.cursor.row == screen.scroll_bottom {
         if screen.scroll_top == 0 && screen.scroll_bottom == screen_view.rows - 1 {
@@ -258,13 +259,14 @@ fn apply_esc_index(
                 screen.grid.push_visible_row(screen_view);
             }
         } else {
-            grid::scroll_up_in_region_op(
+            grid::scroll_up_in_region_with_scrollback_policy_op(
                 &mut screen.grid,
                 screen_view,
                 &mut screen.images,
                 screen.scroll_top,
                 screen.scroll_bottom,
                 1,
+                preserve_top_origin_scrollback,
             );
         }
     } else if screen.cursor.row < screen_view.rows - 1 {
@@ -276,6 +278,7 @@ fn apply_esc_index(
 fn apply_esc_next_line(
     screen: &mut Screen,
     screen_view: &Viewport,
+    preserve_top_origin_scrollback: bool,
 ) {
     screen.cursor.col = 0;
     if screen.cursor.row == screen.scroll_bottom {
@@ -286,13 +289,14 @@ fn apply_esc_next_line(
                 screen.grid.push_visible_row(screen_view);
             }
         } else {
-            grid::scroll_up_in_region_op(
+            grid::scroll_up_in_region_with_scrollback_policy_op(
                 &mut screen.grid,
                 screen_view,
                 &mut screen.images,
                 screen.scroll_top,
                 screen.scroll_bottom,
                 1,
+                preserve_top_origin_scrollback,
             );
         }
     } else if screen.cursor.row < screen_view.rows - 1 {
@@ -460,12 +464,20 @@ pub(crate) fn esc_apply(
         ParsedEscAction::Index => {
             clamp_cursor_to_row_width(screen, viewport);
             let screen_view = screen::screen_viewport(screen, viewport);
-            apply_esc_index(screen, &screen_view);
+            apply_esc_index(
+                screen,
+                &screen_view,
+                !*on_alt_screen && !screen::page_memory_active(screen),
+            );
         }
         ParsedEscAction::NextLine => {
             clamp_cursor_to_row_width(screen, viewport);
             let screen_view = screen::screen_viewport(screen, viewport);
-            apply_esc_next_line(screen, &screen_view);
+            apply_esc_next_line(
+                screen,
+                &screen_view,
+                !*on_alt_screen && !screen::page_memory_active(screen),
+            );
         }
         ParsedEscAction::SetTabStop => {
             clamp_cursor_to_row_width(screen, viewport);

@@ -699,6 +699,7 @@ fn apply_main_csi(
     let pending_output = &mut *pending_output;
     let screen = &mut *screen;
     let mut viewport = screen::screen_viewport(screen, viewport);
+    let preserve_top_origin_scrollback = !*on_alt_screen && !screen::page_memory_active(screen);
 
     match action {
         MainCsiAction::SelfTest { requested_tests } => {
@@ -818,7 +819,13 @@ fn apply_main_csi(
                 let insert = modes.insert_mode;
                 let view = screen::screen_viewport(screen, &viewport);
                 for _ in 0..count.max(1) {
-                    put_char(screen, &view, ch.clone(), insert);
+                    put_char_with_scrollback_policy(
+                        screen,
+                        &view,
+                        ch.clone(),
+                        insert,
+                        preserve_top_origin_scrollback,
+                    );
                 }
             }
         }
@@ -966,13 +973,14 @@ fn apply_main_csi(
                         n,
                     );
                 } else {
-                    grid::scroll_up_in_region_op(
+                    grid::scroll_up_in_region_with_scrollback_policy_op(
                         &mut screen.grid,
                         &viewport,
                         &mut screen.images,
                         top,
                         screen.scroll_bottom,
                         n,
+                        preserve_top_origin_scrollback,
                     );
                 }
             }
@@ -995,13 +1003,14 @@ fn apply_main_csi(
                     screen.grid.push_visible_row(&viewport);
                 }
             } else {
-                grid::scroll_up_in_region_op(
+                grid::scroll_up_in_region_with_scrollback_policy_op(
                     &mut screen.grid,
                     &viewport,
                     &mut screen.images,
                     screen.scroll_top,
                     screen.scroll_bottom,
                     n,
+                    preserve_top_origin_scrollback,
                 );
             }
         }

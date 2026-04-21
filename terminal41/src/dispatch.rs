@@ -32,16 +32,16 @@ use crate::parser::csi_apply;
 use crate::parser::csi_parse;
 use crate::parser::esc_apply;
 use crate::parser::esc_parse;
-use crate::parser::execute;
 use crate::parser::execute_status;
-use crate::parser::put_8bit_byte;
-use crate::parser::put_ascii_run;
-use crate::parser::put_printable;
+use crate::parser::execute_with_scrollback_policy;
+use crate::parser::put_8bit_byte_with_scrollback_policy;
+use crate::parser::put_ascii_run_with_scrollback_policy;
+use crate::parser::put_printable_with_scrollback_policy;
 use crate::parser::put_status_8bit_byte;
 use crate::parser::put_status_ascii_run;
 use crate::parser::put_status_printable;
 use crate::parser::put_status_text_run;
-use crate::parser::put_text_run;
+use crate::parser::put_text_run_with_scrollback_policy;
 use crate::report;
 use crate::report_color_table;
 use crate::screen;
@@ -174,15 +174,45 @@ pub(super) fn apply_basic_action(
     insert_mode: bool,
     newline_mode: bool,
     bell_pending: &mut bool,
+    preserve_top_origin_scrollback: bool,
 ) {
     match action {
-        BasicAction::PrintAscii(run) => apply_ascii_run(active, viewport, insert_mode, run),
-        BasicAction::PrintText(run) => apply_text_run(active, viewport, insert_mode, run),
-        BasicAction::Print(text) => apply_printable(active, viewport, insert_mode, text),
-        BasicAction::Print8Bit(byte) => apply_8bit_byte(active, viewport, insert_mode, byte),
-        BasicAction::Execute(byte) => {
-            apply_execute(active, viewport, bell_pending, newline_mode, byte)
-        }
+        BasicAction::PrintAscii(run) => apply_ascii_run(
+            active,
+            viewport,
+            insert_mode,
+            preserve_top_origin_scrollback,
+            run,
+        ),
+        BasicAction::PrintText(run) => apply_text_run(
+            active,
+            viewport,
+            insert_mode,
+            preserve_top_origin_scrollback,
+            run,
+        ),
+        BasicAction::Print(text) => apply_printable(
+            active,
+            viewport,
+            insert_mode,
+            preserve_top_origin_scrollback,
+            text,
+        ),
+        BasicAction::Print8Bit(byte) => apply_8bit_byte(
+            active,
+            viewport,
+            insert_mode,
+            preserve_top_origin_scrollback,
+            byte,
+        ),
+        BasicAction::Execute(byte) => apply_execute(
+            active,
+            viewport,
+            bell_pending,
+            newline_mode,
+            preserve_top_origin_scrollback,
+            byte,
+        ),
     }
 }
 
@@ -191,6 +221,7 @@ pub(super) fn apply_vt52_action(
     active: &mut Screen,
     viewport: &Viewport,
     insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
 ) {
     match action {
         Vt52Action::AwaitCursorColumn => {}
@@ -198,7 +229,15 @@ pub(super) fn apply_vt52_action(
             row,
             col,
             trailing_ascii,
-        } => apply_vt52_cursor_position(active, viewport, insert_mode, row, col, trailing_ascii),
+        } => apply_vt52_cursor_position(
+            active,
+            viewport,
+            insert_mode,
+            preserve_top_origin_scrollback,
+            row,
+            col,
+            trailing_ascii,
+        ),
     }
 }
 
@@ -414,6 +453,7 @@ pub(super) fn apply_vt52_cursor_position(
     active: &mut Screen,
     viewport: &Viewport,
     insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
     row: u32,
     col: u32,
     trailing_ascii: &[u8],
@@ -422,7 +462,13 @@ pub(super) fn apply_vt52_cursor_position(
     active.cursor.col = col.min(viewport.cols.saturating_sub(1));
     if !trailing_ascii.is_empty() {
         let view = screen::screen_viewport(active, viewport);
-        put_ascii_run(active, &view, trailing_ascii, insert_mode);
+        put_ascii_run_with_scrollback_policy(
+            active,
+            &view,
+            trailing_ascii,
+            insert_mode,
+            preserve_top_origin_scrollback,
+        );
     }
 }
 
@@ -430,6 +476,7 @@ pub(super) fn apply_ascii_run(
     active: &mut Screen,
     viewport: &Viewport,
     insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
     run: &[u8],
 ) {
     if active.active_display == screen::ActiveDisplay::Status
@@ -438,7 +485,13 @@ pub(super) fn apply_ascii_run(
         put_status_ascii_run(active, run, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
-        put_ascii_run(active, &view, run, insert_mode);
+        put_ascii_run_with_scrollback_policy(
+            active,
+            &view,
+            run,
+            insert_mode,
+            preserve_top_origin_scrollback,
+        );
     }
 }
 
@@ -446,6 +499,7 @@ pub(super) fn apply_text_run(
     active: &mut Screen,
     viewport: &Viewport,
     insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
     run: &str,
 ) {
     if active.active_display == screen::ActiveDisplay::Status
@@ -454,7 +508,13 @@ pub(super) fn apply_text_run(
         put_status_text_run(active, run, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
-        put_text_run(active, &view, run, insert_mode);
+        put_text_run_with_scrollback_policy(
+            active,
+            &view,
+            run,
+            insert_mode,
+            preserve_top_origin_scrollback,
+        );
     }
 }
 
@@ -462,6 +522,7 @@ pub(super) fn apply_printable(
     active: &mut Screen,
     viewport: &Viewport,
     insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
     text: SmolStr,
 ) {
     if active.active_display == screen::ActiveDisplay::Status
@@ -470,7 +531,13 @@ pub(super) fn apply_printable(
         put_status_printable(active, text, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
-        put_printable(active, &view, text, insert_mode);
+        put_printable_with_scrollback_policy(
+            active,
+            &view,
+            text,
+            insert_mode,
+            preserve_top_origin_scrollback,
+        );
     }
 }
 
@@ -478,6 +545,7 @@ pub(super) fn apply_8bit_byte(
     active: &mut Screen,
     viewport: &Viewport,
     insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
     byte: u8,
 ) {
     if active.active_display == screen::ActiveDisplay::Status
@@ -486,7 +554,13 @@ pub(super) fn apply_8bit_byte(
         put_status_8bit_byte(active, byte, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
-        put_8bit_byte(active, &view, byte, insert_mode);
+        put_8bit_byte_with_scrollback_policy(
+            active,
+            &view,
+            byte,
+            insert_mode,
+            preserve_top_origin_scrollback,
+        );
     }
 }
 
@@ -495,6 +569,7 @@ pub(super) fn apply_execute(
     viewport: &Viewport,
     bell_pending: &mut bool,
     newline_mode: bool,
+    preserve_top_origin_scrollback: bool,
     byte: u8,
 ) {
     if active.active_display == screen::ActiveDisplay::Status
@@ -503,7 +578,14 @@ pub(super) fn apply_execute(
         execute_status(active, byte, bell_pending, newline_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
-        execute(active, &view, byte, bell_pending, newline_mode);
+        execute_with_scrollback_policy(
+            active,
+            &view,
+            byte,
+            bell_pending,
+            newline_mode,
+            preserve_top_origin_scrollback,
+        );
     }
 }
 

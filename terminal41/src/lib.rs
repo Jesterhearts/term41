@@ -566,6 +566,8 @@ impl Terminal {
         ) {
             TerminalAction::Ignore => dispatch::PendingApplication::None,
             TerminalAction::Basic(action) => {
+                let preserve_top_origin_scrollback =
+                    !self.on_alt_screen && !screen::page_memory_active(&self.active);
                 dispatch::apply_basic_action(
                     action,
                     &mut self.active,
@@ -573,15 +575,19 @@ impl Terminal {
                     self.modes.insert_mode,
                     self.modes.newline_mode,
                     &mut effects.bell,
+                    preserve_top_origin_scrollback,
                 );
                 dispatch::PendingApplication::None
             }
             TerminalAction::Vt52(action) => {
+                let preserve_top_origin_scrollback =
+                    !self.on_alt_screen && !screen::page_memory_active(&self.active);
                 dispatch::apply_vt52_action(
                     action,
                     &mut self.active,
                     &self.viewport,
                     self.modes.insert_mode,
+                    preserve_top_origin_scrollback,
                 );
                 dispatch::PendingApplication::None
             }

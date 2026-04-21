@@ -30,7 +30,9 @@ pub(crate) use self::scroll::scroll_down_in_region as scroll_down_in_region_op;
 pub(crate) use self::scroll::scroll_left as scroll_left_op;
 pub(crate) use self::scroll::scroll_right as scroll_right_op;
 pub(crate) use self::scroll::scroll_up_in_rect as scroll_up_in_rect_op;
+#[cfg(test)]
 pub(crate) use self::scroll::scroll_up_in_region as scroll_up_in_region_op;
+pub(crate) use self::scroll::scroll_up_in_region_with_scrollback_policy as scroll_up_in_region_with_scrollback_policy_op;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {

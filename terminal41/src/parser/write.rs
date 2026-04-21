@@ -5,7 +5,10 @@ use super::*;
 
 #[derive(Clone, Copy)]
 enum WriteTarget<'a> {
-    Main(&'a Viewport),
+    Main {
+        viewport: &'a Viewport,
+        preserve_top_origin_scrollback: bool,
+    },
     Status,
 }
 
@@ -67,13 +70,32 @@ pub(super) fn status_erase_chars(
     status.row.clear_range(col..end, status.fg, status.bg);
 }
 
+#[cfg(test)]
 pub(crate) fn put_ascii_run(
     screen: &mut Screen,
     viewport: &Viewport,
     run: &[u8],
     insert_mode: bool,
 ) {
-    put_ascii_run_impl(screen, WriteTarget::Main(viewport), run, insert_mode);
+    put_ascii_run_with_scrollback_policy(screen, viewport, run, insert_mode, true);
+}
+
+pub(crate) fn put_ascii_run_with_scrollback_policy(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    run: &[u8],
+    insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
+) {
+    put_ascii_run_impl(
+        screen,
+        WriteTarget::Main {
+            viewport,
+            preserve_top_origin_scrollback,
+        },
+        run,
+        insert_mode,
+    );
 }
 
 pub(crate) fn put_status_ascii_run(
@@ -84,13 +106,32 @@ pub(crate) fn put_status_ascii_run(
     put_ascii_run_impl(screen, WriteTarget::Status, run, insert_mode);
 }
 
+#[cfg(test)]
 pub(crate) fn put_char(
     screen: &mut Screen,
     viewport: &Viewport,
     s: SmolStr,
     insert_mode: bool,
 ) {
-    put_char_impl(screen, WriteTarget::Main(viewport), s, insert_mode);
+    put_char_with_scrollback_policy(screen, viewport, s, insert_mode, true);
+}
+
+pub(crate) fn put_char_with_scrollback_policy(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    s: SmolStr,
+    insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
+) {
+    put_char_impl(
+        screen,
+        WriteTarget::Main {
+            viewport,
+            preserve_top_origin_scrollback,
+        },
+        s,
+        insert_mode,
+    );
 }
 
 pub(super) fn put_status_char(
@@ -138,13 +179,32 @@ pub(crate) fn translated_codepoint(
     None
 }
 
+#[cfg(test)]
 pub(crate) fn put_printable(
     screen: &mut Screen,
     viewport: &Viewport,
     s: SmolStr,
     insert_mode: bool,
 ) {
-    put_printable_impl(screen, WriteTarget::Main(viewport), s, insert_mode);
+    put_printable_with_scrollback_policy(screen, viewport, s, insert_mode, true);
+}
+
+pub(crate) fn put_printable_with_scrollback_policy(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    s: SmolStr,
+    insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
+) {
+    put_printable_impl(
+        screen,
+        WriteTarget::Main {
+            viewport,
+            preserve_top_origin_scrollback,
+        },
+        s,
+        insert_mode,
+    );
 }
 
 pub(crate) fn put_status_printable(
@@ -155,13 +215,32 @@ pub(crate) fn put_status_printable(
     put_printable_impl(screen, WriteTarget::Status, s, insert_mode);
 }
 
+#[cfg(test)]
 pub(crate) fn put_8bit_byte(
     screen: &mut Screen,
     viewport: &Viewport,
     byte: u8,
     insert_mode: bool,
 ) {
-    put_8bit_byte_impl(screen, WriteTarget::Main(viewport), byte, insert_mode);
+    put_8bit_byte_with_scrollback_policy(screen, viewport, byte, insert_mode, true);
+}
+
+pub(crate) fn put_8bit_byte_with_scrollback_policy(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    byte: u8,
+    insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
+) {
+    put_8bit_byte_impl(
+        screen,
+        WriteTarget::Main {
+            viewport,
+            preserve_top_origin_scrollback,
+        },
+        byte,
+        insert_mode,
+    );
 }
 
 pub(crate) fn put_status_8bit_byte(
@@ -172,13 +251,32 @@ pub(crate) fn put_status_8bit_byte(
     put_8bit_byte_impl(screen, WriteTarget::Status, byte, insert_mode);
 }
 
+#[cfg(test)]
 pub(crate) fn put_text_run(
     screen: &mut Screen,
     viewport: &Viewport,
     run: &str,
     insert_mode: bool,
 ) {
-    put_text_run_impl(screen, WriteTarget::Main(viewport), run, insert_mode);
+    put_text_run_with_scrollback_policy(screen, viewport, run, insert_mode, true);
+}
+
+pub(crate) fn put_text_run_with_scrollback_policy(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    run: &str,
+    insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
+) {
+    put_text_run_impl(
+        screen,
+        WriteTarget::Main {
+            viewport,
+            preserve_top_origin_scrollback,
+        },
+        run,
+        insert_mode,
+    );
 }
 
 pub(crate) fn put_status_text_run(
@@ -508,7 +606,7 @@ fn target_style(
     target: WriteTarget<'_>,
 ) -> Option<CellStyle> {
     match target {
-        WriteTarget::Main(_) => Some(screen_style(screen)),
+        WriteTarget::Main { .. } => Some(screen_style(screen)),
         WriteTarget::Status => status_line_ref(screen).map(status_style),
     }
 }
@@ -518,7 +616,7 @@ fn target_cols(
     target: WriteTarget<'_>,
 ) -> Option<u32> {
     match target {
-        WriteTarget::Main(viewport) => Some(current_row_display_cols(screen, viewport)),
+        WriteTarget::Main { viewport, .. } => Some(current_row_display_cols(screen, viewport)),
         WriteTarget::Status => status_line_ref(screen).map(|status| status.row.len().max(1)),
     }
 }
@@ -528,7 +626,7 @@ fn target_cursor_col(
     target: WriteTarget<'_>,
 ) -> Option<u32> {
     match target {
-        WriteTarget::Main(_) => Some(screen.cursor.col),
+        WriteTarget::Main { .. } => Some(screen.cursor.col),
         WriteTarget::Status => status_line_ref(screen).map(|status| status.cursor.col),
     }
 }
@@ -539,7 +637,7 @@ fn set_target_last_char(
     last: SmolStr,
 ) {
     match target {
-        WriteTarget::Main(_) => screen.last_char = Some(last),
+        WriteTarget::Main { .. } => screen.last_char = Some(last),
         WriteTarget::Status => {
             if let Some(status) = status_line_mut(screen) {
                 status.last_char = Some(last);
@@ -553,11 +651,14 @@ fn prepare_ascii_cursor(
     target: WriteTarget<'_>,
 ) -> bool {
     match target {
-        WriteTarget::Main(viewport) => {
+        WriteTarget::Main {
+            viewport,
+            preserve_top_origin_scrollback,
+        } => {
             let cols = current_row_display_cols(screen, viewport);
             if screen.cursor.col >= cols {
                 if screen.autowrap {
-                    soft_wrap(screen, viewport);
+                    soft_wrap(screen, viewport, preserve_top_origin_scrollback);
                 } else {
                     screen.cursor.col = cols - 1;
                 }
@@ -583,11 +684,14 @@ fn fit_char_to_target(
     width: usize,
 ) -> bool {
     match target {
-        WriteTarget::Main(viewport) => {
+        WriteTarget::Main {
+            viewport,
+            preserve_top_origin_scrollback,
+        } => {
             let cols = current_row_display_cols(screen, viewport);
             if screen.cursor.col + width as u32 > cols {
                 if screen.autowrap {
-                    soft_wrap(screen, viewport);
+                    soft_wrap(screen, viewport, preserve_top_origin_scrollback);
                 } else {
                     screen.cursor.col = cols.saturating_sub(width as u32);
                 }
@@ -613,7 +717,7 @@ fn target_insert_chars(
     count: usize,
 ) {
     match target {
-        WriteTarget::Main(viewport) => {
+        WriteTarget::Main { viewport, .. } => {
             grid::insert_chars_op(&mut screen.grid, &screen.cursor, viewport, count as u16);
         }
         WriteTarget::Status => {
@@ -629,7 +733,7 @@ fn target_row_mut<'a>(
     target: WriteTarget<'_>,
 ) -> Option<&'a mut Row> {
     match target {
-        WriteTarget::Main(viewport) => {
+        WriteTarget::Main { viewport, .. } => {
             let row = screen::active_row_index(screen, viewport);
             Some(&mut screen.grid.rows[row])
         }
@@ -643,7 +747,7 @@ fn advance_target_cursor(
     delta: u32,
 ) {
     match target {
-        WriteTarget::Main(_) => screen.cursor.col += delta,
+        WriteTarget::Main { .. } => screen.cursor.col += delta,
         WriteTarget::Status => {
             if let Some(status) = status_line_mut(screen) {
                 status.cursor.col += delta;
@@ -689,7 +793,7 @@ fn try_extend_prev_cell(
     s: &str,
 ) -> Option<SmolStr> {
     match target {
-        WriteTarget::Main(viewport) => try_extend_prev_main_cell(screen, viewport, s),
+        WriteTarget::Main { viewport, .. } => try_extend_prev_main_cell(screen, viewport, s),
         WriteTarget::Status => try_extend_prev_status_cell(screen, s),
     }
 }
@@ -700,7 +804,7 @@ fn try_extend_prev_zwj_cell(
     s: &str,
 ) -> Option<SmolStr> {
     match target {
-        WriteTarget::Main(viewport) => try_extend_prev_main_zwj_cell(screen, viewport, s),
+        WriteTarget::Main { viewport, .. } => try_extend_prev_main_zwj_cell(screen, viewport, s),
         WriteTarget::Status => try_extend_prev_status_zwj_cell(screen, s),
     }
 }
@@ -814,6 +918,7 @@ fn try_extend_row_cell(
 fn soft_wrap(
     screen: &mut Screen,
     viewport: &Viewport,
+    preserve_top_origin_scrollback: bool,
 ) {
     screen.cursor.col = 0;
     let r = screen::active_row_index(screen, viewport);
@@ -824,13 +929,14 @@ fn soft_wrap(
         } else if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
             screen.grid.push_visible_row(viewport);
         } else {
-            grid::scroll_up_in_region_op(
+            grid::scroll_up_in_region_with_scrollback_policy_op(
                 &mut screen.grid,
                 viewport,
                 &mut screen.images,
                 screen.scroll_top,
                 screen.scroll_bottom,
                 1,
+                preserve_top_origin_scrollback,
             );
         }
     } else if screen.cursor.row < viewport.rows - 1 {

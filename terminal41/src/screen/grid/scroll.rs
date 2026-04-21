@@ -26,6 +26,34 @@ pub(crate) fn scroll_up_in_region(
     shift_in_region(images, abs_top, abs_bottom, -(n as i64));
 }
 
+pub(crate) fn scroll_up_in_region_with_scrollback_policy(
+    grid: &mut Grid,
+    viewport: &Viewport,
+    images: &mut BTreeMap<u64, PlacedImage>,
+    top: u32,
+    bottom: u32,
+    n: u32,
+    preserve_top_origin_scrollback: bool,
+) {
+    if !preserve_top_origin_scrollback || top != 0 {
+        scroll_up_in_region(grid, viewport, images, top, bottom, n);
+        return;
+    }
+
+    let first_visible = viewport.top_index(grid.rows.len());
+    let abs_bottom = first_visible + bottom as usize;
+    let n = (n as usize).min(bottom as usize + 1);
+    let insert_at = abs_bottom + 1;
+    for _ in 0..n {
+        grid.rows.insert(
+            insert_at,
+            Row::new(viewport.cols, grid.default_fg, grid.default_bg),
+        );
+    }
+    shift_images_after_insert(images, insert_at, n);
+    trim_scrollback_to_limit(grid, viewport);
+}
+
 pub(crate) fn scroll_down_in_region(
     grid: &mut Grid,
     viewport: &Viewport,
@@ -46,6 +74,29 @@ pub(crate) fn scroll_down_in_region(
         );
     }
     shift_in_region(images, abs_top, abs_bottom, n as i64);
+}
+
+fn shift_images_after_insert(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    row: usize,
+    count: usize,
+) {
+    for image in images.values_mut() {
+        if image.row >= row {
+            image.row += count;
+        }
+    }
+}
+
+fn trim_scrollback_to_limit(
+    grid: &mut Grid,
+    viewport: &Viewport,
+) {
+    let max_rows = viewport.rows as usize + grid.scrollback_limit as usize;
+    while max_rows > 0 && grid.rows.len() > max_rows {
+        grid.rows.pop_front();
+        grid.total_popped += 1;
+    }
 }
 
 pub(crate) fn scroll_up_in_rect(

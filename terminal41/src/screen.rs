@@ -840,6 +840,24 @@ mod integration_tests {
         view::status_line_row(&term.active).map(|row| row.cells.concat())
     }
 
+    fn visible_row_text(
+        term: &TestTerm,
+        row: u32,
+    ) -> String {
+        term.visible_row(row).cells.concat()
+    }
+
+    fn grid_row_text(
+        term: &TestTerm,
+        row: usize,
+    ) -> String {
+        term.active.grid.rows[row]
+            .cells
+            .iter()
+            .map(|cell| cell.as_str())
+            .collect()
+    }
+
     #[test]
     fn alt_screen_1049_hides_primary_and_restores() {
         let mut term = TestTerm::new(8, 4, 100, 16, 8);
@@ -914,6 +932,36 @@ mod integration_tests {
             text.contains("33333333"),
             "visible text should include the live bottom row: {text:?}"
         );
+    }
+
+    #[test]
+    fn primary_top_origin_partial_scroll_region_preserves_ejected_line_in_scrollback() {
+        let mut term = TestTerm::new(5, 4, 100, 16, 8);
+        term.process(b"\x1b[1;1HAAAAA\x1b[2;1HBBBBB\x1b[3;1HCCCCC\x1b[4;1HDDDDD");
+
+        term.process(b"\x1b[1;3r\x1b[3;1H\n");
+
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 1);
+        assert_eq!(grid_row_text(&term, 0), "AAAAA");
+        assert_eq!(visible_row_text(&term, 0), "BBBBB");
+        assert_eq!(visible_row_text(&term, 1), "CCCCC");
+        assert_eq!(visible_row_text(&term, 2), "     ");
+        assert_eq!(visible_row_text(&term, 3), "DDDDD");
+    }
+
+    #[test]
+    fn alt_top_origin_partial_scroll_region_discards_ejected_line() {
+        let mut term = TestTerm::new(5, 4, 100, 16, 8);
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[1;1HAAAAA\x1b[2;1HBBBBB\x1b[3;1HCCCCC\x1b[4;1HDDDDD");
+
+        term.process(b"\x1b[1;3r\x1b[3;1H\n");
+
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 0);
+        assert_eq!(visible_row_text(&term, 0), "BBBBB");
+        assert_eq!(visible_row_text(&term, 1), "CCCCC");
+        assert_eq!(visible_row_text(&term, 2), "     ");
+        assert_eq!(visible_row_text(&term, 3), "DDDDD");
     }
 
     #[test]

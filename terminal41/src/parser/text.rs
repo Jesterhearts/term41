@@ -3,12 +3,24 @@ use unicode_width::UnicodeWidthChar;
 use super::*;
 use crate::screen::BackspaceGuard;
 
+#[cfg(test)]
 pub(crate) fn execute(
     screen: &mut Screen,
     viewport: &Viewport,
     byte: u8,
     bell_pending: &mut bool,
     newline_mode: bool,
+) {
+    execute_with_scrollback_policy(screen, viewport, byte, bell_pending, newline_mode, true);
+}
+
+pub(crate) fn execute_with_scrollback_policy(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    byte: u8,
+    bell_pending: &mut bool,
+    newline_mode: bool,
+    preserve_top_origin_scrollback: bool,
 ) {
     clamp_cursor_to_row_width(screen, viewport);
 
@@ -22,13 +34,14 @@ pub(crate) fn execute(
                 if screen.scroll_top == 0 && screen.scroll_bottom == viewport.rows - 1 {
                     screen.grid.push_visible_row(viewport);
                 } else {
-                    grid::scroll_up_in_region_op(
+                    grid::scroll_up_in_region_with_scrollback_policy_op(
                         &mut screen.grid,
                         viewport,
                         &mut screen.images,
                         screen.scroll_top,
                         screen.scroll_bottom,
                         1,
+                        preserve_top_origin_scrollback,
                     );
                 }
             } else if screen.cursor.row < viewport.rows - 1 {

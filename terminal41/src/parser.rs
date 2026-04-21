@@ -58,16 +58,28 @@ pub(crate) use self::esc::esc_dispatch;
 pub(crate) use self::esc::esc_parse;
 pub(crate) use self::status::apply_status_line_csi;
 pub(crate) use self::status::execute_status;
+#[cfg(test)]
 pub(crate) use self::text::execute;
+pub(crate) use self::text::execute_with_scrollback_policy;
+#[cfg(test)]
 pub(crate) use self::write::put_8bit_byte;
+pub(crate) use self::write::put_8bit_byte_with_scrollback_policy;
+#[cfg(test)]
 pub(crate) use self::write::put_ascii_run;
+pub(crate) use self::write::put_ascii_run_with_scrollback_policy;
+#[cfg(test)]
 pub(crate) use self::write::put_char;
+pub(crate) use self::write::put_char_with_scrollback_policy;
+#[cfg(test)]
 pub(crate) use self::write::put_printable;
+pub(crate) use self::write::put_printable_with_scrollback_policy;
 pub(crate) use self::write::put_status_8bit_byte;
 pub(crate) use self::write::put_status_ascii_run;
 pub(crate) use self::write::put_status_printable;
 pub(crate) use self::write::put_status_text_run;
+#[cfg(test)]
 pub(crate) use self::write::put_text_run;
+pub(crate) use self::write::put_text_run_with_scrollback_policy;
 
 /// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
 /// `put_ascii_run` clones out of this table instead of constructing a fresh
