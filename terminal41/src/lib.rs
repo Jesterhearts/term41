@@ -81,7 +81,11 @@ pub use self::io::mouse::MouseModifiers;
 pub use self::io::mouse::MouseTracking;
 use self::io::mouse::encode_mouse_event;
 use self::io::mouse::should_report;
+pub use self::processing::HostInput;
+pub use self::processing::HostInputEffects;
+pub use self::processing::HostMouse;
 pub use self::processing::TerminalProcessor;
+pub use self::processing::apply_host_input;
 pub(crate) use self::report::deccir_report;
 pub(crate) use self::report::dectabsr_report;
 pub use self::screen::Screen;
@@ -816,8 +820,6 @@ mod tests {
     use palette::Srgb;
 
     use super::*;
-    use crate::io::clipboard::paste;
-    use crate::io::clipboard::paste_from_clipboard;
     use crate::selection::SelectionMode;
     use crate::test_support::TestTerm;
 
@@ -1107,12 +1109,7 @@ mod tests {
     #[test]
     fn paste_default_is_raw() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
-        paste(
-            &mut term.effects.host_bytes,
-            term.inner.modes.c1_mode,
-            term.inner.modes.bracketed_paste,
-            "hello\n",
-        );
+        term.paste_text("hello\n");
         assert_eq!(term.take_pending_output(), b"hello\n");
     }
 
@@ -1121,12 +1118,7 @@ mod tests {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h");
         assert!(term.modes.bracketed_paste);
-        paste(
-            &mut term.effects.host_bytes,
-            term.inner.modes.c1_mode,
-            term.inner.modes.bracketed_paste,
-            "hello\n",
-        );
+        term.paste_text("hello\n");
         assert_eq!(term.take_pending_output(), b"\x1b[200~hello\n\x1b[201~");
     }
 
@@ -1134,12 +1126,7 @@ mod tests {
     fn paste_wraps_with_8bit_csi_after_s8c1t() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h\x1b G");
-        paste(
-            &mut term.effects.host_bytes,
-            term.inner.modes.c1_mode,
-            term.inner.modes.bracketed_paste,
-            "hello\n",
-        );
+        term.paste_text("hello\n");
         assert_eq!(term.take_pending_output(), b"\x9b200~hello\n\x9b201~");
     }
 
@@ -1149,12 +1136,7 @@ mod tests {
         term.process(b"\x1b[?2004h");
         term.process(b"\x1b[?2004l");
         assert!(!term.modes.bracketed_paste);
-        paste(
-            &mut term.effects.host_bytes,
-            term.inner.modes.c1_mode,
-            term.inner.modes.bracketed_paste,
-            "hi",
-        );
+        term.paste_text("hi");
         assert_eq!(term.take_pending_output(), b"hi");
     }
 
@@ -1164,12 +1146,7 @@ mod tests {
         term.process(b"\x1b[?2004h");
         // The clipboard tries to break out of the bracket — the injected
         // `\x1b[201~` is stripped and everything else comes through.
-        paste(
-            &mut term.effects.host_bytes,
-            term.inner.modes.c1_mode,
-            term.inner.modes.bracketed_paste,
-            "evil\x1b[201~injection",
-        );
+        term.paste_text("evil\x1b[201~injection");
         assert_eq!(
             term.take_pending_output(),
             b"\x1b[200~evilinjection\x1b[201~"
@@ -1343,13 +1320,7 @@ mod tests {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
         term.clipboard.set(ClipboardKind::Clipboard, "hello");
-        paste_from_clipboard(
-            &mut term.inner.clipboard,
-            &mut term.effects.host_bytes,
-            term.inner.modes.c1_mode,
-            term.inner.modes.bracketed_paste,
-            ClipboardKind::Clipboard,
-        );
+        term.paste_from_clipboard(ClipboardKind::Clipboard);
         assert_eq!(term.take_pending_output(), b"hello");
     }
 
@@ -1357,13 +1328,7 @@ mod tests {
     fn paste_from_clipboard_ignores_empty_selection() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.clipboard = Clipboard::in_memory();
-        paste_from_clipboard(
-            &mut term.inner.clipboard,
-            &mut term.effects.host_bytes,
-            term.inner.modes.c1_mode,
-            term.inner.modes.bracketed_paste,
-            ClipboardKind::Clipboard,
-        );
+        term.paste_from_clipboard(ClipboardKind::Clipboard);
         assert!(term.take_pending_output().is_empty());
     }
 

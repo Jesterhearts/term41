@@ -1,9 +1,13 @@
 use std::ops::Deref;
 use std::ops::DerefMut;
 
+use clip41::ClipboardKind;
+
 use crate::ColorPalette;
 use crate::CursorStyle;
 use crate::FeaturePermissions;
+use crate::HostInput;
+use crate::HostMouse;
 use crate::MouseButton;
 use crate::MouseEventKind;
 use crate::MouseModifiers;
@@ -13,7 +17,7 @@ use crate::StatusDisplayKind;
 use crate::Terminal;
 use crate::TerminalEffects;
 use crate::TerminalProcessor;
-use crate::host;
+use crate::apply_host_input;
 use crate::selection;
 use crate::settings;
 use crate::view;
@@ -147,7 +151,7 @@ impl TestTerm {
     }
 
     pub fn is_synchronized_update_active(&self) -> bool {
-        host::synchronized_update_active(self.inner.modes.synchronized_update_since)
+        crate::host::synchronized_update_active(self.inner.modes.synchronized_update_since)
     }
 
     pub fn take_bell_pending(&mut self) -> bool {
@@ -158,14 +162,8 @@ impl TestTerm {
         &mut self,
         focused: bool,
     ) {
-        let c1_mode = self.inner.modes.c1_mode;
-        let focus_reporting = self.inner.modes.focus_reporting;
-        host::report_focus_change(
-            &mut self.effects.host_bytes,
-            c1_mode,
-            focus_reporting,
-            focused,
-        )
+        let effects = apply_host_input(&mut self.inner, HostInput::FocusChanged { focused });
+        self.effects.host_bytes.extend(effects.host_bytes);
     }
 
     pub fn take_pending_output(&mut self) -> Vec<u8> {
@@ -192,24 +190,39 @@ impl TestTerm {
         row: u32,
         mods: MouseModifiers,
     ) -> bool {
-        let c1_mode = self.inner.modes.c1_mode;
-        let mouse_tracking = self.inner.modes.mouse_tracking;
-        let mouse_encoding = self.inner.modes.mouse_encoding;
-        host::mouse_report(
-            &mut self.effects.host_bytes,
-            c1_mode,
-            mouse_tracking,
-            mouse_encoding,
-            kind,
-            button,
-            col,
-            row,
-            mods,
-        )
+        let effects = apply_host_input(
+            &mut self.inner,
+            HostInput::Mouse(HostMouse {
+                kind,
+                button,
+                col,
+                row,
+                mods,
+            }),
+        );
+        let emitted = !effects.is_empty();
+        self.effects.host_bytes.extend(effects.host_bytes);
+        emitted
     }
 
     pub fn take_pending_host_resize(&mut self) -> Option<(u32, u32)> {
         self.effects.resize_request.take()
+    }
+
+    pub fn paste_text(
+        &mut self,
+        text: &str,
+    ) {
+        let effects = apply_host_input(&mut self.inner, HostInput::PasteText(text));
+        self.effects.host_bytes.extend(effects.host_bytes);
+    }
+
+    pub fn paste_from_clipboard(
+        &mut self,
+        kind: ClipboardKind,
+    ) {
+        let effects = apply_host_input(&mut self.inner, HostInput::PasteFromClipboard { kind });
+        self.effects.host_bytes.extend(effects.host_bytes);
     }
 
     pub fn set_default_cursor_style(

@@ -1,4 +1,88 @@
+use clip41::ClipboardKind;
+
 use super::*;
+
+/// Effects produced by host-originated input routed back toward the PTY.
+#[derive(Debug, Default)]
+pub struct HostInputEffects {
+    pub host_bytes: Vec<u8>,
+}
+
+impl HostInputEffects {
+    pub fn is_empty(&self) -> bool {
+        self.host_bytes.is_empty()
+    }
+
+    pub fn extend(
+        &mut self,
+        other: Self,
+    ) {
+        self.host_bytes.extend(other.host_bytes);
+    }
+}
+
+/// Host-originated mouse event to be encoded for the foreground program.
+#[derive(Debug, Clone, Copy)]
+pub struct HostMouse {
+    pub kind: MouseEventKind,
+    pub button: MouseButton,
+    pub col: u32,
+    pub row: u32,
+    pub mods: MouseModifiers,
+}
+
+/// Host-originated input routed through the terminal engine boundary.
+#[derive(Debug, Clone, Copy)]
+pub enum HostInput<'a> {
+    FocusChanged { focused: bool },
+    Mouse(HostMouse),
+    PasteText(&'a str),
+    PasteFromClipboard { kind: ClipboardKind },
+}
+
+pub fn apply_host_input(
+    terminal: &mut Terminal,
+    input: HostInput<'_>,
+) -> HostInputEffects {
+    let mut effects = HostInputEffects::default();
+
+    match input {
+        HostInput::FocusChanged { focused } => host::report_focus_change(
+            &mut effects.host_bytes,
+            terminal.modes.c1_mode,
+            terminal.modes.focus_reporting,
+            focused,
+        ),
+        HostInput::Mouse(mouse) => {
+            host::mouse_report(
+                &mut effects.host_bytes,
+                terminal.modes.c1_mode,
+                terminal.modes.mouse_tracking,
+                terminal.modes.mouse_encoding,
+                mouse.kind,
+                mouse.button,
+                mouse.col,
+                mouse.row,
+                mouse.mods,
+            );
+        }
+        HostInput::PasteText(text) => io::clipboard::paste(
+            &mut effects.host_bytes,
+            terminal.modes.c1_mode,
+            terminal.modes.bracketed_paste,
+            text,
+        ),
+        HostInput::PasteFromClipboard { kind } => io::clipboard::paste_from_clipboard(
+            &mut terminal.clipboard,
+            &mut effects.host_bytes,
+            terminal.modes.c1_mode,
+            terminal.modes.bracketed_paste,
+            kind,
+        ),
+    }
+
+    effects
+}
 
 struct ParserFrame {
     parser: vtepp::Parser,

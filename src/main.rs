@@ -26,16 +26,18 @@ use pty_pipe41::Pty;
 use pty_pipe41::PtyWriter;
 use renderer::RenderHost;
 use renderer::startup::StartupPresenter;
+use terminal41::HostInput;
+use terminal41::HostInputEffects;
+use terminal41::HostMouse;
 use terminal41::MouseButton as TermMouseButton;
 use terminal41::MouseEventKind;
 use terminal41::MouseModifiers;
 use terminal41::Terminal;
 use terminal41::TerminalEffects;
 use terminal41::TerminalThread;
+use terminal41::apply_host_input;
 use terminal41::host;
 use terminal41::io::clipboard::copy_to_clipboard;
-use terminal41::io::clipboard::paste;
-use terminal41::io::clipboard::paste_from_clipboard;
 use terminal41::prompt::command_and_output_text_at;
 use terminal41::prompt::command_duration_at;
 use terminal41::prompt::command_text_at;
@@ -434,6 +436,19 @@ impl WindowHost {
         }
     }
 
+    fn emit_host_input(
+        &self,
+        target: &InputEndpoint,
+        input: HostInput<'_>,
+        reset_viewport: bool,
+    ) {
+        let effects = {
+            let mut terminal = target.terminal.lock();
+            apply_host_input(&mut terminal, input)
+        };
+        self.write_host_bytes(target, effects.host_bytes, reset_viewport);
+    }
+
     fn apply_terminal_effects(
         &mut self,
         tab_id: TabId,
@@ -466,13 +481,7 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let terminal = target.terminal.lock();
-            let c1_mode = terminal.modes.c1_mode;
-            let focus_reporting = terminal.modes.focus_reporting;
-            let mut host_bytes = Vec::new();
-            host::report_focus_change(&mut host_bytes, c1_mode, focus_reporting, focused);
-            drop(terminal);
-            self.write_host_bytes(target, host_bytes, true);
+            self.emit_host_input(target, HostInput::FocusChanged { focused }, true);
         }
         self.notify_interaction_changed();
     }
@@ -564,19 +573,13 @@ impl WindowHost {
                 true
             }
             Action::Paste => {
-                let mut guard = target.terminal.lock();
-                let terminal = &mut *guard;
-                let mut host_bytes = Vec::new();
-
-                paste_from_clipboard(
-                    &mut terminal.clipboard,
-                    &mut host_bytes,
-                    terminal.modes.c1_mode,
-                    terminal.modes.bracketed_paste,
-                    ClipboardKind::Clipboard,
+                self.emit_host_input(
+                    target,
+                    HostInput::PasteFromClipboard {
+                        kind: ClipboardKind::Clipboard,
+                    },
+                    true,
                 );
-                drop(guard);
-                self.write_host_bytes(target, host_bytes, true);
                 true
             }
             Action::OpenSearch => {
@@ -810,24 +813,17 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let terminal = target.terminal.lock();
-            let c1_mode = terminal.modes.c1_mode;
-            let mouse_tracking = terminal.modes.mouse_tracking;
-            let mouse_encoding = terminal.modes.mouse_encoding;
-            let mut host_bytes = Vec::new();
-            host::mouse_report(
-                &mut host_bytes,
-                c1_mode,
-                mouse_tracking,
-                mouse_encoding,
-                MouseEventKind::Motion,
-                self.mouse_buttons.primary_held(),
-                cell.0,
-                cell.1,
-                self.mouse_modifiers(),
+            self.emit_host_input(
+                target,
+                HostInput::Mouse(HostMouse {
+                    kind: MouseEventKind::Motion,
+                    button: self.mouse_buttons.primary_held(),
+                    col: cell.0,
+                    row: cell.1,
+                    mods: self.mouse_modifiers(),
+                }),
+                true,
             );
-            drop(terminal);
-            self.write_host_bytes(target, host_bytes, true);
             self.notify_interaction_changed();
             return;
         }
@@ -1007,24 +1003,17 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let terminal = target.terminal.lock();
-            let c1_mode = terminal.modes.c1_mode;
-            let mouse_tracking = terminal.modes.mouse_tracking;
-            let mouse_encoding = terminal.modes.mouse_encoding;
-            let mut host_bytes = Vec::new();
-            host::mouse_report(
-                &mut host_bytes,
-                c1_mode,
-                mouse_tracking,
-                mouse_encoding,
-                kind,
-                term_button,
-                col,
-                row,
-                self.mouse_modifiers(),
+            self.emit_host_input(
+                target,
+                HostInput::Mouse(HostMouse {
+                    kind,
+                    button: term_button,
+                    col,
+                    row,
+                    mods: self.mouse_modifiers(),
+                }),
+                true,
             );
-            drop(terminal);
-            self.write_host_bytes(target, host_bytes, true);
             self.notify_interaction_changed();
             return;
         }
@@ -1094,17 +1083,14 @@ impl WindowHost {
                         );
                         terminal.selection = None;
                     } else {
-                        view::reset_viewport(&mut terminal.active);
-                        let mut host_bytes = Vec::new();
-                        paste_from_clipboard(
-                            &mut terminal.clipboard,
-                            &mut host_bytes,
-                            terminal.modes.c1_mode,
-                            terminal.modes.bracketed_paste,
-                            ClipboardKind::Clipboard,
-                        );
                         drop(guard);
-                        self.write_host_bytes(target, host_bytes, false);
+                        self.emit_host_input(
+                            target,
+                            HostInput::PasteFromClipboard {
+                                kind: ClipboardKind::Clipboard,
+                            },
+                            true,
+                        );
                         self.notify_interaction_changed();
                         return;
                     }
@@ -1140,71 +1126,66 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            let terminal = target.terminal.lock();
-            let c1_mode = terminal.modes.c1_mode;
-            let mouse_tracking = terminal.modes.mouse_tracking;
-            let mouse_encoding = terminal.modes.mouse_encoding;
-            let mut host_bytes = Vec::new();
-            if y_lines < 0 {
-                for _ in 0..y_lines.unsigned_abs() {
-                    host::mouse_report(
-                        &mut host_bytes,
-                        c1_mode,
-                        mouse_tracking,
-                        mouse_encoding,
-                        MouseEventKind::Press,
-                        TermMouseButton::WheelUp,
-                        col,
-                        row,
-                        self.mouse_modifiers(),
-                    );
+            let effects = {
+                let mut terminal = target.terminal.lock();
+                let mut effects = HostInputEffects::default();
+                if y_lines < 0 {
+                    for _ in 0..y_lines.unsigned_abs() {
+                        effects.extend(apply_host_input(
+                            &mut terminal,
+                            HostInput::Mouse(HostMouse {
+                                kind: MouseEventKind::Press,
+                                button: TermMouseButton::WheelUp,
+                                col,
+                                row,
+                                mods: self.mouse_modifiers(),
+                            }),
+                        ));
+                    }
+                } else if y_lines > 0 {
+                    for _ in 0..y_lines as u32 {
+                        effects.extend(apply_host_input(
+                            &mut terminal,
+                            HostInput::Mouse(HostMouse {
+                                kind: MouseEventKind::Press,
+                                button: TermMouseButton::WheelDown,
+                                col,
+                                row,
+                                mods: self.mouse_modifiers(),
+                            }),
+                        ));
+                    }
                 }
-            } else if y_lines > 0 {
-                for _ in 0..y_lines as u32 {
-                    host::mouse_report(
-                        &mut host_bytes,
-                        c1_mode,
-                        mouse_tracking,
-                        mouse_encoding,
-                        MouseEventKind::Press,
-                        TermMouseButton::WheelDown,
-                        col,
-                        row,
-                        self.mouse_modifiers(),
-                    );
+                if x_lines < 0 {
+                    for _ in 0..x_lines.unsigned_abs() {
+                        effects.extend(apply_host_input(
+                            &mut terminal,
+                            HostInput::Mouse(HostMouse {
+                                kind: MouseEventKind::Press,
+                                button: TermMouseButton::WheelLeft,
+                                col,
+                                row,
+                                mods: self.mouse_modifiers(),
+                            }),
+                        ));
+                    }
+                } else if x_lines > 0 {
+                    for _ in 0..x_lines as u32 {
+                        effects.extend(apply_host_input(
+                            &mut terminal,
+                            HostInput::Mouse(HostMouse {
+                                kind: MouseEventKind::Press,
+                                button: TermMouseButton::WheelRight,
+                                col,
+                                row,
+                                mods: self.mouse_modifiers(),
+                            }),
+                        ));
+                    }
                 }
-            }
-            if x_lines < 0 {
-                for _ in 0..x_lines.unsigned_abs() {
-                    host::mouse_report(
-                        &mut host_bytes,
-                        c1_mode,
-                        mouse_tracking,
-                        mouse_encoding,
-                        MouseEventKind::Press,
-                        TermMouseButton::WheelLeft,
-                        col,
-                        row,
-                        self.mouse_modifiers(),
-                    );
-                }
-            } else if x_lines > 0 {
-                for _ in 0..x_lines as u32 {
-                    host::mouse_report(
-                        &mut host_bytes,
-                        c1_mode,
-                        mouse_tracking,
-                        mouse_encoding,
-                        MouseEventKind::Press,
-                        TermMouseButton::WheelRight,
-                        col,
-                        row,
-                        self.mouse_modifiers(),
-                    );
-                }
-            }
-            drop(terminal);
-            self.write_host_bytes(target, host_bytes, true);
+                effects
+            };
+            self.write_host_bytes(target, effects.host_bytes, true);
             self.notify_interaction_changed();
             return;
         }
@@ -1293,16 +1274,9 @@ impl WindowHost {
                 ) {
                     let cmd = cmd.trim().to_owned();
                     terminal.selection = None;
-                    view::reset_viewport(&mut terminal.active);
-                    let mut host_bytes = Vec::new();
-                    paste(
-                        &mut host_bytes,
-                        terminal.modes.c1_mode,
-                        terminal.modes.bracketed_paste,
-                        &format!("{cmd}\r"),
-                    );
                     drop(guard);
-                    self.write_host_bytes(target, host_bytes, false);
+                    let text = format!("{cmd}\r");
+                    self.emit_host_input(target, HostInput::PasteText(&text), true);
                 }
             }
             1 => {
