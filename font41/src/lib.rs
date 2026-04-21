@@ -613,8 +613,8 @@ impl FontSystem {
 
     /// Rasterize a glyph from a specific font in the chain.
     ///
-    /// Probes color-glyph tables in the FreeType/HarfBuzz-preferred order —
-    /// SVG → COLR v1 → sbix → CBDT — then falls back to `glyf` outlines.
+    /// Probes color-glyph tables in scalable-first order — COLR → SVG →
+    /// sbix → CBDT — then falls back to `glyf` outlines.
     /// Each color rasteriser derives its own scaling from the emoji font's
     /// metrics, so a Noto Color Emoji glyph (1024 upem) fits the cell
     /// regardless of the primary monospace font's unit system.
@@ -652,13 +652,12 @@ impl FontSystem {
         // cluster covers more than one cell.
         let target_w = self.cell_width * cells_wide.max(1);
 
-        if let Some(glyph) = svg::rasterize_svg(&font, glyph_index, target_w, self.cell_height) {
-            debug!("rasterized SVG glyph {glyph_index} for cell span {cells_wide}");
+        if let Some(glyph) = colr::rasterize_colr(&font, glyph_index, target_w, self.cell_height) {
+            debug!("rasterized COLR glyph {glyph_index} for cell span {cells_wide}");
             return glyph;
         }
-        if let Some(glyph) = colr::rasterize_colr_v1(&font, glyph_index, target_w, self.cell_height)
-        {
-            debug!("rasterized COLR v1 glyph {glyph_index} for cell span {cells_wide}");
+        if let Some(glyph) = svg::rasterize_svg(&font, glyph_index, target_w, self.cell_height) {
+            debug!("rasterized SVG glyph {glyph_index} for cell span {cells_wide}");
             return glyph;
         }
         if let Some(glyph) = bitmap::rasterize_sbix(&font, glyph_index, target_w, self.cell_height)
@@ -767,7 +766,8 @@ fn load_font(
     let units_per_em = head.units_per_em() as f32;
     // Probe for colour glyph tables. If any is present, we treat this as a
     // colour font and let it win the font-selection race for emoji clusters.
-    let is_color = rf.colr().is_ok() || rf.cbdt().is_ok() || rf.sbix().is_ok() || rf.svg().is_ok();
+    let color_tables = color_tables(&rf);
+    let is_color = color_tables.any();
 
     Some(LoadedFont {
         data,
@@ -793,6 +793,14 @@ fn load_family_variant(
     is_bold: bool,
     is_italic: bool,
 ) -> Option<usize> {
+    if let fontdb::Family::Name(name) = family {
+        let id = pick_named_family_face(db, name, weight, style)?;
+        let loaded = db.with_face_data(id, |data, _| load_font(data, is_bold, is_italic))??;
+        let idx = fonts.len();
+        fonts.push(loaded);
+        return Some(idx);
+    }
+
     let query = fontdb::Query {
         families: std::slice::from_ref(family),
         weight,
@@ -808,6 +816,62 @@ fn load_family_variant(
     let idx = fonts.len();
     fonts.push(loaded);
     Some(idx)
+}
+
+fn pick_named_family_face(
+    db: &fontdb::Database,
+    name: &str,
+    weight: fontdb::Weight,
+    style: fontdb::Style,
+) -> Option<fontdb::ID> {
+    db.faces()
+        .filter(|face| {
+            face.weight == weight
+                && face.style == style
+                && face.stretch == fontdb::Stretch::Normal
+                && face.families.iter().any(|family| family.0 == name)
+        })
+        .max_by_key(|face| {
+            db.with_face_data(face.id, |data, _| color_table_score(data))
+                .unwrap_or_default()
+        })
+        .map(|face| face.id)
+}
+
+#[derive(Clone, Copy, Default)]
+struct ColorTables {
+    colr: bool,
+    svg: bool,
+    sbix: bool,
+    cbdt: bool,
+}
+
+impl ColorTables {
+    fn any(self) -> bool {
+        self.colr || self.svg || self.sbix || self.cbdt
+    }
+
+    fn score(self) -> u8 {
+        // Prefer scalable color outlines when duplicate faces share the same
+        // family/style/weight. This keeps a locally installed COLR/SVG Noto
+        // Color Emoji ahead of distro bitmap-only CBDT builds.
+        (self.colr as u8) * 8 + (self.svg as u8) * 4 + (self.sbix as u8) * 2 + self.cbdt as u8
+    }
+}
+
+fn color_tables(rf: &read_fonts::FontRef<'_>) -> ColorTables {
+    ColorTables {
+        colr: rf.colr().is_ok(),
+        svg: rf.svg().is_ok(),
+        sbix: rf.sbix().is_ok(),
+        cbdt: rf.cbdt().is_ok(),
+    }
+}
+
+fn color_table_score(data: &[u8]) -> u8 {
+    read_fonts::FontRef::new(data)
+        .map(|rf| color_tables(&rf).score())
+        .unwrap_or_default()
 }
 
 /// Pick the face that should shape a cell with the given attributes, walking
