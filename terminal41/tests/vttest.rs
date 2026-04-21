@@ -3,97 +3,8 @@
 //! terminal with a persistent `TerminalProcessor`, feeds escape
 //! sequences, and inspects the grid to verify correct behavior.
 
-use terminal41::ColorPalette;
-use terminal41::FeaturePermissions;
 use terminal41::LineAttr;
-use terminal41::Terminal;
-use terminal41::TerminalEffects;
-use terminal41::TerminalProcessor;
-use terminal41::view;
-
-// ---------------------------------------------------------------------------
-// Test harness
-// ---------------------------------------------------------------------------
-
-struct VtTerm {
-    terminal: Terminal,
-    processor: TerminalProcessor,
-    effects: TerminalEffects,
-}
-
-impl VtTerm {
-    fn new(
-        cols: u32,
-        rows: u32,
-    ) -> Self {
-        Self {
-            terminal: Terminal::new(
-                cols,
-                rows,
-                1000,
-                terminal41::StatusDisplayKind::None,
-                false,
-                FeaturePermissions::default(),
-                16,
-                8,
-                ColorPalette::default(),
-            ),
-            processor: TerminalProcessor::new(),
-            effects: TerminalEffects::default(),
-        }
-    }
-
-    fn new_80x24() -> Self {
-        Self::new(80, 24)
-    }
-
-    fn process(
-        &mut self,
-        data: &[u8],
-    ) {
-        let effects = self.processor.process_bytes(&mut self.terminal, data);
-        self.effects.extend(effects);
-    }
-
-    fn pending_output(&mut self) -> Vec<u8> {
-        std::mem::take(&mut self.effects.host_bytes)
-    }
-
-    fn row_text(
-        &self,
-        row: u32,
-    ) -> String {
-        let r = self.visible_row(row);
-        let mut s = String::new();
-        for cell in &r.cells {
-            s.push_str(cell);
-        }
-        s
-    }
-
-    fn cell_char(
-        &self,
-        row: u32,
-        col: u32,
-    ) -> char {
-        let r = self.visible_row(row);
-        r.cells[col as usize].as_str().chars().next().unwrap_or(' ')
-    }
-
-    fn visible_row(
-        &self,
-        row: u32,
-    ) -> &terminal41::Row {
-        view::visible_row(&self.terminal.active, &self.terminal.viewport, row)
-    }
-
-    fn cursor(&self) -> (u32, u32) {
-        (
-            self.terminal.active.cursor.row,
-            self.terminal.active.cursor.col,
-        )
-    }
-}
+use terminal41::test_support::TestTerm as VtTerm;
 
 // ---------------------------------------------------------------------------
 // 1. Cursor movement
@@ -154,10 +65,10 @@ fn pending_wrap_cancelled_by_cursor_movement() {
     for _ in 0..80 {
         t.process(b"X");
     }
-    assert_eq!(t.terminal.active.cursor.col, 80);
+    assert_eq!(t.inner.active.cursor.col, 80);
     // CUB should cancel pending wrap then move back
     t.process(b"\x1b[D");
-    assert_eq!(t.terminal.active.cursor.col, 78);
+    assert_eq!(t.inner.active.cursor.col, 78);
 }
 
 #[test]
@@ -182,8 +93,8 @@ fn decstbm_sets_region_and_homes_cursor() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[5;10H"); // move away from home
     t.process(b"\x1b[5;20r"); // scroll region rows 5-20
-    assert_eq!(t.terminal.active.scroll_top, 4);
-    assert_eq!(t.terminal.active.scroll_bottom, 19);
+    assert_eq!(t.inner.active.scroll_top, 4);
+    assert_eq!(t.inner.active.scroll_bottom, 19);
     assert_eq!(t.cursor(), (0, 0)); // cursor homed
 }
 
@@ -207,7 +118,7 @@ fn ind_at_scroll_bottom_scrolls_region() {
     t.process(b"\x1b[15;1H"); // back to bottom
     t.process(b"\x1bD"); // IND — should scroll region up
     // cursor stays at row 14 (0-based), region scrolled
-    assert_eq!(t.terminal.active.cursor.row, 14);
+    assert_eq!(t.inner.active.cursor.row, 14);
 }
 
 #[test]
@@ -216,7 +127,7 @@ fn ri_at_scroll_top_scrolls_region_down() {
     t.process(b"\x1b[10;15r"); // region rows 10-15
     t.process(b"\x1b[10;1H"); // top of region
     t.process(b"\x1bM"); // RI — should scroll region down
-    assert_eq!(t.terminal.active.cursor.row, 9);
+    assert_eq!(t.inner.active.cursor.row, 9);
 }
 
 // ---------------------------------------------------------------------------
@@ -240,7 +151,7 @@ fn origin_mode_cud_clamps_to_region() {
     t.process(b"\x1b[12;13r"); // tiny 2-line region
     t.process(b"\x1b[?6h"); // origin mode ON
     t.process(b"\x1b[99B"); // CUD 99 — should clamp to scroll_bottom
-    assert_eq!(t.terminal.active.cursor.row, 12); // row 13 (1-based) = 12 (0-based)
+    assert_eq!(t.inner.active.cursor.row, 12); // row 13 (1-based) = 12 (0-based)
 }
 
 #[test]
@@ -248,7 +159,7 @@ fn origin_mode_decstbm_homes_to_region_top() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[?6h"); // origin mode ON
     t.process(b"\x1b[20;23r"); // region rows 20-23
-    assert_eq!(t.terminal.active.cursor.row, 19); // homed to scroll_top
+    assert_eq!(t.inner.active.cursor.row, 19); // homed to scroll_top
 }
 
 // ---------------------------------------------------------------------------
@@ -276,8 +187,8 @@ fn decaln_resets_scroll_region() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[5;10r"); // restricted region
     t.process(b"\x1b#8"); // DECALN resets it
-    assert_eq!(t.terminal.active.scroll_top, 0);
-    assert_eq!(t.terminal.active.scroll_bottom, 23);
+    assert_eq!(t.inner.active.scroll_top, 0);
+    assert_eq!(t.inner.active.scroll_bottom, 23);
 }
 
 // ---------------------------------------------------------------------------
@@ -289,7 +200,7 @@ fn deccolm_set_resizes_to_132() {
     let mut t = VtTerm::new_80x24();
     // Mode 40 must be enabled before DECCOLM is honoured.
     t.process(b"\x1b[?40h\x1b[?3h");
-    assert_eq!(t.terminal.viewport.cols, 132);
+    assert_eq!(t.inner.viewport.cols, 132);
     assert_eq!(t.cursor(), (0, 0));
 }
 
@@ -299,7 +210,7 @@ fn deccolm_reset_restores_80() {
     t.process(b"\x1b[?40h");
     t.process(b"\x1b[?3h");
     t.process(b"\x1b[?3l");
-    assert_eq!(t.terminal.viewport.cols, 80);
+    assert_eq!(t.inner.viewport.cols, 80);
 }
 
 // ---------------------------------------------------------------------------
@@ -418,9 +329,9 @@ fn dl_deletes_lines() {
 fn default_tab_stops_every_8_columns() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[H\t");
-    assert_eq!(t.terminal.active.cursor.col, 8);
+    assert_eq!(t.inner.active.cursor.col, 8);
     t.process(b"\t");
-    assert_eq!(t.terminal.active.cursor.col, 16);
+    assert_eq!(t.inner.active.cursor.col, 16);
 }
 
 #[test]
@@ -429,7 +340,7 @@ fn hts_sets_custom_tab_stop() {
     t.process(b"\x1b[1;5H"); // col 4 (0-based)
     t.process(b"\x1bH"); // HTS
     t.process(b"\x1b[1;1H\t"); // tab from col 0
-    assert_eq!(t.terminal.active.cursor.col, 4);
+    assert_eq!(t.inner.active.cursor.col, 4);
 }
 
 #[test]
@@ -437,7 +348,7 @@ fn tbc_3_clears_all_tab_stops() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[3g"); // clear all
     t.process(b"\x1b[H\t"); // tab with no stops → last col
-    assert_eq!(t.terminal.active.cursor.col, 79);
+    assert_eq!(t.inner.active.cursor.col, 79);
 }
 
 // ---------------------------------------------------------------------------
@@ -529,11 +440,11 @@ fn osc_1337_report_cell_size() {
 #[test]
 fn decckm_tracked_by_screen() {
     let mut t = VtTerm::new_80x24();
-    assert!(!t.terminal.active.app_cursor_keys);
+    assert!(!t.inner.active.app_cursor_keys);
     t.process(b"\x1b[?1h");
-    assert!(t.terminal.active.app_cursor_keys);
+    assert!(t.inner.active.app_cursor_keys);
     t.process(b"\x1b[?1l");
-    assert!(!t.terminal.active.app_cursor_keys);
+    assert!(!t.inner.active.app_cursor_keys);
 }
 
 // ---------------------------------------------------------------------------
@@ -544,21 +455,12 @@ fn decckm_tracked_by_screen() {
 fn title_push_pop() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b]2;Original\x1b\\"); // set title
-    assert_eq!(
-        t.terminal.metadata.current_title.as_deref(),
-        Some("Original")
-    );
+    assert_eq!(t.inner.metadata.current_title.as_deref(), Some("Original"));
     t.process(b"\x1b[22;0t"); // push
     t.process(b"\x1b]2;Temporary\x1b\\"); // change
-    assert_eq!(
-        t.terminal.metadata.current_title.as_deref(),
-        Some("Temporary")
-    );
+    assert_eq!(t.inner.metadata.current_title.as_deref(), Some("Temporary"));
     t.process(b"\x1b[23;0t"); // pop
-    assert_eq!(
-        t.terminal.metadata.current_title.as_deref(),
-        Some("Original")
-    );
+    assert_eq!(t.inner.metadata.current_title.as_deref(), Some("Original"));
 }
 
 // ---------------------------------------------------------------------------
@@ -569,12 +471,12 @@ fn title_push_pop() {
 fn xtsave_xtrestore_round_trips_mode() {
     let mut t = VtTerm::new_80x24();
     // Default: autowrap on
-    assert!(t.terminal.active.autowrap);
+    assert!(t.inner.active.autowrap);
     t.process(b"\x1b[?7s"); // save mode 7
     t.process(b"\x1b[?7l"); // disable autowrap
-    assert!(!t.terminal.active.autowrap);
+    assert!(!t.inner.active.autowrap);
     t.process(b"\x1b[?7r"); // restore → should be back on
-    assert!(t.terminal.active.autowrap);
+    assert!(t.inner.active.autowrap);
 }
 
 // ---------------------------------------------------------------------------
@@ -601,11 +503,11 @@ fn insert_mode_shifts_text_right() {
 
 #[test]
 fn decawm_off_prevents_wrap() {
-    let mut t = VtTerm::new(10, 4);
+    let mut t = VtTerm::new(10, 4, 1000, 16, 8);
     t.process(b"\x1b[?7l"); // disable autowrap
     t.process(b"\x1b[H");
     t.process(b"abcdefghijXY"); // more than 10 cols
-    assert_eq!(t.terminal.active.cursor.row, 0); // no wrap
+    assert_eq!(t.inner.active.cursor.row, 0); // no wrap
     assert_eq!(t.cell_char(0, 9), 'Y'); // last col overwritten
 }
 
@@ -659,7 +561,7 @@ fn vt_moves_down_like_lf() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[1;1H");
     t.process(b"\x0b"); // VT
-    assert_eq!(t.terminal.active.cursor.row, 1);
+    assert_eq!(t.inner.active.cursor.row, 1);
 }
 
 #[test]
@@ -667,7 +569,7 @@ fn ff_moves_down_like_lf() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[1;1H");
     t.process(b"\x0c"); // FF
-    assert_eq!(t.terminal.active.cursor.row, 1);
+    assert_eq!(t.inner.active.cursor.row, 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -681,7 +583,7 @@ fn bs_inside_csi_executes_and_sequence_completes() {
     // CUF with embedded BS: CSI 2 BS C
     // BS executes (col 9→8), then CUF 2 fires (col 8→10)
     t.process(b"\x1b[2\x08C");
-    assert_eq!(t.terminal.active.cursor.col, 10);
+    assert_eq!(t.inner.active.cursor.col, 10);
 }
 
 // ---------------------------------------------------------------------------
@@ -776,17 +678,17 @@ fn decaln_clears_row_wrap_and_line_attr_before_border_drawing() {
     let mut t = VtTerm::new_80x24();
 
     t.process(b"\x1b[23;1H\x1b#6");
-    t.terminal.active.grid.rows[22].wrapped = true;
+    t.inner.active.grid.rows[22].wrapped = true;
     assert_eq!(
-        t.terminal.active.grid.rows[22].line_attr,
+        t.inner.active.grid.rows[22].line_attr,
         LineAttr::DoubleWidth
     );
-    assert!(t.terminal.active.grid.rows[22].wrapped);
+    assert!(t.inner.active.grid.rows[22].wrapped);
 
     t.process(b"\x1b#8");
 
-    assert_eq!(t.terminal.active.grid.rows[22].line_attr, LineAttr::Normal);
-    assert!(!t.terminal.active.grid.rows[22].wrapped);
+    assert_eq!(t.inner.active.grid.rows[22].line_attr, LineAttr::Normal);
+    assert!(!t.inner.active.grid.rows[22].wrapped);
     assert_eq!(t.row_text(22), "E".repeat(80));
 }
 
