@@ -943,3 +943,292 @@ fn soft_wrap(
         screen.cursor.row += 1;
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use palette::Srgb;
+
+    use super::super::test_support::*;
+    use super::super::*;
+    use super::*;
+
+    // -- put_char -----------------------------------------------------------
+
+    #[test]
+    fn put_char_writes_with_current_colors_and_advances() {
+        let (mut screen, viewport) = setup();
+        screen.fg = Srgb::new(1, 2, 3);
+        screen.bg = Srgb::new(4, 5, 6);
+
+        put_char(&mut screen, &viewport, SmolStr::new_inline("A"), false);
+
+        assert_eq!(row_text(&screen, &viewport, 0).chars().next(), Some('A'));
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].fg[0], Srgb::new(1, 2, 3));
+        assert_eq!(screen.grid.rows[r].bg[0], Srgb::new(4, 5, 6));
+        assert_eq!(screen.cursor.col, 1);
+        assert_eq!(screen.cursor.row, 0);
+    }
+
+    #[test]
+    fn put_char_soft_wraps_at_right_edge() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"abcdefghij", &mut screen, &mut viewport);
+
+        // Cursor sits past the right edge; the next char should wrap.
+        assert_eq!(screen.cursor.col, TEST_COLS);
+        feed(b"k", &mut screen, &mut viewport);
+
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 1);
+        assert!(
+            screen.grid.rows[screen.grid.active_row_index(&screen.cursor, &viewport) - 1].wrapped
+        );
+        assert_eq!(&row_text(&screen, &viewport, 1)[..1], "k");
+    }
+
+    #[test]
+    fn put_char_folds_combining_mark_into_previous_cell() {
+        let (mut screen, mut viewport) = setup();
+        // U+0301 COMBINING ACUTE ACCENT — feeding "e" then the combining mark
+        // should store the full grapheme "é" in one cell without advancing.
+        feed("e\u{0301}".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "e\u{0301}");
+        assert_eq!(screen.cursor.col, 1);
+    }
+
+    #[test]
+    fn put_char_vs16_emoji_stays_in_single_cell() {
+        let (mut screen, mut viewport) = setup();
+        // `UnicodeWidthStr::width("❤\u{FE0F}") == 2`, but glibc `wcswidth`
+        // reports 1 because it treats VS16 as a zero-width variation
+        // selector without upgrading the base to emoji presentation. The
+        // host shell tracks cursor position via wcswidth, so our grid must
+        // agree — otherwise a single backspace from readline lands on the
+        // continuation cell and the user can't delete the emoji. Keep the
+        // cluster in one cell; the shaper still sees the full cluster
+        // text and renders it scaled to that cell.
+        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{2764}\u{FE0F}");
+        assert_eq!(
+            screen.grid.rows[r].cells[1].as_str(),
+            " ",
+            "VS16 must not widen the cell — cells[1] stays blank"
+        );
+        assert_eq!(screen.cursor.col, 1);
+    }
+
+    #[test]
+    fn put_char_write_after_vs16_emoji_preserves_the_emoji() {
+        // Reproduces the reported "heart vanishes when you type anything
+        // after it" bug. Before the fix, `is_wide_anchor` re-measured the
+        // cell text with `UnicodeWidthStr` — which returns 2 for "❤\u{FE0F}"
+        // — so `break_wide_glyphs_around_write` treated the single-cell
+        // emoji as a misaligned wide anchor and blanked it. The grid-state
+        // check in `is_wide_anchor_at` looks at the right neighbour
+        // instead, matching the physical layout.
+        let (mut screen, mut viewport) = setup();
+        feed("\u{2764}\u{FE0F}X".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(
+            screen.grid.rows[r].cells[0].as_str(),
+            "\u{2764}\u{FE0F}",
+            "heart must survive subsequent write"
+        );
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "X");
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn backspace_over_vs16_emoji_moves_one_column() {
+        // Readline sends a single BS to rub out `❤\u{FE0F}` because glibc
+        // `wcswidth` reports its width as 1. The cursor must land on the
+        // anchor column so subsequent rub-out bytes (typically `\b \b`)
+        // clear the cell cleanly; widening the cell into 2 columns would
+        // leave the cursor sitting on the continuation after one BS and
+        // desync the shell's tracking.
+        let (mut screen, mut viewport) = setup();
+        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.col, 1);
+
+        execute(&mut screen, &viewport, BS, &mut false, false);
+        assert_eq!(screen.cursor.col, 0);
+
+        // A full rub-out of `\b \b` from bash lands us back at col 0 with
+        // the cell erased.
+        feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &mut viewport);
+        feed(b"\x08 \x08", &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), " ");
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    #[test]
+    fn backspace_guard_absorbs_zwj_width_overcount() {
+        // Reproduces the bash/readline over-backspace pattern for 👩‍💻:
+        // host codepoint widths sum to 4 (2 + 0 + 2), but terminal cell
+        // width is 2. We should absorb the two extra BS bytes so the prompt
+        // prefix is not overwritten.
+        let (mut screen, mut viewport) = setup();
+        feed("ab👩\u{200D}💻".as_bytes(), &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.col, 4);
+
+        feed(b"\x08\x08\x08\x08", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.col, 2, "extra BS bytes are absorbed");
+
+        feed(b"X", &mut screen, &mut viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "a");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "b");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "X");
+    }
+
+    #[test]
+    fn put_char_regional_indicators_get_separate_cells() {
+        let (mut screen, mut viewport) = setup();
+        // `unicode-width` reports width 1 for each regional indicator, so
+        // "🇺🇸" advances the cursor by 2 across two 1-col cells. We do not
+        // collapse the flag pair into one cell — that would disagree with
+        // the host's wcswidth and desync the cursor.
+        feed("🇺🇸".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "🇺");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "🇸");
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    // -- wide (2-column) glyph handling ------------------------------------
+
+    #[test]
+    fn put_char_wide_glyph_occupies_two_cells_and_advances_cursor() {
+        let (mut screen, mut viewport) = setup();
+        feed("好".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "好");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), ""); // continuation
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn put_char_wide_glyph_soft_wraps_when_it_would_overhang() {
+        let (mut screen, mut viewport) = setup();
+        // Fill 9 of 10 columns with narrow chars so only 1 column is free.
+        feed(b"abcdefghi", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.col, 9);
+
+        feed("好".as_bytes(), &mut screen, &mut viewport);
+
+        // The wide glyph didn't fit at col 9, so we soft-wrap and place it
+        // on the next row.
+        assert_eq!(screen.cursor.row, 1);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "好");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "");
+        assert_eq!(screen.cursor.col, 2);
+        assert!(screen.grid.rows[r - 1].wrapped);
+    }
+
+    #[test]
+    fn put_char_narrow_overwriting_wide_anchor_blanks_continuation() {
+        let (mut screen, mut viewport) = setup();
+        feed("好b".as_bytes(), &mut screen, &mut viewport);
+        // Move cursor back to col 0 and stomp on the anchor with a narrow char.
+        feed(b"\x1b[1;1H", &mut screen, &mut viewport);
+        feed(b"x", &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "x");
+        // The continuation at col 1 is now orphaned — must be blanked.
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), " ");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "b");
+    }
+
+    #[test]
+    fn put_char_narrow_overwriting_wide_continuation_blanks_anchor() {
+        let (mut screen, mut viewport) = setup();
+        feed("好b".as_bytes(), &mut screen, &mut viewport);
+        // Park cursor on the continuation (col 1) and write a narrow char.
+        feed(b"\x1b[1;2H", &mut screen, &mut viewport);
+        feed(b"x", &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        // The anchor at col 0 is now orphaned — must be blanked.
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), " ");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "x");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "b");
+    }
+
+    #[test]
+    fn put_char_wide_overwriting_wide_blanks_both_neighbours() {
+        let (mut screen, mut viewport) = setup();
+        // [好, "", 世, "", a]
+        feed("好世a".as_bytes(), &mut screen, &mut viewport);
+        // Park on col 1 (好's continuation) and write a new wide glyph that
+        // straddles the old layout.
+        feed(b"\x1b[1;2H", &mut screen, &mut viewport);
+        feed("界".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        // 好's anchor (col 0) is orphaned — blanked.
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), " ");
+        // New wide glyph at cols 1-2.
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "界");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "");
+        // 世's orphaned continuation (at col 3) is blanked.
+        assert_eq!(screen.grid.rows[r].cells[3].as_str(), " ");
+        assert_eq!(screen.grid.rows[r].cells[4].as_str(), "a");
+    }
+
+    #[test]
+    fn put_char_zwj_emoji_merges_into_previous_wide_cell() {
+        let (mut screen, mut viewport) = setup();
+        // 👩‍💻 = 👩 ZWJ 💻. Once the ZWJ has folded into the previous cell,
+        // the following emoji should also extend that same grapheme cluster
+        // instead of starting a fresh wide glyph cell of its own.
+        feed("👩\u{200D}💻".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👩\u{200D}💻");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), " ");
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn put_char_write_after_zwj_emoji_preserves_full_cluster() {
+        let (mut screen, mut viewport) = setup();
+        feed("👩\u{200D}💻X".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👩\u{200D}💻");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "X");
+        assert_eq!(screen.cursor.col, 3);
+    }
+
+    #[test]
+    fn erase_from_zwj_continuation_clears_full_cluster_without_touching_prefix() {
+        let (mut screen, mut viewport) = setup();
+        feed("> 👩\u{200D}💻".as_bytes(), &mut screen, &mut viewport);
+
+        execute(&mut screen, &viewport, BS, &mut false, false);
+        assert_eq!(screen.cursor.col, 3);
+
+        feed(b"\x1b[K", &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), ">");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), " ");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), " ");
+        assert_eq!(screen.grid.rows[r].cells[3].as_str(), " ");
+        assert_eq!(screen.cursor.col, 3);
+    }
+}

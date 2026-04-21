@@ -116,3 +116,28 @@ pub(crate) fn apply_status_line_csi(
         }
     }
 }
+
+#[cfg(test)]
+mod tests {
+    use super::super::test_support::*;
+    use super::super::*;
+    use super::*;
+
+    #[test]
+    fn csi_parse_uses_status_line_context_for_plain_actions() {
+        let (mut screen, _) = setup();
+        screen::set_status_display(
+            &mut screen,
+            TEST_COLS,
+            StatusDisplayKind::HostWritable,
+            color::default_fg(),
+            color::default_bg(),
+        );
+        screen.active_display = ActiveDisplay::Status;
+        let modes = TerminalModes::new();
+        assert!(matches!(
+            parse_csi_action_with(b"\x1b[31m", &screen, &modes),
+            ParsedCsiAction::StatusLine(StatusLineCsiAction::SetGraphicsRendition { .. })
+        ));
+    }
+}

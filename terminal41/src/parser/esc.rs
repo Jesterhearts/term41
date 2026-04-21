@@ -582,3 +582,680 @@ pub(crate) fn esc_dispatch(
         .drcs(drcs)
         .call();
 }
+
+#[cfg(test)]
+mod tests {
+    use vtepp::Action;
+    use vtepp::Parser;
+
+    use super::super::test_support::*;
+    use super::super::*;
+    use super::*;
+
+    #[test]
+    fn esc_parse_maps_hard_reset_semantically() {
+        let modes = TerminalModes::new();
+        assert!(matches!(
+            parse_esc_action(b"\x1bc", &modes),
+            ParsedEscAction::HardReset
+        ));
+    }
+
+    #[test]
+    fn esc_parse_maps_hash_intermediate_semantically() {
+        let modes = TerminalModes::new();
+        assert!(matches!(
+            parse_esc_action(b"\x1b#8", &modes),
+            ParsedEscAction::ScreenAlignmentTest
+        ));
+    }
+
+    #[test]
+    fn esc_parse_maps_charset_designation_semantically() {
+        let modes = TerminalModes::new();
+        assert!(matches!(
+            parse_esc_action(b"\x1b(0", &modes),
+            ParsedEscAction::DesignateCharset {
+                slot: GraphicSetSlot::G0,
+                charset: CharacterSet::DecSpecialGraphics
+            }
+        ));
+    }
+
+    #[test]
+    fn esc_parse_resolves_soft_charset_designations_semantically() {
+        let modes = TerminalModes::new();
+        let mut drcs = DrcsStore::default();
+        drcs.define(&[0, 0, 0, 0, 0, 0, 0, 0], b"@?");
+        assert!(matches!(
+            parse_esc_action_with(b"\x1b(@", &modes, &drcs),
+            ParsedEscAction::DesignateCharset {
+                slot: GraphicSetSlot::G0,
+                charset: CharacterSet::Drcs(0, crate::drcs::CharsetSize::Cs94)
+            }
+        ));
+    }
+
+    #[test]
+    fn esc_parse_maps_vt52_sequences_using_mode_state() {
+        let mut modes = TerminalModes::new();
+        modes.vt52_mode = true;
+        assert!(matches!(
+            parse_esc_action(b"\x1bH", &modes),
+            ParsedEscAction::Vt52(Vt52EscAction::CursorHome)
+        ));
+    }
+
+    // -- esc_dispatch ------------------------------------------------------
+
+    #[test]
+    fn esc_m_at_scroll_top_scrolls_down() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"top\nmid\nbot", &mut screen, &mut viewport);
+        // Cursor is at scroll_top (row 0) after moving back there.
+        feed(b"\x1b[H", &mut screen, &mut viewport);
+        feed(b"\x1bM", &mut screen, &mut viewport);
+        // After scroll-down, the old top row shifts down one and row 0 blanks.
+        assert_eq!(row_text(&screen, &viewport, 0).trim(), "");
+        assert_eq!(row_text(&screen, &viewport, 1).trim_end(), "top");
+    }
+
+    #[test]
+    fn esc_m_above_scroll_top_moves_cursor_up() {
+        let (mut screen, mut viewport) = setup();
+        screen.cursor.row = 2;
+        feed(b"\x1bM", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.row, 1);
+    }
+
+    #[test]
+    fn esc_m_at_row_zero_outside_region_is_noop() {
+        // scroll_top defaults to 0, so row 0 triggers scroll_down_in_region
+        // above. Force a non-zero scroll_top to exercise the cursor.row > 0
+        // branch at exactly row 0 of the viewport.
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[2;4r", &mut screen, &mut viewport); // scroll_top = 1
+        screen.cursor.row = 0;
+        feed(b"\x1bM", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.row, 0);
+    }
+
+    #[test]
+    fn esc_scs_designator_is_ignored() {
+        let (mut screen, mut viewport) = setup();
+        screen.cursor.row = 2;
+        screen.cursor.col = 3;
+        // ESC ( B designates US-ASCII as G0. Parser should no-op without
+        // dropping state or panicking on the `B` byte (which would otherwise
+        // land in the unknown-byte arm).
+        feed(b"\x1b(B", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.row, 2);
+        assert_eq!(screen.cursor.col, 3);
+    }
+
+    #[test]
+    fn esc_keypad_modes_set_app_keypad() {
+        let (mut screen, mut viewport) = setup();
+        assert!(!screen.app_keypad);
+        feed(b"\x1b=", &mut screen, &mut viewport);
+        assert!(screen.app_keypad);
+        feed(b"\x1b>", &mut screen, &mut viewport);
+        assert!(!screen.app_keypad);
+        // Cursor must not be affected.
+        assert_eq!(screen.cursor.row, 0);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    // -- DEC Special Graphics (SCS) ------------------------------------------
+
+    #[test]
+    fn scs_g0_drawing_translates_box_chars() {
+        let (mut screen, mut viewport) = setup();
+        // ESC ( 0 designates DEC drawing into G0, then print box-drawing bytes.
+        // 0x6C = ┌, 0x71 = ─, 0x6B = ┐
+        feed(b"\x1b(0\x6c\x71\x6b", &mut screen, &mut viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{250C}"); // ┌
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "\u{2500}"); // ─
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "\u{2510}"); // ┐
+    }
+
+    #[test]
+    fn scs_g0_ascii_restores_normal() {
+        let (mut screen, mut viewport) = setup();
+        // Enable drawing, write a box char, then switch back to ASCII.
+        feed(b"\x1b(0\x6c\x1b(B\x6c", &mut screen, &mut viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{250C}"); // ┌
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "l"); // plain ASCII
+    }
+
+    #[test]
+    fn scs_drawing_does_not_translate_below_0x60() {
+        let (mut screen, mut viewport) = setup();
+        // In drawing mode, bytes below 0x60 should pass through as ASCII.
+        feed(b"\x1b(0ABC", &mut screen, &mut viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "A");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "B");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "C");
+    }
+
+    #[test]
+    fn scs_so_si_switch_between_g0_g1() {
+        let (mut screen, mut viewport) = setup();
+        // G0 = ASCII (default), G1 = drawing.
+        // SO (0x0E) invokes G1, SI (0x0F) invokes G0.
+        feed(b"\x1b)0", &mut screen, &mut viewport); // G1 = drawing
+        feed(b"\x0E", &mut screen, &mut viewport); // SO → GL = G1
+        feed(b"\x6c", &mut screen, &mut viewport); // should translate
+        feed(b"\x0F", &mut screen, &mut viewport); // SI → GL = G0
+        feed(b"\x6c", &mut screen, &mut viewport); // should be plain ASCII
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{250C}"); // ┌
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "l"); // plain
+    }
+
+    #[test]
+    fn scs_decstr_resets_charset_state() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b(0", &mut screen, &mut viewport);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::DecSpecialGraphics
+        );
+        // DECSTR should reset charset state.
+        feed(b"\x1b[!p", &mut screen, &mut viewport);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::Ascii
+        );
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G1),
+            CharacterSet::Ascii
+        );
+        assert_eq!(screen.charset.gl_slot(), GraphicSetSlot::G0);
+    }
+
+    #[test]
+    fn scs_ris_resets_charset_state() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b(0\x1b)0\x0E", &mut screen, &mut viewport);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::DecSpecialGraphics
+        );
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G1),
+            CharacterSet::DecSpecialGraphics
+        );
+        assert_eq!(screen.charset.gl_slot(), GraphicSetSlot::G1);
+        // RIS should reset everything.
+        feed(b"\x1bc", &mut screen, &mut viewport);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::Ascii
+        );
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G1),
+            CharacterSet::Ascii
+        );
+        assert_eq!(screen.charset.gl_slot(), GraphicSetSlot::G0);
+    }
+
+    #[test]
+    fn scs_save_restore_cursor_preserves_charset() {
+        let (mut screen, mut viewport) = setup();
+        // Enable drawing in G0, save cursor.
+        feed(b"\x1b(0\x1b7", &mut screen, &mut viewport);
+        // Switch back to ASCII.
+        feed(b"\x1b(B", &mut screen, &mut viewport);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::Ascii
+        );
+        // Restore cursor — should bring back DEC drawing.
+        feed(b"\x1b8", &mut screen, &mut viewport);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::DecSpecialGraphics
+        );
+    }
+
+    #[test]
+    fn scs_technical_charset_translates_math_symbols() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b)>", &mut screen, &mut viewport); // G1 = DEC Technical
+        feed(b"\x0Eabc", &mut screen, &mut viewport); // SO -> GL = G1
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{03B1}");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "\u{03B2}");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "\u{03C7}");
+    }
+
+    #[test]
+    fn scs_ls2_maps_g2_into_gl() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b.A", &mut screen, &mut viewport); // G2 = ISO Latin-1 supplemental
+        feed(b"\x1bn!!", &mut screen, &mut viewport); // LS2 -> GL = G2
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{00A1}");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "\u{00A1}");
+        assert_eq!(screen.charset.gl_slot(), GraphicSetSlot::G2);
+    }
+
+    #[test]
+    fn scs_single_shift_uses_g2_for_one_character() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b.A\x1bN!!", &mut screen, &mut viewport); // G2 = ISO Latin-1 supplemental
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{00A1}");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "!");
+    }
+
+    #[test]
+    fn scs_ls1r_maps_g1_into_gr_for_utf8_text() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b)>\x1b~", &mut screen, &mut viewport); // G1 = DEC Technical, GR = G1
+        feed("á".as_bytes(), &mut screen, &mut viewport); // U+00E1 -> 0x61 in GR
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{03B1}");
+        assert_eq!(screen.charset.gr_slot(), GraphicSetSlot::G1);
+    }
+
+    #[test]
+    fn scs_ls2r_maps_g2_into_gr_for_utf8_text() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b.%5\x1b}", &mut screen, &mut viewport); // G2 = DEC Supplemental, GR = G2
+        feed("¨".as_bytes(), &mut screen, &mut viewport); // U+00A8 -> DEC MCS currency sign
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{00A4}");
+        assert_eq!(screen.charset.gr_slot(), GraphicSetSlot::G2);
+    }
+
+    #[test]
+    fn docs_8bit_mode_routes_raw_high_bytes_through_gr() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b%@\x1b)>\x1b~\xe1A", &mut screen, &mut viewport); // raw 0xE1 -> 0x61 in GR
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{03B1}");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "A");
+    }
+
+    #[test]
+    fn scs_gr_translation_applies_to_split_utf8_codepoint() {
+        let (mut screen, mut viewport) = setup();
+        let base_pal = color::ColorPalette::default();
+        let mut dec_color = dec_color_state_from_palette(&base_pal);
+        let mut pal = effective_palette(&base_pal, &dec_color);
+        let mut parser = Parser::new();
+        let mut stash = Screen::new(
+            viewport.cols,
+            viewport.rows,
+            0,
+            color::default_fg(),
+            color::default_bg(),
+            color::default_fg(),
+            color::default_bg(),
+        );
+        let mut on_alt_screen = false;
+        let mut modes = TerminalModes::new();
+        let mut kitty_keyboard = KittyKeyboardState::new();
+        let mut pending_output = Vec::new();
+        let mut pending_resize = None;
+        let mut cursor_style = CursorStyle::default();
+        let mut bell_pending = false;
+        let mut current_title = None;
+        let mut title_stack = Vec::new();
+        let mut saved_modes = std::collections::HashMap::new();
+        let mut current_prompt_row = None;
+        let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
+        let mut default_status_display = StatusDisplayKind::None;
+        let feature_permissions = FeaturePermissions::default();
+        let mut macros = MacroStore::default();
+        let mut drcs = DrcsStore::default();
+
+        for chunk in [b"\x1b)>\x1b~\xc3".as_slice(), b"\xa1".as_slice()] {
+            for action in parser.parse(chunk) {
+                match action {
+                    Action::PrintAscii(run) => {
+                        put_ascii_run(&mut screen, &viewport, run, modes.insert_mode)
+                    }
+                    Action::PrintText(run) => {
+                        put_text_run(&mut screen, &viewport, run, modes.insert_mode)
+                    }
+                    Action::Print(s) => put_printable(&mut screen, &viewport, s, modes.insert_mode),
+                    Action::Print8Bit(byte) => {
+                        put_8bit_byte(&mut screen, &viewport, byte, modes.insert_mode)
+                    }
+                    Action::Execute(b) => execute(
+                        &mut screen,
+                        &viewport,
+                        b,
+                        &mut bell_pending,
+                        modes.newline_mode,
+                    ),
+                    Action::CsiDispatch {
+                        params,
+                        intermediates,
+                        action,
+                    } => {
+                        csi_dispatch()
+                            .screen(&mut screen)
+                            .stash(&mut stash)
+                            .viewport(&mut viewport)
+                            .on_alt_screen(&mut on_alt_screen)
+                            .modes(&mut modes)
+                            .kitty_keyboard(&mut kitty_keyboard)
+                            .pending_output(&mut pending_output)
+                            .pending_resize(&mut pending_resize)
+                            .cursor_style(&mut cursor_style)
+                            .cell_width(8)
+                            .cell_height(16)
+                            .palette(&mut pal)
+                            .base_palette(&base_pal)
+                            .dec_color(&mut dec_color)
+                            .default_status_display(&mut default_status_display)
+                            .title_stack(&mut title_stack)
+                            .current_title(&mut current_title)
+                            .saved_modes(&mut saved_modes)
+                            .current_prompt_row(&mut current_prompt_row)
+                            .bell_pending(&mut bell_pending)
+                            .vt52_cursor_addr(&mut vt52_cursor_addr)
+                            .macros(&mut macros)
+                            .drcs(&mut drcs)
+                            .params(&params)
+                            .intermediates(intermediates.as_slice())
+                            .action(action)
+                            .feature_permissions(&feature_permissions)
+                            .call();
+                    }
+                    Action::EscDispatch {
+                        intermediates,
+                        byte,
+                    } => {
+                        esc_dispatch()
+                            .screen(&mut screen)
+                            .stash(&mut stash)
+                            .viewport(&mut viewport)
+                            .on_alt_screen(&mut on_alt_screen)
+                            .modes(&mut modes)
+                            .kitty_keyboard(&mut kitty_keyboard)
+                            .cursor_style(&mut cursor_style)
+                            .current_title(&mut current_title)
+                            .title_stack(&mut title_stack)
+                            .saved_modes(&mut saved_modes)
+                            .current_prompt_row(&mut current_prompt_row)
+                            .bell_pending(&mut bell_pending)
+                            .palette(&mut pal)
+                            .base_palette(&base_pal)
+                            .dec_color(&mut dec_color)
+                            .default_status_display(&mut default_status_display)
+                            .pending_output(&mut pending_output)
+                            .vt52_cursor_addr(&mut vt52_cursor_addr)
+                            .macros(&mut macros)
+                            .drcs(&mut drcs)
+                            .intermediates(intermediates.as_slice())
+                            .byte(byte)
+                            .call();
+                    }
+                    _ => {}
+                }
+            }
+        }
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{03B1}");
+    }
+
+    #[test]
+    fn scs_decnrcm_gates_nrc_translation() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b(A#", &mut screen, &mut viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "#");
+
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[?42h\x1b(A#", &mut screen, &mut viewport);
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{00A3}");
+    }
+
+    #[test]
+    fn decrqupss_reports_default_upss() {
+        let (mut screen, mut viewport) = setup();
+        let out = feed_with_output(b"\x1b[&u", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1bP0!u%5\x1b\\");
+    }
+
+    #[test]
+    fn scs_full_box_top_bottom() {
+        // Simulate a typical box-drawing sequence: ┌──┐ on top, └──┘ on bottom.
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b(0", &mut screen, &mut viewport);
+        feed(b"\x6c\x71\x71\x6b", &mut screen, &mut viewport); // ┌──┐
+        feed(b"\r\n", &mut screen, &mut viewport);
+        feed(b"\x6d\x71\x71\x6a", &mut screen, &mut viewport); // └──┘
+        let top = row_text(&screen, &viewport, 0);
+        assert!(top.starts_with("\u{250C}\u{2500}\u{2500}\u{2510}"));
+        let bot = row_text(&screen, &viewport, 1);
+        assert!(bot.starts_with("\u{2514}\u{2500}\u{2500}\u{2518}"));
+    }
+
+    // -- DECALN (ESC # 8) ---------------------------------------------------
+
+    #[test]
+    fn decaln_fills_screen_with_e() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"hello", &mut screen, &mut viewport);
+        feed(b"\x1b#8", &mut screen, &mut viewport);
+        let text = row_text(&screen, &viewport, 0);
+        assert!(text.chars().all(|c| c == 'E'));
+        let text2 = row_text(&screen, &viewport, TEST_ROWS - 1);
+        assert!(text2.chars().all(|c| c == 'E'));
+    }
+
+    // -- IND (ESC D) and NEL (ESC E) ----------------------------------------
+
+    #[test]
+    fn ind_moves_cursor_down() {
+        let (mut screen, mut viewport) = setup();
+        screen.cursor.col = 5;
+        feed(b"\x1bD", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 5); // col preserved
+    }
+
+    #[test]
+    fn ind_at_scroll_bottom_scrolls_up() {
+        let (mut screen, mut viewport) = setup();
+        screen.cursor.row = screen.scroll_bottom;
+        let rows_before = screen.grid.rows.len();
+        feed(b"\x1bD", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.row, screen.scroll_bottom);
+        assert!(screen.grid.rows.len() > rows_before);
+    }
+
+    #[test]
+    fn nel_moves_to_col_0_of_next_line() {
+        let (mut screen, mut viewport) = setup();
+        screen.cursor.col = 5;
+        feed(b"\x1bE", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.row, 1);
+        assert_eq!(screen.cursor.col, 0);
+    }
+
+    /// Enter VT52 then exit via `ESC <`; DECRQM should see ANSI mode restored.
+    #[test]
+    fn vt52_enter_and_exit_via_esc_lt() {
+        let (mut screen, mut viewport) = setup();
+        // `CSI ? 2 l` → VT52; `ESC <` → back to ANSI; DECRQM → set.
+        let out = feed_with_output(b"\x1b[?2l\x1b<\x1b[?2$p", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1b[?2;1$y");
+    }
+
+    /// VT52 ESC A/B/C/D cursor movement.
+    #[test]
+    fn vt52_cursor_up() {
+        let (mut screen, mut viewport) = setup();
+        // CUP to row 2, col 3 (1-based: 3;4), then VT52 ESC A.
+        feed(b"\x1b[3;4H\x1b[?2l\x1bA", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (1, 3));
+    }
+
+    #[test]
+    fn vt52_cursor_down() {
+        let (mut screen, mut viewport) = setup();
+        // CUP to row 1, col 0, then VT52 ESC B.
+        feed(b"\x1b[2;1H\x1b[?2l\x1bB", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (2, 0));
+    }
+
+    #[test]
+    fn vt52_cursor_right() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[1;3H\x1b[?2l\x1bC", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (0, 3));
+    }
+
+    #[test]
+    fn vt52_cursor_left() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[1;5H\x1b[?2l\x1bD", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (0, 3));
+    }
+
+    /// VT52 cursor up at row 0 does not underflow.
+    #[test]
+    fn vt52_cursor_up_clamps_at_top() {
+        let (mut screen, mut viewport) = setup();
+        // Already at row 0 (home). VT52 mode, ESC A.
+        feed(b"\x1b[?2l\x1bA", &mut screen, &mut viewport);
+        assert_eq!(screen.cursor.row, 0);
+    }
+
+    /// VT52 ESC H homes the cursor.
+    #[test]
+    fn vt52_cursor_home() {
+        let (mut screen, mut viewport) = setup();
+        // CUP to row 3, col 6 (1-based), then VT52 ESC H.
+        feed(b"\x1b[3;6H\x1b[?2l\x1bH", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (0, 0));
+    }
+
+    /// VT52 ESC Y <row+0x20> <col+0x20> direct cursor address — bytes split.
+    #[test]
+    fn vt52_direct_cursor_address() {
+        let (mut screen, mut viewport) = setup();
+        // Enter VT52 then ESC Y: row 2 ('"'=0x22), col 4 ('$'=0x24).
+        feed(b"\x1b[?2l\x1bY\"$", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (2, 4));
+    }
+
+    /// VT52 ESC Y where both position bytes arrive in the same PrintAscii run.
+    #[test]
+    fn vt52_direct_cursor_address_batched() {
+        let (mut screen, mut viewport) = setup();
+        // Row 1 ('!'=0x21), col 3 ('#'=0x23).
+        feed(b"\x1b[?2l\x1bY!#", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (1, 3));
+    }
+
+    /// Text after ESC Y position bytes is printed normally.
+    #[test]
+    fn vt52_direct_cursor_address_then_text() {
+        let (mut screen, mut viewport) = setup();
+        // Row 0, col 0 (both 0x20 = space), then 'A'.
+        feed(b"\x1b[?2l\x1bY  A", &mut screen, &mut viewport);
+        assert_eq!((screen.cursor.row, screen.cursor.col), (0, 1));
+        assert_eq!(&row_text(&screen, &viewport, 0)[..1], "A");
+    }
+
+    /// VT52 ESC J erases from cursor to end of screen (same as ED 0).
+    #[test]
+    fn vt52_erase_to_end_of_screen() {
+        let (mut screen, mut viewport) = setup();
+        // Fill row 0 with 'a', row 1 with 'b', then enter VT52 at row 0
+        // col 5 (via CUP before VT52 entry) and erase.
+        feed(
+            b"aaaaaaaaaa\r\nbbbbbbbbbb\x1b[1;6H\x1b[?2l\x1bJ",
+            &mut screen,
+            &mut viewport,
+        );
+        let r0 = row_text(&screen, &viewport, 0);
+        let r1 = row_text(&screen, &viewport, 1);
+        assert_eq!(&r0[..5], "aaaaa", "text before cursor preserved");
+        assert_eq!(r0[5..].trim(), "", "text from cursor erased");
+        assert_eq!(r1.trim(), "", "row 1 cleared");
+    }
+
+    /// VT52 ESC K erases from cursor to end of line (same as EL 0).
+    #[test]
+    fn vt52_erase_to_end_of_line() {
+        let (mut screen, mut viewport) = setup();
+        // Fill row 0, position at col 3, enter VT52, erase to EOL.
+        feed(
+            b"aaaaaaaaaa\x1b[1;4H\x1b[?2l\x1bK",
+            &mut screen,
+            &mut viewport,
+        );
+        let r0 = row_text(&screen, &viewport, 0);
+        assert_eq!(&r0[..3], "aaa");
+        assert_eq!(r0[3..].trim(), "");
+    }
+
+    /// VT52 ESC F/G toggle DEC Special Graphics on G0 within one parse pass.
+    #[test]
+    fn vt52_graphics_mode_on() {
+        let (mut screen, mut viewport) = setup();
+        feed(b"\x1b[?2l\x1bF", &mut screen, &mut viewport);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::DecSpecialGraphics
+        );
+    }
+
+    #[test]
+    fn vt52_graphics_mode_off() {
+        let (mut screen, mut viewport) = setup();
+        // Enable then disable in the same parse pass.
+        feed(b"\x1b[?2l\x1bF\x1bG", &mut screen, &mut viewport);
+        assert_eq!(
+            screen.charset.designated(GraphicSetSlot::G0),
+            CharacterSet::Ascii
+        );
+    }
+
+    /// VT52 ESC Z identify returns ESC / Z.
+    #[test]
+    fn vt52_identify() {
+        let (mut screen, mut viewport) = setup();
+        let out = feed_with_output(b"\x1b[?2l\x1bZ", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1b/Z");
+    }
+
+    /// CSI sequences are silently dropped in VT52 mode.
+    #[test]
+    fn vt52_csi_suppressed() {
+        let (mut screen, mut viewport) = setup();
+        // Position cursor at col 5 (1-based col 6), enter VT52, send CSI CUB.
+        feed(b"\x1b[1;6H\x1b[?2l\x1b[3D", &mut screen, &mut viewport);
+        // CSI cursor-back should have been dropped.
+        assert_eq!(screen.cursor.col, 5, "cursor should not move in VT52 mode");
+    }
+
+    /// VT52 reverse index (ESC I) scrolls down at the top of the scroll region.
+    #[test]
+    fn vt52_reverse_index_scrolls() {
+        let (mut screen, mut viewport) = setup();
+        // Fill row 0 with text, CUP to row 0, enter VT52, reverse index.
+        feed(
+            b"line0\r\nline1\r\nline2\x1b[1;1H\x1b[?2l\x1bI",
+            &mut screen,
+            &mut viewport,
+        );
+        // Row 0 should now be blank (scrolled down).
+        let r0 = row_text(&screen, &viewport, 0);
+        assert_eq!(r0.trim(), "");
+    }
+}
