@@ -47,6 +47,166 @@ fn split_osc(payload: &[u8]) -> (&[u8], &[u8]) {
     }
 }
 
+#[cfg(test)]
+mod process_tests {
+    use crate::test_support::TestTerm;
+
+    fn emit_prompt(
+        term: &mut TestTerm,
+        label: &str,
+        output_lines: u32,
+        exit: i32,
+    ) {
+        term.process(b"\x1b]133;A\x1b\\");
+        term.process(label.as_bytes());
+        term.process(b"\x1b]133;B\x1b\\");
+        term.process(b"\n\x1b]133;C\x1b\\");
+        for i in 0..output_lines {
+            term.process(format!("out{i}\n").as_bytes());
+        }
+        term.process(format!("\x1b]133;D;{exit}\x1b\\").as_bytes());
+    }
+
+    #[test]
+    fn osc_7_updates_terminal_cwd() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b]7;file://localhost/tmp/work\x1b\\");
+        assert_eq!(
+            term.metadata.current_directory.as_deref(),
+            Some(std::path::Path::new("/tmp/work"))
+        );
+    }
+
+    #[test]
+    fn osc_8_attaches_link_to_subsequent_cells() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b]8;;https://example.com\x1b\\link\x1b]8;;\x1b\\after");
+        assert_eq!(term.hyperlink_at(0, 0), Some("https://example.com"));
+        assert_eq!(term.hyperlink_at(0, 3), Some("https://example.com"));
+        assert_eq!(term.hyperlink_at(0, 4), None);
+    }
+
+    #[test]
+    fn osc_8_close_clears_current_link() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b]8;;https://example.com\x1b\\");
+        assert!(term.active.current_hyperlink.is_some());
+        term.process(b"\x1b]8;;\x1b\\");
+        assert!(term.active.current_hyperlink.is_none());
+    }
+
+    #[test]
+    fn osc_2_updates_terminal_title() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b]2;build ok\x1b\\");
+        assert_eq!(term.metadata.current_title.as_deref(), Some("build ok"));
+    }
+
+    #[test]
+    fn osc_0_updates_terminal_title() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b]0;hi\x1b\\");
+        assert_eq!(term.metadata.current_title.as_deref(), Some("hi"));
+    }
+
+    #[test]
+    fn osc_133_stamps_exit_status_onto_prompt_row_through_process() {
+        let mut term = TestTerm::new(10, 6, 100, 16, 8);
+        emit_prompt(&mut term, "$ ls", 1, 0);
+        let prompt_row = &term.active.grid.rows[0];
+        assert!(prompt_row.prompt_start);
+        assert_eq!(prompt_row.exit_status, Some(0));
+    }
+
+    #[test]
+    fn osc_133_exit_status_survives_scrollback_pop() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        emit_prompt(&mut term, "$ first", 2, 0);
+        emit_prompt(&mut term, "$ second", 2, 1);
+        let first = term
+            .active
+            .grid
+            .rows
+            .iter()
+            .find(|r| r.prompt_start)
+            .expect("first prompt row survived");
+        assert_eq!(first.exit_status, Some(0));
+    }
+
+    #[test]
+    fn prompt_marks_ride_reflow_shrink_then_grow() {
+        let mut term = TestTerm::new(20, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x1b\\");
+        term.process(b"$ this is a long prompt line");
+        term.process(b"\x1b]133;B\x1b\\\n");
+        term.process(b"\x1b]133;D;0\x1b\\");
+
+        term.resize(8, 6);
+        term.resize(20, 6);
+
+        let prompt_rows: Vec<_> = term
+            .active
+            .grid
+            .rows
+            .iter()
+            .enumerate()
+            .filter(|(_, r)| r.prompt_start)
+            .collect();
+        assert_eq!(
+            prompt_rows.len(),
+            1,
+            "exactly one prompt mark after reflow round-trip, got {}: {:#?}",
+            prompt_rows.len(),
+            prompt_rows
+                .iter()
+                .map(|(i, r)| (i, r.cells.iter().map(|c| c.as_str()).collect::<String>()))
+                .collect::<Vec<_>>()
+        );
+        assert_eq!(prompt_rows[0].1.exit_status, Some(0));
+    }
+
+    #[test]
+    fn prompt_marks_do_not_duplicate_on_continuation_rows() {
+        let mut term = TestTerm::new(20, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x1b\\");
+        term.process(b"$ a command that will definitely wrap");
+        term.process(b"\x1b]133;B\x1b\\\n");
+
+        term.resize(8, 6);
+
+        for i in 0..term.active.grid.rows.len() {
+            let is_head = i == 0 || !term.active.grid.rows[i - 1].wrapped;
+            if !is_head {
+                let row = &term.active.grid.rows[i];
+                assert!(
+                    !row.prompt_start,
+                    "continuation row {i} unexpectedly carries prompt_start"
+                );
+                assert!(
+                    !row.output_start,
+                    "continuation row {i} unexpectedly carries output_start"
+                );
+            }
+        }
+    }
+
+    #[test]
+    fn row_clear_drops_marks() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        emit_prompt(&mut term, "$ cmd", 1, 0);
+        term.process(b"\x1b[2J");
+        let any_marks = term
+            .active
+            .grid
+            .rows
+            .iter()
+            .rev()
+            .take(term.viewport.rows as usize)
+            .any(|r| r.prompt_start || r.output_start || r.exit_status.is_some());
+        assert!(!any_marks, "ED 2 must drop marks on visible rows");
+    }
+}
+
 /// Resolve xterm OSC 52 selector characters into concrete clipboard kinds.
 ///
 /// Selectors: `c` and digits `0`..`7` target the clipboard; `p`, `s`, `q`

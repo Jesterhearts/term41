@@ -3079,3 +3079,202 @@ mod tests {
         assert_eq!(r0.trim(), "");
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use crate::ConformanceLevel;
+    use crate::ProgramAllowlist;
+    use crate::test_support::TestTerm;
+
+    fn visible_text(term: &TestTerm) -> String {
+        let mut s = String::new();
+        for row in 0..term.viewport.rows {
+            let row = term.visible_row(row);
+            for cell in &row.cells {
+                s.push_str(cell);
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    #[test]
+    fn bel_byte_sets_bell_pending() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        assert!(!term.take_bell_pending());
+        term.process(b"\x07");
+        assert!(term.take_bell_pending());
+        assert!(!term.take_bell_pending());
+    }
+
+    #[test]
+    fn bel_inside_text_is_caught() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"hi\x07there");
+        assert!(term.take_bell_pending());
+    }
+
+    #[test]
+    fn bel_does_not_advance_cursor() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x07");
+        assert_eq!(term.active.cursor.col, 0);
+        assert_eq!(term.active.cursor.row, 0);
+    }
+
+    #[test]
+    fn da1_replies_vt420() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?63;7;21;22;28;29c");
+    }
+
+    #[test]
+    fn da1_with_zero_param_also_replies() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[0c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?63;7;21;22;28;29c");
+    }
+
+    #[test]
+    fn da2_replies_as_vt420_compatible() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[>c");
+        assert_eq!(term.take_pending_output(), b"\x1b[>41;0;0c");
+    }
+
+    #[test]
+    fn decscl_level1_changes_da1_prefix_without_resetting_screen() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"hello\x1b[?1004h\x1b[61\"p");
+        assert_eq!(term.modes.conformance_level, ConformanceLevel::Level1);
+        assert_eq!(term.modes.c1_mode, crate::C1Mode::SevenBit);
+        assert!(term.modes.focus_reporting);
+        term.process(b"\x1b[c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?61;7;21;22;28;29c");
+        let row_text: String = term
+            .visible_row(0)
+            .cells
+            .iter()
+            .map(|c| c.as_str())
+            .collect();
+        assert!(row_text.starts_with("hello"), "row text was {row_text:?}");
+    }
+
+    #[test]
+    fn decscl_with_8bit_controls_switches_reply_encoding() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[64;2\"p\x1b[>c");
+        assert_eq!(term.modes.conformance_level, ConformanceLevel::Level4);
+        assert_eq!(term.modes.c1_mode, crate::C1Mode::EightBit);
+        assert_eq!(term.take_pending_output(), b"\x9b>41;0;0c");
+    }
+
+    #[test]
+    fn s8c1t_is_ignored_in_level1_mode() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[61\"p\x1b G\x1b[>c");
+        assert_eq!(term.modes.conformance_level, ConformanceLevel::Level1);
+        assert_eq!(term.modes.c1_mode, crate::C1Mode::SevenBit);
+        assert_eq!(term.take_pending_output(), b"\x1b[>41;0;0c");
+    }
+
+    #[test]
+    fn da1_downgrades_when_macros_are_not_allowlisted() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?63;7;21;22;28;29c");
+    }
+
+    #[test]
+    fn ris_clears_stored_macros() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.set_macro_permissions(ProgramAllowlist::AllowAll);
+        term.process(b"\x1bP1;1;1!z414243\x1b\\");
+        term.process(b"\x1bc");
+        term.process(b"\x1b[1*z");
+        assert!(visible_text(&term).trim().is_empty());
+    }
+
+    #[test]
+    fn decrqm_reports_vt525_color_private_modes() {
+        let mut term = TestTerm::new(10, 3, 10, 16, 8);
+        term.process(b"\x1b[?114h\x1b[?115h\x1b[?116h\x1b[?117h");
+        term.process(b"\x1b[?114$p\x1b[?115$p\x1b[?116$p\x1b[?117$p");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1b[?114;1$y\x1b[?115;1$y\x1b[?116;1$y\x1b[?117;1$y"
+        );
+    }
+
+    #[test]
+    fn page_geometry_commands_queue_host_resize() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[36*|");
+        assert_eq!(term.take_pending_host_resize(), Some((80, 36)));
+        term.process(b"\x1b[132$|");
+        assert_eq!(term.take_pending_host_resize(), Some((132, 36)));
+    }
+
+    #[test]
+    fn decrqm_reports_permanent_mode_states() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b[10$p\x1b[20$p\x1b[?60$p");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1b[10;4$y\x1b[20;2$y\x1b[?60;4$y"
+        );
+    }
+
+    #[test]
+    fn dectst_power_up_self_test_resets_terminal_state() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        term.process(b"\x1b[?1004h\x1b(0hello");
+        term.process(b"\x1b[4;1y");
+
+        assert!(!term.modes.focus_reporting);
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G0),
+            crate::charset::CharacterSet::Ascii
+        );
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
+        for r in term.active.grid.rows.iter().rev().take(3) {
+            assert_eq!(r.content_len(), 0);
+        }
+    }
+
+    #[test]
+    fn deccolm_ignored_without_mode_40() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?3h");
+        assert_eq!(term.viewport.cols, 80);
+    }
+
+    #[test]
+    fn deccolm_set_resizes_to_132_and_clears() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"hello");
+        assert_eq!(term.viewport.cols, 80);
+        term.process(b"\x1b[?40h\x1b[?3h");
+        assert_eq!(term.viewport.cols, 132);
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
+        assert_eq!(term.active.scroll_top, 0);
+        let first_vis = term.active.grid.rows.len() - 24;
+        assert_eq!(term.active.grid.rows[first_vis].cells[0].as_str(), " ");
+    }
+
+    #[test]
+    fn deccolm_reset_restores_original_width() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?40h");
+        term.process(b"\x1b[?3h");
+        assert_eq!(term.viewport.cols, 132);
+        term.process(b"\x1b[?3l");
+        assert_eq!(term.viewport.cols, 80);
+        assert_eq!(term.active.cursor.row, 0);
+    }
+}

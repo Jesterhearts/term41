@@ -309,3 +309,33 @@ mod dispatch_tests {
         );
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::test_support::TestTerm;
+
+    #[test]
+    fn kitty_push_records_flags_through_process() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[>1u");
+        assert_eq!(
+            term.kitty_keyboard.current(),
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES
+        );
+    }
+
+    #[test]
+    fn kitty_pop_default_unwinds_one_frame_through_process() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[>1u\x1b[<u");
+        assert!(term.kitty_keyboard.current().is_empty());
+    }
+
+    #[test]
+    fn kitty_query_writes_response_to_pending_output_through_process() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[>3u\x1b[?u");
+        assert_eq!(term.take_pending_output(), b"\x1b[?3u");
+    }
+}

@@ -811,3 +811,321 @@ pub(super) fn resize_screen(
     });
     screen.offset = screen.offset.min(scrollback);
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::StatusDisplayKind;
+    use crate::MouseTracking;
+    use crate::Terminal;
+    use crate::test_support::TestTerm;
+    use crate::view;
+
+    fn visible_text(term: &Terminal) -> String {
+        let mut s = String::new();
+        for r in 0..term.viewport.rows {
+            let row = view::visible_row(&term.active, &term.viewport, r);
+            for cell in &row.cells {
+                s.push_str(cell);
+            }
+            s.push('\n');
+        }
+        s
+    }
+
+    fn visible_text_flat(term: &Terminal) -> String {
+        visible_text(term).replace('\n', "")
+    }
+
+    fn status_line_text(term: &Terminal) -> Option<String> {
+        view::status_line_row(&term.active).map(|row| row.cells.concat())
+    }
+
+    #[test]
+    fn alt_screen_1049_hides_primary_and_restores() {
+        let mut term = TestTerm::new(8, 4, 100, 16, 8);
+        term.process(b"hello");
+        term.process(b"\x1b[?1049h");
+
+        assert!(term.on_alt_screen);
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
+        assert!(
+            !visible_text(&term).contains("hello"),
+            "alt screen should be blank, got {:?}",
+            visible_text(&term)
+        );
+
+        term.process(b"WORLD");
+        assert!(visible_text(&term).contains("WORLD"));
+
+        term.process(b"\x1b[?1049l");
+
+        assert!(!term.on_alt_screen);
+        assert!(visible_text(&term).contains("hello"));
+        assert_eq!(term.active.cursor.col, 5);
+        assert_eq!(term.active.cursor.row, 0);
+    }
+
+    #[test]
+    fn decssdt_uses_one_physical_row_for_status_line() {
+        let mut term = TestTerm::new(8, 4, 100, 16, 8);
+
+        assert_eq!(term.viewport.rows, 4);
+        assert_eq!(term.total_rows(), 4);
+
+        term.process(b"\x1b[2$~");
+
+        assert!(term.status_line_visible());
+        assert_eq!(term.viewport.rows, 3);
+        assert_eq!(term.total_rows(), 4);
+
+        term.process(b"\x1b[0$~");
+
+        assert!(!term.status_line_visible());
+        assert_eq!(term.viewport.rows, 4);
+        assert_eq!(term.total_rows(), 4);
+    }
+
+    #[test]
+    fn decsasd_routes_printing_to_host_writable_status_line() {
+        let mut term = TestTerm::new(8, 4, 100, 16, 8);
+
+        term.process(b"\x1b[2$~");
+        term.process(b"\x1b[1$}");
+        term.process(b"STATUS");
+        term.process(b"\x1b[0$}");
+        term.process(b"main");
+
+        assert_eq!(status_line_text(&term).unwrap().trim_end(), "STATUS");
+        assert!(visible_text(&term).contains("main"));
+        assert!(!visible_text(&term).contains("STATUS"));
+    }
+
+    #[test]
+    fn visible_screen_tracks_live_bottom_after_scrollback_growth() {
+        let mut term = TestTerm::new(8, 2, 100, 16, 8);
+        term.process(b"111111112222222233333333");
+        let text = visible_text(&term);
+        assert!(
+            text.contains("22222222"),
+            "visible text should include the second wrapped row: {text:?}"
+        );
+        assert!(
+            text.contains("33333333"),
+            "visible text should include the live bottom row: {text:?}"
+        );
+    }
+
+    #[test]
+    fn alt_screen_1049_resize_preserves_primary() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"primary-content");
+        term.process(b"\x1b[?1049h");
+        term.process(b"ALT");
+
+        term.resize(12, 5);
+        term.process(b"\x1b[?1049l");
+
+        let flat = visible_text_flat(&term);
+        assert!(
+            flat.contains("primary-content"),
+            "primary content lost through resize: {:?}",
+            flat
+        );
+        assert_eq!(term.viewport.cols, 12);
+        assert_eq!(term.viewport.rows, 5);
+    }
+
+    #[test]
+    fn alt_screen_inherits_scrollback_by_default() {
+        let mut term = TestTerm::new(8, 3, 100, 16, 8);
+        term.process(b"\x1b[?1049h");
+
+        for _ in 0..10 {
+            term.process(b"line\n");
+        }
+        assert!(term.active.grid.scrollback_len(&term.viewport) > 0);
+    }
+
+    #[test]
+    fn strict_alt_screen_has_no_scrollback() {
+        let mut term = TestTerm::new_with_alt_scrollback_policy(8, 3, 100, true, 16, 8);
+        term.process(b"\x1b[?1049h");
+
+        for _ in 0..10 {
+            term.process(b"line\n");
+        }
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 0);
+    }
+
+    #[test]
+    fn decsc_decrc_restores_cursor_and_colors() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"\x1b[3;5H");
+        term.process(b"\x1b[31m");
+        term.process(b"\x1b7");
+        let saved_fg = term.active.fg;
+        term.process(b"\x1b[1;1H\x1b[32m");
+        term.process(b"\x1b8");
+
+        assert_eq!(term.active.cursor.row, 2);
+        assert_eq!(term.active.cursor.col, 4);
+        assert_eq!(term.active.fg, saved_fg);
+    }
+
+    #[test]
+    fn mode_47_does_not_save_cursor() {
+        let mut term = TestTerm::new(8, 3, 100, 16, 8);
+        term.process(b"\x1b[2;3H");
+        term.process(b"\x1b[?47h");
+        term.process(b"\x1b[1;1H");
+        term.process(b"\x1b[?47l");
+
+        assert_eq!(term.active.cursor.row, 1);
+        assert_eq!(term.active.cursor.col, 2);
+    }
+
+    #[test]
+    fn alt_screen_entry_clears_alt_images() {
+        let mut term = TestTerm::new(10, 10, 0, 16, 8);
+        term.process(b"\x1b[?1049h");
+        assert!(term.on_alt_screen);
+        let id = term.images.next_image_id;
+        term.images.next_image_id += 1;
+        term.active.images.insert(
+            id,
+            crate::PlacedImage {
+                image: image41::DecodedImage::single_frame(1, 16, vec![]),
+                id,
+                row: 3,
+                col: 0,
+                display_width: 1,
+                display_height: 16,
+                placed_at: std::time::Instant::now(),
+            },
+        );
+
+        term.process(b"\x1b[?1049l");
+        assert!(!term.on_alt_screen);
+        term.process(b"\x1b[?1049h");
+
+        assert!(!term.active.images.contains_key(&id));
+    }
+
+    #[test]
+    fn alt_screen_reentry_resets_cursor_and_pen_state() {
+        let mut term = TestTerm::new(10, 4, 0, 16, 8);
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[3;4H\x1b[30;46m");
+        term.process(b"\x1b[?25l");
+        term.process(b"\x1b[?1049l");
+        term.process(b"\x1b[?1049h");
+
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
+        assert_eq!(term.active.fg, term.active.grid.default_fg);
+        assert_eq!(term.active.bg, term.active.grid.default_bg);
+        assert_eq!(term.active.attrs, font41::attrs::CellAttrs::default());
+        assert_eq!(term.active.underline, font41::attrs::UnderlineStyle::None);
+        assert_eq!(term.active.underline_color, None);
+        assert!(term.active.cursor_visible);
+    }
+
+    #[test]
+    fn dectcem_hides_and_shows_cursor() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        assert!(term.active.cursor_visible, "default must be visible");
+        term.process(b"\x1b[?25l");
+        assert!(!term.active.cursor_visible);
+        term.process(b"\x1b[?25h");
+        assert!(term.active.cursor_visible);
+    }
+
+    #[test]
+    fn dectcem_state_is_per_screen() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[?25l");
+        term.process(b"\x1b[?1049h");
+        assert!(term.active.cursor_visible);
+        term.process(b"\x1b[?1049l");
+        assert!(!term.active.cursor_visible);
+    }
+
+    #[test]
+    fn ris_clears_visible_and_resets_cursor() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        term.process(b"hello\x1b[5;5H");
+        term.process(b"\x1bc");
+
+        assert_eq!(term.active.cursor.row, 0);
+        assert_eq!(term.active.cursor.col, 0);
+        for r in term.active.grid.rows.iter().rev().take(3) {
+            assert_eq!(r.content_len(), 0);
+        }
+    }
+
+    #[test]
+    fn ris_returns_to_primary_screen() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        term.process(b"\x1b[?1049h");
+        assert!(term.on_alt_screen);
+        term.process(b"\x1bc");
+        assert!(!term.on_alt_screen);
+    }
+
+    #[test]
+    fn status_line_demo_ris_round_trip_keeps_visible_rows_in_bounds() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.set_default_status_display(StatusDisplayKind::Indicator);
+
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[?1049l");
+        term.process(b"\x1b[2$~");
+        term.process(b"\x1b[1$}STATUS > selftest41 > host-writable demo");
+        term.process(b"\x1bc");
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[2J\x1b[H");
+        term.process(b"\x1b[?1049l");
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[2J\x1b[H");
+
+        assert!(
+            term.inner.active.grid.rows.len() >= term.inner.viewport.rows as usize,
+            "active grid shorter than viewport: len={} rows={}",
+            term.inner.active.grid.rows.len(),
+            term.inner.viewport.rows
+        );
+        for row in 0..term.inner.viewport.rows {
+            let _ = view::visible_row(&term.inner.active, &term.inner.viewport, row);
+        }
+    }
+
+    #[test]
+    fn ris_resets_modes_the_app_flipped() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        term.process(b"\x1b[?2004h");
+        term.process(b"\x1b[?1004h");
+        term.process(b"\x1b[?1000h");
+        term.process(b"\x1b[?25l");
+        term.process(b"\x1bc");
+
+        assert!(!term.modes.bracketed_paste);
+        assert!(!term.modes.focus_reporting);
+        assert_eq!(term.modes.mouse_tracking, MouseTracking::Off);
+        assert!(term.active.cursor_visible);
+    }
+
+    #[test]
+    fn ris_preserves_scrollback() {
+        let mut term = TestTerm::new(4, 2, 100, 16, 8);
+        for _ in 0..5 {
+            term.process(b"x\r\n");
+        }
+        let rows_before = term.active.grid.rows.len();
+        assert!(rows_before > 2, "setup should have produced scrollback");
+
+        term.process(b"\x1bc");
+
+        assert_eq!(term.active.grid.rows.len(), rows_before);
+    }
+}

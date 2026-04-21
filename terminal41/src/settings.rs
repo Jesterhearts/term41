@@ -75,3 +75,77 @@ pub fn set_default_status_display(
         status_display,
     );
 }
+
+#[cfg(test)]
+mod tests {
+    use palette::Srgb;
+
+    use super::*;
+    use crate::CursorShape;
+    use crate::test_support::TestTerm;
+
+    #[test]
+    fn config_default_cursor_style_overrides_xterm_default() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.set_default_cursor_style(CursorStyle {
+            shape: CursorShape::Underline,
+            blink: false,
+        });
+        assert_eq!(term.cursor_style.shape, CursorShape::Underline);
+        assert!(!term.cursor_style.blink);
+    }
+
+    #[test]
+    fn set_scrollback_limit_takes_effect_on_next_push() {
+        let mut term = TestTerm::new(8, 2, 100, 16, 8);
+        for i in 0..50u32 {
+            term.process(format!("line{i}\n").as_bytes());
+        }
+        term.set_scrollback_policy(5, false);
+        for i in 0..20u32 {
+            term.process(format!("after{i}\n").as_bytes());
+        }
+        let max_expected = term.viewport.rows as usize + 5;
+        assert!(
+            term.active.grid.rows.len() <= max_expected,
+            "grid kept {} rows after lowering limit to 5 (max {})",
+            term.active.grid.rows.len(),
+            max_expected,
+        );
+    }
+
+    #[test]
+    fn set_palette_updates_grid_defaults_and_existing_default_cells() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"ab");
+        let old = term.palette.clone();
+        let mut new = old.clone();
+        new.fg = Srgb::new(10, 20, 30);
+        new.bg = Srgb::new(40, 50, 60);
+
+        term.set_palette(new.clone());
+
+        assert_eq!(term.palette.fg, new.fg);
+        assert_eq!(term.palette.bg, new.bg);
+        assert_eq!(term.active.grid.default_fg, new.fg);
+        assert_eq!(term.active.grid.default_bg, new.bg);
+        assert_eq!(term.active.grid.rows[0].fg[0], new.fg);
+        assert_eq!(term.active.grid.rows[0].bg[0], new.bg);
+        assert_eq!(term.active.fg, new.fg);
+        assert_eq!(term.active.bg, new.bg);
+    }
+
+    #[test]
+    fn set_palette_preserves_non_default_foreground_colors() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[31mx");
+        let old_fg = term.active.grid.rows[0].fg[0];
+        let mut new = term.palette.clone();
+        new.fg = Srgb::new(10, 20, 30);
+        new.bg = Srgb::new(40, 50, 60);
+
+        term.set_palette(new);
+
+        assert_eq!(term.active.grid.rows[0].fg[0], old_fg);
+    }
+}

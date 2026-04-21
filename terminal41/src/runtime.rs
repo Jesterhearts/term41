@@ -70,3 +70,12 @@ pub(crate) fn run_terminal_thread(
 pub(crate) fn terminal_batch_budget_exhausted(batch_start: std::time::Instant) -> bool {
     batch_start.elapsed() >= TERMINAL_BATCH_TIME_BUDGET
 }
+
+#[cfg(test)]
+mod tests {
+    #[test]
+    fn terminal_batch_budget_trips_on_time_limit() {
+        let start = std::time::Instant::now() - super::TERMINAL_BATCH_TIME_BUDGET;
+        assert!(super::terminal_batch_budget_exhausted(start));
+    }
+}

@@ -241,3 +241,102 @@ pub fn select_command_at(
         origin: anchor,
     });
 }
+
+#[cfg(test)]
+mod tests {
+    use std::path::PathBuf;
+
+    use crate::test_support::TestTerm;
+
+    fn emit_prompt(
+        term: &mut TestTerm,
+        label: &str,
+        output_lines: u32,
+        exit: i32,
+    ) {
+        term.process(b"\x1b]133;A\x1b\\");
+        term.process(label.as_bytes());
+        term.process(b"\x1b]133;B\x1b\\");
+        term.process(b"\n\x1b]133;C\x1b\\");
+        for i in 0..output_lines {
+            term.process(format!("out{i}\n").as_bytes());
+        }
+        term.process(format!("\x1b]133;D;{exit}\x1b\\").as_bytes());
+    }
+
+    #[test]
+    fn indicator_status_formats_path_and_running_command() {
+        let mut term = TestTerm::new(16, 4, 100, 16, 8);
+        term.metadata.current_directory = Some(PathBuf::from("/tmp/project"));
+        term.process(b"\x1b[1$~");
+        term.process(b"\x1b]133;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]133;B\x07");
+        term.process(b"cargo test");
+        term.process(b"\x1b]133;C\x07");
+
+        assert_eq!(
+            term.indicator_status_text().as_deref(),
+            Some("/ > tmp > project > cargo test")
+        );
+    }
+
+    #[test]
+    fn indicator_status_omits_command_when_not_running() {
+        let mut term = TestTerm::new(16, 4, 100, 16, 8);
+        term.metadata.current_directory = Some(PathBuf::from("/tmp/project"));
+        term.process(b"\x1b[1$~");
+        term.process(b"\x1b]133;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]133;B\x07");
+        term.process(b"cargo test");
+        term.process(b"\x1b]133;C\x07");
+        term.process(b"\x1b]133;D;0\x07");
+
+        assert_eq!(
+            term.indicator_status_text().as_deref(),
+            Some("/ > tmp > project")
+        );
+    }
+
+    #[test]
+    fn scroll_to_prev_prompt_moves_viewport() {
+        let mut term = TestTerm::new(10, 4, 200, 16, 8);
+        emit_prompt(&mut term, "$ a", 3, 0);
+        emit_prompt(&mut term, "$ b", 3, 0);
+        emit_prompt(&mut term, "$ c", 3, 0);
+        let before = term.active.offset;
+        term.scroll_to_prev_prompt();
+        assert!(term.active.offset > before);
+    }
+
+    #[test]
+    fn scroll_to_prev_prompt_silent_with_no_marks() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"plain\noutput\nwithout\nshell integration\n");
+        let before = term.active.offset;
+        term.scroll_to_prev_prompt();
+        assert_eq!(term.active.offset, before);
+    }
+
+    #[test]
+    fn scroll_to_next_prompt_walks_forward() {
+        let mut term = TestTerm::new(10, 4, 200, 16, 8);
+        emit_prompt(&mut term, "$ a", 3, 0);
+        emit_prompt(&mut term, "$ b", 3, 0);
+        emit_prompt(&mut term, "$ c", 3, 0);
+        term.active.offset = term.active.grid.scrollback_len(&term.viewport);
+        let start = term.active.offset;
+        term.scroll_to_next_prompt();
+        assert!(term.active.offset < start);
+    }
+
+    #[test]
+    fn scroll_to_next_prompt_silent_at_last_prompt() {
+        let mut term = TestTerm::new(10, 4, 200, 16, 8);
+        emit_prompt(&mut term, "$ only", 3, 0);
+        let before = term.active.offset;
+        term.scroll_to_next_prompt();
+        assert_eq!(term.active.offset, before);
+    }
+}

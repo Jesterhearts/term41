@@ -753,3 +753,481 @@ mod tests {
         assert_eq!(expand_to_line(&row), (0, 4));
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use clip41::Clipboard;
+    use clip41::ClipboardKind;
+
+    use super::*;
+    use crate::test_support::TestTerm;
+
+    fn write_row(
+        term: &mut TestTerm,
+        screen_row: u32,
+        text: &str,
+    ) {
+        term.process(format!("\x1b[{};1H", screen_row + 1).as_bytes());
+        term.process(text.as_bytes());
+    }
+
+    #[test]
+    fn start_selection_char_mode_is_empty_initially() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            1,
+            SelectionMode::Char,
+        );
+        assert!(term.selection.is_some());
+        assert!(!term.has_selection());
+    }
+
+    #[test]
+    fn char_selection_extend_produces_text() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        write_row(&mut term, 0, "hello");
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            4,
+            0,
+        );
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn word_selection_snaps_to_boundaries() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        write_row(&mut term, 0, "hello world");
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            0,
+            SelectionMode::Word,
+        );
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn line_selection_covers_full_row_through_test_term() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        write_row(&mut term, 0, "hello world");
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            5,
+            0,
+            SelectionMode::Line,
+        );
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("hello world")
+        );
+    }
+
+    #[test]
+    fn selection_spans_rows_with_newline_separator() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        write_row(&mut term, 0, "abc");
+        write_row(&mut term, 1, "def");
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            1,
+        );
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("abc\ndef")
+        );
+    }
+
+    #[test]
+    fn selection_drags_backwards_flips_anchor_head() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        write_row(&mut term, 0, "hello world");
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            8,
+            0,
+            SelectionMode::Word,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            0,
+        );
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("hello world")
+        );
+    }
+
+    #[test]
+    fn is_cell_selected_matches_contains() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        write_row(&mut term, 0, "abcdefghij");
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            2,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            5,
+            0,
+        );
+        assert!(!is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            1,
+            0
+        ));
+        assert!(is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            2,
+        ));
+        assert!(is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            5,
+        ));
+        assert!(!is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            6
+        ));
+        assert!(!is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            1,
+            3,
+        ));
+    }
+
+    #[test]
+    fn search_finds_exact_case_sensitive_matches() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        write_row(&mut term, 0, "abc foo xyz FOO bar");
+        term.open_search();
+        assert!(term.search_active());
+        term.active.offset = search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "foo",
+        );
+        assert_eq!(term.search.matches.len(), 1);
+        let m = term.search.matches[0];
+        assert_eq!((m.start_col, m.end_col), (4, 6));
+        assert!(is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            4
+        ));
+        assert!(is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            5
+        ));
+        assert!(is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            6
+        ));
+        assert!(!is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            3
+        ));
+        assert!(!is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            7
+        ));
+        assert!(!is_cell_match(
+            &term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            12
+        ));
+    }
+
+    #[test]
+    fn search_close_clears_state() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        write_row(&mut term, 0, "hello");
+        term.open_search();
+        term.active.offset = search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "hello",
+        );
+        assert_eq!(term.search.matches.len(), 1);
+        close_search(&mut term.inner.search, &mut term.inner.selection);
+        assert!(!term.search_active());
+        assert!(term.search.matches.is_empty());
+        assert!(term.search.query.is_empty());
+    }
+
+    #[test]
+    fn search_close_promotes_active_match_to_selection() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        write_row(&mut term, 0, "abc foo def");
+        term.open_search();
+        term.active.offset = search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "foo",
+        );
+        close_search(&mut term.inner.search, &mut term.inner.selection);
+        assert!(is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            4
+        ));
+        assert!(is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            5
+        ));
+        assert!(is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            6
+        ));
+        assert!(!is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            3
+        ));
+        assert!(!is_cell_selected(
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            7
+        ));
+    }
+
+    #[test]
+    fn search_close_without_matches_leaves_prior_selection() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        write_row(&mut term, 0, "hello world");
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            4,
+            0,
+        );
+        assert!(term.has_selection());
+        term.open_search();
+        term.active.offset = search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "nonexistent",
+        );
+        close_search(&mut term.inner.search, &mut term.inner.selection);
+        assert!(is_cell_selected(
+            term.selection.as_ref(),
+            &term.active,
+            &term.inner.viewport,
+            0,
+            0
+        ));
+        assert!(is_cell_selected(
+            term.selection.as_ref(),
+            &term.active,
+            &term.inner.viewport,
+            0,
+            4
+        ));
+    }
+
+    #[test]
+    fn search_next_wraps_around() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        write_row(&mut term, 0, "foo");
+        write_row(&mut term, 1, "foo");
+        write_row(&mut term, 2, "foo");
+        term.open_search();
+        term.active.offset = search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "foo",
+        );
+        assert_eq!(term.search.matches.len(), 3);
+        let start_idx = term.search.active_idx;
+        term.active.offset = search_step_next(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+        );
+        term.active.offset = search_step_next(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+        );
+        term.active.offset = search_step_next(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+        );
+        assert_eq!(term.search.active_idx, start_idx);
+    }
+
+    #[test]
+    fn search_backspace_trims_query_and_rescans() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        write_row(&mut term, 0, "fox foxy fo");
+        term.open_search();
+        term.active.offset = search_append(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+            "foxy",
+        );
+        assert_eq!(term.search.matches.len(), 1);
+        term.active.offset = search_backspace(
+            &mut term.inner.search,
+            &term.inner.active,
+            &term.inner.viewport,
+        );
+        assert_eq!(term.search.matches.len(), 2);
+    }
+
+    #[test]
+    fn copy_selection_writes_to_clipboard() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        term.clipboard = Clipboard::in_memory();
+        write_row(&mut term, 0, "copy-me");
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            6,
+            0,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            6,
+            0,
+        );
+        copy_selection(
+            &mut term.inner.clipboard,
+            term.inner.selection.as_ref(),
+            &term.inner.active,
+            ClipboardKind::Clipboard,
+        );
+        assert_eq!(
+            term.clipboard.get(ClipboardKind::Clipboard).as_deref(),
+            Some("copy-me")
+        );
+        assert!(term.has_selection());
+    }
+
+    #[test]
+    fn clear_selection_drops_state() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        write_row(&mut term, 0, "hello");
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            4,
+            0,
+        );
+        term.inner.selection = None;
+        assert!(term.inner.selection.is_none());
+        assert!(selection_text(term.inner.selection.as_ref(), &term.inner.active).is_none());
+    }
+}

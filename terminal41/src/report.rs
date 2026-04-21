@@ -607,3 +607,300 @@ fn hex_decode(hex: &[u8]) -> Vec<u8> {
 fn hex_encode(bytes: &[u8]) -> String {
     bytes.iter().map(|b| format!("{b:02X}")).collect()
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use palette::Srgb;
+
+    use crate::DecColorSpace;
+    use crate::dec::color::report_color_table;
+    use crate::test_support::TestTerm;
+
+    #[test]
+    fn xtversion_replies_with_name_and_version() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[>0q");
+        let expected = format!("\x1bP>|term41 {}\x1b\\", env!("CARGO_PKG_VERSION"));
+        assert_eq!(term.take_pending_output(), expected.as_bytes());
+    }
+
+    #[test]
+    fn decrqss_reports_page_geometry_settings() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[36*|\x1b[72t\x1b[132$|");
+        super::handle_decrqss(b"t", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r72t\x1b\\");
+        super::handle_decrqss(b"*|", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r36*|\x1b\\");
+        super::handle_decrqss(b"$|", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r132$|\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_reports_status_and_attr_change_state() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[2$~\x1b[1$}\x1b[2*x");
+        super::handle_decrqss(b"$~", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r2$~\x1b\\");
+        super::handle_decrqss(b"$}", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r1$}\x1b\\");
+        super::handle_decrqss(b"*x", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r2*x\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_reports_normal_text_color_assignment() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        super::handle_decrqss(b"1,|", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r1;7;0,|\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_reports_window_frame_color_assignment() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[2;4;5,|");
+        super::handle_decrqss(b"2,|", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r2;4;5,|\x1b\\");
+    }
+
+    #[test]
+    fn decrqss_reports_alternate_text_color_assignment() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[13;4;5,}");
+        super::handle_decrqss(b"13,}", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r13;4;5,}\x1b\\");
+    }
+
+    #[test]
+    fn decctr_reports_current_color_table() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[2;2$u");
+        let expected = format!(
+            "\x1bP2$s{}\x1b\\",
+            report_color_table(&term.dec_color, DecColorSpace::Rgb)
+        );
+        assert_eq!(term.take_pending_output(), expected.as_bytes());
+    }
+
+    #[test]
+    fn decctr_reports_current_color_table_in_hls() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[2;1$u");
+        let expected = format!(
+            "\x1bP2$s{}\x1b\\",
+            report_color_table(&term.dec_color, DecColorSpace::Hls)
+        );
+        assert_eq!(term.take_pending_output(), expected.as_bytes());
+    }
+
+    #[test]
+    fn decac_changes_effective_default_colors() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[1;4;7,|x");
+
+        assert_eq!(term.palette.fg, term.dec_color.table[4]);
+        assert_eq!(term.palette.bg, term.dec_color.table[7]);
+        assert_eq!(term.active.grid.default_fg, term.dec_color.table[4]);
+        assert_eq!(term.active.grid.default_bg, term.dec_color.table[7]);
+        assert_eq!(term.active.grid.rows[0].fg[0], term.dec_color.table[4]);
+        assert_eq!(term.active.grid.rows[0].bg[0], term.dec_color.table[7]);
+
+        super::handle_decrqss(b"1,|", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r1;4;7,|\x1b\\");
+    }
+
+    #[test]
+    fn decctr_restore_remaps_existing_default_colored_cells() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"ab");
+        term.process(b"\x1bP2$p0;2;1;2;3/7;2;10;20;30\x1b\\");
+
+        let expected_bg = Srgb::new(3, 5, 8);
+        let expected_fg = Srgb::new(26, 51, 77);
+
+        assert_eq!(term.palette.bg, expected_bg);
+        assert_eq!(term.palette.fg, expected_fg);
+        assert_eq!(term.active.grid.rows[0].fg[0], expected_fg);
+        assert_eq!(term.active.grid.rows[0].bg[0], expected_bg);
+        assert_eq!(term.active.grid.rows[0].fg[1], expected_fg);
+        assert_eq!(term.active.grid.rows[0].bg[1], expected_bg);
+    }
+
+    #[test]
+    fn decctr_restore_preserves_explicit_sgr_colors() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[31mx");
+        let explicit_fg = term.active.grid.rows[0].fg[0];
+
+        term.process(b"\x1bP2$p0;2;1;2;3/7;2;10;20;30/1;2;200;10;10\x1b\\");
+
+        assert_eq!(term.active.grid.rows[0].fg[0], explicit_fg);
+    }
+
+    #[test]
+    fn decctr_restore_accepts_hls_entries() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1bP2$p4;1;240;50;100\x1b\\");
+        assert_ne!(
+            term.dec_color.table[4],
+            crate::color::palette_color(&term.base_palette, 4)
+        );
+    }
+
+    #[test]
+    fn decstglt_selects_lookup_table_mode() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[1){");
+        assert_eq!(
+            term.dec_color.lookup_table,
+            crate::DecColorLookupTable::AlternateWithAttrs
+        );
+        term.process(b"\x1b[3){");
+        assert_eq!(
+            term.dec_color.lookup_table,
+            crate::DecColorLookupTable::AnsiSgr
+        );
+    }
+
+    #[test]
+    fn decrsps_restores_tab_stops() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b[3g");
+        term.process(b"\x1bP2$t4;9\x1b\\");
+        assert!(term.active.tab_stops[3]);
+        assert!(term.active.tab_stops[8]);
+        assert!(!term.active.tab_stops[7]);
+    }
+
+    #[test]
+    fn decrqpsr_reports_cursor_information() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b[?6h\x1b(0\x0e\x1b[1;4m");
+        term.process(b"\x1b[2;3H");
+        term.process(b"\x1b[1$w");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1bP1$u2;3;1;C;@;A;1;2;@;0B%5%5\x1b\\"
+        );
+    }
+
+    #[test]
+    fn decrsps_restores_cursor_information() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1bP1$t2;3;1;C;A;A;1;2;@;0B%5%5\x1b\\");
+
+        assert_eq!(term.active.cursor.row, 1);
+        assert_eq!(term.active.cursor.col, 2);
+        assert!(term.active.attrs.contains(font41::attrs::CellAttrs::BOLD));
+        assert_eq!(term.active.underline, font41::attrs::UnderlineStyle::Single);
+        assert!(
+            term.active
+                .attrs
+                .contains(font41::attrs::CellAttrs::PROTECTED)
+        );
+        assert!(term.active.origin_mode);
+        assert_eq!(
+            term.active.charset.gl_slot(),
+            crate::charset::GraphicSetSlot::G1
+        );
+        assert_eq!(
+            term.active.charset.gr_slot(),
+            crate::charset::GraphicSetSlot::G2
+        );
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G0),
+            crate::charset::CharacterSet::DecSpecialGraphics
+        );
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G1),
+            crate::charset::CharacterSet::Ascii
+        );
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G2),
+            crate::charset::CharacterSet::DecSupplemental
+        );
+    }
+
+    #[test]
+    fn decrqtsr_reports_ascii_g0_and_g1_designations() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b[1$u");
+        assert_eq!(term.take_pending_output(), b"\x1bP1$s\x1b)B\x1b(B\x1b\\");
+    }
+
+    #[test]
+    fn decrsts_restores_ascii_g0_and_g1_designations() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1b(0\x1b)>");
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G0),
+            crate::charset::CharacterSet::DecSpecialGraphics
+        );
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G1),
+            crate::charset::CharacterSet::DecTechnical
+        );
+
+        term.process(b"\x1bP1$p\x1b)B\x1b(B\x1b\\");
+
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G0),
+            crate::charset::CharacterSet::Ascii
+        );
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G1),
+            crate::charset::CharacterSet::Ascii
+        );
+    }
+
+    #[test]
+    fn decrsts_accepts_ddd1_without_rejecting_the_report() {
+        let mut term = TestTerm::new(16, 4, 10, 16, 8);
+        term.process(b"\x1bP1$p\x1b)1\x1b)B\x1b(B\x1b\\");
+
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G0),
+            crate::charset::CharacterSet::Ascii
+        );
+        assert_eq!(
+            term.active
+                .charset
+                .designated(crate::charset::GraphicSetSlot::G1),
+            crate::charset::CharacterSet::Ascii
+        );
+    }
+
+    #[test]
+    fn ris_resets_dec_color_state() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        let mut custom = term.inner.palette.clone();
+        custom.bg = Srgb::new(24, 32, 48);
+        custom.fg = Srgb::new(220, 210, 200);
+        term.set_palette(custom.clone());
+        term.process(b"\x1b[1;4;7,|\x1bP2$p4;2;8;9;10\x1b\\");
+        term.process(b"\x1bc");
+
+        super::handle_decrqss(b"1,|", &mut term.inner, &mut term.effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1bP1$r1;7;0,|\x1b\\");
+        assert_eq!(term.palette.fg, custom.fg);
+        assert_eq!(term.palette.bg, custom.bg);
+        assert_eq!(term.active.grid.default_bg, custom.bg);
+        assert_eq!(term.visible_row(0).bg[0], custom.bg);
+    }
+}

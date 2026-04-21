@@ -501,3 +501,254 @@ fn parse_pattern(
 fn glyph_storage_bytes(glyph: &GlyphPattern) -> usize {
     glyph.pixels.len()
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::MAX_DRCS_PAYLOAD_BYTES;
+    use crate::test_support::TestTerm;
+
+    #[test]
+    fn decdld_loads_and_designates_soft_charset() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;1;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1b( @!");
+
+        let expected = font41::encode_drcs_char(0).unwrap();
+        let actual = term.visible_row(0).cells[0].chars().next().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn decdld_accepts_pcn_zero_for_94_character_sets() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;0;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1b( @!");
+
+        let expected = font41::encode_drcs_char(0).unwrap();
+        let actual = term.visible_row(0).cells[0].chars().next().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn decdld_supports_space_intermediate_designation() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;0;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1b( @!");
+
+        let expected = font41::encode_drcs_char(0).unwrap();
+        let actual = term.visible_row(0).cells[0].chars().next().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn bundled_selftest_drcs_script_renders_soft_glyphs() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        let script = include_str!("../../selftest41/resources/icon.drcs")
+            .replace('\u{0090}', "\x1bP")
+            .replace('\u{009c}', "\x1b\\");
+        term.process(script.as_bytes());
+
+        let actual = term.visible_row(0).cells[0].chars().next().unwrap();
+        assert_ne!(actual, '!');
+        assert!((actual as u32) >= 0xF0000);
+    }
+
+    #[test]
+    fn decdld_94_charset_maps_colon_to_its_own_glyph_slot() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;26;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1b( @:");
+
+        let expected = font41::encode_drcs_char((b':' - b'!') as u16).unwrap();
+        let actual = term.visible_row(0).cells[0].chars().next().unwrap();
+        assert_eq!(actual, expected);
+    }
+
+    #[test]
+    fn vtrex_cactus_snippet_writes_soft_glyphs_into_two_rows() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;55;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1bP1;87;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1b( @");
+        term.process(b"\x1b[10;30Hw\x08\x1bMW");
+
+        let lower = term.visible_row(9).cells[29].chars().next().unwrap();
+        let upper = term.visible_row(8).cells[29].chars().next().unwrap();
+        assert_eq!(
+            lower,
+            font41::encode_drcs_char((b'w' - b'!') as u16).unwrap()
+        );
+        assert_eq!(
+            upper,
+            font41::encode_drcs_char((b'W' - b'!') as u16).unwrap()
+        );
+    }
+
+    #[test]
+    fn vtrex_trex_snippet_writes_soft_glyphs_into_two_rows() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;15;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1bP1;26;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1bP1;28;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1bP1;64;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1b( @");
+        term.process(b"\x1b[7;8H:<\x08\x08\x0b/`");
+
+        let top_left = term.visible_row(6).cells[7].chars().next().unwrap();
+        let top_right = term.visible_row(6).cells[8].chars().next().unwrap();
+        let bottom_left = term.visible_row(7).cells[7].chars().next().unwrap();
+        let bottom_right = term.visible_row(7).cells[8].chars().next().unwrap();
+        assert_eq!(
+            top_left,
+            font41::encode_drcs_char((b':' - b'!') as u16).unwrap()
+        );
+        assert_eq!(
+            top_right,
+            font41::encode_drcs_char((b'<' - b'!') as u16).unwrap()
+        );
+        assert_eq!(
+            bottom_left,
+            font41::encode_drcs_char((b'/' - b'!') as u16).unwrap()
+        );
+        assert_eq!(
+            bottom_right,
+            font41::encode_drcs_char((b'`' - b'!') as u16).unwrap()
+        );
+    }
+
+    #[test]
+    fn vtrex_soft_font_load_contains_trex_and_cactus_glyph_defs() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        for pcn in [15u16, 26, 28, 55, 64, 65, 78, 87] {
+            term.process(format!("\x1bP1;{pcn};1;6;0;2;16;0{{ @~~~~~~\x1b\\").as_bytes());
+        }
+        let glyphs = term.drcs_render_glyphs();
+        let geometry = font41::DrcsGeometryClass::Col80Line24;
+
+        for byte in [b':', b'<', b'/', b'`', b'w', b'W', b'n', b'a'] {
+            let glyph_id = byte as u16 - b'!' as u16;
+            assert!(
+                glyphs.contains_key(&(geometry, glyph_id)),
+                "missing DRCS glyph for byte {byte:?} -> id {glyph_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn vtrex_trex_and_cactus_drcs_glyphs_rasterize_non_empty() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        for pcn in [15u16, 26, 28, 55, 64, 65, 78, 87] {
+            term.process(format!("\x1bP1;{pcn};1;6;0;2;16;0{{ @~~~~~~\x1b\\").as_bytes());
+        }
+
+        let mut font_system = font41::FontSystem::new(None, 16.0, 1);
+        let _guard = font41::set_drcs_context(
+            Some(font41::DrcsGeometryClass::Col80Line24),
+            Some(term.drcs_render_glyphs()),
+        );
+
+        for byte in [b':', b'<', b'/', b'`', b'w', b'W', b'n', b'a'] {
+            let glyph_id = byte as u16 - b'!' as u16;
+            let cell = font41::encode_drcs_char(glyph_id).unwrap().to_string();
+            let shaped = font_system.shape_row(
+                &[smol_str::SmolStr::new(cell)],
+                &[font41::attrs::CellAttrs::default()],
+            );
+            let raster = font_system.rasterize_glyph(shaped[0].font_index, shaped[0].glyph_id, 1);
+            assert!(
+                raster.width > 0 && raster.height > 0 && !raster.bitmap.is_empty(),
+                "empty raster for byte {byte:?} -> id {glyph_id}"
+            );
+        }
+    }
+
+    #[test]
+    fn vtrex_page_composition_copies_cactus_and_trex_to_visible_page() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        for pcn in [15u16, 26, 28, 55, 64, 65, 78, 87] {
+            term.process(format!("\x1bP1;{pcn};1;6;0;2;16;0{{ @~~~~~~\x1b\\").as_bytes());
+        }
+
+        term.process(b"\x1b[?64l");
+        term.process(b"\x1b[2 P\x1b( @");
+        term.process(b"\x1b[10;30Hw\x08\x1bMW");
+        let page2 = crate::screen::page_viewport(&term.active, &term.viewport, 2).unwrap();
+        assert_eq!(
+            term.active.grid.rows[page2.top + 9].cells[29]
+                .chars()
+                .next()
+                .unwrap(),
+            font41::encode_drcs_char((b'w' - b'!') as u16).unwrap()
+        );
+        term.process(b"\x1b[1;1;10;30;2;1;1;3$v");
+        let page3 = crate::screen::page_viewport(&term.active, &term.viewport, 3).unwrap();
+        assert_eq!(
+            term.active.grid.rows[page3.top + 9].cells[29]
+                .chars()
+                .next()
+                .unwrap(),
+            font41::encode_drcs_char((b'w' - b'!') as u16).unwrap()
+        );
+        term.process(b"\x1b[3 P\x1b[7;8H:<\x08\x08\x0b/`");
+        assert_eq!(
+            term.active.grid.rows[page3.top + 6].cells[7]
+                .chars()
+                .next()
+                .unwrap(),
+            font41::encode_drcs_char((b':' - b'!') as u16).unwrap()
+        );
+        term.process(b"\x1b[1 P\x1b[1;1;10;30;3;1;1;1$v");
+
+        let cactus_lower = term.visible_row(9).cells[29].chars().next().unwrap();
+        let cactus_upper = term.visible_row(8).cells[29].chars().next().unwrap();
+        let trex_top_left = term.visible_row(6).cells[7].chars().next().unwrap();
+        let trex_top_right = term.visible_row(6).cells[8].chars().next().unwrap();
+        let trex_bottom_left = term.visible_row(7).cells[7].chars().next().unwrap();
+        let trex_bottom_right = term.visible_row(7).cells[8].chars().next().unwrap();
+
+        assert_eq!(
+            cactus_lower,
+            font41::encode_drcs_char((b'w' - b'!') as u16).unwrap()
+        );
+        assert_eq!(
+            cactus_upper,
+            font41::encode_drcs_char((b'W' - b'!') as u16).unwrap()
+        );
+        assert_eq!(
+            trex_top_left,
+            font41::encode_drcs_char((b':' - b'!') as u16).unwrap()
+        );
+        assert_eq!(
+            trex_top_right,
+            font41::encode_drcs_char((b'<' - b'!') as u16).unwrap()
+        );
+        assert_eq!(
+            trex_bottom_left,
+            font41::encode_drcs_char((b'/' - b'!') as u16).unwrap()
+        );
+        assert_eq!(
+            trex_bottom_right,
+            font41::encode_drcs_char((b'`' - b'!') as u16).unwrap()
+        );
+    }
+
+    #[test]
+    fn ris_clears_loaded_soft_charsets() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP1;1;1;6;0;2;16;0{ @~~~~~~\x1b\\");
+        term.process(b"\x1bc");
+        term.process(b"\x1b( @!");
+        assert_eq!(term.visible_row(0).cells[0].as_str(), "!");
+    }
+
+    #[test]
+    fn oversized_drcs_payload_is_discarded() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        let mut seq = b"\x1bP1;1;1;6;0;2;16;0{ @".to_vec();
+        seq.extend(std::iter::repeat_n(b'~', MAX_DRCS_PAYLOAD_BYTES + 32));
+        seq.extend_from_slice(b"\x1b\\");
+        term.process(&seq);
+        term.process(b"\x1b( @!");
+        assert_eq!(term.visible_row(0).cells[0].as_str(), "!");
+    }
+}

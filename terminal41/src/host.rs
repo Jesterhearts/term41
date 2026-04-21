@@ -52,3 +52,141 @@ pub fn mouse_report(
     );
     true
 }
+
+#[cfg(test)]
+mod tests {
+    use std::time::Duration;
+    use std::time::Instant;
+
+    use super::*;
+    use crate::test_support::TestTerm;
+
+    #[test]
+    fn decset_1006_switches_to_sgr_encoding() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?1006h");
+        assert_eq!(term.modes.mouse_encoding, MouseEncoding::Sgr);
+        term.process(b"\x1b[?1006l");
+        assert_eq!(term.modes.mouse_encoding, MouseEncoding::Default);
+    }
+
+    #[test]
+    fn decset_1002_enables_button_event_tracking() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?1002h");
+        assert_eq!(term.modes.mouse_tracking, MouseTracking::ButtonEvent);
+        term.process(b"\x1b[?1002l");
+        assert_eq!(term.modes.mouse_tracking, MouseTracking::Off);
+    }
+
+    #[test]
+    fn tracking_mode_is_replaced_not_layered() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?1000h");
+        term.process(b"\x1b[?1003h");
+        assert_eq!(term.modes.mouse_tracking, MouseTracking::AnyEvent);
+    }
+
+    #[test]
+    fn mouse_report_emits_into_pending_output() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?1000h\x1b[?1006h");
+        let emitted = term.mouse_report(
+            MouseEventKind::Press,
+            MouseButton::Left,
+            4,
+            9,
+            MouseModifiers::default(),
+        );
+        assert!(emitted);
+        assert_eq!(term.take_pending_output(), b"\x1b[<0;5;10M");
+    }
+
+    #[test]
+    fn mouse_report_uses_8bit_csi_after_s8c1t() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?1000h\x1b[?1006h\x1b G");
+        let emitted = term.mouse_report(
+            MouseEventKind::Press,
+            MouseButton::Left,
+            4,
+            9,
+            MouseModifiers::default(),
+        );
+        assert!(emitted);
+        assert_eq!(term.take_pending_output(), b"\x9b<0;5;10M");
+    }
+
+    #[test]
+    fn mouse_report_returns_false_when_tracking_off() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        let emitted = term.mouse_report(
+            MouseEventKind::Press,
+            MouseButton::Left,
+            0,
+            0,
+            MouseModifiers::default(),
+        );
+        assert!(!emitted);
+        assert!(term.take_pending_output().is_empty());
+    }
+
+    #[test]
+    fn focus_change_silent_when_reporting_disabled() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.report_focus_change(true);
+        assert!(term.take_pending_output().is_empty());
+    }
+
+    #[test]
+    fn focus_change_emits_csi_i_o_when_enabled() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[?1004h");
+        term.report_focus_change(true);
+        term.report_focus_change(false);
+        assert_eq!(term.take_pending_output(), b"\x1b[I\x1b[O");
+    }
+
+    #[test]
+    fn focus_change_uses_8bit_csi_after_s8c1t() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[?1004h\x1b G");
+        term.report_focus_change(true);
+        term.report_focus_change(false);
+        assert_eq!(term.take_pending_output(), b"\x9bI\x9bO");
+    }
+
+    #[test]
+    fn decrst_1004_disables_focus_reporting() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[?1004h\x1b[?1004l");
+        term.report_focus_change(true);
+        assert!(term.take_pending_output().is_empty());
+    }
+
+    #[test]
+    fn bsu_sets_synchronized_update_flag() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        assert!(!term.is_synchronized_update_active());
+        term.process(b"\x1b[?2026h");
+        assert!(term.is_synchronized_update_active());
+    }
+
+    #[test]
+    fn esu_clears_synchronized_update_flag() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?2026h");
+        term.process(b"\x1b[?2026l");
+        assert!(!term.is_synchronized_update_active());
+        assert!(term.modes.synchronized_update_since.is_none());
+    }
+
+    #[test]
+    fn synchronized_update_expires_after_timeout() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?2026h");
+        term.modes.synchronized_update_since =
+            Some(Instant::now() - SYNCHRONIZED_UPDATE_TIMEOUT - Duration::from_millis(1));
+        assert!(!term.is_synchronized_update_active());
+    }
+}

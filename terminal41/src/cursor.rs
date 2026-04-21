@@ -154,3 +154,36 @@ mod tests {
         );
     }
 }
+
+#[cfg(test)]
+mod integration_tests {
+    use super::CursorShape;
+    use super::CursorStyle;
+    use crate::test_support::TestTerm;
+
+    #[test]
+    fn decscusr_sets_steady_block() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[2 q");
+        assert_eq!(
+            term.cursor_style,
+            CursorStyle {
+                shape: CursorShape::Block,
+                blink: false,
+            }
+        );
+    }
+
+    #[test]
+    fn decscusr_sets_blinking_beam() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[5 q");
+        assert_eq!(
+            term.cursor_style,
+            CursorStyle {
+                shape: CursorShape::Beam,
+                blink: true,
+            }
+        );
+    }
+}
