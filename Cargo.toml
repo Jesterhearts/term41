@@ -107,6 +107,9 @@ deadlock-detection   = ["parking_lot/deadlock_detection"]
 # built-in PNG path (animated GIF is the motivating case). Requires the
 # libav* dev packages on the host; leave off for lightweight builds.
 ffmpeg               = ["image41/ffmpeg"]
+# Software-only rendering mode which doesn't require a GPU or graphics drivers.
+# This does not currently work with background images.
+software-only        = []
 # Adds a hook which tracks Ctrl+C hits in the PTY output stream, allowing us
 # to measure end-to-end latency of Ctrl+C for performance testing. Used only
 # for development.

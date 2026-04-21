@@ -281,11 +281,19 @@ impl RenderHost {
 
     // -- Main loop ----------------------------------------------------------
 
+    #[cfg_attr(feature = "software-only", allow(unused_variables, unreachable_code))]
     pub fn run(
         &mut self,
         window_rx: mpsc::Receiver<(Arc<Window>, OwnedDisplayHandle)>,
         startup_release_rx: mpsc::Receiver<()>,
     ) {
+        #[cfg(feature = "software-only")]
+        {
+            info!("software-only rendering mode enabled; GPU features will be disabled");
+            self.run_software_only(window_rx);
+            return;
+        }
+
         let mut frames = 0u64;
         let mut first_frame = true;
 
@@ -329,21 +337,13 @@ impl RenderHost {
             // Clone into a local buffer so we can commit() (freeing ring
             // buffer slots for the writer) before processing, which also
             // avoids a borrow conflict with &mut self in handle_render_event.
-            let events: Vec<RenderEvent> = self.event_rx.read_chunk().to_vec();
-            self.event_rx.commit();
-            for event in &events {
-                self.handle_render_event(event);
-            }
+            self.drain_render_events();
 
             // Drain child-exit notifications.
-            while let Ok(tab_id) = self.child_exit_rx.try_recv() {
-                self.handle_child_exited(tab_id);
-            }
+            self.drain_child_exit_notifications();
 
             // Hot-reload config if the watcher flagged a change.
-            if self.config_reload.swap(false, Ordering::Acquire) {
-                self.reload_config();
-            }
+            self.reload_config_if_requested();
 
             if self.should_exit || self.event_rx.is_abandoned() {
                 break;
@@ -405,6 +405,66 @@ impl RenderHost {
         }
 
         std::process::exit(0);
+    }
+
+    #[cfg(feature = "software-only")]
+    fn run_software_only(
+        &mut self,
+        window_rx: mpsc::Receiver<(Arc<Window>, OwnedDisplayHandle)>,
+    ) {
+        let (window, _) = match window_rx.recv() {
+            Ok(wd) => wd,
+            Err(_) => return,
+        };
+        self.window = Some(window.clone());
+
+        let scale = self
+            .config
+            .dpi_scale
+            .map(|s| s as f64)
+            .unwrap_or_else(|| window.scale_factor());
+        if scale != 1.0 {
+            self.font_system.set_scale_factor(scale as f32);
+        }
+
+        let initial_size = window.inner_size();
+        self.window_size = (initial_size.width, initial_size.height);
+        self.handle_resize(initial_size.width, initial_size.height);
+
+        loop {
+            std::thread::park();
+            self.drain_render_events();
+            self.drain_child_exit_notifications();
+            self.reload_config_if_requested();
+
+            if self.should_exit || self.event_rx.is_abandoned() {
+                break;
+            }
+
+            self.update_ime_cursor_area();
+        }
+
+        std::process::exit(0);
+    }
+
+    fn drain_render_events(&mut self) {
+        let events: Vec<RenderEvent> = self.event_rx.read_chunk().to_vec();
+        self.event_rx.commit();
+        for event in &events {
+            self.handle_render_event(event);
+        }
+    }
+
+    fn drain_child_exit_notifications(&mut self) {
+        while let Ok(tab_id) = self.child_exit_rx.try_recv() {
+            self.handle_child_exited(tab_id);
+        }
+    }
+
+    fn reload_config_if_requested(&mut self) {
+        if self.config_reload.swap(false, Ordering::Acquire) {
+            self.reload_config();
+        }
     }
 
     fn next_render_wait(
@@ -697,9 +757,6 @@ impl RenderHost {
     }
 
     fn recalculate_grid_size(&mut self) {
-        let Some(_) = self.renderer.as_ref() else {
-            return;
-        };
         if let Some((cols, rows)) = self.current_window_grid_size() {
             self.window_resize_epoch += 1;
             let epoch = self.window_resize_epoch;
@@ -712,9 +769,18 @@ impl RenderHost {
     }
 
     fn current_window_grid_size(&self) -> Option<(u32, u32)> {
-        let renderer = self.renderer.as_ref()?;
         let (width, height) = self.window_size;
-        let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
+        if width == 0 || height == 0 {
+            return None;
+        }
+        let gutter_px = if self.config.gutter {
+            self.renderer
+                .as_ref()
+                .map(|renderer| renderer.gutter_width_px(self.font_system.cell_width))
+                .unwrap_or_else(|| compute_gutter_width(self.font_system.cell_width))
+        } else {
+            0
+        };
         let usable_width = width.saturating_sub(gutter_px);
         let tab_bar_px = if self.tab_bar_visible() {
             self.font_system.cell_height
@@ -1222,6 +1288,7 @@ impl RenderHost {
         let mut input_state = self.input_state.lock();
         input_state.keybindings = self.config.keybindings.clone();
         input_state.tab_count = self.tabs.len();
+        input_state.tab_order = self.tabs.iter().map(|tab| tab.id).collect();
         input_state.cell_width = self.font_system.cell_width;
         input_state.cell_height = self.font_system.cell_height;
         input_state.gutter_width = if self.config.gutter {

@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
 use std::sync::Arc;
+use std::time::Duration;
+use std::time::Instant;
 
 use font41::FontSystem;
 use font41::RasterizedGlyph;
@@ -14,29 +16,51 @@ use softbuffer::Context;
 use softbuffer::Surface;
 use terminal41::CursorShape;
 use terminal41::LineAttr;
+use terminal41::VisibleImage;
 use unicode_segmentation::UnicodeSegmentation;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
-use crate::InputEndpoint;
+use crate::renderer::GUTTER_MENU_ITEMS;
+use crate::renderer::GutterPopup;
+use crate::renderer::POPUP_WIDTH_CELLS;
+use crate::renderer::TAB_MENU_ITEMS;
+use crate::renderer::TAB_MENU_WIDTH_CELLS;
+use crate::renderer::TabContextMenu;
 use crate::renderer::compute_gutter_width;
+use crate::renderer::r#impl::CURSOR_BLINK_HALF_PERIOD;
 use crate::renderer::r#impl::FAILURE;
 use crate::renderer::r#impl::RUNNING;
 use crate::renderer::r#impl::RowSnapshot;
 use crate::renderer::r#impl::SUCCESS;
+use crate::renderer::r#impl::TabInfo;
 use crate::renderer::r#impl::TermSnapshot;
 use crate::renderer::r#impl::collect_row_glyphs;
 use crate::renderer::r#impl::snapshot_terminal;
+use crate::renderer::paint::blink_animation_enabled;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
 
 type StartupGlyphKey = (usize, u16, u8, bool, Option<font41::DrcsGeometryClass>);
 
+pub(crate) struct StartupTab<'a> {
+    pub(crate) label: &'a str,
+    pub(crate) active: bool,
+}
+
 struct CachedBackground {
     width: u32,
     height: u32,
     pixels: Vec<u8>,
+}
+
+struct StartupFrame {
+    snap: TermSnapshot,
+    visible_images: Vec<VisibleImage>,
+    cursor_visible: bool,
+    blink_off: bool,
+    rapid_blink_off: bool,
 }
 
 pub(crate) struct StartupPresenter {
@@ -46,6 +70,7 @@ pub(crate) struct StartupPresenter {
     glyph_cache: HashMap<StartupGlyphKey, RasterizedGlyph>,
     gutter_enabled: bool,
     background: Option<CachedBackground>,
+    started: Instant,
     first_frame: bool,
 }
 
@@ -86,6 +111,7 @@ impl StartupPresenter {
             glyph_cache: HashMap::new(),
             gutter_enabled,
             background: background_path.and_then(|path| load_cached_background(&path)),
+            started: Instant::now(),
             first_frame: true,
         })
     }
@@ -93,39 +119,40 @@ impl StartupPresenter {
     pub(crate) fn present(
         &mut self,
         window: &Arc<Window>,
-        target: &InputEndpoint,
+        terminal: &Arc<parking_lot::Mutex<terminal41::Terminal>>,
+        tabs: &[StartupTab<'_>],
         hovered_button: Option<crate::renderer::TabBarHover>,
+        tab_context_menu: Option<&TabContextMenu>,
+        gutter_popup: Option<&GutterPopup>,
         maximized: bool,
-    ) {
+    ) -> Option<Duration> {
         let size = window.inner_size();
-        let Some(width) = NonZeroU32::new(size.width.max(1)) else {
-            return;
-        };
-        let Some(height) = NonZeroU32::new(size.height.max(1)) else {
-            return;
-        };
+        let width = NonZeroU32::new(size.width.max(1))?;
+        let height = NonZeroU32::new(size.height.max(1))?;
 
         if let Err(err) = self.surface.resize(width, height) {
             warn!("startup presenter: resize failed: {err}");
-            return;
+            return None;
         }
 
-        let (title, snap) = {
-            let terminal = target.terminal.lock();
-            let title = terminal
-                .metadata
-                .current_title
-                .clone()
-                .unwrap_or_else(|| "Shell".to_string());
+        let frame = {
+            let terminal = terminal.lock();
             let snap = snapshot_terminal(&terminal);
-            (title, snap)
+            let visible_images = terminal41::view::visible_images(
+                &terminal.active,
+                &terminal.viewport,
+                terminal.cell_height(),
+                Instant::now(),
+            )
+            .collect::<Vec<_>>();
+            build_startup_frame(snap, visible_images, self.started)
         };
 
         let mut buffer = match self.surface.buffer_mut() {
             Ok(buffer) => buffer,
             Err(err) => {
                 warn!("startup presenter: buffer acquisition failed: {err}");
-                return;
+                return None;
             }
         };
 
@@ -141,21 +168,21 @@ impl StartupPresenter {
             0
         };
 
-        clear(buffer.as_mut(), pack_rgb(snap.palette.bg));
+        clear(buffer.as_mut(), pack_rgb(frame.snap.palette.bg));
         if let Some(background) = self.background.as_ref() {
             paint_cached_background(buffer.as_mut(), width, height, background);
         }
         paint_tab_bar(
             &mut self.font_system,
-            &snap,
+            &frame.snap,
             buffer.as_mut(),
-            &title,
+            tabs,
             cell_w,
             width,
             height,
             tab_bar_h,
-            snap.palette.bg,
-            snap.palette.fg,
+            frame.snap.palette.bg,
+            frame.snap.palette.fg,
             hovered_button,
             maximized,
         );
@@ -164,7 +191,7 @@ impl StartupPresenter {
                 buffer.as_mut(),
                 width,
                 height,
-                &snap,
+                &frame.snap,
                 gutter_w,
                 cell_h,
                 tab_bar_h,
@@ -172,7 +199,7 @@ impl StartupPresenter {
         }
         paint_status_line_chrome(
             &mut self.font_system,
-            &snap,
+            &frame.snap,
             buffer.as_mut(),
             width,
             height,
@@ -181,12 +208,12 @@ impl StartupPresenter {
             tab_bar_h,
         );
 
-        let block_cursor = match snap.cursor_style.shape {
-            CursorShape::Block => snap.cursor,
+        let block_cursor = match frame.snap.cursor_style.shape {
+            CursorShape::Block if frame.cursor_visible => frame.snap.cursor,
             _ => None,
         };
 
-        for (row_idx, row) in snap.rows.iter().enumerate() {
+        for (row_idx, row) in frame.snap.rows.iter().enumerate() {
             let y = tab_bar_h + row_idx as i32 * cell_h;
             if y >= height as i32 {
                 break;
@@ -195,16 +222,16 @@ impl StartupPresenter {
             let is_double_wide = !matches!(row.line_attr, LineAttr::Normal);
             let effective_cell_w = if is_double_wide { cell_w * 2 } else { cell_w };
             let visible_cols = if is_double_wide {
-                snap.viewport_cols / 2
+                frame.snap.viewport_cols / 2
             } else {
-                snap.viewport_cols
+                frame.snap.viewport_cols
             };
 
             paint_row_backgrounds(
                 buffer.as_mut(),
                 width,
                 height,
-                &snap,
+                &frame.snap,
                 row,
                 row_idx as u32,
                 y,
@@ -217,13 +244,13 @@ impl StartupPresenter {
 
             let glyphs = collect_row_glyphs(
                 &mut self.font_system,
-                &snap,
+                &frame.snap,
                 row,
                 row_idx as u32,
                 visible_cols,
                 block_cursor,
-                false,
-                false,
+                frame.blink_off,
+                frame.rapid_blink_off,
             );
 
             for glyph in glyphs {
@@ -234,8 +261,8 @@ impl StartupPresenter {
                     glyph.glyph_id,
                     glyph.cells_wide,
                     glyph.synth_bold,
-                    super::r#impl::drcs_geometry_class(&snap)
-                        .map(|geometry| (geometry, snap.drcs_glyphs.clone())),
+                    super::r#impl::drcs_geometry_class(&frame.snap)
+                        .map(|geometry| (geometry, frame.snap.drcs_glyphs.clone())),
                 );
                 if raster.width == 0 || raster.height == 0 {
                     continue;
@@ -259,16 +286,55 @@ impl StartupPresenter {
             }
         }
 
-        paint_cursor_overlay(
+        paint_visible_images(
             buffer.as_mut(),
             width,
             height,
-            &snap,
+            &frame.visible_images,
             cell_w,
             cell_h,
             tab_bar_h,
             gutter_w,
         );
+        paint_cursor_overlay(
+            buffer.as_mut(),
+            width,
+            height,
+            &frame.snap,
+            frame.cursor_visible,
+            cell_w,
+            cell_h,
+            tab_bar_h,
+            gutter_w,
+        );
+        if gutter_w > 0
+            && let Some(popup) = gutter_popup
+        {
+            paint_gutter_popup(
+                &mut self.font_system,
+                &frame.snap,
+                buffer.as_mut(),
+                width,
+                height,
+                popup,
+                gutter_w,
+                cell_w,
+                cell_h,
+                tab_bar_h,
+            );
+        }
+        if let Some(menu) = tab_context_menu {
+            paint_tab_context_menu(
+                &mut self.font_system,
+                &frame.snap,
+                buffer.as_mut(),
+                width,
+                height,
+                menu,
+                cell_w,
+                cell_h,
+            );
+        }
 
         if let Err(err) = buffer.present() {
             warn!("startup presenter: present failed: {err}");
@@ -281,6 +347,116 @@ impl StartupPresenter {
                 APP_START_TIME.get().unwrap().elapsed().as_millis()
             );
         }
+
+        next_startup_redraw_delay(&frame, self.started)
+    }
+}
+
+fn build_startup_frame(
+    snap: TermSnapshot,
+    visible_images: Vec<VisibleImage>,
+    started: Instant,
+) -> StartupFrame {
+    let elapsed = started.elapsed();
+    let blink_off = blink_phase_off(elapsed, CURSOR_BLINK_HALF_PERIOD);
+    let rapid_blink_off = blink_phase_off(elapsed, CURSOR_BLINK_HALF_PERIOD / 2);
+    let cursor_visible = cursor_visible_for_frame(&snap, elapsed);
+    StartupFrame {
+        snap,
+        visible_images,
+        cursor_visible,
+        blink_off,
+        rapid_blink_off,
+    }
+}
+
+fn blink_phase_off(
+    elapsed: Duration,
+    half_period: Duration,
+) -> bool {
+    let half_nanos = half_period.as_nanos().max(1);
+    ((elapsed.as_nanos() / half_nanos) & 1) == 1
+}
+
+fn cursor_visible_for_frame(
+    snap: &TermSnapshot,
+    elapsed: Duration,
+) -> bool {
+    if snap.cursor.is_none() {
+        return false;
+    }
+    if !snap.cursor_style.blink {
+        return true;
+    }
+    let half = CURSOR_BLINK_HALF_PERIOD.as_secs_f32();
+    let phase = (elapsed.as_secs_f32() / half) as u64;
+    phase & 1 == 0
+}
+
+fn next_startup_redraw_delay(
+    frame: &StartupFrame,
+    started: Instant,
+) -> Option<Duration> {
+    let mut delay = None;
+    if startup_frame_has_cursor_blink(frame)
+        || startup_frame_has_blinking_text(frame, CellAttrs::BLINK)
+    {
+        delay = Some(duration_until_next_phase(started, CURSOR_BLINK_HALF_PERIOD));
+    }
+    if startup_frame_has_blinking_text(frame, CellAttrs::RAPID_BLINK) {
+        let rapid_delay = duration_until_next_phase(started, CURSOR_BLINK_HALF_PERIOD / 2);
+        delay = Some(delay.map_or(rapid_delay, |d| d.min(rapid_delay)));
+    }
+    if startup_frame_has_animated_images(frame) {
+        delay = Some(delay.map_or(super::FRAME_DURATION, |d| d.min(super::FRAME_DURATION)));
+    }
+    delay
+}
+
+fn startup_frame_has_cursor_blink(frame: &StartupFrame) -> bool {
+    frame.snap.cursor.is_some() && frame.snap.cursor_style.blink
+}
+
+fn startup_frame_has_blinking_text(
+    frame: &StartupFrame,
+    blink_attr: CellAttrs,
+) -> bool {
+    frame.snap.rows.iter().any(|row| {
+        row.attrs
+            .iter()
+            .copied()
+            .any(|attrs| attrs.contains(blink_attr) && blink_animation_enabled(&frame.snap, attrs))
+    })
+}
+
+fn startup_frame_has_animated_images(frame: &StartupFrame) -> bool {
+    frame
+        .visible_images
+        .iter()
+        .any(|image| image.image.is_animated())
+}
+
+fn duration_until_next_phase(
+    started: Instant,
+    half_period: Duration,
+) -> Duration {
+    duration_until_next_phase_from_elapsed(started.elapsed(), half_period)
+}
+
+fn duration_until_next_phase_from_elapsed(
+    elapsed: Duration,
+    half_period: Duration,
+) -> Duration {
+    let elapsed_nanos = elapsed.as_nanos();
+    let period_nanos = half_period.as_nanos();
+    if period_nanos == 0 {
+        return Duration::ZERO;
+    }
+    let remainder = elapsed_nanos % period_nanos;
+    if remainder == 0 {
+        half_period
+    } else {
+        Duration::from_nanos((period_nanos - remainder) as u64)
     }
 }
 
@@ -288,7 +464,7 @@ fn paint_tab_bar(
     font_system: &mut FontSystem,
     snap: &TermSnapshot,
     buffer: &mut [u32],
-    title: &str,
+    tabs: &[StartupTab<'_>],
     cell_w: i32,
     width: usize,
     height: usize,
@@ -298,11 +474,15 @@ fn paint_tab_bar(
     hovered_button: Option<crate::renderer::TabBarHover>,
     maximized: bool,
 ) {
+    let tab_infos: Vec<TabInfo<'_>> = tabs
+        .iter()
+        .map(|tab| TabInfo {
+            label: tab.label,
+            active: tab.active,
+        })
+        .collect();
     let plan = build_tab_bar_plan(
-        &[crate::renderer::r#impl::TabInfo {
-            label: title,
-            active: true,
-        }],
+        &tab_infos,
         &snap.palette,
         hovered_button,
         maximized,
@@ -394,6 +574,194 @@ fn paint_tab_bar(
                 pack_rgb(separator),
             );
         }
+    }
+}
+
+fn paint_gutter_popup(
+    font_system: &mut FontSystem,
+    snap: &TermSnapshot,
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    popup: &GutterPopup,
+    gutter_w: i32,
+    cell_w: i32,
+    cell_h: i32,
+    tab_bar_h: i32,
+) {
+    let header_rows = usize::from(popup.duration_text.is_some());
+    let total_rows = header_rows + GUTTER_MENU_ITEMS.len();
+    let popup_w = (cell_w as f32 * POPUP_WIDTH_CELLS).round() as i32;
+    let popup_h = total_rows as i32 * cell_h;
+    let popup_x = gutter_w;
+    let popup_y = (popup.screen_row as i32 * cell_h + tab_bar_h)
+        .min(height as i32 - popup_h)
+        .max(tab_bar_h);
+
+    let panel_bg = Srgb::new(30, 30, 38);
+    let border = Srgb::new(80, 80, 100);
+    let dim_fg = Srgb::new(140, 140, 160);
+    let normal_fg = Srgb::new(220, 220, 220);
+    let hover_bg = Srgb::new(55, 55, 70);
+
+    fill_rect(
+        buffer,
+        width,
+        height,
+        popup_x,
+        popup_y,
+        popup_w,
+        popup_h,
+        pack_rgb(panel_bg),
+    );
+    fill_rect(
+        buffer,
+        width,
+        height,
+        popup_x,
+        popup_y,
+        popup_w,
+        1,
+        pack_rgb(border),
+    );
+    fill_rect(
+        buffer,
+        width,
+        height,
+        popup_x,
+        popup_y + popup_h - 1,
+        popup_w,
+        1,
+        pack_rgb(border),
+    );
+
+    let margin = cell_w as f32 * 0.5;
+    let max_chars = ((popup_w as f32 - margin * 2.0) / cell_w as f32).max(1.0) as usize;
+    if let Some(duration) = popup.duration_text.as_ref() {
+        let label: String = duration.chars().take(max_chars).collect();
+        let row = label_row(&label, dim_fg, panel_bg, false);
+        paint_shaped_label(
+            font_system,
+            snap,
+            buffer,
+            width,
+            height,
+            &row,
+            popup_x as f32 + margin,
+            popup_y as f32,
+        );
+    }
+
+    for (idx, item) in GUTTER_MENU_ITEMS.iter().enumerate() {
+        let row_y = popup_y + (header_rows + idx) as i32 * cell_h;
+        if popup.hovered_item == Some(idx) {
+            fill_rect(
+                buffer,
+                width,
+                height,
+                popup_x,
+                row_y,
+                popup_w,
+                cell_h,
+                pack_rgb(hover_bg),
+            );
+        }
+
+        let label: String = item.label.chars().take(max_chars).collect();
+        let row = label_row(&label, normal_fg, panel_bg, false);
+        paint_shaped_label(
+            font_system,
+            snap,
+            buffer,
+            width,
+            height,
+            &row,
+            popup_x as f32 + margin,
+            row_y as f32,
+        );
+    }
+}
+
+fn paint_tab_context_menu(
+    font_system: &mut FontSystem,
+    snap: &TermSnapshot,
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    menu: &TabContextMenu,
+    cell_w: i32,
+    cell_h: i32,
+) {
+    let menu_w = (cell_w as f32 * TAB_MENU_WIDTH_CELLS).round() as i32;
+    let menu_h = TAB_MENU_ITEMS.len() as i32 * cell_h;
+    let menu_x = (menu.x.round() as i32).min(width as i32 - menu_w).max(0);
+    let menu_y = cell_h;
+
+    let panel_bg = Srgb::new(30, 30, 38);
+    let border = Srgb::new(80, 80, 100);
+    let normal_fg = Srgb::new(220, 220, 220);
+    let hover_bg = Srgb::new(55, 55, 70);
+
+    fill_rect(
+        buffer,
+        width,
+        height,
+        menu_x,
+        menu_y,
+        menu_w,
+        menu_h,
+        pack_rgb(panel_bg),
+    );
+    fill_rect(
+        buffer,
+        width,
+        height,
+        menu_x,
+        menu_y,
+        menu_w,
+        1,
+        pack_rgb(border),
+    );
+    fill_rect(
+        buffer,
+        width,
+        height,
+        menu_x,
+        menu_y + menu_h - 1,
+        menu_w,
+        1,
+        pack_rgb(border),
+    );
+
+    let margin = cell_w as f32 * 0.5;
+    let max_chars = ((menu_w as f32 - margin * 2.0) / cell_w as f32).max(1.0) as usize;
+    for (idx, item) in TAB_MENU_ITEMS.iter().enumerate() {
+        let item_y = menu_y + idx as i32 * cell_h;
+        if menu.hovered_item == Some(idx) {
+            fill_rect(
+                buffer,
+                width,
+                height,
+                menu_x,
+                item_y,
+                menu_w,
+                cell_h,
+                pack_rgb(hover_bg),
+            );
+        }
+
+        let label: String = item.label.chars().take(max_chars).collect();
+        let row = label_row(&label, normal_fg, panel_bg, false);
+        paint_shaped_label(
+            font_system,
+            snap,
+            buffer,
+            width,
+            height,
+            &row,
+            menu_x as f32 + margin,
+            item_y as f32,
+        );
     }
 }
 
@@ -566,6 +934,135 @@ fn paint_cached_background(
     }
 }
 
+fn paint_visible_images(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    visible_images: &[VisibleImage],
+    cell_w: i32,
+    cell_h: i32,
+    tab_bar_h: i32,
+    gutter_w: i32,
+) {
+    for image in visible_images {
+        let Some(frame) = image.image.frames.get(image.frame_index) else {
+            continue;
+        };
+        if image.image.width == 0
+            || image.image.height == 0
+            || image.display_width == 0
+            || image.display_height == 0
+        {
+            continue;
+        }
+
+        let dst_x = gutter_w + image.screen_col as i32 * cell_w;
+        let dst_y = tab_bar_h + image.screen_row * cell_h;
+        blit_scaled_rgba(
+            buffer,
+            width,
+            height,
+            dst_x,
+            dst_y,
+            image.display_width as i32,
+            image.display_height as i32,
+            image.image.width as usize,
+            image.image.height as usize,
+            &frame.pixels,
+        );
+    }
+}
+
+fn blit_scaled_rgba(
+    buffer: &mut [u32],
+    width: usize,
+    height: usize,
+    dst_x: i32,
+    dst_y: i32,
+    dst_w: i32,
+    dst_h: i32,
+    src_w: usize,
+    src_h: usize,
+    pixels: &[u8],
+) {
+    if dst_w <= 0 || dst_h <= 0 {
+        return;
+    }
+    let expected = src_w.saturating_mul(src_h).saturating_mul(4);
+    if src_w == 0 || src_h == 0 || pixels.len() < expected {
+        return;
+    }
+
+    let min_x = dst_x.max(0) as usize;
+    let min_y = dst_y.max(0) as usize;
+    let max_x = (dst_x + dst_w).min(width as i32).max(0) as usize;
+    let max_y = (dst_y + dst_h).min(height as i32).max(0) as usize;
+    if min_x >= max_x || min_y >= max_y {
+        return;
+    }
+
+    let scale_x = src_w as f32 / dst_w as f32;
+    let scale_y = src_h as f32 / dst_h as f32;
+    for y in min_y..max_y {
+        let src_y = ((y as i32 - dst_y) as f32 * scale_y).clamp(0.0, (src_h - 1) as f32);
+        for x in min_x..max_x {
+            let src_x = ((x as i32 - dst_x) as f32 * scale_x).clamp(0.0, (src_w - 1) as f32);
+            let rgba = sample_bilinear_rgba(pixels, src_w, src_h, src_x, src_y);
+            let idx = y * width + x;
+            buffer[idx] = blend_rgba_over(buffer[idx], rgba[0], rgba[1], rgba[2], rgba[3]);
+        }
+    }
+}
+
+fn sample_bilinear_rgba(
+    pixels: &[u8],
+    width: usize,
+    height: usize,
+    x: f32,
+    y: f32,
+) -> [u8; 4] {
+    let x0 = x.floor() as usize;
+    let y0 = y.floor() as usize;
+    let x1 = (x0 + 1).min(width - 1);
+    let y1 = (y0 + 1).min(height - 1);
+    let tx = x - x0 as f32;
+    let ty = y - y0 as f32;
+    let c00 = rgba_at(pixels, width, x0, y0);
+    let c10 = rgba_at(pixels, width, x1, y0);
+    let c01 = rgba_at(pixels, width, x0, y1);
+    let c11 = rgba_at(pixels, width, x1, y1);
+    let mut out = [0u8; 4];
+    for channel in 0..4 {
+        let top = lerp(c00[channel] as f32, c10[channel] as f32, tx);
+        let bottom = lerp(c01[channel] as f32, c11[channel] as f32, tx);
+        out[channel] = lerp(top, bottom, ty).round() as u8;
+    }
+    out
+}
+
+fn rgba_at(
+    pixels: &[u8],
+    width: usize,
+    x: usize,
+    y: usize,
+) -> [u8; 4] {
+    let idx = (y * width + x) * 4;
+    [
+        pixels[idx],
+        pixels[idx + 1],
+        pixels[idx + 2],
+        pixels[idx + 3],
+    ]
+}
+
+fn lerp(
+    a: f32,
+    b: f32,
+    t: f32,
+) -> f32 {
+    a + (b - a) * t
+}
+
 fn blend_rgba_over(
     dst: u32,
     r: u8,
@@ -595,11 +1092,15 @@ fn paint_cursor_overlay(
     width: usize,
     height: usize,
     snap: &crate::renderer::r#impl::TermSnapshot,
+    cursor_visible: bool,
     cell_w: i32,
     cell_h: i32,
     tab_bar_h: i32,
     gutter_w: i32,
 ) {
+    if !cursor_visible {
+        return;
+    }
     let Some((row, col)) = snap.cursor else {
         return;
     };
@@ -796,4 +1297,48 @@ fn fill_rect(
 
 fn pack_rgb(color: Srgb<u8>) -> u32 {
     ((color.red as u32) << 16) | ((color.green as u32) << 8) | color.blue as u32
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn blink_phase_toggles_on_half_period_boundaries() {
+        let half = Duration::from_millis(500);
+        assert!(!blink_phase_off(Duration::from_millis(499), half));
+        assert!(blink_phase_off(Duration::from_millis(500), half));
+        assert!(blink_phase_off(Duration::from_millis(999), half));
+        assert!(!blink_phase_off(Duration::from_millis(1000), half));
+    }
+
+    #[test]
+    fn duration_until_next_phase_returns_remaining_half_period() {
+        let remaining = duration_until_next_phase_from_elapsed(
+            Duration::from_millis(125),
+            Duration::from_millis(500),
+        );
+        assert_eq!(remaining, Duration::from_millis(375));
+    }
+
+    #[test]
+    fn scaled_rgba_blit_clips_negative_destination() {
+        let mut buffer = vec![0x000000; 4];
+        let pixels = vec![255, 0, 0, 255];
+        blit_scaled_rgba(&mut buffer, 2, 2, -1, -1, 2, 2, 1, 1, &pixels);
+
+        assert_eq!(buffer[0], 0xff0000);
+        assert_eq!(buffer[1], 0x000000);
+        assert_eq!(buffer[2], 0x000000);
+        assert_eq!(buffer[3], 0x000000);
+    }
+
+    #[test]
+    fn scaled_rgba_blit_alpha_blends_over_existing_pixel() {
+        let mut buffer = vec![0x0000ff];
+        let pixels = vec![255, 0, 0, 128];
+        blit_scaled_rgba(&mut buffer, 1, 1, 0, 0, 1, 1, 1, 1, &pixels);
+
+        assert_eq!(buffer[0], 0x80007f);
+    }
 }

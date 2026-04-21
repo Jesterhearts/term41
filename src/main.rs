@@ -27,6 +27,7 @@ use pty_pipe41::Pty;
 use pty_pipe41::PtyWriter;
 use renderer::RenderHost;
 use renderer::startup::StartupPresenter;
+use renderer::startup::StartupTab;
 use terminal41::HostInput;
 use terminal41::HostInputEffects;
 use terminal41::HostMouse;
@@ -166,6 +167,7 @@ enum RecordingPopupState {
 pub(crate) struct InputState {
     keybindings: Keybindings,
     tab_count: usize,
+    tab_order: Vec<TabId>,
     cell_width: u32,
     cell_height: u32,
     gutter_width: u32,
@@ -179,6 +181,7 @@ pub(crate) struct InputState {
 struct WindowHost {
     window: Option<Arc<Window>>,
     startup_presenter: Option<StartupPresenter>,
+    startup_next_redraw: Option<Instant>,
     startup_release_tx: Option<mpsc::SyncSender<()>>,
     input_endpoints: HashMap<TabId, InputEndpoint>,
     active_input_tab: Option<TabId>,
@@ -228,6 +231,98 @@ impl WindowHost {
     fn active_input_target(&self) -> Option<&InputEndpoint> {
         let tab_id = self.active_input_tab?;
         self.input_endpoints.get(&tab_id)
+    }
+
+    fn startup_tab_titles(&self) -> Vec<(String, bool)> {
+        let tab_order = self.input_state.lock().tab_order.clone();
+        let mut titles: Vec<(String, bool)> = tab_order
+            .iter()
+            .filter_map(|tab_id| {
+                let target = self.input_endpoints.get(tab_id)?;
+                let title = target
+                    .terminal
+                    .lock()
+                    .metadata
+                    .current_title
+                    .clone()
+                    .unwrap_or_else(|| "Shell".to_owned());
+                Some((title, Some(*tab_id) == self.active_input_tab))
+            })
+            .collect();
+
+        if titles.is_empty()
+            && let Some(tab_id) = self.active_input_tab
+            && let Some(target) = self.input_endpoints.get(&tab_id)
+        {
+            let title = target
+                .terminal
+                .lock()
+                .metadata
+                .current_title
+                .clone()
+                .unwrap_or_else(|| "Shell".to_owned());
+            titles.push((title, true));
+        }
+
+        titles
+    }
+
+    fn startup_interaction_snapshot(
+        &self
+    ) -> (
+        Option<renderer::TabBarHover>,
+        Option<TabContextMenu>,
+        Option<renderer::GutterPopup>,
+    ) {
+        let state = self.input_state.lock();
+        (
+            state.hovered_tab_bar_button,
+            state.tab_context_menu.clone(),
+            state.gutter_popup.clone(),
+        )
+    }
+
+    fn present_startup_frame(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        window: &Arc<Window>,
+    ) -> bool {
+        let Some(tab_id) = self.active_input_tab else {
+            return false;
+        };
+        let Some(terminal) = self
+            .input_endpoints
+            .get(&tab_id)
+            .map(|target| target.terminal.clone())
+        else {
+            return false;
+        };
+
+        let tab_titles = self.startup_tab_titles();
+        let tabs: Vec<StartupTab<'_>> = tab_titles
+            .iter()
+            .map(|(label, active)| StartupTab {
+                label,
+                active: *active,
+            })
+            .collect();
+        let (hovered_button, tab_context_menu, gutter_popup) = self.startup_interaction_snapshot();
+        let maximized = window.is_maximized();
+        let Some(presenter) = self.startup_presenter.as_mut() else {
+            return false;
+        };
+
+        let delay = presenter.present(
+            window,
+            &terminal,
+            &tabs,
+            hovered_button,
+            tab_context_menu.as_ref(),
+            gutter_popup.as_ref(),
+            maximized,
+        );
+        self.schedule_startup_redraw(event_loop, delay);
+        true
     }
 
     fn layout_snapshot(&self) -> (u32, u32, u32, usize) {
@@ -313,6 +408,42 @@ impl WindowHost {
         if self.startup_presenter.is_some()
             && let Some(window) = &self.window
         {
+            window.request_redraw();
+        }
+    }
+
+    fn schedule_startup_redraw(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+        delay: Option<Duration>,
+    ) {
+        let Some(delay) = delay else {
+            self.startup_next_redraw = None;
+            event_loop.set_control_flow(ControlFlow::Wait);
+            return;
+        };
+        let when = Instant::now() + delay.max(Duration::from_millis(1));
+        self.startup_next_redraw = Some(when);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(when));
+    }
+
+    fn request_due_startup_redraw(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if self.startup_presenter.is_none() {
+            return;
+        }
+        let Some(when) = self.startup_next_redraw else {
+            return;
+        };
+        if Instant::now() < when {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(when));
+            return;
+        }
+        self.startup_next_redraw = None;
+        event_loop.set_control_flow(ControlFlow::Wait);
+        if let Some(window) = &self.window {
             window.request_redraw();
         }
     }
@@ -1567,6 +1698,13 @@ fn format_duration(d: Duration) -> String {
 const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
 impl ApplicationHandler<AppEvent> for WindowHost {
+    fn about_to_wait(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) {
+        self.request_due_startup_redraw(event_loop);
+    }
+
     fn user_event(
         &mut self,
         event_loop: &ActiveEventLoop,
@@ -1596,6 +1734,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     APP_START_TIME.get().unwrap().elapsed().as_millis()
                 );
                 self.startup_presenter = None;
+                self.startup_next_redraw = None;
                 if let Some(tx) = self.startup_release_tx.take() {
                     let _ = tx.send(());
                 }
@@ -1693,12 +1832,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             self.startup_gutter,
             startup_background,
         );
-        if let Some(tab_id) = self.active_input_tab
-            && let Some(target) = self.input_endpoints.get(&tab_id)
-            && let Some(presenter) = self.startup_presenter.as_mut()
-        {
-            let hovered_button = self.input_state.lock().hovered_tab_bar_button;
-            presenter.present(&window, target, hovered_button, window.is_maximized());
+        if self.present_startup_frame(event_loop, &window) {
             window.request_redraw();
         }
 
@@ -1716,18 +1850,20 @@ impl ApplicationHandler<AppEvent> for WindowHost {
         self.window_size = (startup_window_size.width, startup_window_size.height);
         self.window = Some(window);
 
-        event_loop.set_control_flow(ControlFlow::Wait);
+        if self.startup_next_redraw.is_none() {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
     }
 
     fn window_event(
         &mut self,
-        _event_loop: &ActiveEventLoop,
+        event_loop: &ActiveEventLoop,
         _window_id: WindowId,
         event: WindowEvent,
     ) {
         let ev = match event {
             WindowEvent::CloseRequested => {
-                _event_loop.exit();
+                event_loop.exit();
                 return;
             }
 
@@ -1740,13 +1876,9 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::RedrawRequested => {
-                if let Some(tab_id) = self.active_input_tab
-                    && let Some(window) = self.window.as_ref()
-                    && let Some(target) = self.input_endpoints.get(&tab_id)
-                    && let Some(presenter) = self.startup_presenter.as_mut()
+                if let Some(window) = self.window.as_ref().cloned()
+                    && self.present_startup_frame(event_loop, &window)
                 {
-                    let hovered_button = self.input_state.lock().hovered_tab_bar_button;
-                    presenter.present(window, target, hovered_button, window.is_maximized());
                     return;
                 }
                 return;
@@ -1785,7 +1917,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                self.handle_mouse_input(_event_loop, state == ElementState::Pressed, button);
+                self.handle_mouse_input(event_loop, state == ElementState::Pressed, button);
                 return;
             }
 
@@ -2005,6 +2137,7 @@ fn main() {
     let input_state = Arc::new(Mutex::new(InputState {
         keybindings: startup_keybindings,
         tab_count: 1,
+        tab_order: vec![TabId(0)],
         cell_width,
         cell_height,
         gutter_width: if startup_gutter {
@@ -2066,6 +2199,7 @@ fn main() {
     let mut host = WindowHost {
         window: None,
         startup_presenter: None,
+        startup_next_redraw: None,
         startup_release_tx: Some(startup_release_tx),
         input_endpoints: HashMap::from([(
             TabId(0),
