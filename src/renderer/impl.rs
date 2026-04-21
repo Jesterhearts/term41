@@ -736,9 +736,14 @@ fn load_pipeline_cache(
         info!("no pipeline cache found");
     }
 
-    // SAFETY: `data` was written by a previous `PipelineCache::get_data` call
-    // from this program (or is `None`). `fallback: true` ensures a corrupt
-    // or stale file just produces an empty cache instead of an error.
+    // SAFETY: this cache path is written only from `PipelineCache::get_data`
+    // below, and read back as an optional `data` payload for the same wgpu
+    // API. Persisted cache files can be stale, corrupted, or from an
+    // incompatible adapter after filesystem tampering, driver changes, or
+    // upgrades; wgpu validates the payload against the adapter's pipeline
+    // cache key before handing it to the backend, and `fallback: true` tells
+    // wgpu to create an empty cache when validation rejects unavoidable stale
+    // data. This matches wgpu's documented on-disk cache usage pattern.
     unsafe {
         device.create_pipeline_cache(&wgpu::PipelineCacheDescriptor {
             label: Some("pipeline_cache"),

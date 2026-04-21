@@ -235,8 +235,11 @@ impl pulp::WithSimd for ScanPrintable<'_> {
 
         let mut i = 0;
         while i + lanes <= data.len() {
-            // SAFETY: bounds checked above; `S::u8s: Pod` accepts any byte
-            // pattern so the unaligned read is sound.
+            // SAFETY: `i + lanes <= data.len()` guarantees the range
+            // `[data.as_ptr().add(i), data.as_ptr().add(i + lanes))` is
+            // in-bounds for reads. `read_unaligned` removes any alignment
+            // requirement, and `S::u8s: Pod` accepts every possible byte
+            // pattern.
             let chunk: S::u8s =
                 unsafe { core::ptr::read_unaligned(data.as_ptr().add(i) as *const S::u8s) };
             let diff = simd.sub_u8s(chunk, base);
@@ -284,8 +287,11 @@ impl pulp::WithSimd for ScanText<'_> {
 
         let mut i = 0;
         while i + lanes <= data.len() {
-            // SAFETY: bounds checked above; `S::u8s: Pod` accepts any byte
-            // pattern so the unaligned read is sound.
+            // SAFETY: `i + lanes <= data.len()` guarantees the range
+            // `[data.as_ptr().add(i), data.as_ptr().add(i + lanes))` is
+            // in-bounds for reads. `read_unaligned` removes any alignment
+            // requirement, and `S::u8s: Pod` accepts every possible byte
+            // pattern.
             let chunk: S::u8s =
                 unsafe { core::ptr::read_unaligned(data.as_ptr().add(i) as *const S::u8s) };
             let is_c0 = simd.less_than_u8s(chunk, splat_0x20);
@@ -709,7 +715,8 @@ impl Parser {
             // correct.
             0x20..=0x7E => {
                 let buf = [byte];
-                // SAFETY: single ascii byte guaranteed to be valid UTF-8.
+                // SAFETY: this match arm only runs for `byte` in
+                // 0x20..=0x7E, which is valid single-byte UTF-8.
                 let s = unsafe { std::str::from_utf8_unchecked(&buf) };
                 Some(RawAction::Print(SmolStr::new_inline(s)))
             }
@@ -1182,7 +1189,12 @@ impl<'a> Iterator for ParseIter<'a> {
                         Err(e) => e.valid_up_to(),
                     };
                     if valid_len > 0 {
-                        // SAFETY: from_utf8 validated [pos..pos+valid_len].
+                        // SAFETY: `candidate` is exactly
+                        // `data[pos..pos + candidate_len]`, and
+                        // `str::from_utf8(candidate)` reported
+                        // `valid_len > 0` valid bytes at the start of that
+                        // slice. Therefore `data[pos..pos + valid_len]` is
+                        // valid UTF-8 and remains inside `self.data`.
                         let s = unsafe {
                             std::str::from_utf8_unchecked(
                                 &self.data[self.pos..self.pos + valid_len],

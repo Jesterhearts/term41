@@ -87,7 +87,8 @@ pub(crate) use self::write::put_text_run_with_scrollback_policy;
 static ASCII_CELLS: LazyLock<[SmolStr; 95]> = LazyLock::new(|| {
     std::array::from_fn(|i| {
         let b = 0x20u8 + i as u8;
-        // SAFETY: b is in 0x20..=0x7E which is valid single-byte UTF-8.
+        // SAFETY: `i` is produced by `0..95`, so `b = 0x20 + i` is in
+        // 0x20..=0x7E. Every byte in that range is valid single-byte UTF-8.
         SmolStr::new_inline(unsafe { std::str::from_utf8_unchecked(std::slice::from_ref(&b)) })
     })
 });

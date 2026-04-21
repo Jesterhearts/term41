@@ -303,6 +303,7 @@ fn put_ascii_run_impl(
     if run.is_empty() {
         return;
     }
+    debug_assert_printable_ascii_run(run);
 
     let run = if let Some(charset) = screen.charset.take_single_shift_charset() {
         let b = run[0];
@@ -498,6 +499,7 @@ fn put_ascii_run_fast(
     run: &[u8],
     insert_mode: bool,
 ) {
+    debug_assert_printable_ascii_run(run);
     let Some(style) = target_style(screen, target) else {
         return;
     };
@@ -573,9 +575,17 @@ fn write_ascii_chunk(
     break_wide_glyphs_around_write(row, col, chunk.len());
     let table: &[SmolStr; 95] = &ASCII_CELLS;
     for (cell, &b) in row.cells[col..col + chunk.len()].iter_mut().zip(chunk) {
-        *cell = unsafe { table.get_unchecked((b - 0x20) as usize) }.clone();
+        *cell = table[(b - 0x20) as usize].clone();
     }
     fill_row_style(row, col, chunk.len(), style);
+}
+
+#[inline(always)]
+fn debug_assert_printable_ascii_run(run: &[u8]) {
+    debug_assert!(
+        run.iter().all(|&b| (0x20..=0x7E).contains(&b)),
+        "put_ascii_run_fast requires printable ASCII bytes"
+    );
 }
 
 #[inline(always)]

@@ -74,19 +74,37 @@ struct ReaderState {
 /// The `ReaderState` is kept alive via a `Box` held in [`MemInput`]
 /// whose field drop order tears down ffmpeg (which stops calling this
 /// callback) before the box releases the allocation.
+// SAFETY: this function is only registered with ffmpeg by `open_in_memory`,
+// which supplies a non-null `opaque` pointer to a boxed `ReaderState` and an
+// ffmpeg-owned I/O buffer. The callback defensively rejects null pointers and
+// negative sizes before entering the unsafe blocks below.
 unsafe extern "C" fn read_packet(
     opaque: *mut c_void,
     buf: *mut u8,
     buf_size: c_int,
 ) -> c_int {
+    if opaque.is_null() || buf_size < 0 {
+        return ffi::AVERROR(libc::EINVAL);
+    }
+    if buf_size == 0 {
+        return 0;
+    }
+    if buf.is_null() {
+        return ffi::AVERROR(libc::EINVAL);
+    }
+
     // SAFETY: `opaque` is the `&mut *reader as *mut ReaderState`
     // stored in `open_in_memory`, and the backing `Box` outlives this
-    // callback (see `MemInput::drop`). ffmpeg never aliases the opaque
-    // pointer across threads for a given context.
+    // callback (see `MemInput::drop`). The null check above rejects the
+    // only invalid value we can detect locally; alignment and pointee
+    // type come from the `opaque` value we passed to `avio_alloc_context`.
+    // ffmpeg never aliases the opaque pointer across threads for a given
+    // context.
     let state = unsafe { &mut *(opaque as *mut ReaderState) };
     // SAFETY: ffmpeg guarantees `buf` is valid for writes of `buf_size`
     // bytes for the duration of this call and isn't concurrently
-    // accessed elsewhere.
+    // accessed elsewhere. The checks above ensure `buf` is non-null and
+    // `buf_size` is positive before converting it to `usize`.
     let slice = unsafe { std::slice::from_raw_parts_mut(buf, buf_size as usize) };
     match state.cursor.read(slice) {
         Ok(0) => ffi::AVERROR_EOF,
@@ -103,13 +121,24 @@ unsafe extern "C" fn read_packet(
 ///
 /// Same contract as [`read_packet`] — `opaque` is a valid
 /// `&mut ReaderState` for the duration of the call.
+// SAFETY: this function is only registered with ffmpeg by `open_in_memory`,
+// which supplies a non-null `opaque` pointer to a boxed `ReaderState`. The
+// callback defensively rejects a null pointer before entering the unsafe block
+// below.
 unsafe extern "C" fn seek_packet(
     opaque: *mut c_void,
     offset: i64,
     whence: c_int,
 ) -> i64 {
+    if opaque.is_null() {
+        return -1;
+    }
+
     // SAFETY: see `read_packet` — `opaque` points to a live ReaderState
-    // owned by the `MemInput` driving this decode.
+    // owned by the `MemInput` driving this decode. The null check above
+    // rejects the only invalid value we can detect locally; alignment and
+    // pointee type come from the `opaque` value we passed to
+    // `avio_alloc_context`.
     let state = unsafe { &mut *(opaque as *mut ReaderState) };
 
     // AVSEEK_SIZE is an ffmpeg extension: "don't seek, just tell me the

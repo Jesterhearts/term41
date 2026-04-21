@@ -864,17 +864,13 @@ mod tests {
 
     #[test]
     fn background_image_path_expands_env_var() {
-        // SAFETY: setting an env var in a single-threaded test context.
-        // The risk would be other threads reading mid-mutation; this
-        // test only sets it.
-        unsafe {
-            std::env::set_var("TERM41_TEST_WALLPAPER_DIR", "/srv/walls");
-        }
-        let cfg = parse("background_image = \"$TERM41_TEST_WALLPAPER_DIR/foo.png\"");
-        assert_eq!(
-            cfg.background_image.as_deref(),
-            Some(std::path::Path::new("/srv/walls/foo.png"))
-        );
+        let Some(home) = std::env::var_os("HOME") else {
+            return;
+        };
+
+        let cfg = parse("background_image = \"$HOME/term41-wallpaper.png\"");
+        let expected = std::path::Path::new(&home).join("term41-wallpaper.png");
+        assert_eq!(cfg.background_image.as_deref(), Some(expected.as_path()));
     }
 
     #[test]
