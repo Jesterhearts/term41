@@ -49,7 +49,6 @@ use crate::config::Config;
 use crate::config::DEFAULT_SCROLLBACK;
 use crate::keybindings::Action;
 use crate::output_recording::RecorderControl;
-use crate::renderer::r#impl::PreparedRenderer;
 use crate::renderer::r#impl::Renderer;
 use crate::renderer::r#impl::TabInfo;
 use crate::renderer::r#impl::WindowControls;
@@ -288,7 +287,6 @@ impl RenderHost {
         startup_release_rx: mpsc::Receiver<()>,
     ) {
         let mut frames = 0u64;
-        let mut prepared_renderer: Option<PreparedRenderer> = None;
         let mut first_frame = true;
 
         // Phase 1: wait for the window and initialize the renderer.
@@ -357,16 +355,18 @@ impl RenderHost {
             // one comparison and nothing else.
             self.update_ime_cursor_area();
 
-            if prepared_renderer.is_none() {
-                prepared_renderer = Some(tracing::debug_span!("prepare_renderer").in_scope(|| {
+            if self.renderer.is_none() {
+                let prepared_renderer = tracing::debug_span!("prepare_renderer").in_scope(|| {
                     pollster::block_on(Renderer::prepare(
                         display.clone(),
                         self.config.power_preference,
+                        effective_bg_path(&self.config),
+                        self.config.background_opacity,
+                        self.startup_snapshot_size(),
+                        window.inner_size(),
                     ))
-                }));
-            }
+                });
 
-            if self.renderer.is_none() {
                 let _ = self.proxy.send_event(AppEvent::ReleaseStartupSurface);
                 let _ = startup_release_rx.recv();
                 // Surface the precedence rule once at startup so the user
@@ -383,16 +383,11 @@ impl RenderHost {
                 }
                 self.renderer = Some(tracing::debug_span!("create_renderer").in_scope(|| {
                     Renderer::from_prepared(
-                        prepared_renderer
-                            .take()
-                            .expect("prepared renderer must exist before surface handoff"),
+                        prepared_renderer,
                         window.clone(),
                         self.config.opacity,
                         self.config.gutter,
                         self.config.vsync,
-                        effective_bg_path(&self.config),
-                        self.config.background_opacity,
-                        self.startup_snapshot_size(),
                     )
                 }));
             }
