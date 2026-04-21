@@ -106,7 +106,7 @@ pub fn rasterize(
         cp @ 0x1FB3C..=0x1FB67 => draw_wedge(cp, &mut alpha, w, h),
         cp @ 0x1FB68..=0x1FB6F => draw_block_diagonal(cp, &mut alpha, w, h),
         cp @ 0x1FB70..=0x1FB8F => draw_sflc_block(cp, &mut alpha, w, h),
-        cp @ 0x1FB90..=0x1FB9F => draw_shade_pattern(cp, &mut alpha, w, h),
+        cp @ 0x1FB90..=0x1FB9F => draw_shade_pattern(cp, &mut alpha, w, h, supersample as usize),
         cp @ 0x1FBA0..=0x1FBAF => draw_diagonal_lines(cp, &mut alpha, w, h),
         _ => {}
     }
@@ -798,11 +798,13 @@ fn draw_shade_pattern(
     alpha: &mut [u8],
     w: usize,
     h: usize,
+    supersample: usize,
 ) {
     let wf = w as f32;
     let hf = h as f32;
     let xm = wf / 2.0;
     let ym = hf / 2.0;
+    let ss = supersample.max(1);
 
     match cp {
         // Inverse medium shade — same density as U+2592 but semantically
@@ -833,7 +835,7 @@ fn draw_shade_pattern(
         0x1FB95 => {
             for py in 0..h {
                 for px in 0..w {
-                    if (px + py) % 2 == 0 {
+                    if ((px / ss) + (py / ss)).is_multiple_of(2) {
                         alpha[py * w + px] = 0xFF;
                     }
                 }
@@ -842,7 +844,7 @@ fn draw_shade_pattern(
         0x1FB96 => {
             for py in 0..h {
                 for px in 0..w {
-                    if (px + py) % 2 != 0 {
+                    if !((px / ss) + (py / ss)).is_multiple_of(2) {
                         alpha[py * w + px] = 0xFF;
                     }
                 }
@@ -851,7 +853,7 @@ fn draw_shade_pattern(
         // Heavy horizontal fill — 2-on / 2-off horizontal stripes.
         0x1FB97 => {
             for py in 0..h {
-                if (py / 2) % 2 == 1 {
+                if ((py / ss) / 2) % 2 == 1 {
                     for px in 0..w {
                         alpha[py * w + px] = 0xFF;
                     }
@@ -863,7 +865,7 @@ fn draw_shade_pattern(
             // UL-to-LR stripes: perpendicular coordinate is (x + y).
             for py in 0..h {
                 for px in 0..w {
-                    if (px + py) % 4 < 2 {
+                    if ((px / ss) + (py / ss)) % 4 < 2 {
                         alpha[py * w + px] = 0xFF;
                     }
                 }
@@ -873,7 +875,7 @@ fn draw_shade_pattern(
             // UR-to-LL stripes: perpendicular coordinate is (x − y).
             for py in 0..h {
                 for px in 0..w {
-                    if (px as isize - py as isize).rem_euclid(4) < 2 {
+                    if ((px / ss) as isize - (py / ss) as isize).rem_euclid(4) < 2 {
                         alpha[py * w + px] = 0xFF;
                     }
                 }
@@ -1310,11 +1312,43 @@ mod tests {
     }
 
     #[test]
+    fn checkerboard_survives_supersampling() {
+        let w = 8u32;
+        let h = 12u32;
+        let g = rasterize(0xFB95, w, h, 10.0, 4);
+        let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
+        let empty: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0x00).count();
+        let shaded: usize = g
+            .bitmap
+            .chunks_exact(4)
+            .filter(|c| c[3] != 0x00 && c[3] != 0xFF)
+            .count();
+        assert_eq!(filled, (w * h / 2) as usize);
+        assert_eq!(empty, (w * h / 2) as usize);
+        assert_eq!(shaded, 0, "checkerboard collapsed into shade");
+    }
+
+    #[test]
     fn inverse_checkerboard_complements_checkerboard() {
         let w = 8u32;
         let h = 12u32;
         let a = rasterize(0xFB95, w, h, 10.0, 1);
         let b = rasterize(0xFB96, w, h, 10.0, 1);
+        for i in 0..(w * h) as usize {
+            assert_eq!(
+                a.bitmap[i * 4 + 3] as u16 + b.bitmap[i * 4 + 3] as u16,
+                0xFF,
+                "checkerboard pixel {i}"
+            );
+        }
+    }
+
+    #[test]
+    fn inverse_checkerboard_complements_checkerboard_under_supersampling() {
+        let w = 8u32;
+        let h = 12u32;
+        let a = rasterize(0xFB95, w, h, 10.0, 4);
+        let b = rasterize(0xFB96, w, h, 10.0, 4);
         for i in 0..(w * h) as usize {
             assert_eq!(
                 a.bitmap[i * 4 + 3] as u16 + b.bitmap[i * 4 + 3] as u16,
