@@ -4,7 +4,7 @@
 
 # term41
 
-<p aligh="center">
+<p align="center">
   <video src="https://github.com/user-attachments/assets/d5e13ecc-1adf-446e-8fee-8c09ca605df4">
   </video>
 </p>
