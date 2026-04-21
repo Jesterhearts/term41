@@ -2295,33 +2295,6 @@ impl Renderer {
             );
         }
 
-        for tab in &plan.tabs {
-            if let Some(separator) = tab.separator {
-                let sep_w = 3.0_f32;
-                let sep_color = pack_color(&separator, self.bg_alpha);
-                let bi = bg_vertices.len() as u32;
-                bg_vertices.extend_from_slice(&[
-                    BgVertex {
-                        pos: [tab.x + tab.width, 0.0],
-                        color: sep_color,
-                    },
-                    BgVertex {
-                        pos: [tab.x + tab.width + sep_w, 0.0],
-                        color: sep_color,
-                    },
-                    BgVertex {
-                        pos: [tab.x + tab.width, cell_h],
-                        color: sep_color,
-                    },
-                    BgVertex {
-                        pos: [tab.x + tab.width + sep_w, cell_h],
-                        color: sep_color,
-                    },
-                ]);
-                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
-            }
-        }
-
         if let Some(bg) = plan.new_tab_button.bg {
             push_rect(
                 plan.new_tab_button.x,
@@ -2441,6 +2414,33 @@ impl Renderer {
                     overlay_fg_vertices,
                     overlay_fg_indices,
                 );
+            }
+        }
+
+        for tab in &plan.tabs {
+            if let Some(separator) = tab.separator {
+                let sep_w = 3.0_f32;
+                let sep_color = pack_color(&separator, self.bg_alpha);
+                let bi = bg_vertices.len() as u32;
+                bg_vertices.extend_from_slice(&[
+                    BgVertex {
+                        pos: [tab.x + tab.width, 0.0],
+                        color: sep_color,
+                    },
+                    BgVertex {
+                        pos: [tab.x + tab.width + sep_w, 0.0],
+                        color: sep_color,
+                    },
+                    BgVertex {
+                        pos: [tab.x + tab.width, cell_h],
+                        color: sep_color,
+                    },
+                    BgVertex {
+                        pos: [tab.x + tab.width + sep_w, cell_h],
+                        color: sep_color,
+                    },
+                ]);
+                bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
             }
         }
     }

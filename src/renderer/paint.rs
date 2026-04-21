@@ -171,9 +171,9 @@ fn clip_status_line_tail<'a>(
     if cols == 1 {
         return vec!["…"];
     }
-    let keep = cols - 1;
+    let keep = cols - 2;
     let mut clipped = Vec::with_capacity(cols);
-    clipped.push("…");
+    clipped.push("… ");
     clipped.extend_from_slice(&segments[segments.len() - keep..]);
     clipped
 }
@@ -425,8 +425,8 @@ fn truncate_label(
     if label_chars <= max_chars {
         return label.to_string();
     }
-    let ellipsis = "…";
-    let truncated_len = max_chars.saturating_sub(1);
+    let ellipsis = "… ";
+    let truncated_len = max_chars.saturating_sub(2);
     label
         .graphemes(true)
         .take(truncated_len)

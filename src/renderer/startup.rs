@@ -347,21 +347,6 @@ fn paint_tab_bar(
         );
     }
 
-    for tab in &plan.tabs {
-        if let Some(separator) = tab.separator {
-            fill_rect(
-                buffer,
-                width,
-                height,
-                tab.x.round() as i32 + tab.width.round() as i32,
-                0,
-                3,
-                tab_bar_h,
-                pack_rgb(separator),
-            );
-        }
-    }
-
     if let Some(button_bg) = plan.new_tab_button.bg {
         fill_rect(
             buffer,
@@ -394,6 +379,21 @@ fn paint_tab_bar(
         let row = label_row(button.label, fg, plan.base_bg, false);
         let x = button.x + (button.width - cell_w as f32) * 0.5;
         paint_shaped_label(font_system, snap, buffer, width, height, &row, x, 0.0);
+    }
+
+    for tab in &plan.tabs {
+        if let Some(separator) = tab.separator {
+            fill_rect(
+                buffer,
+                width,
+                height,
+                tab.x.round() as i32 + tab.width.round() as i32,
+                0,
+                3,
+                tab_bar_h,
+                pack_rgb(separator),
+            );
+        }
     }
 }
 
