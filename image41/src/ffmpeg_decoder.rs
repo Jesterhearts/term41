@@ -19,23 +19,13 @@
 //! Teardown order matters: close `Input` first (leaves custom IO alone
 //! thanks to the flag), then free the AVIOContext (and its internal
 //! buffer, which ffmpeg may have reallocated), then drop the reader
-//! state. The internal `MemInput` wrapper enforces this via field order plus
-//! a manual `Drop`.
+//! state. The internal `memory_input::MemoryInput` wrapper keeps that unsafe
+//! adapter separate from the decode pipeline.
 
-use std::ffi::c_void;
-use std::io::Cursor;
-use std::io::Read;
-use std::io::Seek;
-use std::io::SeekFrom;
-use std::mem::ManuallyDrop;
-use std::os::raw::c_int;
-use std::ptr;
 use std::sync::OnceLock;
 use std::time::Duration;
 
-use ff::ffi;
 use ff::format::Pixel;
-use ff::format::context::Input;
 use ff::media::Type;
 use ff::software::scaling::Context as SwsContext;
 use ff::software::scaling::Flags as SwsFlags;
@@ -53,274 +43,321 @@ fn ensure_init() -> bool {
     *INIT.get_or_init(|| ff::init().is_ok())
 }
 
-/// State handed to ffmpeg's read/seek callbacks via the AVIOContext
-/// `opaque` pointer. Lives inside a `Box` on the heap so the pointer
-/// stays stable while ffmpeg holds it.
-struct ReaderState {
-    cursor: Cursor<Vec<u8>>,
-}
+mod memory_input {
+    use std::ffi::c_void;
+    use std::fmt;
+    use std::io::Cursor;
+    use std::io::Read;
+    use std::io::Seek;
+    use std::io::SeekFrom;
+    use std::mem::ManuallyDrop;
+    use std::ops::Deref;
+    use std::ops::DerefMut;
+    use std::os::raw::c_int;
+    use std::ptr;
+    use std::ptr::NonNull;
 
-/// ffmpeg read callback. Fills `buf` from the backing `ReaderState`'s
-/// cursor and returns the byte count, [`AVERROR_EOF`] at end of input,
-/// or `AVERROR(EIO)` on an unreadable cursor.
-///
-/// # Safety
-///
-/// Registered via `avio_alloc_context` with `opaque` set to
-/// `&mut ReaderState`. ffmpeg's contract:
-/// - `opaque` is returned verbatim as whatever pointer we passed in.
-/// - `buf` points to at least `buf_size` writable bytes owned by ffmpeg.
-/// - `buf_size` is non-negative.
-///
-/// The `ReaderState` is kept alive via a `Box` held in [`MemInput`]
-/// whose field drop order tears down ffmpeg (which stops calling this
-/// callback) before the box releases the allocation.
-// SAFETY: this function is only registered with ffmpeg by `open_in_memory`,
-// which supplies a non-null `opaque` pointer to a boxed `ReaderState` and an
-// ffmpeg-owned I/O buffer. The callback defensively rejects null pointers and
-// negative sizes before entering the unsafe blocks below.
-unsafe extern "C" fn read_packet(
-    opaque: *mut c_void,
-    buf: *mut u8,
-    buf_size: c_int,
-) -> c_int {
-    if opaque.is_null() || buf_size < 0 {
-        return ffi::AVERROR(libc::EINVAL);
-    }
-    if buf_size == 0 {
-        return 0;
-    }
-    if buf.is_null() {
-        return ffi::AVERROR(libc::EINVAL);
+    use ff::ffi;
+    use ff::format::context::Input as FormatInput;
+
+    use super::ff;
+
+    /// A custom-IO-opened ffmpeg input.
+    ///
+    /// This is the only safe type exposed by the in-memory input adapter.
+    /// It owns the ffmpeg format context, the custom AVIO context, and the
+    /// Rust reader state used by ffmpeg's callbacks. Drop order is
+    /// format input → AVIO context → reader state.
+    pub(super) struct MemoryInput {
+        input: ManuallyDrop<FormatInput>,
+        _io: AvioContext,
+        _reader: Box<ReaderState>,
     }
 
-    // SAFETY: `opaque` is the `&mut *reader as *mut ReaderState`
-    // stored in `open_in_memory`, and the backing `Box` outlives this
-    // callback (see `MemInput::drop`). The null check above rejects the
-    // only invalid value we can detect locally; alignment and pointee
-    // type come from the `opaque` value we passed to `avio_alloc_context`.
-    // ffmpeg never aliases the opaque pointer across threads for a given
-    // context.
-    let state = unsafe { &mut *(opaque as *mut ReaderState) };
-    // SAFETY: ffmpeg guarantees `buf` is valid for writes of `buf_size`
-    // bytes for the duration of this call and isn't concurrently
-    // accessed elsewhere. The checks above ensure `buf` is non-null and
-    // `buf_size` is positive before converting it to `usize`.
-    let slice = unsafe { std::slice::from_raw_parts_mut(buf, buf_size as usize) };
-    match state.cursor.read(slice) {
-        Ok(0) => ffi::AVERROR_EOF,
-        Ok(n) => n as c_int,
-        Err(_) => ffi::AVERROR(libc::EIO),
-    }
-}
-
-/// ffmpeg seek callback. Handles `SEEK_SET` / `SEEK_CUR` / `SEEK_END`
-/// plus the ffmpeg-specific `AVSEEK_SIZE` query ("what's the total
-/// length?"). Returns the new position or `-1` on failure.
-///
-/// # Safety
-///
-/// Same contract as [`read_packet`] — `opaque` is a valid
-/// `&mut ReaderState` for the duration of the call.
-// SAFETY: this function is only registered with ffmpeg by `open_in_memory`,
-// which supplies a non-null `opaque` pointer to a boxed `ReaderState`. The
-// callback defensively rejects a null pointer before entering the unsafe block
-// below.
-unsafe extern "C" fn seek_packet(
-    opaque: *mut c_void,
-    offset: i64,
-    whence: c_int,
-) -> i64 {
-    if opaque.is_null() {
-        return -1;
+    pub(super) enum OpenError {
+        IoBufferAlloc,
+        AvioContextAlloc,
+        FormatContextAlloc,
+        OpenInput(i32),
     }
 
-    // SAFETY: see `read_packet` — `opaque` points to a live ReaderState
-    // owned by the `MemInput` driving this decode. The null check above
-    // rejects the only invalid value we can detect locally; alignment and
-    // pointee type come from the `opaque` value we passed to
-    // `avio_alloc_context`.
-    let state = unsafe { &mut *(opaque as *mut ReaderState) };
-
-    // AVSEEK_SIZE is an ffmpeg extension: "don't seek, just tell me the
-    // total length." Report the buffer size without touching the cursor.
-    if whence & ffi::AVSEEK_SIZE as c_int != 0 {
-        return state.cursor.get_ref().len() as i64;
-    }
-
-    // Mask off AVSEEK_FORCE (0x20000) etc. — only the low 3 bits carry
-    // the actual SEEK_SET / SEEK_CUR / SEEK_END selector.
-    let pos = match whence & 0x7 {
-        libc::SEEK_SET => SeekFrom::Start(offset as u64),
-        libc::SEEK_CUR => SeekFrom::Current(offset),
-        libc::SEEK_END => SeekFrom::End(offset),
-        _ => return -1,
-    };
-    state.cursor.seek(pos).map(|p| p as i64).unwrap_or(-1)
-}
-
-/// A custom-IO-opened ffmpeg input plus the raw AVIOContext and reader
-/// state that back it. Teardown order is Input → AVIOContext → reader.
-struct MemInput {
-    input: ManuallyDrop<Input>,
-    io_ctx: *mut ffi::AVIOContext,
-    _reader: Box<ReaderState>,
-}
-
-impl Drop for MemInput {
-    fn drop(&mut self) {
-        // SAFETY: `self.input` was constructed via `ManuallyDrop::new` in
-        // `open_in_memory` and hasn't been dropped yet — `Drop::drop`
-        // runs exactly once, so this is the only call to
-        // `ManuallyDrop::drop`. After this line `self.input` must not
-        // be used again, which holds because we don't touch it below.
-        //
-        // `avformat_close_input` (run via the wrapped Input's Drop)
-        // leaves our AVIOContext alone thanks to the
-        // `AVFMT_FLAG_CUSTOM_IO` we set — so the subsequent calls below
-        // act on an AVIOContext that is still valid and owned by us.
-        unsafe {
-            ManuallyDrop::drop(&mut self.input);
-        }
-
-        if !self.io_ctx.is_null() {
-            // SAFETY: `io_ctx` is the AVIOContext we allocated in
-            // `open_in_memory` and no one else has freed it: ffmpeg-next
-            // doesn't own custom-IO contexts. `av_freep(&mut buffer)`
-            // frees whatever buffer the context currently holds (ffmpeg
-            // may have reallocated it during open) and nulls the field,
-            // which `avio_context_free` tolerates. Both functions are
-            // safe to call with valid pointers we own.
-            unsafe {
-                let buffer_ptr = &mut (*self.io_ctx).buffer as *mut *mut u8;
-                ffi::av_freep(buffer_ptr as *mut c_void);
-                ffi::avio_context_free(&mut self.io_ctx);
+    impl fmt::Display for OpenError {
+        fn fmt(
+            &self,
+            f: &mut fmt::Formatter<'_>,
+        ) -> fmt::Result {
+            match self {
+                Self::IoBufferAlloc => f.write_str("failed to allocate AVIO buffer"),
+                Self::AvioContextAlloc => f.write_str("failed to allocate AVIO context"),
+                Self::FormatContextAlloc => f.write_str("failed to allocate AVFormatContext"),
+                Self::OpenInput(code) => {
+                    write!(f, "avformat_open_input failed with ffmpeg error {code}")
+                }
             }
         }
-        // `_reader` drops via normal field drop order, safely after
-        // every ffmpeg callback has had its last chance to run.
-    }
-}
-
-/// Open `data` as an ffmpeg input with a custom AVIOContext. Returns
-/// `None` if any allocation or probe step fails.
-///
-/// All the unsafe machinery below assumes:
-/// - ffmpeg's allocation functions (`av_malloc`, `avio_alloc_context`,
-///   `avformat_alloc_context`) either return `NULL` on failure or a
-///   freshly-allocated, uniquely-owned pointer on success.
-/// - `avio_alloc_context` takes ownership of `io_buffer`.
-/// - `avformat_open_input` on success transfers no ownership; on failure it
-///   frees and nulls the AVFormatContext pointer we pass in.
-/// - `Input::wrap` takes ownership of the AVFormatContext and arranges
-///   `avformat_close_input` on drop.
-/// - All cleanup paths free exactly what we still own at the failure point
-///   (audited test `rejects_garbage_bytes` exercises the open failure branch
-///   specifically).
-fn open_in_memory(data: Vec<u8>) -> Option<MemInput> {
-    // 4 KiB matches ffmpeg's own default probe buffer size; too small and
-    // the demuxer will keep re-reading to grow it.
-    const BUF_SIZE: usize = 4096;
-
-    // SAFETY: `av_malloc` returns either a fresh allocation of at least
-    // `BUF_SIZE` bytes or NULL. We check for NULL immediately.
-    let io_buffer = unsafe { ffi::av_malloc(BUF_SIZE) };
-    if io_buffer.is_null() {
-        return None;
     }
 
-    // Box the reader so its address is stable for the lifetime of the
-    // AVIOContext — ffmpeg keeps our `opaque` pointer. The Box holds a
-    // unique allocation with no aliases at this point.
-    let mut reader = Box::new(ReaderState {
-        cursor: Cursor::new(data),
-    });
-    let opaque = &mut *reader as *mut ReaderState as *mut c_void;
+    /// Open `data` as an ffmpeg input with custom in-memory IO.
+    pub(super) fn open(data: Vec<u8>) -> Result<MemoryInput, OpenError> {
+        let (io_ctx, reader) = open_io_context(data)?;
+        let fmt_ctx = match open_format_context(io_ctx.as_ptr()) {
+            Ok(fmt_ctx) => fmt_ctx,
+            Err(err) => {
+                // `MemoryInput` has not been assembled yet, so the local
+                // AVIO wrapper owns cleanup for the context created above.
+                drop(io_ctx);
+                return Err(err);
+            }
+        };
 
-    // SAFETY: `io_buffer` is the valid av_malloc'd pointer from above,
-    // `read_packet` / `seek_packet` match ffmpeg's callback ABI, and
-    // `opaque` points to a live `ReaderState` owned by the `reader`
-    // Box that stays alive in the returned `MemInput` (the
-    // destructuring on error paths drops it after we've freed ffmpeg
-    // state).
-    let io_ctx = unsafe {
-        ffi::avio_alloc_context(
-            io_buffer as *mut u8,
-            BUF_SIZE as c_int,
-            0, // write_flag = 0 (read-only)
-            opaque,
-            Some(read_packet),
-            None,
-            Some(seek_packet),
-        )
-    };
-    if io_ctx.is_null() {
-        // SAFETY: `io_buffer` was never handed to avio_alloc_context
-        // (it returned NULL), so ownership is still ours.
-        unsafe { ffi::av_free(io_buffer) };
-        return None;
+        // SAFETY: `fmt_ctx` is a fully-opened `AVFormatContext` returned
+        // by `avformat_open_input`. Ownership is transferred to the
+        // ffmpeg wrapper, which will close it on drop.
+        let input = unsafe { FormatInput::wrap(fmt_ctx) };
+
+        Ok(MemoryInput {
+            input: ManuallyDrop::new(input),
+            _io: io_ctx,
+            _reader: reader,
+        })
     }
 
-    // SAFETY: `avformat_alloc_context` either returns a fresh context
-    // or NULL. No ownership transfer.
-    let mut fmt_ctx = unsafe { ffi::avformat_alloc_context() };
-    if fmt_ctx.is_null() {
-        // SAFETY: AVIOContext now owns `io_buffer`; free via the
-        // context's `buffer` field in case ffmpeg already swapped it,
-        // then free the context itself. These are the only live
-        // ffmpeg-owned resources in this branch.
+    impl Deref for MemoryInput {
+        type Target = FormatInput;
+
+        fn deref(&self) -> &Self::Target {
+            &self.input
+        }
+    }
+
+    impl DerefMut for MemoryInput {
+        fn deref_mut(&mut self) -> &mut Self::Target {
+            &mut self.input
+        }
+    }
+
+    impl Drop for MemoryInput {
+        fn drop(&mut self) {
+            // SAFETY: `input` is constructed exactly once in `open` and
+            // `MemoryInput::drop` runs exactly once. Dropping the input
+            // first closes the `AVFormatContext`; because
+            // `AVFMT_FLAG_CUSTOM_IO` is set, that close leaves our custom
+            // `AVIOContext` for the `AvioContext` field to free next.
+            unsafe {
+                ManuallyDrop::drop(&mut self.input);
+            }
+        }
+    }
+
+    /// State handed to ffmpeg's read/seek callbacks via the AVIOContext
+    /// `opaque` pointer. Lives inside a `Box` on the heap so the pointer
+    /// stays stable while ffmpeg holds it.
+    struct ReaderState {
+        cursor: Cursor<Vec<u8>>,
+    }
+
+    struct AvioContext {
+        ptr: NonNull<ffi::AVIOContext>,
+    }
+
+    impl AvioContext {
+        fn as_ptr(&self) -> *mut ffi::AVIOContext {
+            self.ptr.as_ptr()
+        }
+    }
+
+    impl Drop for AvioContext {
+        fn drop(&mut self) {
+            // SAFETY: `ptr` is a live AVIOContext created by
+            // `avio_alloc_context` and uniquely owned by this wrapper.
+            // ffmpeg may reallocate `buffer` during probing, so free the
+            // current field value before freeing the context itself.
+            unsafe {
+                free_avio_context(self.ptr.as_ptr());
+            }
+        }
+    }
+
+    /// ffmpeg read callback. Fills `buf` from the backing
+    /// `ReaderState`'s cursor and returns the byte count,
+    /// [`AVERROR_EOF`] at end of input, or `AVERROR(EIO)` on an
+    /// unreadable cursor.
+    ///
+    /// # Safety
+    ///
+    /// Registered via `avio_alloc_context` with `opaque` set to
+    /// `&mut ReaderState`. ffmpeg's contract:
+    /// - `opaque` is returned verbatim as whatever pointer we passed in.
+    /// - `buf` points to at least `buf_size` writable bytes owned by ffmpeg.
+    /// - `buf_size` is non-negative.
+    ///
+    /// The `ReaderState` is kept alive inside `MemoryInput`, whose drop
+    /// order closes ffmpeg before releasing the reader allocation.
+    unsafe extern "C" fn read_packet(
+        opaque: *mut c_void,
+        buf: *mut u8,
+        buf_size: c_int,
+    ) -> c_int {
+        if opaque.is_null() || buf_size < 0 {
+            return ffi::AVERROR(libc::EINVAL);
+        }
+        if buf_size == 0 {
+            return 0;
+        }
+        if buf.is_null() {
+            return ffi::AVERROR(libc::EINVAL);
+        }
+
+        // SAFETY: `opaque` is the pointer to the boxed `ReaderState`
+        // passed to `avio_alloc_context` by `open_io_context`; the box
+        // outlives all callback calls because it is owned by
+        // `MemoryInput` and dropped after the ffmpeg input and AVIO
+        // context.
+        let state = unsafe { &mut *(opaque as *mut ReaderState) };
+        // SAFETY: ffmpeg provides a writable buffer of `buf_size` bytes
+        // for the duration of this callback. Local guards above reject a
+        // null buffer and negative sizes before constructing the slice.
+        let slice = unsafe { std::slice::from_raw_parts_mut(buf, buf_size as usize) };
+        match state.cursor.read(slice) {
+            Ok(0) => ffi::AVERROR_EOF,
+            Ok(n) => n as c_int,
+            Err(_) => ffi::AVERROR(libc::EIO),
+        }
+    }
+
+    /// ffmpeg seek callback. Handles `SEEK_SET` / `SEEK_CUR` /
+    /// `SEEK_END` plus the ffmpeg-specific `AVSEEK_SIZE` query.
+    ///
+    /// # Safety
+    ///
+    /// Same contract as [`read_packet`] — `opaque` is a valid
+    /// `&mut ReaderState` for the duration of the call.
+    unsafe extern "C" fn seek_packet(
+        opaque: *mut c_void,
+        offset: i64,
+        whence: c_int,
+    ) -> i64 {
+        if opaque.is_null() {
+            return -1;
+        }
+
+        // SAFETY: see `read_packet`; this callback is registered with
+        // the same boxed `ReaderState` pointer and cannot outlive the
+        // owning `MemoryInput`.
+        let state = unsafe { &mut *(opaque as *mut ReaderState) };
+
+        if whence & ffi::AVSEEK_SIZE as c_int != 0 {
+            return state.cursor.get_ref().len() as i64;
+        }
+
+        let pos = match whence & 0x7 {
+            libc::SEEK_SET => SeekFrom::Start(offset as u64),
+            libc::SEEK_CUR => SeekFrom::Current(offset),
+            libc::SEEK_END => SeekFrom::End(offset),
+            _ => return -1,
+        };
+        state.cursor.seek(pos).map(|p| p as i64).unwrap_or(-1)
+    }
+
+    fn open_io_context(data: Vec<u8>) -> Result<(AvioContext, Box<ReaderState>), OpenError> {
+        // 4 KiB matches ffmpeg's own default probe buffer size; too small
+        // and the demuxer will keep re-reading to grow it.
+        const BUF_SIZE: usize = 4096;
+
+        // SAFETY: `av_malloc` returns either a fresh allocation of at
+        // least `BUF_SIZE` bytes or NULL. We check for NULL immediately.
+        let io_buffer = unsafe { ffi::av_malloc(BUF_SIZE) };
+        if io_buffer.is_null() {
+            return Err(OpenError::IoBufferAlloc);
+        }
+
+        let mut reader = Box::new(ReaderState {
+            cursor: Cursor::new(data),
+        });
+        let opaque = &mut *reader as *mut ReaderState as *mut c_void;
+
+        // SAFETY: `io_buffer` is the valid av_malloc'd pointer from
+        // above, `read_packet` / `seek_packet` match ffmpeg's callback
+        // ABI, and `opaque` points to a boxed `ReaderState` that is
+        // returned with the AVIO context and then stored in `MemoryInput`.
+        let io_ctx = unsafe {
+            ffi::avio_alloc_context(
+                io_buffer as *mut u8,
+                BUF_SIZE as c_int,
+                0,
+                opaque,
+                Some(read_packet),
+                None,
+                Some(seek_packet),
+            )
+        };
+        let ptr = match NonNull::new(io_ctx) {
+            Some(ptr) => ptr,
+            None => {
+                // SAFETY: `io_buffer` was not accepted by
+                // `avio_alloc_context`, so ownership is still local.
+                unsafe { ffi::av_free(io_buffer) };
+                return Err(OpenError::AvioContextAlloc);
+            }
+        };
+
+        Ok((AvioContext { ptr }, reader))
+    }
+
+    fn open_format_context(
+        io_ctx: *mut ffi::AVIOContext
+    ) -> Result<*mut ffi::AVFormatContext, OpenError> {
+        // SAFETY: `avformat_alloc_context` either returns a fresh context
+        // or NULL. No ownership transfer occurs on success.
+        let mut fmt_ctx = unsafe { ffi::avformat_alloc_context() };
+        if fmt_ctx.is_null() {
+            return Err(OpenError::FormatContextAlloc);
+        }
+
+        // SAFETY: `fmt_ctx` is a valid, uniquely-owned AVFormatContext
+        // and `io_ctx` is the live AVIOContext created for this input.
+        // Setting `AVFMT_FLAG_CUSTOM_IO` keeps ffmpeg from freeing our
+        // AVIOContext when the format context closes.
+        unsafe {
+            (*fmt_ctx).pb = io_ctx;
+            (*fmt_ctx).flags |= ffi::AVFMT_FLAG_CUSTOM_IO;
+        }
+
+        // SAFETY: `fmt_ctx` is a valid owned pointer. Passing NULL for
+        // path, format, and options asks ffmpeg to auto-probe through the
+        // custom IO context. On failure ffmpeg frees and nulls `fmt_ctx`;
+        // on success ownership stays with the caller.
+        let ret = unsafe {
+            ffi::avformat_open_input(&mut fmt_ctx, ptr::null(), ptr::null_mut(), ptr::null_mut())
+        };
+        if ret < 0 {
+            return Err(OpenError::OpenInput(ret));
+        }
+
+        Ok(fmt_ctx)
+    }
+
+    /// Free an AVIOContext allocated by `avio_alloc_context`.
+    ///
+    /// # Safety
+    ///
+    /// `io_ctx` must be non-null, uniquely owned, allocated by
+    /// `avio_alloc_context`, and not freed by an `AVFormatContext`.
+    unsafe fn free_avio_context(io_ctx: *mut ffi::AVIOContext) {
+        // SAFETY: caller guarantees `io_ctx` is a valid custom
+        // AVIOContext we own. `av_freep` accepts a pointer to the buffer
+        // field and nulls it after free; `avio_context_free` then frees
+        // the context and nulls the local pointer.
         unsafe {
             let buffer_ptr = &mut (*io_ctx).buffer as *mut *mut u8;
             ffi::av_freep(buffer_ptr as *mut c_void);
             let mut io = io_ctx;
             ffi::avio_context_free(&mut io);
         }
-        return None;
     }
-
-    // SAFETY: `fmt_ctx` is a valid, uniquely-owned AVFormatContext we
-    // just allocated; writing its `pb` and `flags` fields is sound.
-    // Setting AVFMT_FLAG_CUSTOM_IO tells avformat_close_input not to
-    // touch our AVIOContext, which is essential for the Drop ordering
-    // in `MemInput`.
-    unsafe {
-        (*fmt_ctx).pb = io_ctx;
-        (*fmt_ctx).flags |= ffi::AVFMT_FLAG_CUSTOM_IO;
-    }
-
-    // SAFETY: `fmt_ctx` is a valid owned pointer; the other three
-    // arguments are explicitly documented to accept NULL for "auto
-    // detect format / no options". On failure ffmpeg frees `fmt_ctx`
-    // and nulls the pointer for us; on success ownership stays with
-    // `fmt_ctx`.
-    let ret = unsafe {
-        ffi::avformat_open_input(&mut fmt_ctx, ptr::null(), ptr::null_mut(), ptr::null_mut())
-    };
-    if ret < 0 {
-        // SAFETY: avformat_open_input has already freed fmt_ctx, so
-        // the AVIOContext is the only ffmpeg resource we still own.
-        unsafe {
-            let buffer_ptr = &mut (*io_ctx).buffer as *mut *mut u8;
-            ffi::av_freep(buffer_ptr as *mut c_void);
-            let mut io = io_ctx;
-            ffi::avio_context_free(&mut io);
-        }
-        return None;
-    }
-
-    // SAFETY: `fmt_ctx` is a fully-initialized, opened AVFormatContext
-    // with exclusive ownership — the requirement stated on
-    // `Input::wrap`. The returned `Input` will call
-    // `avformat_close_input` on drop, which we sequence correctly in
-    // `MemInput::drop` (close Input first, then free the AVIOContext).
-    let input = unsafe { Input::wrap(fmt_ctx) };
-
-    Some(MemInput {
-        input: ManuallyDrop::new(input),
-        io_ctx,
-        _reader: reader,
-    })
 }
+
+use memory_input::MemoryInput;
 
 /// Decode an animated GIF byte buffer into a [`DecodedImage`]. Returns
 /// `None` when ffmpeg init fails, the probe rejects the input, or no
@@ -363,7 +400,7 @@ pub struct FrameReader {
     pub width: u32,
     /// Height of decoded frames in pixels.
     pub height: u32,
-    mem: MemInput,
+    mem: MemoryInput,
     stream_index: usize,
     time_base: ff::Rational,
     decoder: ff::decoder::Video,
@@ -391,13 +428,19 @@ impl FrameReader {
             warn!("ffmpeg init failed; cannot decode");
             return None;
         }
-        let mem = open_in_memory(data)?;
+        let mem = match memory_input::open(data) {
+            Ok(mem) => mem,
+            Err(err) => {
+                warn!("ffmpeg in-memory input open failed: {err}");
+                return None;
+            }
+        };
         Self::init(mem)
     }
 
-    fn init(mem: MemInput) -> Option<Self> {
+    fn init(mem: MemoryInput) -> Option<Self> {
         let (stream_index, time_base, decoder) = {
-            let stream = mem.input.streams().best(Type::Video)?;
+            let stream = mem.streams().best(Type::Video)?;
             let idx = stream.index();
             let tb = stream.time_base();
             let ctx = ff::codec::context::Context::from_parameters(stream.parameters()).ok()?;
@@ -440,7 +483,7 @@ impl FrameReader {
         // the demuxer hits EOF.
         loop {
             let packet = {
-                let mut iter = self.mem.input.packets();
+                let mut iter = self.mem.packets();
                 loop {
                     match iter.next() {
                         Some((stream, packet)) => {
@@ -498,7 +541,7 @@ impl FrameReader {
     /// mid-stream-only formats.
     pub fn seek_to_start(&mut self) -> bool {
         self.decoder.flush();
-        let ok = self.mem.input.seek(0, ..).is_ok();
+        let ok = self.mem.seek(0, ..).is_ok();
         if ok {
             self.finished = false;
         }
@@ -626,7 +669,7 @@ mod tests {
 
     #[test]
     fn rejects_garbage_bytes() {
-        // Not any known container → open_in_memory should bail cleanly.
+        // Not any known container → memory input open should bail cleanly.
         // Importantly this checks no leaks / UB in the error-path cleanup.
         assert!(decode(b"this is not a valid image file").is_none());
     }
