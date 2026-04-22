@@ -3,7 +3,17 @@
 
 use std::time::Instant;
 
-use super::*;
+use vte_mode41::C1Mode;
+
+use crate::MouseButton;
+use crate::MouseEncoding;
+use crate::MouseEventKind;
+use crate::MouseModifiers;
+use crate::MouseTracking;
+use crate::SYNCHRONIZED_UPDATE_TIMEOUT;
+use crate::conformance;
+use crate::io::mouse::encode_mouse_event;
+use crate::io::mouse::should_report;
 
 /// Whether synchronized-output mode is still within its safety deadline.
 pub fn synchronized_update_active(since: Option<Instant>) -> bool {
@@ -68,6 +78,8 @@ mod tests {
     use std::time::Instant;
 
     use super::*;
+    use crate::HostInput;
+    use crate::apply_host_input;
     use crate::test_support::TestTerm;
 
     #[test]

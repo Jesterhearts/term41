@@ -1,4 +1,8 @@
-use super::*;
+use crate::Terminal;
+use crate::TerminalEffects;
+use crate::charset;
+use crate::drcs;
+use crate::report;
 
 pub(crate) struct HookState {
     pub(crate) bytes: Vec<u8>,

@@ -1,6 +1,17 @@
 //! Runtime settings mutation helpers.
 
-use super::*;
+use crate::ColorPalette;
+use crate::CursorStyle;
+use crate::DecColorState;
+use crate::FeaturePermissions;
+use crate::Screen;
+use crate::StatusDisplayKind;
+use crate::TerminalProtocolState;
+use crate::Viewport;
+use crate::dec::color::effective_palette;
+use crate::dec::color::rebase_theme_entries;
+use crate::feature;
+use crate::lifecycle_ops;
 use crate::screen::palette_sync::apply_screen_palette;
 use crate::screen::palette_sync::sync_screen_erase_defaults;
 

@@ -45,14 +45,14 @@ struct Buffer {
 }
 
 #[derive(Debug, Clone)]
-pub struct Store {
+pub struct DrcsStore {
     buffers: Vec<Option<Buffer>>,
     next_serial: u64,
     total_storage_bytes: usize,
     render_glyphs: DrcsGlyphMap,
 }
 
-impl Default for Store {
+impl Default for DrcsStore {
     fn default() -> Self {
         Self {
             buffers: vec![None; MAX_DRCS_BUFFERS],
@@ -63,7 +63,7 @@ impl Default for Store {
     }
 }
 
-impl Store {
+impl DrcsStore {
     pub fn clear(&mut self) {
         self.buffers.fill(None);
         self.total_storage_bytes = 0;

@@ -1,46 +1,33 @@
-use std::collections::HashMap;
 use std::sync::LazyLock;
-use std::time::Instant;
 
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
 use smol_str::SmolStr;
-use unicode_segmentation::UnicodeSegmentation;
 use vtepp::Params;
 
 use crate::C1Mode;
-use crate::ColorPalette;
 use crate::ConformanceLevel;
 use crate::TerminalModes;
-use crate::TextMode;
 use crate::charset;
 use crate::charset::CharacterSet;
 use crate::charset::GraphicSetSlot;
 use crate::color;
-use crate::color::apply_sgr_groups;
-use crate::conformance;
 use crate::cursor::CursorStyle;
 use crate::dec::color::DecColorState;
 use crate::dec::color::effective_palette;
 use crate::dec::color::erase_background_color;
 use crate::dec::r#macro::MacroStore;
 use crate::dec_color_state_from_palette;
-use crate::drcs::Store as DrcsStore;
-use crate::feature::FeaturePermissions;
+use crate::drcs::DrcsStore;
 use crate::io::keyboard::KittyKeyboardState;
-use crate::io::keyboard::handle_kitty_keyboard_groups;
-use crate::io::mouse::MouseTracking;
-use crate::io::mouse::apply_mouse_mode;
 use crate::mode;
 use crate::screen;
 use crate::screen::ActiveDisplay;
 use crate::screen::Screen;
 use crate::screen::StatusDisplayKind;
-use crate::screen::StatusLine;
 use crate::screen::grid;
 use crate::screen::grid::Viewport;
 use crate::screen::row::LineAttr;
-use crate::screen::row::Row;
 
 mod csi;
 mod esc;
@@ -156,11 +143,11 @@ fn clamp_cursor_to_row_width(
 
 /// Sentinel for the second (and beyond) cell of a wide glyph. Distinct from
 /// the default blank (`" "`) so neighbour cleanup can tell them apart.
-fn continuation_cell() -> SmolStr {
-    SmolStr::default()
+const fn continuation_cell() -> SmolStr {
+    SmolStr::new_inline("")
 }
 
-fn blank_cell() -> SmolStr {
+const fn blank_cell() -> SmolStr {
     SmolStr::new_inline(" ")
 }
 
@@ -665,6 +652,7 @@ pub(super) mod test_support {
     use vtepp::Parser;
 
     use super::*;
+    use crate::FeaturePermissions;
     use crate::cursor::CursorStyle;
     use crate::io::keyboard::KittyKeyboardState;
     use crate::screen::Screen;

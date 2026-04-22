@@ -1,4 +1,12 @@
-use super::*;
+use std::time::Instant;
+
+use vte_mode41::C1Mode;
+
+use crate::PlacedImage;
+use crate::Screen;
+use crate::Viewport;
+use crate::conformance;
+use crate::screen;
 
 pub(crate) fn handle_kitty_graphics(
     data: &[u8],

@@ -1,6 +1,18 @@
-use super::*;
+use vte_mode41::C1Mode;
+use vte_mode41::ConformanceLevel;
+
+use crate::Screen;
+use crate::Terminal;
+use crate::TerminalModes;
+use crate::Viewport;
+use crate::charset;
+use crate::conformance;
+use crate::cursor;
 use crate::dec::color::report_alternate_text_color;
 use crate::dec::color::report_color_assignment;
+use crate::drcs;
+use crate::drcs::DrcsStore;
+use crate::screen;
 use crate::screen::grid::AttrChangeExtent;
 
 pub(crate) fn handle_decrqss(

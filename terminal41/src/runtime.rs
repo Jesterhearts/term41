@@ -1,4 +1,16 @@
-use super::*;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+use std::thread::Thread;
+
+use parking_lot::Mutex;
+use pty_pipe41::MAX_READ_CHUNK;
+use pty_pipe41::PtyReader;
+
+use crate::Terminal;
+use crate::TerminalEffects;
+use crate::TerminalProcessor;
 
 pub(crate) const TERMINAL_BATCH_TIME_BUDGET: std::time::Duration =
     std::time::Duration::from_millis(4);
@@ -56,11 +68,11 @@ pub(crate) fn run_terminal_thread(
         }
 
         if hit_budget {
-            thread::yield_now();
+            std::thread::yield_now();
             continue;
         }
 
-        thread::park();
+        std::thread::park();
         if stop.load(Ordering::Acquire) {
             break;
         }

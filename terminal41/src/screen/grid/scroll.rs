@@ -1,8 +1,10 @@
 use std::collections::BTreeMap;
 
-use super::*;
+use crate::Row;
+use crate::Viewport;
 use crate::image::PlacedImage;
 use crate::image::shift_in_region;
+use crate::screen::grid::Grid;
 
 pub(crate) fn scroll_up_in_region(
     grid: &mut Grid,

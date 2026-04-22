@@ -1,4 +1,31 @@
-use super::*;
+use smol_str::SmolStr;
+use vte_mode41::C1Mode;
+use vte_mode41::ConformanceLevel;
+use vte_mode41::TextMode;
+
+use crate::CursorStyle;
+use crate::DecColorState;
+use crate::KittyKeyboardState;
+use crate::LineAttr;
+use crate::Screen;
+use crate::StatusDisplayKind;
+use crate::TerminalModes;
+use crate::Viewport;
+use crate::charset;
+use crate::charset::CharacterSet;
+use crate::charset::GraphicSetSlot;
+use crate::color;
+use crate::dec::r#macro::MacroStore;
+use crate::drcs::DrcsStore;
+use crate::mode;
+use crate::parser::ParsedEscAction;
+use crate::parser::Vt52EscAction;
+use crate::parser::apply_hard_reset_state;
+use crate::parser::can_negotiate_c1;
+use crate::parser::clamp_cursor_to_row_width;
+use crate::parser::current_row_display_cols;
+use crate::screen;
+use crate::screen::grid;
 
 fn parse_vt52_esc(byte: u8) -> Option<ParsedEscAction> {
     let action = match byte {
@@ -588,9 +615,17 @@ mod tests {
     use vtepp::Action;
     use vtepp::Parser;
 
-    use super::super::test_support::*;
-    use super::super::*;
     use super::*;
+    use crate::FeaturePermissions;
+    use crate::dec::color::effective_palette;
+    use crate::dec_color_state_from_palette;
+    use crate::parser::csi_dispatch;
+    use crate::parser::execute;
+    use crate::parser::put_8bit_byte;
+    use crate::parser::put_ascii_run;
+    use crate::parser::put_printable;
+    use crate::parser::put_text_run;
+    use crate::parser::test_support::*;
 
     #[test]
     fn esc_parse_maps_hard_reset_semantically() {

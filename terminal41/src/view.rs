@@ -1,6 +1,15 @@
 use std::time::Instant;
 
-use super::*;
+use crate::HyperlinkRegistry;
+use crate::Row;
+use crate::Screen;
+use crate::StatusDisplayKind;
+use crate::TerminalMetadata;
+use crate::Viewport;
+use crate::VisibleImage;
+use crate::lifecycle_ops;
+use crate::prompt;
+use crate::selection;
 
 /// Return the number of rows currently presented to the host, including any
 /// visible status line row that consumes part of the window height.
@@ -61,7 +70,7 @@ pub fn visible_row<'a>(
 
 /// Resolve the hyperlink target at the given viewport cell.
 pub fn hyperlink_at<'a>(
-    screen: &'a Screen,
+    screen: &Screen,
     viewport: &Viewport,
     hyperlinks: &'a HyperlinkRegistry,
     screen_row: u32,

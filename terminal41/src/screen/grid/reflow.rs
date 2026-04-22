@@ -1,4 +1,4 @@
-use super::*;
+use crate::screen::grid::Grid;
 use crate::screen::row::LineAttr;
 use crate::screen::row::Row;
 

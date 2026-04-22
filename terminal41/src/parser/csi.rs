@@ -1,4 +1,58 @@
-use super::*;
+use std::collections::HashMap;
+use std::time::Instant;
+
+use font41::attrs::CellAttrs;
+use font41::attrs::UnderlineStyle;
+use smol_str::SmolStr;
+use vte_mode41::C1Mode;
+use vte_mode41::ConformanceLevel;
+use vtepp::Params;
+
+use crate::ColorPalette;
+use crate::CursorStyle;
+use crate::DecColorState;
+use crate::FeaturePermissions;
+use crate::KittyKeyboardState;
+use crate::MouseTracking;
+use crate::Screen;
+use crate::StatusDisplayKind;
+use crate::TerminalModes;
+use crate::Viewport;
+use crate::charset;
+use crate::color::apply_sgr_groups;
+use crate::conformance;
+use crate::dec::r#macro::MacroStore;
+use crate::drcs::DrcsStore;
+use crate::io::keyboard::handle_kitty_keyboard_groups;
+use crate::io::mouse::apply_mouse_mode;
+use crate::mode;
+use crate::parser::DSR_CPR;
+use crate::parser::DSR_OK;
+use crate::parser::MainCsiAction;
+use crate::parser::OwnedParams;
+use crate::parser::ParsedCsiAction;
+use crate::parser::StatusLineCsiAction;
+use crate::parser::TBC_ALL;
+use crate::parser::TBC_CURRENT;
+use crate::parser::WINOP_REPORT_CELL_SIZE;
+use crate::parser::WINOP_REPORT_PIXELS;
+use crate::parser::WINOP_REPORT_TEXT_SIZE;
+use crate::parser::WINOP_TITLE_POP;
+use crate::parser::WINOP_TITLE_PUSH;
+use crate::parser::apply_hard_reset_state;
+use crate::parser::apply_status_line_csi;
+use crate::parser::clamp_cursor_to_row_width;
+use crate::parser::current_row_display_cols;
+use crate::parser::next_tab_stop;
+use crate::parser::prev_tab_stop;
+use crate::parser::put_char_with_scrollback_policy;
+use crate::parser::row_display_cols;
+use crate::parser::sync_screen_erase_defaults;
+use crate::parser::valid_page_lines;
+use crate::parser::valid_screen_lines;
+use crate::screen;
+use crate::screen::ActiveDisplay;
+use crate::screen::grid;
 
 fn first_group_param(
     params: &OwnedParams,
@@ -1818,9 +1872,10 @@ pub(crate) fn csi_dispatch(
 mod tests {
     use palette::Srgb;
 
-    use super::super::test_support::*;
-    use super::super::*;
     use super::*;
+    use crate::color;
+    use crate::parser::execute;
+    use crate::parser::test_support::*;
 
     #[test]
     fn csi_parse_maps_private_mode_query_semantically() {

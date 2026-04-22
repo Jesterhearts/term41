@@ -1,6 +1,14 @@
 use clip41::ClipboardKind;
 
-use super::*;
+use crate::MouseButton;
+use crate::MouseEventKind;
+use crate::MouseModifiers;
+use crate::Terminal;
+use crate::TerminalEffects;
+use crate::dcs;
+use crate::dispatch;
+use crate::host;
+use crate::io;
 
 /// Effects produced by host-originated input routed back toward the PTY.
 #[derive(Debug, Default)]

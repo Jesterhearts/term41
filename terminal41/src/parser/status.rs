@@ -3,7 +3,16 @@ use super::write::status_delete_chars;
 use super::write::status_erase_chars;
 use super::write::status_insert_chars;
 use super::write::status_line_mut;
-use super::*;
+use crate::Screen;
+use crate::charset;
+use crate::color;
+use crate::color::apply_sgr_groups;
+use crate::parser::BEL;
+use crate::parser::FF;
+use crate::parser::NUL;
+use crate::parser::StatusLineCsiAction;
+use crate::parser::VT;
+use crate::parser::next_tab_stop;
 
 pub(crate) fn execute_status(
     screen: &mut Screen,
@@ -119,9 +128,13 @@ pub(crate) fn apply_status_line_csi(
 
 #[cfg(test)]
 mod tests {
-    use super::super::test_support::*;
-    use super::super::*;
     use super::*;
+    use crate::StatusDisplayKind;
+    use crate::TerminalModes;
+    use crate::parser::ParsedCsiAction;
+    use crate::parser::test_support::*;
+    use crate::screen;
+    use crate::screen::ActiveDisplay;
 
     #[test]
     fn csi_parse_uses_status_line_context_for_plain_actions() {

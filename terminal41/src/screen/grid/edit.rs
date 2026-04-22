@@ -1,8 +1,11 @@
 use std::collections::BTreeMap;
 
-use super::*;
+use crate::Row;
+use crate::Viewport;
 use crate::image::PlacedImage;
 use crate::image::clear_in_range;
+use crate::screen::grid::Cursor;
+use crate::screen::grid::Grid;
 use crate::screen::row::LineAttr;
 
 fn reset_row_after_full_clear(row: &mut Row) {

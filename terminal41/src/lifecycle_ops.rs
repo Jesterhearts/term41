@@ -1,4 +1,17 @@
-use super::*;
+use std::collections::HashMap;
+use std::time::Instant;
+
+use crate::ColorPalette;
+use crate::CommandMeta;
+use crate::Row;
+use crate::Screen;
+use crate::StatusDisplayKind;
+use crate::Viewport;
+use crate::VisibleImage;
+use crate::feature;
+use crate::resize_screen;
+use crate::screen;
+use crate::selection;
 
 pub(crate) fn total_rows(
     screen: &Screen,

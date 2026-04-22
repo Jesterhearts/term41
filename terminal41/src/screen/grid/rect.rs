@@ -3,7 +3,9 @@ use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
-use super::*;
+use crate::Viewport;
+use crate::screen::grid::AttrChangeExtent;
+use crate::screen::grid::Grid;
 
 #[allow(clippy::too_many_arguments)]
 pub(crate) fn fill_rect(

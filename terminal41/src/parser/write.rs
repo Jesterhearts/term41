@@ -1,8 +1,22 @@
+use font41::attrs::CellAttrs;
+use font41::attrs::UnderlineStyle;
+use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
+use unicode_segmentation::UnicodeSegmentation;
 use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
-use super::*;
+use crate::Row;
+use crate::Screen;
+use crate::Viewport;
+use crate::charset;
+use crate::parser::ASCII_CELLS;
+use crate::parser::blank_cell;
+use crate::parser::continuation_cell;
+use crate::parser::current_row_display_cols;
+use crate::screen;
+use crate::screen::StatusLine;
+use crate::screen::grid;
 
 #[derive(Clone, Copy)]
 enum WriteTarget<'a> {
