@@ -137,6 +137,7 @@ enum AppEvent {
     RemoveInputEndpoint(TabId),
     SetActiveInputTab(Option<TabId>),
     DismissRecordingPopup(u64),
+    DismissToast(u64),
 }
 
 struct Tab {
@@ -159,6 +160,11 @@ struct RecordingPopupView {
     lines: Vec<String>,
 }
 
+#[derive(Clone)]
+struct ToastView {
+    text: String,
+}
+
 enum RecordingPopupState {
     PendingStart { path: PathBuf },
     Completed { token: u64 },
@@ -175,6 +181,7 @@ pub(crate) struct InputState {
     tab_context_menu: Option<TabContextMenu>,
     gutter_popup: Option<renderer::GutterPopup>,
     recording_popup: Option<RecordingPopupView>,
+    toast: Option<ToastView>,
     preedit: Option<PreeditState>,
 }
 
@@ -213,6 +220,7 @@ struct WindowHost {
     event_proxy: EventLoopProxy<AppEvent>,
     recording_popup: Option<RecordingPopupState>,
     next_recording_popup_token: u64,
+    next_toast_token: u64,
 }
 
 impl WindowHost {
@@ -452,6 +460,28 @@ impl WindowHost {
     ) {
         self.input_state.lock().recording_popup = popup;
         self.notify_interaction_changed();
+    }
+
+    fn update_toast_view(
+        &mut self,
+        toast: Option<ToastView>,
+    ) {
+        self.input_state.lock().toast = toast;
+        self.notify_interaction_changed();
+    }
+
+    fn show_toast(
+        &mut self,
+        text: impl Into<String>,
+    ) {
+        let token = self.next_toast_token;
+        self.next_toast_token += 1;
+        self.update_toast_view(Some(ToastView { text: text.into() }));
+        let proxy = self.event_proxy.clone();
+        thread::spawn(move || {
+            thread::sleep(Duration::from_secs(2));
+            let _ = proxy.send_event(AppEvent::DismissToast(token));
+        });
     }
 
     fn show_recording_start_popup(
@@ -750,6 +780,7 @@ impl WindowHost {
             Action::CycleEmojiCompatibility => {
                 let mode = target.terminal.lock().cycle_emoji_compatibility_mode();
                 info!("emoji compatibility mode: {}", mode.label());
+                self.show_toast(format!("Emoji compatibility: {}", mode.label()));
                 true
             }
             Action::NewTab
@@ -1798,6 +1829,11 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     self.dismiss_recording_popup();
                 }
             }
+            AppEvent::DismissToast(token) => {
+                if token + 1 == self.next_toast_token {
+                    self.update_toast_view(None);
+                }
+            }
         }
     }
 
@@ -2163,6 +2199,7 @@ fn main() {
         tab_context_menu: None,
         gutter_popup: None,
         recording_popup: None,
+        toast: None,
         preedit: None,
     }));
     let tab = Tab {
@@ -2249,6 +2286,7 @@ fn main() {
         event_proxy: proxy,
         recording_popup: None,
         next_recording_popup_token: 1,
+        next_toast_token: 1,
     };
     event_loop.run_app(&mut host).expect("run event loop");
 }

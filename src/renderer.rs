@@ -142,6 +142,11 @@ pub(crate) struct RecordingPopup {
     pub lines: Vec<String>,
 }
 
+#[derive(Clone)]
+pub(crate) struct Toast {
+    pub text: String,
+}
+
 fn resize_tab_to_grid(
     tab: &mut Tab,
     cols: u32,
@@ -1186,17 +1191,19 @@ impl RenderHost {
             return;
         };
 
-        let (hovered_button, tab_context_menu, gutter_popup, recording_popup, preedit) = {
+        let (hovered_button, tab_context_menu, gutter_popup, recording_popup, toast, preedit) = {
             let input_state = self.input_state.lock();
             (
                 input_state.hovered_tab_bar_button,
                 input_state.tab_context_menu.clone(),
                 input_state.gutter_popup.clone(),
                 input_state.recording_popup.clone(),
+                input_state.toast.clone(),
                 input_state.preedit.clone(),
             )
         };
         let recording_popup = recording_popup.map(|popup| RecordingPopup { lines: popup.lines });
+        let toast = toast.map(|toast| Toast { text: toast.text });
 
         let controls = WindowControls {
             hovered: hovered_button,
@@ -1228,6 +1235,7 @@ impl RenderHost {
             &controls,
             gutter_popup.as_ref(),
             recording_popup.as_ref(),
+            toast.as_ref(),
             preedit.as_ref(),
         );
     }
