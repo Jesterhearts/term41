@@ -9,6 +9,7 @@ mod renderer;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
@@ -99,6 +100,7 @@ use crate::renderer::paint::build_tab_bar_layout;
 extern crate log;
 
 static APP_START_TIME: OnceLock<Instant> = OnceLock::new();
+static LOG_TOAST_TX: OnceLock<mpsc::Sender<String>> = OnceLock::new();
 
 const INITIAL_COLS: u32 = 80;
 const INITIAL_ROWS: u32 = 24;
@@ -137,7 +139,94 @@ enum AppEvent {
     RemoveInputEndpoint(TabId),
     SetActiveInputTab(Option<TabId>),
     DismissRecordingPopup(u64),
+    ShowToast(String),
     DismissToast(u64),
+}
+
+#[derive(Default)]
+struct LogToastVisitor {
+    message: Option<String>,
+    fields: Vec<String>,
+}
+
+struct LogToastLayer;
+
+impl tracing::field::Visit for LogToastVisitor {
+    fn record_debug(
+        &mut self,
+        field: &tracing::field::Field,
+        value: &dyn fmt::Debug,
+    ) {
+        let value = clean_log_field_value(format!("{value:?}"));
+        if field.name() == "message" {
+            self.message = Some(value);
+        } else {
+            self.fields.push(format!("{}={value}", field.name()));
+        }
+    }
+}
+
+impl<S> tracing_subscriber::Layer<S> for LogToastLayer
+where
+    S: tracing::Subscriber,
+{
+    fn on_event(
+        &self,
+        event: &tracing::Event<'_>,
+        _ctx: tracing_subscriber::layer::Context<'_, S>,
+    ) {
+        let level = *event.metadata().level();
+        if !matches!(level, tracing::Level::WARN | tracing::Level::ERROR) {
+            return;
+        }
+
+        let mut visitor = LogToastVisitor::default();
+        event.record(&mut visitor);
+        let message = log_toast_message(visitor, event.metadata().target());
+        enqueue_log_toast(format!("{level}: {message}"));
+    }
+}
+
+fn clean_log_field_value(value: String) -> String {
+    let Some(trimmed) = value.strip_prefix('"').and_then(|v| v.strip_suffix('"')) else {
+        return value;
+    };
+    trimmed.to_string()
+}
+
+fn log_toast_message(
+    visitor: LogToastVisitor,
+    target: &str,
+) -> String {
+    if let Some(message) = visitor.message {
+        return message;
+    }
+    if !visitor.fields.is_empty() {
+        return visitor.fields.join(" ");
+    }
+    target.to_string()
+}
+
+fn enqueue_log_toast(message: String) {
+    if let Some(tx) = LOG_TOAST_TX.get() {
+        let _ = tx.send(message);
+    }
+}
+
+fn install_log_toast_forwarder(proxy: EventLoopProxy<AppEvent>) {
+    let (tx, rx) = mpsc::channel();
+    if LOG_TOAST_TX.set(tx).is_err() {
+        return;
+    }
+
+    thread::Builder::new()
+        .name("log-toast-forwarder".into())
+        .spawn(move || {
+            for message in rx {
+                let _ = proxy.send_event(AppEvent::ShowToast(message));
+            }
+        })
+        .expect("spawn log toast forwarder");
 }
 
 struct Tab {
@@ -1829,6 +1918,9 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     self.dismiss_recording_popup();
                 }
             }
+            AppEvent::ShowToast(message) => {
+                self.show_toast(message);
+            }
             AppEvent::DismissToast(token) => {
                 if token + 1 == self.next_toast_token {
                     self.update_toast_view(None);
@@ -2045,12 +2137,28 @@ impl MouseButtonState {
 
 fn main() {
     use tracing_subscriber::fmt::format::FmtSpan;
+    use tracing_subscriber::layer::SubscriberExt;
+    use tracing_subscriber::util::SubscriberInitExt;
 
     let _ = APP_START_TIME.set(Instant::now());
 
-    tracing_subscriber::fmt()
-        .with_env_filter(tracing_subscriber::EnvFilter::from_default_env())
-        .with_span_events(FmtSpan::CLOSE)
+    let directive = cfg_select! {
+        debug_assertions => {
+            "term41=debug"
+        }
+        not(debug_assertions) => {
+            "term41=warn"
+        }
+    };
+
+    tracing_subscriber::registry()
+        .with(
+            tracing_subscriber::EnvFilter::builder()
+                .with_default_directive(directive.parse().expect("parse log filter directive"))
+                .from_env_lossy(),
+        )
+        .with(tracing_subscriber::fmt::layer().with_span_events(FmtSpan::CLOSE))
+        .with(LogToastLayer)
         .init();
 
     #[cfg(feature = "deadlock-detection")]
@@ -2079,18 +2187,30 @@ fn main() {
 
     let command = parse_command_args();
 
-    let config_path = config::config_file_path();
-    let config = tracing::debug_span!("load_config").in_scope(|| match config_path.as_deref() {
-        Some(p) => config::load_from(p),
-        None => Config::default(),
-    });
-
     let event_loop: EventLoop<AppEvent> =
         tracing::debug_span!("create_event_loop").in_scope(|| {
             EventLoop::with_user_event()
                 .build()
                 .expect("create event loop")
         });
+    // Channels.
+    let (event_tx, event_rx) =
+        cueue::cueue::<RenderEvent>(EVENT_QUEUE_SIZE).expect("create event queue");
+    let (window_tx, window_rx) = mpsc::sync_channel(1);
+    let (startup_release_tx, startup_release_rx) = mpsc::sync_channel(1);
+    let (child_exit_tx, child_exit_rx) = mpsc::channel();
+    let config_reload = Arc::new(AtomicBool::new(false));
+    let render_thread_handle = Arc::new(OnceLock::new());
+
+    let proxy = event_loop.create_proxy();
+    install_log_toast_forwarder(proxy.clone());
+    let startup_redraw_proxy = proxy.clone();
+
+    let config_path = config::config_file_path();
+    let config = tracing::debug_span!("load_config").in_scope(|| match config_path.as_deref() {
+        Some(p) => config::load_from(p),
+        None => Config::default(),
+    });
 
     let font_system = tracing::debug_span!("init_font_system").in_scope(|| {
         FontSystem::new(
@@ -2108,18 +2228,6 @@ fn main() {
     let startup_dpi_scale = config.dpi_scale;
     let startup_gutter = config.gutter;
     let startup_keybindings = config.keybindings.clone();
-
-    // Channels.
-    let (event_tx, event_rx) =
-        cueue::cueue::<RenderEvent>(EVENT_QUEUE_SIZE).expect("create event queue");
-    let (window_tx, window_rx) = mpsc::sync_channel(1);
-    let (startup_release_tx, startup_release_rx) = mpsc::sync_channel(1);
-    let (child_exit_tx, child_exit_rx) = mpsc::channel();
-    let config_reload = Arc::new(AtomicBool::new(false));
-    let render_thread_handle = Arc::new(OnceLock::new());
-
-    let proxy = event_loop.create_proxy();
-    let startup_redraw_proxy = proxy.clone();
 
     // Create the terminal thread handle before spawning the PTY so the PTY
     // reader can unpark the terminal thread once it starts.

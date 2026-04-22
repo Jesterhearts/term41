@@ -418,7 +418,7 @@ fn parse_config(
         }
     };
     for key in ignored_keys {
-        warn!("ignored unknown config key in {source}: {key}");
+        warn!("ignored unknown config key: {key}");
     }
 
     let cursor_style = build_cursor_style(file.cursor_shape, file.cursor_blink);
