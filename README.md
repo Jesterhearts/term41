@@ -217,8 +217,9 @@ vsync = "auto"
 # background_image = "/path/to/wallpaper.png"
 # background_opacity = 0.3
 
-[allow_features]
-macros = ["vtrex"]
+[security.features]
+# Only turn this on if you need it.
+# macros = "all"
 
 [colors.status_line]
 # foreground = "#d8dee9"

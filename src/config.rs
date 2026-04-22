@@ -127,6 +127,12 @@ struct AllowFeaturesConfig {
 }
 
 #[derive(Deserialize, Default)]
+struct SecuritySettings {
+    #[serde(default)]
+    features: Option<AllowFeaturesConfig>,
+}
+
+#[derive(Deserialize, Default)]
 struct AnsiColors {
     black: Option<String>,
     red: Option<String>,
@@ -328,10 +334,9 @@ struct ConfigFile {
     /// Color palette in Rio format.
     #[serde(default)]
     colors: Option<ColorsConfig>,
-    /// Security-sensitive terminal features that require a foreground-program
-    /// allowlist before they are advertised or executed.
+    /// Security-sensitive settings.
     #[serde(default)]
-    allow_features: Option<AllowFeaturesConfig>,
+    security: Option<SecuritySettings>,
 }
 
 #[derive(Debug)]
@@ -419,6 +424,8 @@ fn parse_config(
     let cursor_style = build_cursor_style(file.cursor_shape, file.cursor_blink);
     let keybindings = build_keybindings(file.keybindings, source);
     let palette = build_palette(file.colors);
+    let security = file.security.unwrap_or_default();
+    let features = security.features.unwrap_or_default();
 
     Config {
         opacity: file.opacity.unwrap_or(1.0),
@@ -438,10 +445,7 @@ fn parse_config(
         font_supersampling: file.font_supersampling.unwrap_or(4),
         palette,
         feature_permissions: FeaturePermissions {
-            macros: file
-                .allow_features
-                .and_then(|f| f.macros)
-                .unwrap_or_default(),
+            macros: features.macros.unwrap_or_default(),
         },
     }
 }
