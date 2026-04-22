@@ -14,6 +14,8 @@ use crate::parser::current_row_display_cols;
 use crate::screen;
 use crate::screen::StatusLine;
 use crate::screen::grid;
+use crate::screen::row::blank_cell;
+use crate::screen::row::continuation_cell;
 
 #[derive(Clone, Copy)]
 enum WriteTarget {
@@ -676,10 +678,10 @@ fn write_ascii_chunk(
     let mut idx = col;
     while idx < end {
         if row.cells[idx].is_empty() {
-            row.cells[idx - 1] = SmolStr::new_inline(" ");
+            row.cells[idx - 1] = blank_cell();
         } else if row.cells[idx].width() > 1 {
             for i in idx..idx + row.cells[idx].width() {
-                row.cells[i] = SmolStr::new_inline(" ");
+                row.cells[i] = blank_cell();
             }
         }
         idx += 1;
@@ -715,7 +717,7 @@ fn write_styled_glyph(
     };
     let mut idx = col - jbc_offset;
     while idx < col + old_w {
-        row.cells[idx] = SmolStr::new_inline(" ");
+        row.cells[idx] = blank_cell();
         idx += 1;
     }
 
@@ -725,10 +727,10 @@ fn write_styled_glyph(
     while idx < col + width {
         if row.cells[idx].width() > 1 {
             for i in idx..idx + row.cells[idx].width() {
-                row.cells[i] = SmolStr::new_inline(" ");
+                row.cells[i] = blank_cell();
             }
         }
-        row.cells[idx] = SmolStr::new_inline("");
+        row.cells[idx] = continuation_cell();
         idx += 1;
     }
 

@@ -12,6 +12,10 @@ pub(crate) const fn blank_cell() -> SmolStr {
     SmolStr::new_inline(" ")
 }
 
+pub(crate) const fn continuation_cell() -> SmolStr {
+    SmolStr::new_inline("")
+}
+
 /// DEC line rendering attribute. Set by ESC#3 (DECDHL top), ESC#4 (DECDHL
 /// bottom), ESC#5 (DECSWL, normal single-width), and ESC#6 (DECDWL,
 /// double-width). Applies to the whole row; per-cell attrs are separate.
