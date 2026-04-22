@@ -584,6 +584,11 @@ impl RenderHost {
             Action::CloseActiveTab => {
                 self.close_active_tab();
             }
+            Action::CloseWindow => {
+                for idx in 0..self.tabs.len() {
+                    self.close_tab(idx);
+                }
+            }
             Action::NextTab => {
                 self.switch_tab(1);
             }

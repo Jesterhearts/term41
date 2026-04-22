@@ -48,6 +48,8 @@ pub enum Action {
     NewTab,
     /// Close the active tab. If it's the last tab, exit the application.
     CloseActiveTab,
+    /// Close all tabs, then exit the application.
+    CloseWindow,
     /// Switch to the next tab (wraps around).
     NextTab,
     /// Switch to the previous tab (wraps around).

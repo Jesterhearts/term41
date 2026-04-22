@@ -733,6 +733,10 @@ impl WindowHost {
                 spawn_new_window(cwd);
                 true
             }
+            Action::CloseWindow => {
+                self.send(RenderEvent::Action(Action::CloseWindow));
+                true
+            }
             Action::ToggleOutputRecording => {
                 if target.recorder.is_active() {
                     if let Some(path) = target.recorder.stop() {
@@ -988,7 +992,6 @@ impl WindowHost {
 
     fn handle_mouse_input(
         &mut self,
-        event_loop: &ActiveEventLoop,
         pressed: bool,
         button: MouseButton,
     ) {
@@ -1018,7 +1021,7 @@ impl WindowHost {
             && let Some(btn) = self.window_button_at()
         {
             match btn {
-                WindowButton::Close => event_loop.exit(),
+                WindowButton::Close => self.send(RenderEvent::Action(Action::CloseWindow)),
                 WindowButton::Maximize => {
                     if let Some(w) = &self.window {
                         w.set_maximized(!w.is_maximized());
@@ -1871,7 +1874,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
     ) {
         let ev = match event {
             WindowEvent::CloseRequested => {
-                event_loop.exit();
+                self.send(RenderEvent::Action(Action::CloseWindow));
                 return;
             }
 
@@ -1925,7 +1928,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                self.handle_mouse_input(event_loop, state == ElementState::Pressed, button);
+                self.handle_mouse_input(state == ElementState::Pressed, button);
                 return;
             }
 

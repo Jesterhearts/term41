@@ -217,7 +217,10 @@ impl Pty {
 
 impl Drop for Pty {
     fn drop(&mut self) {
-        let _ = self.child_killer.kill();
+        let e = self.child_killer.kill();
+        if e.is_err() {
+            error!("Failed to kill child process: {:?}", e);
+        }
     }
 }
 
