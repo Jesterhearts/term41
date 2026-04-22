@@ -26,19 +26,13 @@ use crate::drcs::DrcsStore;
 use crate::io::keyboard::handle_kitty_keyboard_groups;
 use crate::io::mouse::apply_mouse_mode;
 use crate::mode;
-use crate::parser::DSR_CPR;
-use crate::parser::DSR_OK;
+use crate::parser::DsrParameters;
 use crate::parser::MainCsiAction;
 use crate::parser::OwnedParams;
 use crate::parser::ParsedCsiAction;
 use crate::parser::StatusLineCsiAction;
-use crate::parser::TBC_ALL;
-use crate::parser::TBC_CURRENT;
-use crate::parser::WINOP_REPORT_CELL_SIZE;
-use crate::parser::WINOP_REPORT_PIXELS;
-use crate::parser::WINOP_REPORT_TEXT_SIZE;
-use crate::parser::WINOP_TITLE_POP;
-use crate::parser::WINOP_TITLE_PUSH;
+use crate::parser::TabClearMode;
+use crate::parser::WinManipulationAction;
 use crate::parser::apply_hard_reset_state;
 use crate::parser::apply_status_line_csi;
 use crate::parser::clamp_cursor_to_row_width;
@@ -139,13 +133,26 @@ fn parse_main_plain_csi(
             if params.iter().count() <= 1 && valid_page_lines(ps).is_some() {
                 ParsedCsiAction::Main(MainCsiAction::SetPageLines { lines: ps })
             } else {
+                let Ok(ps) = WinManipulationAction::try_from(ps) else {
+                    return ParsedCsiAction::Unsupported;
+                };
+
                 match ps {
-                    WINOP_TITLE_PUSH => ParsedCsiAction::Main(MainCsiAction::PushTitle),
-                    WINOP_TITLE_POP => ParsedCsiAction::Main(MainCsiAction::PopTitle),
-                    WINOP_REPORT_PIXELS => ParsedCsiAction::Main(MainCsiAction::ReportPixelSize),
-                    WINOP_REPORT_CELL_SIZE => ParsedCsiAction::Main(MainCsiAction::ReportCellSize),
-                    WINOP_REPORT_TEXT_SIZE => ParsedCsiAction::Main(MainCsiAction::ReportTextSize),
-                    _ => ParsedCsiAction::Unsupported,
+                    WinManipulationAction::TitlePush => {
+                        ParsedCsiAction::Main(MainCsiAction::PushTitle)
+                    }
+                    WinManipulationAction::TitlePop => {
+                        ParsedCsiAction::Main(MainCsiAction::PopTitle)
+                    }
+                    WinManipulationAction::ReportPixels => {
+                        ParsedCsiAction::Main(MainCsiAction::ReportPixelSize)
+                    }
+                    WinManipulationAction::ReportCellSize => {
+                        ParsedCsiAction::Main(MainCsiAction::ReportCellSize)
+                    }
+                    WinManipulationAction::ReportTextSize => {
+                        ParsedCsiAction::Main(MainCsiAction::ReportTextSize)
+                    }
                 }
             }
         }
@@ -800,17 +807,26 @@ fn apply_main_csi(
                 format_args!("?{level};7;21;22;28;29{macro_feature}c"),
             );
         }
-        MainCsiAction::DeviceStatusReport { selector } => match selector {
-            DSR_OK => {
-                conformance::write_csi(pending_output, modes.c1_mode, format_args!("0n"));
+        MainCsiAction::DeviceStatusReport { selector } => {
+            let Ok(selector) = DsrParameters::try_from(selector) else {
+                return;
+            };
+
+            match selector {
+                DsrParameters::Ok => {
+                    conformance::write_csi(pending_output, modes.c1_mode, format_args!("0n"));
+                }
+                DsrParameters::Cpr => {
+                    let row = screen.cursor.row + 1;
+                    let col = screen.cursor.col + 1;
+                    conformance::write_csi(
+                        pending_output,
+                        modes.c1_mode,
+                        format_args!("{row};{col}R"),
+                    );
+                }
             }
-            DSR_CPR => {
-                let row = screen.cursor.row + 1;
-                let col = screen.cursor.col + 1;
-                conformance::write_csi(pending_output, modes.c1_mode, format_args!("{row};{col}R"));
-            }
-            _ => {}
-        },
+        }
         MainCsiAction::SetPageLines { lines } => {
             let Some(lines_per_page) = valid_page_lines(lines) else {
                 return;
@@ -1135,16 +1151,21 @@ fn apply_main_csi(
                 screen.cursor.col = prev_tab_stop(&screen.tab_stops, screen.cursor.col);
             }
         }
-        MainCsiAction::TabClear { mode } => match mode {
-            TBC_CURRENT => {
-                let col = screen.cursor.col as usize;
-                if col < screen.tab_stops.len() {
-                    screen.tab_stops[col] = false;
+        MainCsiAction::TabClear { mode } => {
+            let Ok(mode) = TabClearMode::try_from(mode) else {
+                return;
+            };
+
+            match mode {
+                TabClearMode::Current => {
+                    let col = screen.cursor.col as usize;
+                    if col < screen.tab_stops.len() {
+                        screen.tab_stops[col] = false;
+                    }
                 }
+                TabClearMode::All => screen.tab_stops.fill(false),
             }
-            TBC_ALL => screen.tab_stops.fill(false),
-            _ => {}
-        },
+        }
         MainCsiAction::SetAnsiModes {
             enable,
             modes: mode_ids,
@@ -1337,7 +1358,7 @@ pub(crate) fn csi_apply(
             );
         }
         ParsedCsiAction::PrivateDeviceStatusReport { selector } => {
-            if selector == DSR_CPR {
+            if selector == DsrParameters::Cpr as u16 {
                 let row = screen.cursor.row + 1;
                 let col = screen.cursor.col + 1;
                 let page = screen

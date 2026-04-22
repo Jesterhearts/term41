@@ -9,14 +9,35 @@
 
 use serde::Deserialize;
 
-// DECSCUSR parameter values (CSI Ps SP q).
-const DECSCUSR_DEFAULT: u16 = 0;
-const DECSCUSR_BLINKING_BLOCK: u16 = 1;
-const DECSCUSR_STEADY_BLOCK: u16 = 2;
-const DECSCUSR_BLINKING_UNDERLINE: u16 = 3;
-const DECSCUSR_STEADY_UNDERLINE: u16 = 4;
-const DECSCUSR_BLINKING_BEAM: u16 = 5;
-const DECSCUSR_STEADY_BEAM: u16 = 6;
+/// DECSCUSR parameter values (CSI Ps SP q).
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u16)]
+pub enum DecCusr {
+    Default = 0,
+    BlinkingBlock = 1,
+    SteadyBlock = 2,
+    BlinkingUnderline = 3,
+    SteadyUnderline = 4,
+    BlinkingBeam = 5,
+    SteadyBeam = 6,
+}
+
+impl TryFrom<u16> for DecCusr {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Default),
+            1 => Ok(Self::BlinkingBlock),
+            2 => Ok(Self::SteadyBlock),
+            3 => Ok(Self::BlinkingUnderline),
+            4 => Ok(Self::SteadyUnderline),
+            5 => Ok(Self::BlinkingBeam),
+            6 => Ok(Self::SteadyBeam),
+            _ => Err(()),
+        }
+    }
+}
 
 /// Geometry of the cursor overlay.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
@@ -62,32 +83,35 @@ impl CursorStyle {
         &mut self,
         ps: u16,
     ) {
+        let Ok(ps) = DecCusr::try_from(ps) else {
+            return;
+        };
+
         let style = match ps {
-            DECSCUSR_DEFAULT | DECSCUSR_BLINKING_BLOCK => Self {
+            DecCusr::Default | DecCusr::BlinkingBlock => Self {
                 shape: CursorShape::Block,
                 blink: true,
             },
-            DECSCUSR_STEADY_BLOCK => Self {
+            DecCusr::SteadyBlock => Self {
                 shape: CursorShape::Block,
                 blink: false,
             },
-            DECSCUSR_BLINKING_UNDERLINE => Self {
+            DecCusr::BlinkingUnderline => Self {
                 shape: CursorShape::Underline,
                 blink: true,
             },
-            DECSCUSR_STEADY_UNDERLINE => Self {
+            DecCusr::SteadyUnderline => Self {
                 shape: CursorShape::Underline,
                 blink: false,
             },
-            DECSCUSR_BLINKING_BEAM => Self {
+            DecCusr::BlinkingBeam => Self {
                 shape: CursorShape::Beam,
                 blink: true,
             },
-            DECSCUSR_STEADY_BEAM => Self {
+            DecCusr::SteadyBeam => Self {
                 shape: CursorShape::Beam,
                 blink: false,
             },
-            _ => return,
         };
         *self = style;
     }

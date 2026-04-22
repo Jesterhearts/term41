@@ -24,8 +24,15 @@ pub(crate) fn execute_with_scrollback_policy(
 ) {
     clamp_cursor_to_row_width(screen, viewport);
 
+    let Ok(byte) = AsciiControlBytes::try_from(byte) else {
+        screen.backspace_guard = None;
+        return;
+    };
+
     match byte {
-        b'\n' | VT | FF => {
+        AsciiControlBytes::LineFeed
+        | AsciiControlBytes::VerticalTab
+        | AsciiControlBytes::FormFeed => {
             screen.backspace_guard = None;
             if newline_mode {
                 screen.cursor.col = 0;
@@ -49,11 +56,11 @@ pub(crate) fn execute_with_scrollback_policy(
                 clamp_cursor_to_row_width(screen, viewport);
             }
         }
-        b'\r' => {
+        AsciiControlBytes::CarriageReturn => {
             screen.backspace_guard = None;
             screen.cursor.col = 0;
         }
-        BS => {
+        AsciiControlBytes::Backspace => {
             if consume_backspace_guard(screen, viewport) {
                 return;
             }
@@ -61,27 +68,24 @@ pub(crate) fn execute_with_scrollback_policy(
             screen.cursor.col = screen.cursor.col.saturating_sub(1);
             set_backspace_guard_after_move(screen, viewport, prev_col);
         }
-        b'\t' => {
+        AsciiControlBytes::HorizontalTab => {
             screen.backspace_guard = None;
             let cols = current_row_display_cols(screen, viewport);
             screen.cursor.col = next_tab_stop(&screen.tab_stops, screen.cursor.col, cols);
         }
-        SO => {
+        AsciiControlBytes::ShiftOut => {
             screen.backspace_guard = None;
             screen.charset.set_gl(GraphicSetSlot::G1);
         }
-        SI => {
+        AsciiControlBytes::ShiftIn => {
             screen.backspace_guard = None;
             screen.charset.set_gl(GraphicSetSlot::G0);
         }
-        BEL => {
+        AsciiControlBytes::Bell => {
             screen.backspace_guard = None;
             *bell_pending = true;
         }
-        NUL => {
-            screen.backspace_guard = None;
-        }
-        _ => {
+        AsciiControlBytes::Nul => {
             screen.backspace_guard = None;
         }
     }
@@ -151,7 +155,6 @@ fn set_backspace_guard_after_move(
 #[cfg(test)]
 mod tests {
     use super::super::test_support::*;
-    use super::super::*;
     use super::*;
 
     // -- execute ------------------------------------------------------------
@@ -187,11 +190,35 @@ mod tests {
     fn execute_bs_saturates_at_zero() {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 2;
-        execute(&mut screen, &viewport, BS, &mut false, false);
+        execute(
+            &mut screen,
+            &viewport,
+            AsciiControlBytes::Backspace as u8,
+            &mut false,
+            false,
+        );
         assert_eq!(screen.cursor.col, 1);
-        execute(&mut screen, &viewport, BS, &mut false, false);
-        execute(&mut screen, &viewport, BS, &mut false, false);
-        execute(&mut screen, &viewport, BS, &mut false, false);
+        execute(
+            &mut screen,
+            &viewport,
+            AsciiControlBytes::Backspace as u8,
+            &mut false,
+            false,
+        );
+        execute(
+            &mut screen,
+            &viewport,
+            AsciiControlBytes::Backspace as u8,
+            &mut false,
+            false,
+        );
+        execute(
+            &mut screen,
+            &viewport,
+            AsciiControlBytes::Backspace as u8,
+            &mut false,
+            false,
+        );
         assert_eq!(screen.cursor.col, 0);
     }
 
@@ -220,7 +247,13 @@ mod tests {
         let mut bell = false;
         screen.cursor.col = 3;
         screen.cursor.row = 2;
-        execute(&mut screen, &viewport, BEL, &mut bell, false);
+        execute(
+            &mut screen,
+            &viewport,
+            AsciiControlBytes::Bell as u8,
+            &mut bell,
+            false,
+        );
         assert!(bell);
         assert_eq!(screen.cursor.col, 3);
         assert_eq!(screen.cursor.row, 2);
@@ -231,7 +264,13 @@ mod tests {
         let (mut screen, viewport) = setup();
         screen.cursor.col = 3;
         screen.cursor.row = 2;
-        execute(&mut screen, &viewport, NUL, &mut false, false);
+        execute(
+            &mut screen,
+            &viewport,
+            AsciiControlBytes::Nul as u8,
+            &mut false,
+            false,
+        );
         assert_eq!(screen.cursor.col, 3);
         assert_eq!(screen.cursor.row, 2);
     }

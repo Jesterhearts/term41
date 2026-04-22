@@ -472,28 +472,103 @@ pub(super) enum ParsedEscAction {
 }
 
 // C0 control bytes (ECMA-48 / ASCII).
-const NUL: u8 = 0x00;
-const BEL: u8 = 0x07;
-const BS: u8 = 0x08;
-const VT: u8 = 0x0B;
-const FF: u8 = 0x0C;
-const SO: u8 = 0x0E;
-const SI: u8 = 0x0F;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u8)]
+enum AsciiControlBytes {
+    Nul = 0x00,
+    Bell = 0x07,
+    Backspace = 0x08,
+    HorizontalTab = 0x09,
+    LineFeed = 0x0A,
+    VerticalTab = 0x0B,
+    FormFeed = 0x0C,
+    CarriageReturn = 0x0D,
+    ShiftOut = 0x0E,
+    ShiftIn = 0x0F,
+}
 
-// DSR (Device Status Report) parameter values.
-const DSR_OK: u16 = 5;
-const DSR_CPR: u16 = 6;
+impl TryFrom<u8> for AsciiControlBytes {
+    type Error = ();
 
-// CSI Ps t — window manipulation parameter values.
-const WINOP_TITLE_PUSH: u16 = 22;
-const WINOP_TITLE_POP: u16 = 23;
-const WINOP_REPORT_PIXELS: u16 = 14;
-const WINOP_REPORT_CELL_SIZE: u16 = 16;
-const WINOP_REPORT_TEXT_SIZE: u16 = 18;
+    fn try_from(value: u8) -> Result<Self, Self::Error> {
+        match value {
+            0x00 => Ok(Self::Nul),
+            0x07 => Ok(Self::Bell),
+            0x08 => Ok(Self::Backspace),
+            0x09 => Ok(Self::HorizontalTab),
+            0x0A => Ok(Self::LineFeed),
+            0x0B => Ok(Self::VerticalTab),
+            0x0C => Ok(Self::FormFeed),
+            0x0D => Ok(Self::CarriageReturn),
+            0x0E => Ok(Self::ShiftOut),
+            0x0F => Ok(Self::ShiftIn),
+            _ => Err(()),
+        }
+    }
+}
 
-// TBC (Tab Clear) parameter values.
-const TBC_CURRENT: u16 = 0;
-const TBC_ALL: u16 = 3;
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum DsrParameters {
+    Ok = 5,
+    Cpr = 6,
+}
+
+impl TryFrom<u16> for DsrParameters {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            5 => Ok(Self::Ok),
+            6 => Ok(Self::Cpr),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum WinManipulationAction {
+    TitlePush = 22,
+    TitlePop = 23,
+    ReportPixels = 14,
+    ReportCellSize = 16,
+    ReportTextSize = 18,
+}
+
+impl TryFrom<u16> for WinManipulationAction {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            22 => Ok(Self::TitlePush),
+            23 => Ok(Self::TitlePop),
+            14 => Ok(Self::ReportPixels),
+            16 => Ok(Self::ReportCellSize),
+            18 => Ok(Self::ReportTextSize),
+            _ => Err(()),
+        }
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum TabClearMode {
+    Current = 0,
+    All = 3,
+}
+
+impl TryFrom<u16> for TabClearMode {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::Current),
+            3 => Ok(Self::All),
+            _ => Err(()),
+        }
+    }
+}
 
 const VALID_SCREEN_LINE_COUNTS: &[u16] = &[24, 25, 36, 48];
 const VALID_PAGE_LINE_COUNTS: &[u16] = &[24, 25, 36, 48, 72, 144];

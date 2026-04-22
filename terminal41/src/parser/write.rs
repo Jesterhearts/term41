@@ -1144,7 +1144,13 @@ mod tests {
         feed("\u{2764}\u{FE0F}".as_bytes(), &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, 1);
 
-        execute(&mut screen, &viewport, BS, &mut false, false);
+        execute(
+            &mut screen,
+            &viewport,
+            AsciiControlBytes::Backspace as u8,
+            &mut false,
+            false,
+        );
         assert_eq!(screen.cursor.col, 0);
 
         // A full rub-out of `\b \b` from bash lands us back at col 0 with
@@ -1307,7 +1313,13 @@ mod tests {
         let (mut screen, mut viewport) = setup();
         feed("> 👩\u{200D}💻".as_bytes(), &mut screen, &mut viewport);
 
-        execute(&mut screen, &viewport, BS, &mut false, false);
+        execute(
+            &mut screen,
+            &viewport,
+            AsciiControlBytes::Backspace as u8,
+            &mut false,
+            false,
+        );
         assert_eq!(screen.cursor.col, 3);
 
         feed(b"\x1b[K", &mut screen, &mut viewport);

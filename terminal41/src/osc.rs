@@ -19,22 +19,50 @@ use crate::screen::hyperlink::HyperlinkId;
 use crate::screen::hyperlink::HyperlinkRegistry;
 
 // -- OSC command numbers ------------------------------------------------------
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[repr(u16)]
+pub enum OscCommand {
+    SetIconAndTitle = 0,
+    SetTitle = 2,
+    PaletteColor = 4,
+    SetDirectory = 7,
+    Hyperlink = 8,
+    FgColor = 10,
+    BgColor = 11,
+    CursorColor = 12,
+    Clipboard = 52,
+    ResetPalette = 104,
+    ResetFg = 110,
+    ResetBg = 111,
+    ResetCursorColor = 112,
+    ShellIntegration = 133,
+    Iterm2 = 1337,
+}
 
-const OSC_SET_ICON_AND_TITLE: u16 = 0;
-const OSC_SET_TITLE: u16 = 2;
-const OSC_PALETTE_COLOR: u16 = 4;
-const OSC_SET_DIRECTORY: u16 = 7;
-const OSC_HYPERLINK: u16 = 8;
-const OSC_FG_COLOR: u16 = 10;
-const OSC_BG_COLOR: u16 = 11;
-const OSC_CURSOR_COLOR: u16 = 12;
-const OSC_CLIPBOARD: u16 = 52;
-const OSC_RESET_PALETTE: u16 = 104;
-const OSC_RESET_FG: u16 = 110;
-const OSC_RESET_BG: u16 = 111;
-const OSC_RESET_CURSOR_COLOR: u16 = 112;
-const OSC_SHELL_INTEGRATION: u16 = 133;
-const OSC_ITERM2: u16 = 1337;
+impl TryFrom<u16> for OscCommand {
+    type Error = ();
+
+    fn try_from(value: u16) -> Result<Self, Self::Error> {
+        match value {
+            0 => Ok(Self::SetIconAndTitle),
+            2 => Ok(Self::SetTitle),
+            4 => Ok(Self::PaletteColor),
+            7 => Ok(Self::SetDirectory),
+            8 => Ok(Self::Hyperlink),
+            10 => Ok(Self::FgColor),
+            11 => Ok(Self::BgColor),
+            12 => Ok(Self::CursorColor),
+            52 => Ok(Self::Clipboard),
+            104 => Ok(Self::ResetPalette),
+            110 => Ok(Self::ResetFg),
+            111 => Ok(Self::ResetBg),
+            112 => Ok(Self::ResetCursorColor),
+            133 => Ok(Self::ShellIntegration),
+            1337 => Ok(Self::Iterm2),
+            _ => Err(()),
+        }
+    }
+}
 
 /// Split an OSC payload into its numeric command prefix and the remainder.
 ///
@@ -274,40 +302,52 @@ pub(super) fn handle_osc(
 
     // Parse the numeric command prefix. Non-numeric or empty prefixes
     // produce None and fall through to the default (silently dropped).
-    let cmd: Option<u16> = std::str::from_utf8(cmd_bytes)
+    let Some(cmd): Option<u16> = std::str::from_utf8(cmd_bytes)
         .ok()
-        .and_then(|s| s.parse().ok());
+        .and_then(|s| s.parse().ok())
+    else {
+        return;
+    };
+
+    let Ok(cmd) = OscCommand::try_from(cmd) else {
+        return;
+    };
 
     match cmd {
         // OSC 0 sets icon name + window title; OSC 2 sets just the window
         // title. We don't have a separate icon-name surface, so both feed
         // the same field. OSC 1 (icon name only) is intentionally ignored.
-        Some(OSC_SET_ICON_AND_TITLE) | Some(OSC_SET_TITLE) => handle_osc_title(rest, current_title),
-        Some(OSC_SET_DIRECTORY) => handle_osc_7(rest, current_directory),
-        Some(OSC_HYPERLINK) => handle_osc_8(rest, hyperlinks, &mut active_screen.current_hyperlink),
-        Some(OSC_PALETTE_COLOR) => handle_osc_4(rest, palette, c1_mode, pending_output),
-        Some(OSC_FG_COLOR) => handle_osc_color_query(
+        OscCommand::SetIconAndTitle | OscCommand::SetTitle => handle_osc_title(rest, current_title),
+        OscCommand::SetDirectory => handle_osc_7(rest, current_directory),
+        OscCommand::Hyperlink => {
+            handle_osc_8(rest, hyperlinks, &mut active_screen.current_hyperlink)
+        }
+        OscCommand::PaletteColor => handle_osc_4(rest, palette, c1_mode, pending_output),
+        OscCommand::FgColor => handle_osc_color_query(
             rest,
-            OSC_FG_COLOR as u8,
+            OscCommand::FgColor as u8,
             palette.fg,
             c1_mode,
             pending_output,
         ),
-        Some(OSC_BG_COLOR) => handle_osc_color_query(
+        OscCommand::BgColor => handle_osc_color_query(
             rest,
-            OSC_BG_COLOR as u8,
+            OscCommand::BgColor as u8,
             palette.bg,
             c1_mode,
             pending_output,
         ),
-        Some(OSC_CURSOR_COLOR) => {
+        OscCommand::CursorColor => {
             handle_osc_cursor_color_query(rest, palette, c1_mode, pending_output)
         }
-        Some(OSC_CLIPBOARD) => handle_osc_52(rest, clipboard, c1_mode, pending_output),
+        OscCommand::Clipboard => handle_osc_52(rest, clipboard, c1_mode, pending_output),
         // Reset palette/fg/bg/cursor color. Accepted but currently no-op —
         // the palette is immutable at this level.
-        Some(OSC_RESET_PALETTE | OSC_RESET_FG | OSC_RESET_BG | OSC_RESET_CURSOR_COLOR) => {}
-        Some(OSC_SHELL_INTEGRATION) => handle_osc_133(
+        OscCommand::ResetPalette
+        | OscCommand::ResetFg
+        | OscCommand::ResetBg
+        | OscCommand::ResetCursorColor => {}
+        OscCommand::ShellIntegration => handle_osc_133(
             rest,
             active_screen,
             viewport,
@@ -317,15 +357,14 @@ pub(super) fn handle_osc(
         // iTerm2 proprietary commands. Image commands (File=, MultipartFile=,
         // etc.) are routed separately in terminal.rs. ReportCellSize gets a
         // reply; other non-image commands are silently accepted as no-ops.
-        Some(OSC_ITERM2) if rest.starts_with(b"ReportCellSize") => {
+        OscCommand::Iterm2 if rest.starts_with(b"ReportCellSize") => {
             conformance::write_osc(
                 pending_output,
                 c1_mode,
                 format_args!("1337;ReportCellSize={};{}", cell_height, cell_width),
             );
         }
-        Some(OSC_ITERM2) => {}
-        _ => {}
+        OscCommand::Iterm2 => {}
     }
 }
 

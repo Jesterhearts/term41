@@ -7,11 +7,8 @@ use crate::Screen;
 use crate::charset;
 use crate::color;
 use crate::color::apply_sgr_groups;
-use crate::parser::BEL;
-use crate::parser::FF;
-use crate::parser::NUL;
+use crate::parser::AsciiControlBytes;
 use crate::parser::StatusLineCsiAction;
-use crate::parser::VT;
 use crate::parser::next_tab_stop;
 
 pub(crate) fn execute_status(
@@ -20,34 +17,39 @@ pub(crate) fn execute_status(
     bell_pending: &mut bool,
     newline_mode: bool,
 ) {
+    let Ok(byte) = AsciiControlBytes::try_from(byte) else {
+        return;
+    };
+
     match byte {
-        NUL => {}
-        BEL => *bell_pending = true,
-        b'\x08' => {
+        AsciiControlBytes::Nul => {}
+        AsciiControlBytes::Bell => *bell_pending = true,
+        AsciiControlBytes::Backspace => {
             if let Some(status) = status_line_mut(screen) {
                 status.cursor.col = status.cursor.col.saturating_sub(1);
             }
         }
-        b'\x09' => {
+        AsciiControlBytes::HorizontalTab => {
             let tab_stops = screen.tab_stops.clone();
             if let Some(status) = status_line_mut(screen) {
                 let cols = status.row.len().max(1);
                 status.cursor.col = next_tab_stop(&tab_stops, status.cursor.col, cols);
             }
         }
-        b'\n' | VT | FF => {
+        AsciiControlBytes::LineFeed
+        | AsciiControlBytes::VerticalTab
+        | AsciiControlBytes::FormFeed => {
             if newline_mode && let Some(status) = status_line_mut(screen) {
                 status.cursor.col = 0;
             }
         }
-        b'\r' => {
+        AsciiControlBytes::CarriageReturn => {
             if let Some(status) = status_line_mut(screen) {
                 status.cursor.col = 0;
             }
         }
-        b'\x0e' => screen.charset.set_gl(charset::GraphicSetSlot::G1),
-        b'\x0f' => screen.charset.set_gl(charset::GraphicSetSlot::G0),
-        _ => {}
+        AsciiControlBytes::ShiftOut => screen.charset.set_gl(charset::GraphicSetSlot::G1),
+        AsciiControlBytes::ShiftIn => screen.charset.set_gl(charset::GraphicSetSlot::G0),
     }
 }
 
