@@ -1,5 +1,3 @@
-use std::sync::LazyLock;
-
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
 use smol_str::SmolStr;
@@ -66,19 +64,14 @@ pub(crate) use self::write::put_status_text_run;
 pub(crate) use self::write::put_text_run;
 pub(crate) use self::write::put_text_run_with_scrollback_policy;
 
-/// Pre-built inline `SmolStr` for every printable ASCII byte (0x20..=0x7E).
-/// `put_ascii_run` clones out of this table instead of constructing a fresh
-/// `SmolStr` per byte — inline-backed clones are a short memcpy, so the table
-/// eliminates repeated `from_utf8` validation and the inline copy constructor
-/// call per cell.
-static ASCII_CELLS: LazyLock<[SmolStr; 95]> = LazyLock::new(|| {
-    std::array::from_fn(|i| {
-        let b = 0x20u8 + i as u8;
-        // SAFETY: `i` is produced by `0..95`, so `b = 0x20 + i` is in
-        // 0x20..=0x7E. Every byte in that range is valid single-byte UTF-8.
-        SmolStr::new_inline(unsafe { std::str::from_utf8_unchecked(std::slice::from_ref(&b)) })
-    })
-});
+const fn ascii_cell(byte: u8) -> SmolStr {
+    match byte {
+        0x20..=0x7E => SmolStr::new_inline(unsafe {
+            std::str::from_utf8_unchecked(std::slice::from_ref(&byte))
+        }),
+        _ => unreachable!(),
+    }
+}
 
 fn line_attr_display_cols(
     line_attr: LineAttr,
@@ -139,16 +132,6 @@ fn clamp_cursor_to_row_width(
     if screen.cursor.col >= cols {
         screen.cursor.col = cols.saturating_sub(1);
     }
-}
-
-/// Sentinel for the second (and beyond) cell of a wide glyph. Distinct from
-/// the default blank (`" "`) so neighbour cleanup can tell them apart.
-const fn continuation_cell() -> SmolStr {
-    SmolStr::new_inline("")
-}
-
-const fn blank_cell() -> SmolStr {
-    SmolStr::new_inline(" ")
 }
 
 #[derive(Debug, Clone)]

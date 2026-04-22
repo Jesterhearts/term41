@@ -115,16 +115,6 @@ impl StatusLine {
     }
 }
 
-#[derive(Debug, Clone, Copy)]
-pub struct BackspaceGuard {
-    /// Absolute row index in `grid.rows` where we pin extra BS no-ops.
-    pub row: usize,
-    /// Cursor column that should absorb extra BS bytes.
-    pub col: u32,
-    /// Number of extra BS bytes left to absorb at this position.
-    pub remaining: u32,
-}
-
 /// State for a single screen buffer (primary or alt). The terminal holds
 /// two of these — an `active` and a `stash` — and swaps between them with
 /// a single [`std::mem::swap`] on the alt-screen mode transitions.
@@ -176,10 +166,6 @@ pub struct Screen {
     /// Last character placed by `put_char` or `put_ascii_run`, used by REP
     /// (`CSI Ps b`) to repeat the preceding graphic character.
     pub last_char: Option<SmolStr>,
-    /// Transient workaround for host apps that backspace by summing
-    /// per-codepoint widths inside a ZWJ cluster instead of using terminal
-    /// cell width.
-    pub backspace_guard: Option<BackspaceGuard>,
     /// Per-column tab stops. `tab_stops[c]` is `true` when column `c` is a
     /// tab stop. Defaults to every 8 columns (8, 16, 24, ...).
     pub tab_stops: Vec<bool>,
@@ -264,7 +250,6 @@ impl Screen {
             current_hyperlink: None,
             cursor_visible: true,
             last_char: None,
-            backspace_guard: None,
             tab_stops: init_tab_stops(cols),
             origin_mode: false,
             nrc_mode: false,
@@ -765,7 +750,7 @@ pub(super) fn resize_screen(
             grid.rows.len().saturating_sub(effective_old_rows) + cursor.row as usize;
         let old_distance_from_bottom = grid.rows.len().saturating_sub(cursor_abs_now + 1);
 
-        self::grid::reflow_op(grid, new_cols);
+        self::grid::reflow(grid, new_cols);
 
         while grid.rows.len() > max_rows {
             grid.rows.pop_front();

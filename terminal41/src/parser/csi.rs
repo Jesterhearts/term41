@@ -762,6 +762,8 @@ fn apply_main_csi(
     let mut viewport = screen::screen_viewport(screen, viewport);
     let preserve_top_origin_scrollback = !*on_alt_screen && !screen::page_memory_active(screen);
 
+    debug!("Applying main CSI action: {action:?}");
+
     match action {
         MainCsiAction::SelfTest { requested_tests } => {
             let power_up_self_test = requested_tests.is_empty()
@@ -920,9 +922,8 @@ fn apply_main_csi(
             clamp_cursor_to_row_width(screen, &viewport);
         }
         MainCsiAction::CursorForward { count } => {
-            let n = count.max(1) as u32;
-            let cols = current_row_display_cols(screen, &viewport);
-            screen.cursor.col = (screen.cursor.col + n).min(cols - 1);
+            let cols = row_display_cols(screen, &viewport, screen.cursor.row);
+            screen.cursor.col = (screen.cursor.col + count.max(1) as u32).min(cols - 1);
         }
         MainCsiAction::CursorBackward { count } => {
             screen.cursor.col = screen.cursor.col.saturating_sub(count.max(1) as u32);
@@ -950,7 +951,7 @@ fn apply_main_csi(
             screen.cursor.col = col.min(cols - 1);
         }
         MainCsiAction::EraseInDisplay { mode } => {
-            grid::erase_in_display_op(
+            grid::erase_in_display(
                 &mut screen.grid,
                 &screen.cursor,
                 &viewport,
@@ -959,7 +960,7 @@ fn apply_main_csi(
             );
         }
         MainCsiAction::EraseInLine { mode } => {
-            grid::erase_in_line_op(&mut screen.grid, &screen.cursor, &viewport, mode);
+            grid::erase_in_line(&mut screen.grid, &screen.cursor, &viewport, mode);
         }
         MainCsiAction::SetGraphicsRendition { params } => {
             apply_sgr_groups(
@@ -988,9 +989,8 @@ fn apply_main_csi(
             screen.cursor.col = col.min(cols - 1);
         }
         MainCsiAction::CursorForwardRelative { count } => {
-            let n = count.max(1) as u32;
-            let cols = current_row_display_cols(screen, &viewport);
-            screen.cursor.col = (screen.cursor.col + n).min(cols - 1);
+            let cols = row_display_cols(screen, &viewport, screen.cursor.row);
+            screen.cursor.col = (screen.cursor.col + count.max(1) as u32).min(cols - 1);
         }
         MainCsiAction::CursorVerticalRelative { count } => {
             let n = count.max(1) as u32;
@@ -1007,7 +1007,7 @@ fn apply_main_csi(
             if screen.cursor.row >= screen.scroll_top && screen.cursor.row <= screen.scroll_bottom {
                 let top = screen.cursor.row;
                 if modes.declrmm {
-                    grid::scroll_down_in_rect_op(
+                    grid::scroll_down_in_rect(
                         &mut screen.grid,
                         &viewport,
                         top,
@@ -1017,7 +1017,7 @@ fn apply_main_csi(
                         n,
                     );
                 } else {
-                    grid::scroll_down_in_region_op(
+                    grid::scroll_down_in_region(
                         &mut screen.grid,
                         &viewport,
                         &mut screen.images,
@@ -1033,7 +1033,7 @@ fn apply_main_csi(
             if screen.cursor.row >= screen.scroll_top && screen.cursor.row <= screen.scroll_bottom {
                 let top = screen.cursor.row;
                 if modes.declrmm {
-                    grid::scroll_up_in_rect_op(
+                    grid::scroll_up_in_rect(
                         &mut screen.grid,
                         &viewport,
                         top,
@@ -1043,7 +1043,7 @@ fn apply_main_csi(
                         n,
                     );
                 } else {
-                    grid::scroll_up_in_region_with_scrollback_policy_op(
+                    grid::scroll_up_in_region_with_scrollback_policy(
                         &mut screen.grid,
                         &viewport,
                         &mut screen.images,
@@ -1056,13 +1056,28 @@ fn apply_main_csi(
             }
         }
         MainCsiAction::DeleteChars { count } => {
-            grid::delete_chars_op(&mut screen.grid, &screen.cursor, &viewport, count.max(1));
+            grid::delete_chars(
+                &mut screen.grid,
+                &mut screen.cursor,
+                &viewport,
+                count.max(1),
+            );
         }
         MainCsiAction::InsertChars { count } => {
-            grid::insert_chars_op(&mut screen.grid, &screen.cursor, &viewport, count.max(1));
+            grid::shift_chars(
+                &mut screen.grid,
+                &mut screen.cursor,
+                &viewport,
+                count.max(1),
+            );
         }
         MainCsiAction::EraseChars { count } => {
-            grid::erase_chars_op(&mut screen.grid, &screen.cursor, &viewport, count.max(1));
+            grid::erase_chars(
+                &mut screen.grid,
+                &mut screen.cursor,
+                &viewport,
+                count.max(1),
+            );
         }
         MainCsiAction::ScrollUp { count } => {
             let n = count.max(1) as u32;
@@ -1073,7 +1088,7 @@ fn apply_main_csi(
                     screen.grid.push_visible_row(&viewport);
                 }
             } else {
-                grid::scroll_up_in_region_with_scrollback_policy_op(
+                grid::scroll_up_in_region_with_scrollback_policy(
                     &mut screen.grid,
                     &viewport,
                     &mut screen.images,
@@ -1085,7 +1100,7 @@ fn apply_main_csi(
             }
         }
         MainCsiAction::ScrollDown { count } => {
-            grid::scroll_down_in_region_op(
+            grid::scroll_down_in_region(
                 &mut screen.grid,
                 &viewport,
                 &mut screen.images,
@@ -1214,7 +1229,7 @@ pub(crate) fn csi_apply(
     match action {
         ParsedCsiAction::Unsupported => (),
         ParsedCsiAction::StatusLine(action) => {
-            apply_status_line_csi(screen, palette, modes.insert_mode, action);
+            apply_status_line_csi(screen, viewport, palette, modes.insert_mode, action);
         }
         ParsedCsiAction::Main(action) => {
             apply_main_csi()
@@ -1332,7 +1347,7 @@ pub(crate) fn csi_apply(
         }
         ParsedCsiAction::SelectiveEraseDisplay { mode } => {
             let view = screen::screen_viewport(screen, viewport);
-            grid::erase_in_display_selective_op(
+            grid::erase_in_display_selective(
                 &mut screen.grid,
                 &screen.cursor,
                 &view,
@@ -1342,7 +1357,7 @@ pub(crate) fn csi_apply(
         }
         ParsedCsiAction::SelectiveEraseLine { mode } => {
             let view = screen::screen_viewport(screen, viewport);
-            grid::erase_in_line_selective_op(&mut screen.grid, &screen.cursor, &view, mode);
+            grid::erase_in_line_selective(&mut screen.grid, &screen.cursor, &view, mode);
         }
         ParsedCsiAction::KittyKeyboard {
             intermediate,
@@ -1491,7 +1506,7 @@ pub(crate) fn csi_apply(
                 }
                 let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
                 match action {
-                    ParsedCsiAction::ChangeRectAttrs { .. } => grid::change_attrs_rect_op(
+                    ParsedCsiAction::ChangeRectAttrs { .. } => grid::change_attrs_rect(
                         &mut screen.grid,
                         &view,
                         start_row,
@@ -1501,7 +1516,7 @@ pub(crate) fn csi_apply(
                         &sgr,
                         screen.attr_change_extent,
                     ),
-                    ParsedCsiAction::ReverseRectAttrs { .. } => grid::reverse_attrs_rect_op(
+                    ParsedCsiAction::ReverseRectAttrs { .. } => grid::reverse_attrs_rect(
                         &mut screen.grid,
                         &view,
                         start_row,
@@ -1529,7 +1544,7 @@ pub(crate) fn csi_apply(
 
             match action {
                 ParsedCsiAction::EraseRect { .. } => {
-                    grid::erase_rect_op(
+                    grid::erase_rect(
                         &mut screen.grid,
                         &view,
                         rect_top,
@@ -1539,7 +1554,7 @@ pub(crate) fn csi_apply(
                     );
                 }
                 ParsedCsiAction::SelectiveEraseRect { .. } => {
-                    grid::erase_rect_selective_op(
+                    grid::erase_rect_selective(
                         &mut screen.grid,
                         &view,
                         rect_top,
@@ -1554,7 +1569,7 @@ pub(crate) fn csi_apply(
                     if valid && let Some(ch) = char::from_u32(ch_code) {
                         let mut buf = [0u8; 4];
                         let s = SmolStr::new(ch.encode_utf8(&mut buf) as &str);
-                        grid::fill_rect_op(
+                        grid::fill_rect(
                             &mut screen.grid,
                             &view,
                             rect_top,
@@ -1584,7 +1599,7 @@ pub(crate) fn csi_apply(
                     let Some(dst_view) = screen::page_viewport(screen, viewport, dst_page) else {
                         return;
                     };
-                    grid::copy_rect_op(
+                    grid::copy_rect(
                         &mut screen.grid,
                         &src_view,
                         rect_top,
@@ -1598,7 +1613,7 @@ pub(crate) fn csi_apply(
                 }
                 ParsedCsiAction::ChangeRectAttrs { .. } => {
                     let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                    grid::change_attrs_rect_op(
+                    grid::change_attrs_rect(
                         &mut screen.grid,
                         &view,
                         rect_top,
@@ -1611,7 +1626,7 @@ pub(crate) fn csi_apply(
                 }
                 ParsedCsiAction::ReverseRectAttrs { .. } => {
                     let sgr: Vec<u16> = p.get(4..).unwrap_or(&[]).to_vec();
-                    grid::reverse_attrs_rect_op(
+                    grid::reverse_attrs_rect(
                         &mut screen.grid,
                         &view,
                         rect_top,
@@ -1663,7 +1678,7 @@ pub(crate) fn csi_apply(
         ParsedCsiAction::ScrollLeft { count } => {
             let view = screen::screen_viewport(screen, viewport);
             let n = count.max(1) as u32;
-            grid::scroll_left_op(
+            grid::scroll_left(
                 &mut screen.grid,
                 &view,
                 screen.scroll_top,
@@ -1674,7 +1689,7 @@ pub(crate) fn csi_apply(
         ParsedCsiAction::ScrollRight { count } => {
             let view = screen::screen_viewport(screen, viewport);
             let n = count.max(1) as u32;
-            grid::scroll_right_op(
+            grid::scroll_right(
                 &mut screen.grid,
                 &view,
                 screen.scroll_top,
@@ -1719,7 +1734,7 @@ pub(crate) fn csi_apply(
         },
         ParsedCsiAction::InsertColumns { count } => {
             let view = screen::screen_viewport(screen, viewport);
-            grid::insert_cols_op(
+            grid::insert_cols(
                 &mut screen.grid,
                 &view,
                 screen.cursor.col,
@@ -1730,7 +1745,7 @@ pub(crate) fn csi_apply(
         }
         ParsedCsiAction::DeleteColumns { count } => {
             let view = screen::screen_viewport(screen, viewport);
-            grid::delete_cols_op(
+            grid::delete_cols(
                 &mut screen.grid,
                 &view,
                 screen.cursor.col,
@@ -1898,6 +1913,13 @@ mod tests {
     use crate::parser::execute;
     use crate::parser::test_support::*;
 
+    fn set_cursor_col(
+        screen: &mut Screen,
+        col: u32,
+    ) {
+        screen.cursor.col = col;
+    }
+
     #[test]
     fn csi_parse_maps_private_mode_query_semantically() {
         assert!(matches!(
@@ -2021,7 +2043,7 @@ mod tests {
     #[test]
     fn csi_d_moves_cursor_left_saturating() {
         let (mut screen, mut viewport) = setup();
-        screen.cursor.col = 2;
+        set_cursor_col(&mut screen, 2);
         feed(b"\x1b[5D", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, 0);
     }
@@ -2032,7 +2054,7 @@ mod tests {
     fn csi_e_moves_down_and_homes_column() {
         let (mut screen, mut viewport) = setup();
         screen.cursor.row = 0;
-        screen.cursor.col = 5;
+        set_cursor_col(&mut screen, 5);
         feed(b"\x1b[2E", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 0);
@@ -2041,7 +2063,7 @@ mod tests {
     #[test]
     fn csi_e_clamps_at_bottom() {
         let (mut screen, mut viewport) = setup();
-        screen.cursor.col = 3;
+        set_cursor_col(&mut screen, 3);
         feed(b"\x1b[99E", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, TEST_ROWS - 1);
         assert_eq!(screen.cursor.col, 0);
@@ -2051,7 +2073,7 @@ mod tests {
     fn csi_f_moves_up_and_homes_column() {
         let (mut screen, mut viewport) = setup();
         screen.cursor.row = 3;
-        screen.cursor.col = 7;
+        set_cursor_col(&mut screen, 7);
         feed(b"\x1b[2F", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 0);
@@ -2061,7 +2083,7 @@ mod tests {
     fn csi_f_saturates_at_top() {
         let (mut screen, mut viewport) = setup();
         screen.cursor.row = 1;
-        screen.cursor.col = 5;
+        set_cursor_col(&mut screen, 5);
         feed(b"\x1b[99F", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
         assert_eq!(screen.cursor.col, 0);
@@ -2079,7 +2101,7 @@ mod tests {
     fn csi_h_defaults_to_origin() {
         let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
-        screen.cursor.col = 5;
+        set_cursor_col(&mut screen, 5);
         feed(b"\x1b[H", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 0);
         assert_eq!(screen.cursor.col, 0);
@@ -2167,7 +2189,7 @@ mod tests {
     #[test]
     fn csi_d_lowercase_sets_row_only() {
         let (mut screen, mut viewport) = setup();
-        screen.cursor.col = 5;
+        set_cursor_col(&mut screen, 5);
         feed(b"\x1b[3d", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 2);
         assert_eq!(screen.cursor.col, 5);
@@ -2205,7 +2227,7 @@ mod tests {
     fn csi_r_sets_scroll_region_and_homes_cursor() {
         let (mut screen, mut viewport) = setup();
         screen.cursor.row = 3;
-        screen.cursor.col = 5;
+        set_cursor_col(&mut screen, 5);
         feed(b"\x1b[2;3r", &mut screen, &mut viewport);
         assert_eq!(screen.scroll_top, 1);
         assert_eq!(screen.scroll_bottom, 2);
@@ -2225,7 +2247,7 @@ mod tests {
     fn csi_with_intermediate_is_ignored() {
         let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
-        screen.cursor.col = 3;
+        set_cursor_col(&mut screen, 3);
         // Intermediate ` ` before action `q` is a valid CSI shape but not one
         // we handle — we must leave state untouched.
         feed(b"\x1b[1 q", &mut screen, &mut viewport);
@@ -2237,7 +2259,7 @@ mod tests {
     fn csi_unknown_action_is_ignored() {
         let (mut screen, mut viewport) = setup();
         screen.cursor.row = 1;
-        screen.cursor.col = 1;
+        set_cursor_col(&mut screen, 1);
         // Use a genuinely unrecognized CSI action (not Z, which is now CBT).
         feed(b"\x1b[1~", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
@@ -2404,7 +2426,7 @@ mod tests {
     #[test]
     fn decrqpsr_reports_tab_stops() {
         let (mut screen, mut viewport) = setup();
-        screen.cursor.col = 3;
+        set_cursor_col(&mut screen, 3);
         feed(b"\x1bH", &mut screen, &mut viewport);
         let out = feed_with_output(b"\x1b[2$w", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1bP2$u4;9\x1b\\");
@@ -2414,7 +2436,7 @@ mod tests {
     fn np_switches_page_and_homes_cursor() {
         let (mut screen, mut viewport) = setup();
         screen.cursor.row = 5;
-        screen.cursor.col = 7;
+        set_cursor_col(&mut screen, 7);
         feed(b"\x1b[2U", &mut screen, &mut viewport);
         let page = screen.page_memory.as_ref().unwrap();
         assert_eq!(page.active_page, 2);
@@ -2522,7 +2544,7 @@ mod tests {
     #[test]
     fn tab_from_mid_column_goes_to_next_stop() {
         let (mut screen, viewport) = setup();
-        screen.cursor.col = 3;
+        set_cursor_col(&mut screen, 3);
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 8);
     }
@@ -2530,7 +2552,7 @@ mod tests {
     #[test]
     fn tab_at_last_column_stays() {
         let (mut screen, viewport) = setup();
-        screen.cursor.col = TEST_COLS - 1;
+        set_cursor_col(&mut screen, TEST_COLS - 1);
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
@@ -2541,7 +2563,7 @@ mod tests {
         // Move to col 3, set a tab stop with ESC H, then tab from col 0.
         feed(b"\x1b[1;4H\x1bH", &mut screen, &mut viewport);
         assert!(screen.tab_stops[3]);
-        screen.cursor.col = 0;
+        set_cursor_col(&mut screen, 0);
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, 3);
     }
@@ -2587,7 +2609,7 @@ mod tests {
             top: 0,
         };
         // Park at col 20, then CSI 2 Z (back 2 stops) should land at 8.
-        screen.cursor.col = 20;
+        set_cursor_col(&mut screen, 20);
         feed(b"\x1b[2Z", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.col, 8);
     }
@@ -2596,11 +2618,11 @@ mod tests {
     fn tbc_0_clears_at_cursor() {
         let (mut screen, mut viewport) = setup();
         // Default stop at col 8. Move there and clear it.
-        screen.cursor.col = 8;
+        set_cursor_col(&mut screen, 8);
         feed(b"\x1b[0g", &mut screen, &mut viewport);
         assert!(!screen.tab_stops[8]);
         // Tab from col 0 should now go to the last column.
-        screen.cursor.col = 0;
+        set_cursor_col(&mut screen, 0);
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }
@@ -2611,7 +2633,7 @@ mod tests {
         feed(b"\x1b[3g", &mut screen, &mut viewport);
         assert!(screen.tab_stops.iter().all(|&s| !s));
         // Tab from col 0 should go to last column.
-        screen.cursor.col = 0;
+        set_cursor_col(&mut screen, 0);
         execute(&mut screen, &viewport, b'\t', &mut false, false);
         assert_eq!(screen.cursor.col, TEST_COLS - 1);
     }

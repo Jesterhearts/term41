@@ -436,6 +436,15 @@ impl FontSystem {
             return vec![];
         }
 
+        trace!(
+            "shaping row: cells={:?}",
+            if cells.iter().all(|c| c.is_empty() || c == " ") {
+                vec!["<all empty>"]
+            } else {
+                cells.iter().map(|c| c.as_str()).collect::<Vec<_>>()
+            }
+        );
+
         // Build the row string and byte-offset → column mapping.
         let mut row_text = String::new();
         let mut col_map: Vec<u16> = Vec::new();

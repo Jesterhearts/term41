@@ -9,30 +9,30 @@ mod rect;
 mod reflow;
 mod scroll;
 
-pub(crate) use self::edit::delete_chars as delete_chars_op;
-pub(crate) use self::edit::erase_chars as erase_chars_op;
-pub(crate) use self::edit::erase_in_display as erase_in_display_op;
-pub(crate) use self::edit::erase_in_display_selective as erase_in_display_selective_op;
-pub(crate) use self::edit::erase_in_line as erase_in_line_op;
-pub(crate) use self::edit::erase_in_line_selective as erase_in_line_selective_op;
-pub(crate) use self::edit::insert_chars as insert_chars_op;
-pub(crate) use self::rect::change_attrs_rect as change_attrs_rect_op;
-pub(crate) use self::rect::copy_rect as copy_rect_op;
-pub(crate) use self::rect::erase_rect as erase_rect_op;
-pub(crate) use self::rect::erase_rect_selective as erase_rect_selective_op;
-pub(crate) use self::rect::fill_rect as fill_rect_op;
-pub(crate) use self::rect::reverse_attrs_rect as reverse_attrs_rect_op;
-pub(crate) use self::reflow::reflow as reflow_op;
-pub(crate) use self::scroll::delete_cols as delete_cols_op;
-pub(crate) use self::scroll::insert_cols as insert_cols_op;
-pub(crate) use self::scroll::scroll_down_in_rect as scroll_down_in_rect_op;
-pub(crate) use self::scroll::scroll_down_in_region as scroll_down_in_region_op;
-pub(crate) use self::scroll::scroll_left as scroll_left_op;
-pub(crate) use self::scroll::scroll_right as scroll_right_op;
-pub(crate) use self::scroll::scroll_up_in_rect as scroll_up_in_rect_op;
+pub(crate) use self::edit::delete_chars;
+pub(crate) use self::edit::erase_chars;
+pub(crate) use self::edit::erase_in_display;
+pub(crate) use self::edit::erase_in_display_selective;
+pub(crate) use self::edit::erase_in_line;
+pub(crate) use self::edit::erase_in_line_selective;
+pub(crate) use self::edit::shift_chars;
+pub(crate) use self::rect::change_attrs_rect;
+pub(crate) use self::rect::copy_rect;
+pub(crate) use self::rect::erase_rect;
+pub(crate) use self::rect::erase_rect_selective;
+pub(crate) use self::rect::fill_rect;
+pub(crate) use self::rect::reverse_attrs_rect;
+pub(crate) use self::reflow::reflow;
+pub(crate) use self::scroll::delete_cols;
+pub(crate) use self::scroll::insert_cols;
+pub(crate) use self::scroll::scroll_down_in_rect;
+pub(crate) use self::scroll::scroll_down_in_region;
+pub(crate) use self::scroll::scroll_left;
+pub(crate) use self::scroll::scroll_right;
+pub(crate) use self::scroll::scroll_up_in_rect;
 #[cfg(test)]
-pub(crate) use self::scroll::scroll_up_in_region as scroll_up_in_region_op;
-pub(crate) use self::scroll::scroll_up_in_region_with_scrollback_policy as scroll_up_in_region_with_scrollback_policy_op;
+pub(crate) use self::scroll::scroll_up_in_region;
+pub(crate) use self::scroll::scroll_up_in_region_with_scrollback_policy;
 
 #[derive(Debug, Default, Clone, Copy, PartialEq, Eq)]
 pub struct Cursor {
@@ -169,7 +169,7 @@ mod tests {
             &mut self,
             new_width: u32,
         ) {
-            reflow_op(self, new_width);
+            reflow(self, new_width);
         }
 
         fn scroll_up_in_region(
@@ -180,7 +180,7 @@ mod tests {
             bottom: u32,
             n: u32,
         ) {
-            scroll_up_in_region_op(self, viewport, images, top, bottom, n);
+            scroll_up_in_region(self, viewport, images, top, bottom, n);
         }
 
         fn scroll_down_in_region(
@@ -191,7 +191,7 @@ mod tests {
             bottom: u32,
             n: u32,
         ) {
-            scroll_down_in_region_op(self, viewport, images, top, bottom, n);
+            scroll_down_in_region(self, viewport, images, top, bottom, n);
         }
     }
 

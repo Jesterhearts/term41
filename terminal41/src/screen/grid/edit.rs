@@ -126,7 +126,7 @@ pub(crate) fn erase_in_line(
 
 pub(crate) fn delete_chars(
     grid: &mut Grid,
-    cursor: &Cursor,
+    cursor: &mut Cursor,
     viewport: &Viewport,
     n: u16,
 ) {
@@ -139,15 +139,16 @@ pub(crate) fn delete_chars(
     grid.rows[active].clear_range(cols - count..cols, grid.default_fg, grid.default_bg);
 }
 
-pub(crate) fn insert_chars(
+pub(crate) fn shift_chars(
     grid: &mut Grid,
-    cursor: &Cursor,
+    cursor: &mut Cursor,
     viewport: &Viewport,
     n: u16,
 ) {
     let active = grid.active_row_index(cursor, viewport);
     let cols = grid.rows[active].cells.len();
     let col = cursor.col as usize;
+    cursor.col = col as u32;
     let count = (n as usize).min(cols - col);
 
     grid.rows[active].copy_within(col..cols - count, col + count);
@@ -156,13 +157,14 @@ pub(crate) fn insert_chars(
 
 pub(crate) fn erase_chars(
     grid: &mut Grid,
-    cursor: &Cursor,
+    cursor: &mut Cursor,
     viewport: &Viewport,
     n: u16,
 ) {
     let active = grid.active_row_index(cursor, viewport);
     let cols = grid.rows[active].cells.len();
     let col = cursor.col as usize;
+    cursor.col = col as u32;
     let end = (col + n as usize).min(cols);
 
     grid.rows[active].clear_range(col..end, grid.default_fg, grid.default_bg);

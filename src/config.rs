@@ -772,13 +772,13 @@ mod tests {
     #[test]
     fn macros_allowlist_accepts_all_string() {
         assert_eq!(
-            parse("[allow_features]\nmacros = \"all\"\n")
+            parse("[security.features]\nmacros = \"all\"\n")
                 .feature_permissions
                 .macros,
             ProgramAllowlist::AllowAll
         );
         assert_eq!(
-            parse("[allow_features]\nmacros = \"*\"\n")
+            parse("[security.features]\nmacros = \"*\"\n")
                 .feature_permissions
                 .macros,
             ProgramAllowlist::AllowAll
@@ -804,8 +804,8 @@ mod tests {
     #[test]
     fn unknown_nested_keys_are_reported() {
         assert_eq!(
-            ignored_keys("[allow_features]\nmacro = \"all\"\n"),
-            vec!["allow_features.macro"]
+            ignored_keys("[features]\nmacros = \"all\"\n"),
+            vec!["features"]
         );
     }
 

@@ -1,9 +1,10 @@
 use super::write::put_status_char;
 use super::write::status_delete_chars;
 use super::write::status_erase_chars;
-use super::write::status_insert_chars;
 use super::write::status_line_mut;
+use super::write::status_shift_chars;
 use crate::Screen;
+use crate::Viewport;
 use crate::charset;
 use crate::color;
 use crate::color::apply_sgr_groups;
@@ -55,6 +56,7 @@ pub(crate) fn execute_status(
 
 pub(crate) fn apply_status_line_csi(
     screen: &mut Screen,
+    viewport: &Viewport,
     palette: &mut color::ColorPalette,
     insert_mode: bool,
     action: StatusLineCsiAction,
@@ -81,7 +83,7 @@ pub(crate) fn apply_status_line_csi(
             );
         }
         StatusLineCsiAction::InsertChars { count } => {
-            status_insert_chars(status, count as usize);
+            status_shift_chars(status, count as usize);
         }
         StatusLineCsiAction::HomeRow => {
             cursor.row = 0;
@@ -121,7 +123,7 @@ pub(crate) fn apply_status_line_csi(
         StatusLineCsiAction::RepeatLastChar { count } => {
             if let Some(last) = status.last_char.clone() {
                 for _ in 0..count {
-                    put_status_char(screen, last.clone(), insert_mode);
+                    put_status_char(screen, viewport, last.clone(), insert_mode);
                 }
             }
         }

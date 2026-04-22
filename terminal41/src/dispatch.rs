@@ -482,7 +482,7 @@ pub(super) fn apply_ascii_run(
     if active.active_display == screen::ActiveDisplay::Status
         && screen::status_line_writable(active)
     {
-        put_status_ascii_run(active, run, insert_mode);
+        put_status_ascii_run(active, viewport, run, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
         put_ascii_run_with_scrollback_policy(
@@ -505,7 +505,7 @@ pub(super) fn apply_text_run(
     if active.active_display == screen::ActiveDisplay::Status
         && screen::status_line_writable(active)
     {
-        put_status_text_run(active, run, insert_mode);
+        put_status_text_run(active, viewport, run, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
         put_text_run_with_scrollback_policy(
@@ -528,7 +528,7 @@ pub(super) fn apply_printable(
     if active.active_display == screen::ActiveDisplay::Status
         && screen::status_line_writable(active)
     {
-        put_status_printable(active, text, insert_mode);
+        put_status_printable(active, viewport, text, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
         put_printable_with_scrollback_policy(
@@ -551,7 +551,7 @@ pub(super) fn apply_8bit_byte(
     if active.active_display == screen::ActiveDisplay::Status
         && screen::status_line_writable(active)
     {
-        put_status_8bit_byte(active, byte, insert_mode);
+        put_status_8bit_byte(active, viewport, byte, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
         put_8bit_byte_with_scrollback_policy(

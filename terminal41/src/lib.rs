@@ -581,13 +581,15 @@ impl Terminal {
         action: Action<'_>,
         effects: &mut TerminalEffects,
     ) -> dispatch::PendingApplication {
-        match dispatch::classify_action(
+        let action = dispatch::classify_action(
             &self.active,
             &self.modes,
             &self.protocol.drcs,
             &mut self.vt52_cursor_addr,
             action,
-        ) {
+        );
+        debug!("Classified action: {:?}", action);
+        match action {
             TerminalAction::Ignore => dispatch::PendingApplication::None,
             TerminalAction::Basic(action) => {
                 let preserve_top_origin_scrollback =

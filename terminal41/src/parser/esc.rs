@@ -23,7 +23,7 @@ use crate::parser::Vt52EscAction;
 use crate::parser::apply_hard_reset_state;
 use crate::parser::can_negotiate_c1;
 use crate::parser::clamp_cursor_to_row_width;
-use crate::parser::current_row_display_cols;
+use crate::parser::row_display_cols;
 use crate::screen;
 use crate::screen::grid;
 
@@ -161,7 +161,7 @@ fn apply_vt52_esc(
         }
         Vt52EscAction::CursorDown => {}
         Vt52EscAction::CursorRight
-            if screen.cursor.col + 1 < current_row_display_cols(screen, viewport) =>
+            if screen.cursor.col + 1 < row_display_cols(screen, viewport, screen.cursor.row) =>
         {
             screen.cursor.col += 1;
         }
@@ -185,7 +185,7 @@ fn apply_vt52_esc(
         }
         Vt52EscAction::ReverseIndex => {
             if screen.cursor.row == screen.scroll_top {
-                grid::scroll_down_in_region_op(
+                grid::scroll_down_in_region(
                     &mut screen.grid,
                     viewport,
                     &mut screen.images,
@@ -198,7 +198,7 @@ fn apply_vt52_esc(
             }
         }
         Vt52EscAction::EraseToEndOfScreen => {
-            grid::erase_in_display_op(
+            grid::erase_in_display(
                 &mut screen.grid,
                 &screen.cursor,
                 viewport,
@@ -207,7 +207,7 @@ fn apply_vt52_esc(
             );
         }
         Vt52EscAction::EraseToEndOfLine => {
-            grid::erase_in_line_op(&mut screen.grid, &screen.cursor, viewport, 0);
+            grid::erase_in_line(&mut screen.grid, &screen.cursor, viewport, 0);
         }
         Vt52EscAction::DirectCursorAddressStart => {
             *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
@@ -286,7 +286,7 @@ fn apply_esc_index(
                 screen.grid.push_visible_row(screen_view);
             }
         } else {
-            grid::scroll_up_in_region_with_scrollback_policy_op(
+            grid::scroll_up_in_region_with_scrollback_policy(
                 &mut screen.grid,
                 screen_view,
                 &mut screen.images,
@@ -316,7 +316,7 @@ fn apply_esc_next_line(
                 screen.grid.push_visible_row(screen_view);
             }
         } else {
-            grid::scroll_up_in_region_with_scrollback_policy_op(
+            grid::scroll_up_in_region_with_scrollback_policy(
                 &mut screen.grid,
                 screen_view,
                 &mut screen.images,
@@ -337,7 +337,7 @@ fn apply_esc_reverse_index(
     screen_view: &Viewport,
 ) {
     if screen.cursor.row == screen.scroll_top {
-        grid::scroll_down_in_region_op(
+        grid::scroll_down_in_region(
             &mut screen.grid,
             screen_view,
             &mut screen.images,
@@ -355,7 +355,7 @@ fn apply_esc_back_index(
     screen_view: &Viewport,
 ) {
     if screen.cursor.col == 0 {
-        grid::scroll_right_op(
+        grid::scroll_right(
             &mut screen.grid,
             screen_view,
             screen.scroll_top,
@@ -363,7 +363,7 @@ fn apply_esc_back_index(
             1,
         );
     } else {
-        screen.cursor.col -= 1;
+        screen.cursor.col = screen.cursor.col.saturating_sub(1);
     }
 }
 
@@ -371,8 +371,8 @@ fn apply_esc_forward_index(
     screen: &mut Screen,
     screen_view: &Viewport,
 ) {
-    if screen.cursor.col >= current_row_display_cols(screen, screen_view) - 1 {
-        grid::scroll_left_op(
+    if screen.cursor.col >= row_display_cols(screen, screen_view, screen.cursor.row) - 1 {
+        grid::scroll_left(
             &mut screen.grid,
             screen_view,
             screen.scroll_top,
@@ -627,6 +627,13 @@ mod tests {
     use crate::parser::put_text_run;
     use crate::parser::test_support::*;
 
+    fn set_cursor_col(
+        screen: &mut Screen,
+        col: u32,
+    ) {
+        screen.cursor.col = col;
+    }
+
     #[test]
     fn esc_parse_maps_hard_reset_semantically() {
         let modes = TerminalModes::new();
@@ -719,7 +726,7 @@ mod tests {
     fn esc_scs_designator_is_ignored() {
         let (mut screen, mut viewport) = setup();
         screen.cursor.row = 2;
-        screen.cursor.col = 3;
+        set_cursor_col(&mut screen, 3);
         // ESC ( B designates US-ASCII as G0. Parser should no-op without
         // dropping state or panicking on the `B` byte (which would otherwise
         // land in the unknown-byte arm).
@@ -1095,7 +1102,7 @@ mod tests {
     #[test]
     fn ind_moves_cursor_down() {
         let (mut screen, mut viewport) = setup();
-        screen.cursor.col = 5;
+        set_cursor_col(&mut screen, 5);
         feed(b"\x1bD", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 5); // col preserved
@@ -1114,7 +1121,7 @@ mod tests {
     #[test]
     fn nel_moves_to_col_0_of_next_line() {
         let (mut screen, mut viewport) = setup();
-        screen.cursor.col = 5;
+        set_cursor_col(&mut screen, 5);
         feed(b"\x1bE", &mut screen, &mut viewport);
         assert_eq!(screen.cursor.row, 1);
         assert_eq!(screen.cursor.col, 0);
