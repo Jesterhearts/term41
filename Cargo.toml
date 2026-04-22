@@ -13,6 +13,7 @@ members = [
   "pty-pipe41",
   "selftest41",
   "terminal41",
+  "utils41",
   "vte-mode41",
   "vtepp",
 ]
@@ -39,6 +40,7 @@ serde                = { version = "1.0.228", features = ["derive"] }
 smol_str             = "0.3.6"
 unicode-segmentation = "1.13.2"
 unicode-width        = "0.2.2"
+utils41              = { path = "utils41" }
 vte-mode41           = { path = "vte-mode41" }
 vtepp                = { path = "vtepp" }
 
@@ -87,6 +89,7 @@ tracing                        = "0.1.44"
 tracing-subscriber             = { version = "0.3.23", features = ["env-filter"] }
 unicode-segmentation.workspace = true
 unicode-width.workspace        = true
+utils41.workspace              = true
 vtepp.workspace                = true
 wgpu                           = { version = "29.0.1", default-features = false, features = [
   "gles",

@@ -29,6 +29,7 @@ use bytemuck::Zeroable;
 use image41::decode_image;
 #[cfg(feature = "ffmpeg")]
 use image41::ffmpeg_decoder::FrameReader;
+use utils41::lerp;
 use wgpu::util::DeviceExt;
 
 /// How many decoded frames the decoder thread is allowed to get ahead of
@@ -554,14 +555,6 @@ fn rgba_at(
         pixels[idx + 2],
         pixels[idx + 3],
     ]
-}
-
-fn lerp(
-    a: f32,
-    b: f32,
-    t: f32,
-) -> f32 {
-    a + (b - a) * t
 }
 
 fn write_png_rgba(

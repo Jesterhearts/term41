@@ -21,5 +21,6 @@ serde.workspace         = true
 smol_str.workspace      = true
 unicode-segmentation    = "1.13.2"
 unicode-width.workspace = true
+utils41.workspace       = true
 vte-mode41.workspace    = true
 vtepp.workspace         = true

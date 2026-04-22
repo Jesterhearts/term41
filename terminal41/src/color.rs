@@ -1,6 +1,7 @@
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
 use palette::Srgb;
+use utils41::lerp_u8;
 #[cfg(test)]
 use vtepp::Params;
 
@@ -209,15 +210,10 @@ pub fn blend_colors(
     b: Srgb<u8>,
     t: f32,
 ) -> Srgb<u8> {
-    let lerp = |x: u8, y: u8| -> u8 {
-        (x as f32 + (y as f32 - x as f32) * t)
-            .clamp(0.0, 255.0)
-            .round() as u8
-    };
     Srgb::new(
-        lerp(a.red, b.red),
-        lerp(a.green, b.green),
-        lerp(a.blue, b.blue),
+        lerp_u8(a.red, b.red, t),
+        lerp_u8(a.green, b.green, t),
+        lerp_u8(a.blue, b.blue, t),
     )
 }
 

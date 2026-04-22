@@ -18,6 +18,7 @@ use terminal41::CursorShape;
 use terminal41::LineAttr;
 use terminal41::VisibleImage;
 use unicode_segmentation::UnicodeSegmentation;
+use utils41::lerp_u8;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
@@ -1055,9 +1056,9 @@ fn sample_bilinear_rgba(
     let c11 = rgba_at(pixels, width, x1, y1);
     let mut out = [0u8; 4];
     for channel in 0..4 {
-        let top = lerp(c00[channel] as f32, c10[channel] as f32, tx);
-        let bottom = lerp(c01[channel] as f32, c11[channel] as f32, tx);
-        out[channel] = lerp(top, bottom, ty).round() as u8;
+        let top = lerp_u8(c00[channel], c10[channel], tx);
+        let bottom = lerp_u8(c01[channel], c11[channel], tx);
+        out[channel] = lerp_u8(top, bottom, ty);
     }
     out
 }
@@ -1075,14 +1076,6 @@ fn rgba_at(
         pixels[idx + 2],
         pixels[idx + 3],
     ]
-}
-
-fn lerp(
-    a: f32,
-    b: f32,
-    t: f32,
-) -> f32 {
-    a + (b - a) * t
 }
 
 fn blend_rgba_over(
