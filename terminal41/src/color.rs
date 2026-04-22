@@ -1,7 +1,7 @@
 use font41::attrs::CellAttrs;
 use font41::attrs::UnderlineStyle;
 use palette::Srgb;
-use utils41::lerp_u8;
+use utils41::blend_colors;
 #[cfg(test)]
 use vtepp::Params;
 
@@ -204,18 +204,6 @@ const DEFAULT_ANSI_COLORS: [Srgb<u8>; 16] = [
     Srgb::new(0, 255, 255),   // 14 bright cyan     rgb(0, 255, 255)
     Srgb::new(255, 255, 255), // 15 bright white    rgb(255, 255, 255)
 ];
-
-pub fn blend_colors(
-    a: Srgb<u8>,
-    b: Srgb<u8>,
-    t: f32,
-) -> Srgb<u8> {
-    Srgb::new(
-        lerp_u8(a.red, b.red, t),
-        lerp_u8(a.green, b.green, t),
-        lerp_u8(a.blue, b.blue, t),
-    )
-}
 
 /// Look up a 256-color palette index using the given [`ColorPalette`] for
 /// indices 0–15 and the computed cube/grayscale ramp for 16–255.

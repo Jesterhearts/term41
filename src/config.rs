@@ -9,7 +9,7 @@ use terminal41::CursorStyle;
 use terminal41::FeaturePermissions;
 use terminal41::ProgramAllowlist;
 use terminal41::StatusDisplayKind;
-use utils41::lerp_u8;
+use utils41::blend_colors;
 use wgpu::PowerPreference;
 
 use crate::keybindings::Keybinding;
@@ -136,18 +136,6 @@ struct AnsiColors {
     magenta: Option<String>,
     cyan: Option<String>,
     white: Option<String>,
-}
-
-fn blend_colors(
-    a: Srgb<u8>,
-    b: Srgb<u8>,
-    t: f32,
-) -> Srgb<u8> {
-    Srgb::new(
-        lerp_u8(a.red, b.red, t),
-        lerp_u8(a.green, b.green, t),
-        lerp_u8(a.blue, b.blue, t),
-    )
 }
 
 /// Try to parse a hex color, logging a warning on failure and returning the
