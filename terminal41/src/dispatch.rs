@@ -14,6 +14,7 @@ use crate::DecColorSpace;
 use crate::DecColorState;
 use crate::FeaturePermissions;
 use crate::KittyKeyboardState;
+use crate::ShellIntegrationPhase;
 use crate::TerminalModes;
 use crate::Vt52CursorAddr;
 use crate::color::ColorPalette;
@@ -36,12 +37,12 @@ use crate::parser::execute_status;
 use crate::parser::execute_with_scrollback_policy;
 use crate::parser::put_8bit_byte_with_scrollback_policy;
 use crate::parser::put_ascii_run_with_scrollback_policy;
-use crate::parser::put_printable_with_scrollback_policy;
+use crate::parser::put_printable_with_scrollback_policy_and_emoji_compat;
 use crate::parser::put_status_8bit_byte;
 use crate::parser::put_status_ascii_run;
 use crate::parser::put_status_printable;
 use crate::parser::put_status_text_run;
-use crate::parser::put_text_run_with_scrollback_policy;
+use crate::parser::put_text_run_with_scrollback_policy_and_emoji_compat;
 use crate::report;
 use crate::report_color_table;
 use crate::screen;
@@ -175,6 +176,7 @@ pub(super) fn apply_basic_action(
     newline_mode: bool,
     bell_pending: &mut bool,
     preserve_top_origin_scrollback: bool,
+    legacy_emoji_compatibility: bool,
 ) {
     match action {
         BasicAction::PrintAscii(run) => apply_ascii_run(
@@ -190,6 +192,7 @@ pub(super) fn apply_basic_action(
             insert_mode,
             preserve_top_origin_scrollback,
             run,
+            legacy_emoji_compatibility,
         ),
         BasicAction::Print(text) => apply_printable(
             active,
@@ -197,6 +200,7 @@ pub(super) fn apply_basic_action(
             insert_mode,
             preserve_top_origin_scrollback,
             text,
+            legacy_emoji_compatibility,
         ),
         BasicAction::Print8Bit(byte) => apply_8bit_byte(
             active,
@@ -259,6 +263,7 @@ pub(super) fn apply_csi_action(
     current_title: &mut Option<String>,
     saved_modes: &mut HashMap<crate::mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut Vt52CursorAddr,
     macros: &mut MacroStore,
@@ -303,6 +308,7 @@ pub(super) fn apply_csi_action(
                 .current_title(current_title)
                 .saved_modes(saved_modes)
                 .current_prompt_row(current_prompt_row)
+                .shell_integration_phase(shell_integration_phase)
                 .bell_pending(bell_pending)
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .macros(macros)
@@ -330,6 +336,7 @@ pub(super) fn apply_esc_action(
     title_stack: &mut Vec<Option<String>>,
     saved_modes: &mut HashMap<crate::mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
@@ -355,6 +362,7 @@ pub(super) fn apply_esc_action(
                 .title_stack(title_stack)
                 .saved_modes(saved_modes)
                 .current_prompt_row(current_prompt_row)
+                .shell_integration_phase(shell_integration_phase)
                 .bell_pending(bell_pending)
                 .palette(palette)
                 .base_palette(base_palette)
@@ -381,6 +389,7 @@ pub(super) fn apply_osc_action(
     viewport: &Viewport,
     current_title: &mut Option<String>,
     current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
     command_metas: &mut HashMap<u64, CommandMeta>,
     palette: &ColorPalette,
     cell_width: u32,
@@ -401,6 +410,7 @@ pub(super) fn apply_osc_action(
                 .viewport(viewport)
                 .current_title(current_title)
                 .current_prompt_row(current_prompt_row)
+                .shell_integration_phase(shell_integration_phase)
                 .command_metas(command_metas)
                 .palette(palette)
                 .cell_width(cell_width)
@@ -501,6 +511,7 @@ pub(super) fn apply_text_run(
     insert_mode: bool,
     preserve_top_origin_scrollback: bool,
     run: &str,
+    legacy_emoji_compatibility: bool,
 ) {
     if active.active_display == screen::ActiveDisplay::Status
         && screen::status_line_writable(active)
@@ -508,12 +519,13 @@ pub(super) fn apply_text_run(
         put_status_text_run(active, viewport, run, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
-        put_text_run_with_scrollback_policy(
+        put_text_run_with_scrollback_policy_and_emoji_compat(
             active,
             &view,
             run,
             insert_mode,
             preserve_top_origin_scrollback,
+            legacy_emoji_compatibility,
         );
     }
 }
@@ -524,6 +536,7 @@ pub(super) fn apply_printable(
     insert_mode: bool,
     preserve_top_origin_scrollback: bool,
     text: SmolStr,
+    legacy_emoji_compatibility: bool,
 ) {
     if active.active_display == screen::ActiveDisplay::Status
         && screen::status_line_writable(active)
@@ -531,12 +544,13 @@ pub(super) fn apply_printable(
         put_status_printable(active, viewport, text, insert_mode);
     } else {
         let view = screen::screen_viewport(active, viewport);
-        put_printable_with_scrollback_policy(
+        put_printable_with_scrollback_policy_and_emoji_compat(
             active,
             &view,
             text,
             insert_mode,
             preserve_top_origin_scrollback,
+            legacy_emoji_compatibility,
         );
     }
 }

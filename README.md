@@ -230,6 +230,7 @@ keybindings = [
   { keys = "Shift+PageDown", action = "ScrollPageDown" },
   { keys = "Ctrl+Shift+C", action = "Copy" },
   { keys = "Ctrl+Shift+V", action = "Paste" },
+  { keys = "Alt+Shift+L", action = "CycleEmojiCompatibility" },
 ]
 ```
 

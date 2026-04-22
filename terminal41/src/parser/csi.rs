@@ -15,6 +15,7 @@ use crate::FeaturePermissions;
 use crate::KittyKeyboardState;
 use crate::MouseTracking;
 use crate::Screen;
+use crate::ShellIntegrationPhase;
 use crate::StatusDisplayKind;
 use crate::TerminalModes;
 use crate::Viewport;
@@ -751,6 +752,7 @@ fn apply_main_csi(
     current_title: &mut Option<String>,
     saved_modes: &mut HashMap<mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
@@ -782,6 +784,7 @@ fn apply_main_csi(
                     .title_stack(title_stack)
                     .saved_modes(saved_modes)
                     .current_prompt_row(current_prompt_row)
+                    .shell_integration_phase(shell_integration_phase)
                     .bell_pending(bell_pending)
                     .vt52_cursor_addr(vt52_cursor_addr)
                     .palette(palette)
@@ -1218,6 +1221,7 @@ pub(crate) fn csi_apply(
     current_title: &mut Option<String>,
     saved_modes: &mut HashMap<mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
@@ -1253,6 +1257,7 @@ pub(crate) fn csi_apply(
                 .current_title(current_title)
                 .saved_modes(saved_modes)
                 .current_prompt_row(current_prompt_row)
+                .shell_integration_phase(shell_integration_phase)
                 .bell_pending(bell_pending)
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .macros(macros)
@@ -1808,6 +1813,7 @@ pub(crate) fn csi_apply(
                 .title_stack(title_stack)
                 .saved_modes(saved_modes)
                 .current_prompt_row(current_prompt_row)
+                .shell_integration_phase(shell_integration_phase)
                 .bell_pending(bell_pending)
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .dec_color(dec_color)
@@ -1875,6 +1881,7 @@ pub(crate) fn csi_dispatch(
     drcs: &mut DrcsStore,
 ) {
     let action = csi_parse(screen, modes, *params, intermediates, action);
+    let mut shell_integration_phase = ShellIntegrationPhase::None;
     csi_apply()
         .action(action)
         .screen(screen)
@@ -1896,6 +1903,7 @@ pub(crate) fn csi_dispatch(
         .current_title(current_title)
         .saved_modes(saved_modes)
         .current_prompt_row(current_prompt_row)
+        .shell_integration_phase(&mut shell_integration_phase)
         .bell_pending(bell_pending)
         .vt52_cursor_addr(vt52_cursor_addr)
         .macros(macros)

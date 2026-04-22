@@ -113,6 +113,54 @@ pub use crate::screen::row::Row;
 use crate::selection::Selection;
 use crate::selection::search::SearchState;
 
+/// How term41 should handle legacy shell emoji editing compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum EmojiCompatibilityMode {
+    /// Enable only in a shell-integration command-editing phase.
+    #[default]
+    Auto,
+    /// Always use normal terminal grapheme handling.
+    Off,
+    /// Always use legacy scalar emoji handling.
+    On,
+}
+
+impl EmojiCompatibilityMode {
+    /// Cycle through the modes in the order used by the UI hotkey.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Off,
+            Self::Off => Self::On,
+            Self::On => Self::Auto,
+        }
+    }
+
+    /// Human-readable lowercase label for logs/UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+}
+
+/// Current OSC 133 shell-integration phase.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub enum ShellIntegrationPhase {
+    /// No active shell-integration phase is known.
+    #[default]
+    None,
+    /// Prompt text is being printed after `OSC 133;A`.
+    Prompt,
+    /// User command editing is active after `OSC 133;B`.
+    Command,
+    /// Command output is active after `OSC 133;C`.
+    Output,
+    /// The previous command has finished after `OSC 133;D`.
+    Finished,
+}
+
 /// Per-prompt metadata recorded from OSC 133 B/C/D sequences. Keyed by
 /// the absolute row of the prompt (`A` mark) in
 /// [`TerminalMetadata::command_metas`]. Enables command selection, rerun, text
@@ -191,6 +239,9 @@ pub struct TerminalMetadata {
     /// Per-prompt metadata (command column, output row, timing) keyed by the
     /// absolute row of the prompt's `A` mark.
     pub command_metas: HashMap<u64, CommandMeta>,
+    /// Most recent OSC 133 phase. Used only as a compatibility hint; terminal
+    /// semantics still come from explicit VT input.
+    pub shell_integration_phase: ShellIntegrationPhase,
 }
 
 /// Security-sensitive protocol state and VT extension storage.
@@ -401,6 +452,8 @@ pub struct Terminal {
     vt52_cursor_addr: Vt52CursorAddr,
     /// Configured status-line mode used when resetting screens.
     pub default_status_display: StatusDisplayKind,
+    /// User-selected legacy emoji compatibility mode.
+    pub emoji_compatibility_mode: EmojiCompatibilityMode,
     /// Security-sensitive optional protocol state and feature storage.
     pub protocol: TerminalProtocolState,
 }
@@ -467,6 +520,7 @@ impl Terminal {
             dec_color,
             vt52_cursor_addr: Vt52CursorAddr::Idle,
             default_status_display,
+            emoji_compatibility_mode: EmojiCompatibilityMode::Auto,
             protocol: TerminalProtocolState {
                 feature_permissions,
                 ..TerminalProtocolState::default()
@@ -554,6 +608,22 @@ impl Terminal {
         self.selection.as_ref().is_some_and(|s| !s.is_empty())
     }
 
+    /// Cycle the runtime emoji compatibility mode and return the new mode.
+    pub fn cycle_emoji_compatibility_mode(&mut self) -> EmojiCompatibilityMode {
+        self.emoji_compatibility_mode = self.emoji_compatibility_mode.next();
+        self.emoji_compatibility_mode
+    }
+
+    fn legacy_emoji_compatibility_active(&self) -> bool {
+        match self.emoji_compatibility_mode {
+            EmojiCompatibilityMode::Off => false,
+            EmojiCompatibilityMode::On => true,
+            EmojiCompatibilityMode::Auto => {
+                self.metadata.shell_integration_phase == ShellIntegrationPhase::Command
+            }
+        }
+    }
+
     /// Resize the active/stashed screen buffers and viewport.
     pub fn resize(
         &mut self,
@@ -594,6 +664,7 @@ impl Terminal {
             TerminalAction::Basic(action) => {
                 let preserve_top_origin_scrollback =
                     !self.on_alt_screen && !screen::page_memory_active(&self.active);
+                let legacy_emoji_compatibility = self.legacy_emoji_compatibility_active();
                 dispatch::apply_basic_action(
                     action,
                     &mut self.active,
@@ -602,6 +673,7 @@ impl Terminal {
                     self.modes.newline_mode,
                     &mut effects.bell,
                     preserve_top_origin_scrollback,
+                    legacy_emoji_compatibility,
                 );
                 dispatch::PendingApplication::None
             }
@@ -635,6 +707,7 @@ impl Terminal {
                 &mut self.metadata.current_title,
                 &mut self.saved_private_modes,
                 &mut self.metadata.current_prompt_row,
+                &mut self.metadata.shell_integration_phase,
                 &mut effects.bell,
                 &mut self.vt52_cursor_addr,
                 &mut self.protocol.macros,
@@ -659,6 +732,7 @@ impl Terminal {
                     &mut self.metadata.title_stack,
                     &mut self.saved_private_modes,
                     &mut self.metadata.current_prompt_row,
+                    &mut self.metadata.shell_integration_phase,
                     &mut effects.bell,
                     &mut self.palette,
                     &self.base_palette,
@@ -683,6 +757,7 @@ impl Terminal {
                     &self.viewport,
                     &mut self.metadata.current_title,
                     &mut self.metadata.current_prompt_row,
+                    &mut self.metadata.shell_integration_phase,
                     &mut self.metadata.command_metas,
                     &self.palette,
                     self.cell_width,
@@ -842,5 +917,65 @@ impl Drop for TerminalThread {
         if let Some(t) = self.thread_handle.get() {
             t.unpark();
         }
+    }
+}
+
+#[cfg(test)]
+mod emoji_compatibility_tests {
+    use super::*;
+    use crate::test_support::TestTerm;
+
+    const BASH_ZWJ_EMOJI: &str = "👩🏼\u{200D}❤\u{FE0F}\u{200D}💋\u{200D}👩🏽";
+
+    #[test]
+    fn auto_uses_legacy_width_inside_osc_133_command_phase() {
+        let mut term = TestTerm::new(40, 3, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        term.process(BASH_ZWJ_EMOJI.as_bytes());
+
+        assert_eq!(term.cursor(), (0, 13));
+        term.process(&[0x08; 11]);
+        assert_eq!(term.cursor(), (0, 2));
+    }
+
+    #[test]
+    fn off_keeps_normal_cluster_width_even_inside_command_phase() {
+        let mut term = TestTerm::new(40, 3, 100, 16, 8);
+        term.emoji_compatibility_mode = EmojiCompatibilityMode::Off;
+
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        term.process(BASH_ZWJ_EMOJI.as_bytes());
+
+        assert_eq!(term.cursor(), (0, 4));
+    }
+
+    #[test]
+    fn on_uses_legacy_width_without_shell_integration() {
+        let mut term = TestTerm::new(40, 3, 100, 16, 8);
+        term.emoji_compatibility_mode = EmojiCompatibilityMode::On;
+
+        term.process(BASH_ZWJ_EMOJI.as_bytes());
+
+        assert_eq!(term.cursor(), (0, 11));
+    }
+
+    #[test]
+    fn mode_cycles_in_requested_order() {
+        let mut term = TestTerm::new(40, 3, 100, 16, 8);
+
+        assert_eq!(term.emoji_compatibility_mode, EmojiCompatibilityMode::Auto);
+        assert_eq!(
+            term.cycle_emoji_compatibility_mode(),
+            EmojiCompatibilityMode::Off
+        );
+        assert_eq!(
+            term.cycle_emoji_compatibility_mode(),
+            EmojiCompatibilityMode::On
+        );
+        assert_eq!(
+            term.cycle_emoji_compatibility_mode(),
+            EmojiCompatibilityMode::Auto
+        );
     }
 }

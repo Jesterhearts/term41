@@ -66,6 +66,8 @@ pub enum Action {
     ClearPastedBackground,
     /// Start or stop recording PTY output to a temporary `.rec` file.
     ToggleOutputRecording,
+    /// Cycle legacy emoji compatibility handling: auto -> off -> on -> auto.
+    CycleEmojiCompatibility,
 }
 
 /// One key, identified either by its winit `NamedKey` (Enter, F1, …) or by
@@ -178,6 +180,11 @@ impl Keybindings {
                     key: KeySpec::Char('r'),
                     mods: ModifiersState::ALT | ModifiersState::SHIFT,
                     action: Action::ToggleOutputRecording,
+                },
+                Keybinding {
+                    key: KeySpec::Char('l'),
+                    mods: ModifiersState::ALT | ModifiersState::SHIFT,
+                    action: Action::CycleEmojiCompatibility,
                 },
             ],
         }
@@ -481,5 +488,16 @@ mod tests {
         let key = Key::Character(SmolStr::new_inline("n"));
         let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
         assert_eq!(bindings.lookup(&key, mods), Some(Action::OpenNewWindow));
+    }
+
+    #[test]
+    fn defaults_bind_alt_shift_l_to_emoji_compatibility_cycle() {
+        let bindings = Keybindings::defaults();
+        let key = Key::Character(SmolStr::new_inline("l"));
+        let mods = ModifiersState::ALT | ModifiersState::SHIFT;
+        assert_eq!(
+            bindings.lookup(&key, mods),
+            Some(Action::CycleEmojiCompatibility)
+        );
     }
 }

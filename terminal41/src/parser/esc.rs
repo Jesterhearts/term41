@@ -8,6 +8,7 @@ use crate::DecColorState;
 use crate::KittyKeyboardState;
 use crate::LineAttr;
 use crate::Screen;
+use crate::ShellIntegrationPhase;
 use crate::StatusDisplayKind;
 use crate::TerminalModes;
 use crate::Viewport;
@@ -398,6 +399,7 @@ pub(crate) fn esc_apply(
     title_stack: &mut Vec<Option<String>>,
     saved_modes: &mut std::collections::HashMap<mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
     palette: &mut color::ColorPalette,
     base_palette: &color::ColorPalette,
@@ -465,6 +467,7 @@ pub(crate) fn esc_apply(
                 .title_stack(title_stack)
                 .saved_modes(saved_modes)
                 .current_prompt_row(current_prompt_row)
+                .shell_integration_phase(shell_integration_phase)
                 .bell_pending(bell_pending)
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .palette(palette)
@@ -572,6 +575,7 @@ pub(crate) fn esc_dispatch(
     title_stack: &mut Vec<Option<String>>,
     saved_modes: &mut std::collections::HashMap<mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
     palette: &mut color::ColorPalette,
     base_palette: &color::ColorPalette,
@@ -598,6 +602,7 @@ pub(crate) fn esc_dispatch(
         .title_stack(title_stack)
         .saved_modes(saved_modes)
         .current_prompt_row(current_prompt_row)
+        .shell_integration_phase(shell_integration_phase)
         .bell_pending(bell_pending)
         .palette(palette)
         .base_palette(base_palette)
@@ -951,6 +956,7 @@ mod tests {
         let mut title_stack = Vec::new();
         let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
+        let mut shell_integration_phase = ShellIntegrationPhase::None;
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
         let mut default_status_display = StatusDisplayKind::None;
         let feature_permissions = FeaturePermissions::default();
@@ -1028,6 +1034,7 @@ mod tests {
                             .title_stack(&mut title_stack)
                             .saved_modes(&mut saved_modes)
                             .current_prompt_row(&mut current_prompt_row)
+                            .shell_integration_phase(&mut shell_integration_phase)
                             .bell_pending(&mut bell_pending)
                             .palette(&mut pal)
                             .base_palette(&base_pal)

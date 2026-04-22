@@ -601,7 +601,7 @@ impl RenderHost {
             Action::ClearPastedBackground => {
                 self.handle_clear_pasted_background();
             }
-            Action::ToggleOutputRecording => {}
+            Action::ToggleOutputRecording | Action::CycleEmojiCompatibility => {}
         }
     }
 

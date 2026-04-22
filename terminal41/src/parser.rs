@@ -5,6 +5,7 @@ use vtepp::Params;
 
 use crate::C1Mode;
 use crate::ConformanceLevel;
+use crate::ShellIntegrationPhase;
 use crate::TerminalModes;
 use crate::charset;
 use crate::charset::CharacterSet;
@@ -55,14 +56,14 @@ pub(crate) use self::write::put_ascii_run_with_scrollback_policy;
 pub(crate) use self::write::put_char_with_scrollback_policy;
 #[cfg(test)]
 pub(crate) use self::write::put_printable;
-pub(crate) use self::write::put_printable_with_scrollback_policy;
+pub(crate) use self::write::put_printable_with_scrollback_policy_and_emoji_compat;
 pub(crate) use self::write::put_status_8bit_byte;
 pub(crate) use self::write::put_status_ascii_run;
 pub(crate) use self::write::put_status_printable;
 pub(crate) use self::write::put_status_text_run;
 #[cfg(test)]
 pub(crate) use self::write::put_text_run;
-pub(crate) use self::write::put_text_run_with_scrollback_policy;
+pub(crate) use self::write::put_text_run_with_scrollback_policy_and_emoji_compat;
 
 const fn ascii_cell(byte: u8) -> SmolStr {
     match byte {
@@ -588,6 +589,7 @@ fn apply_hard_reset_state(
     title_stack: &mut Vec<Option<String>>,
     saved_modes: &mut std::collections::HashMap<mode::PrivateMode, bool>,
     current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     palette: &mut color::ColorPalette,
@@ -656,6 +658,7 @@ fn apply_hard_reset_state(
     title_stack.clear();
     saved_modes.clear();
     *current_prompt_row = None;
+    *shell_integration_phase = ShellIntegrationPhase::None;
     *bell_pending = false;
     *vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
     macros.clear();
@@ -819,6 +822,7 @@ pub(super) mod test_support {
         let mut title_stack = Vec::new();
         let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
+        let mut shell_integration_phase = ShellIntegrationPhase::None;
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
         let mut default_status_display = StatusDisplayKind::None;
         let feature_permissions = FeaturePermissions::default();
@@ -947,6 +951,7 @@ pub(super) mod test_support {
                         .title_stack(&mut title_stack)
                         .saved_modes(&mut saved_modes)
                         .current_prompt_row(&mut current_prompt_row)
+                        .shell_integration_phase(&mut shell_integration_phase)
                         .bell_pending(&mut bell_pending)
                         .palette(&mut pal)
                         .base_palette(&base_pal)
@@ -1010,6 +1015,7 @@ pub(super) mod test_support {
         let mut title_stack = Vec::new();
         let mut saved_modes = std::collections::HashMap::new();
         let mut current_prompt_row = None;
+        let mut shell_integration_phase = ShellIntegrationPhase::None;
         let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
         let mut default_status_display = StatusDisplayKind::None;
         let feature_permissions = FeaturePermissions::default();
@@ -1138,6 +1144,7 @@ pub(super) mod test_support {
                         .title_stack(&mut title_stack)
                         .saved_modes(&mut saved_modes)
                         .current_prompt_row(&mut current_prompt_row)
+                        .shell_integration_phase(&mut shell_integration_phase)
                         .bell_pending(&mut bell_pending)
                         .palette(&mut pal)
                         .base_palette(&base_pal)

@@ -747,6 +747,11 @@ impl WindowHost {
                 }
                 true
             }
+            Action::CycleEmojiCompatibility => {
+                let mode = target.terminal.lock().cycle_emoji_compatibility_mode();
+                info!("emoji compatibility mode: {}", mode.label());
+                true
+            }
             Action::NewTab
             | Action::CloseActiveTab
             | Action::NextTab

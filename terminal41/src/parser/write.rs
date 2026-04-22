@@ -137,6 +137,25 @@ pub(crate) fn put_char_with_scrollback_policy(
     insert_mode: bool,
     preserve_top_origin_scrollback: bool,
 ) {
+    put_char_with_scrollback_policy_and_emoji_compat(
+        screen,
+        viewport,
+        s,
+        insert_mode,
+        preserve_top_origin_scrollback,
+        false,
+    );
+}
+
+#[inline(always)]
+fn put_char_with_scrollback_policy_and_emoji_compat(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    s: SmolStr,
+    insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
+    legacy_emoji_compatibility: bool,
+) {
     put_char_impl(
         screen,
         viewport,
@@ -145,6 +164,7 @@ pub(crate) fn put_char_with_scrollback_policy(
         },
         s,
         insert_mode,
+        legacy_emoji_compatibility,
     );
 }
 
@@ -154,7 +174,7 @@ pub(super) fn put_status_char(
     s: SmolStr,
     insert_mode: bool,
 ) {
-    put_char_impl(screen, viewport, WriteTarget::Status, s, insert_mode);
+    put_char_impl(screen, viewport, WriteTarget::Status, s, insert_mode, false);
 }
 
 pub(crate) fn translated_codepoint(
@@ -205,12 +225,32 @@ pub(crate) fn put_printable(
 }
 
 #[inline(always)]
+#[cfg(test)]
 pub(crate) fn put_printable_with_scrollback_policy(
     screen: &mut Screen,
     viewport: &Viewport,
     s: SmolStr,
     insert_mode: bool,
     preserve_top_origin_scrollback: bool,
+) {
+    put_printable_with_scrollback_policy_and_emoji_compat(
+        screen,
+        viewport,
+        s,
+        insert_mode,
+        preserve_top_origin_scrollback,
+        false,
+    );
+}
+
+#[inline(always)]
+pub(crate) fn put_printable_with_scrollback_policy_and_emoji_compat(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    s: SmolStr,
+    insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
+    legacy_emoji_compatibility: bool,
 ) {
     put_printable_impl(
         screen,
@@ -220,6 +260,7 @@ pub(crate) fn put_printable_with_scrollback_policy(
         },
         s,
         insert_mode,
+        legacy_emoji_compatibility,
     );
 }
 
@@ -229,7 +270,7 @@ pub(crate) fn put_status_printable(
     s: SmolStr,
     insert_mode: bool,
 ) {
-    put_printable_impl(screen, viewport, WriteTarget::Status, s, insert_mode);
+    put_printable_impl(screen, viewport, WriteTarget::Status, s, insert_mode, false);
 }
 
 #[cfg(test)]
@@ -281,12 +322,32 @@ pub(crate) fn put_text_run(
 }
 
 #[inline(always)]
+#[cfg(test)]
 pub(crate) fn put_text_run_with_scrollback_policy(
     screen: &mut Screen,
     viewport: &Viewport,
     run: &str,
     insert_mode: bool,
     preserve_top_origin_scrollback: bool,
+) {
+    put_text_run_with_scrollback_policy_and_emoji_compat(
+        screen,
+        viewport,
+        run,
+        insert_mode,
+        preserve_top_origin_scrollback,
+        false,
+    );
+}
+
+#[inline(always)]
+pub(crate) fn put_text_run_with_scrollback_policy_and_emoji_compat(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    run: &str,
+    insert_mode: bool,
+    preserve_top_origin_scrollback: bool,
+    legacy_emoji_compatibility: bool,
 ) {
     put_text_run_impl(
         screen,
@@ -296,6 +357,7 @@ pub(crate) fn put_text_run_with_scrollback_policy(
         },
         run,
         insert_mode,
+        legacy_emoji_compatibility,
     );
 }
 
@@ -305,7 +367,14 @@ pub(crate) fn put_status_text_run(
     run: &str,
     insert_mode: bool,
 ) {
-    put_text_run_impl(screen, viewport, WriteTarget::Status, run, insert_mode);
+    put_text_run_impl(
+        screen,
+        viewport,
+        WriteTarget::Status,
+        run,
+        insert_mode,
+        false,
+    );
 }
 
 #[inline(always)]
@@ -325,7 +394,7 @@ fn put_ascii_run_impl(
         let b = run[0];
         let ch = charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
             .unwrap_or_else(|| ascii_cell(b));
-        put_char_impl(screen, viewport, target, ch, insert_mode);
+        put_char_impl(screen, viewport, target, ch, insert_mode, false);
         &run[1..]
     } else {
         run
@@ -339,7 +408,7 @@ fn put_ascii_run_impl(
         for &b in run {
             let ch = charset::translate_ascii_byte(b, charset, screen.nrc_mode, screen.upss)
                 .unwrap_or_else(|| ascii_cell(b));
-            put_char_impl(screen, viewport, target, ch, insert_mode);
+            put_char_impl(screen, viewport, target, ch, insert_mode, false);
         }
         return;
     }
@@ -354,8 +423,16 @@ fn put_char_impl(
     target: WriteTarget,
     s: SmolStr,
     insert_mode: bool,
+    legacy_emoji_compatibility: bool,
 ) {
-    if let Some(combined) = try_extend_prev_cell(screen, viewport, target, &s) {
+    if legacy_emoji_compatibility && is_legacy_emoji_zero_width_control(&s) {
+        screen.charset.single_shift = None;
+        return;
+    }
+
+    if let Some(combined) =
+        try_extend_prev_cell(screen, viewport, target, &s, legacy_emoji_compatibility)
+    {
         debug!("Combining with previous cell to form {:?}", combined);
         set_target_last_char(screen, target, combined);
         return;
@@ -364,7 +441,8 @@ fn put_char_impl(
     debug!("Not combining with previous cell");
     screen.charset.single_shift = None;
 
-    put_char_to_target(screen, viewport, target, s, insert_mode);
+    let width_override = legacy_emoji_scalar_width_override(&s);
+    put_char_to_target(screen, viewport, target, s, insert_mode, width_override);
 }
 
 #[inline(always)]
@@ -374,17 +452,32 @@ fn put_printable_impl(
     target: WriteTarget,
     s: SmolStr,
     insert_mode: bool,
+    legacy_emoji_compatibility: bool,
 ) {
     let mut chars = s.chars();
     if let Some(ch) = chars.next()
         && chars.next().is_none()
         && let Some(mapped) = translated_codepoint(screen, ch)
     {
-        put_char_impl(screen, viewport, target, mapped, insert_mode);
+        put_char_impl(
+            screen,
+            viewport,
+            target,
+            mapped,
+            insert_mode,
+            legacy_emoji_compatibility,
+        );
         return;
     }
 
-    put_char_impl(screen, viewport, target, s, insert_mode);
+    put_char_impl(
+        screen,
+        viewport,
+        target,
+        s,
+        insert_mode,
+        legacy_emoji_compatibility,
+    );
 }
 
 #[inline(always)]
@@ -407,7 +500,7 @@ fn put_8bit_byte_impl(
         let ch = char::from_u32(byte as u32).expect("0xA0..=0xFF is valid Unicode scalar");
         SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4]))
     };
-    put_char_impl(screen, viewport, target, ch, insert_mode);
+    put_char_impl(screen, viewport, target, ch, insert_mode, false);
 }
 
 #[inline(always)]
@@ -417,6 +510,7 @@ fn put_text_run_impl(
     target: WriteTarget,
     run: &str,
     insert_mode: bool,
+    legacy_emoji_compatibility: bool,
 ) {
     if run.is_empty() {
         return;
@@ -431,6 +525,7 @@ fn put_text_run_impl(
             target,
             SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4])),
             insert_mode,
+            legacy_emoji_compatibility,
         );
         chars.as_str()
     } else {
@@ -452,6 +547,7 @@ fn put_text_run_impl(
                 target,
                 SmolStr::new_inline(ch.encode_utf8(&mut [0u8; 4])),
                 insert_mode,
+                legacy_emoji_compatibility,
             );
         }
         return;
@@ -476,6 +572,7 @@ fn put_text_run_impl(
             target,
             SmolStr::new_inline(&run[i..i + len]),
             insert_mode,
+            legacy_emoji_compatibility,
         );
         i += len;
     }
@@ -539,8 +636,13 @@ fn put_char_to_target(
     target: WriteTarget,
     s: SmolStr,
     insert_mode: bool,
+    width_override: Option<usize>,
 ) {
-    let width = s.width();
+    let width = width_override.unwrap_or_else(|| s.width());
+    if width == 0 {
+        screen.charset.single_shift = None;
+        return;
+    }
     if !fit_char_to_target(screen, viewport, target, width) {
         return;
     }
@@ -854,10 +956,13 @@ fn try_extend_prev_cell(
     viewport: &Viewport,
     target: WriteTarget,
     s: &str,
+    legacy_emoji_compatibility: bool,
 ) -> Option<SmolStr> {
     match target {
-        WriteTarget::Main { .. } => try_extend_prev_main_cell(screen, viewport, s),
-        WriteTarget::Status => try_extend_prev_status_cell(screen, s),
+        WriteTarget::Main { .. } => {
+            try_extend_prev_main_cell(screen, viewport, s, legacy_emoji_compatibility)
+        }
+        WriteTarget::Status => try_extend_prev_status_cell(screen, s, legacy_emoji_compatibility),
     }
 }
 
@@ -865,6 +970,7 @@ fn try_extend_prev_main_cell(
     screen: &mut Screen,
     viewport: &Viewport,
     s: &str,
+    legacy_emoji_compatibility: bool,
 ) -> Option<SmolStr> {
     let (prev_row, mut prev_col) = if screen.cursor.col > 0 && screen.cursor.col <= viewport.cols {
         let row = screen::active_row_index(screen, viewport);
@@ -890,12 +996,13 @@ fn try_extend_prev_main_cell(
         "Trying to extend previous cell at row {}, col {} with {:?} in {:?}",
         prev_row, prev_col, s, row.cells
     );
-    try_extend_row_cell(row, prev_col, s)
+    try_extend_row_cell(row, prev_col, s, legacy_emoji_compatibility)
 }
 
 fn try_extend_prev_status_cell(
     screen: &mut Screen,
     s: &str,
+    legacy_emoji_compatibility: bool,
 ) -> Option<SmolStr> {
     let status = status_line_mut(screen)?;
     let prev_col = status.cursor.col as usize;
@@ -903,13 +1010,14 @@ fn try_extend_prev_status_cell(
         return None;
     }
 
-    try_extend_row_cell(&mut status.row, prev_col - 1, s)
+    try_extend_row_cell(&mut status.row, prev_col - 1, s, legacy_emoji_compatibility)
 }
 
 fn try_extend_row_cell(
     row: &mut Row,
     col: usize,
     s: &str,
+    legacy_emoji_compatibility: bool,
 ) -> Option<SmolStr> {
     let prev = row.cells.get(col)?;
     if prev.as_str() == " " || prev.is_empty() {
@@ -933,8 +1041,96 @@ fn try_extend_row_cell(
         return None;
     }
 
+    if legacy_emoji_compatibility && is_legacy_emoji_cluster(&combined) {
+        debug!("Legacy emoji compatibility blocks combining {:?}", combined);
+        return None;
+    }
+
     row.cells[col] = combined.clone();
     Some(combined)
+}
+
+fn is_legacy_emoji_cluster(s: &str) -> bool {
+    s.chars().any(|ch| {
+        is_zero_width_emoji_control(ch)
+            || is_emoji_modifier(ch)
+            || is_emoji_modifier_base(ch)
+            || is_emoji_presentation_scalar(ch)
+    })
+}
+
+fn is_legacy_emoji_zero_width_control(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(ch) = chars.next() else {
+        return false;
+    };
+    chars.next().is_none() && is_zero_width_emoji_control(ch)
+}
+
+fn legacy_emoji_scalar_width_override(s: &str) -> Option<usize> {
+    let mut chars = s.chars();
+    let ch = chars.next()?;
+    if chars.next().is_some() {
+        return None;
+    }
+    is_emoji_modifier(ch).then_some(2)
+}
+
+fn is_zero_width_emoji_control(ch: char) -> bool {
+    matches!(ch, '\u{200D}' | '\u{FE0E}' | '\u{FE0F}')
+}
+
+fn is_emoji_modifier(ch: char) -> bool {
+    ('\u{1F3FB}'..='\u{1F3FF}').contains(&ch)
+}
+
+fn is_emoji_modifier_base(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{261D}'
+            | '\u{26F9}'
+            | '\u{270A}'..='\u{270D}'
+            | '\u{1F385}'
+            | '\u{1F3C2}'..='\u{1F3C4}'
+            | '\u{1F3C7}'
+            | '\u{1F3CA}'..='\u{1F3CC}'
+            | '\u{1F442}'..='\u{1F443}'
+            | '\u{1F446}'..='\u{1F450}'
+            | '\u{1F466}'..='\u{1F469}'
+            | '\u{1F46E}'
+            | '\u{1F470}'..='\u{1F478}'
+            | '\u{1F47C}'
+            | '\u{1F481}'..='\u{1F483}'
+            | '\u{1F485}'..='\u{1F487}'
+            | '\u{1F48F}'
+            | '\u{1F491}'
+            | '\u{1F4AA}'
+            | '\u{1F574}'..='\u{1F575}'
+            | '\u{1F57A}'
+            | '\u{1F590}'
+            | '\u{1F595}'..='\u{1F596}'
+            | '\u{1F645}'..='\u{1F647}'
+            | '\u{1F64B}'..='\u{1F64F}'
+            | '\u{1F6A3}'
+            | '\u{1F6B4}'..='\u{1F6B6}'
+            | '\u{1F6C0}'
+            | '\u{1F6CC}'
+            | '\u{1F918}'..='\u{1F91F}'
+            | '\u{1F926}'
+            | '\u{1F930}'..='\u{1F939}'
+            | '\u{1F93D}'..='\u{1F93E}'
+            | '\u{1F9B5}'..='\u{1F9B6}'
+            | '\u{1F9B8}'..='\u{1F9B9}'
+            | '\u{1F9CD}'..='\u{1F9CF}'
+            | '\u{1FAF0}'..='\u{1FAF8}'
+    )
+}
+
+fn is_emoji_presentation_scalar(ch: char) -> bool {
+    matches!(
+        ch,
+        '\u{1F300}'..='\u{1FAFF}' | '\u{2600}'..='\u{27BF}' | '\u{2300}'..='\u{23FF}'
+    )
 }
 
 fn soft_wrap(

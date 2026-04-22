@@ -11,6 +11,7 @@ use percent_encoding::percent_decode;
 use crate::C1Mode;
 use crate::CommandMeta;
 use crate::Row;
+use crate::ShellIntegrationPhase;
 use crate::color;
 use crate::conformance;
 use crate::screen::Screen;
@@ -291,6 +292,8 @@ pub(super) fn handle_osc(
     /// before the first prompt and after the prompt row scrolls off the
     /// front of scrollback.
     current_prompt_row: &mut Option<u64>,
+    /// Current OSC 133 phase, used as a compatibility hint.
+    shell_integration_phase: &mut ShellIntegrationPhase,
     /// Per-prompt metadata: command column (from B), output row (from C),
     /// and timestamps for duration calculation.
     command_metas: &mut HashMap<u64, CommandMeta>,
@@ -352,6 +355,7 @@ pub(super) fn handle_osc(
             active_screen,
             viewport,
             current_prompt_row,
+            shell_integration_phase,
             command_metas,
         ),
         // iTerm2 proprietary commands. Image commands (File=, MultipartFile=,
@@ -393,6 +397,7 @@ fn handle_osc_133(
     screen: &mut Screen,
     viewport: &Viewport,
     current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
     command_metas: &mut HashMap<u64, CommandMeta>,
 ) {
     let (kind, args) = split_osc(rest);
@@ -406,10 +411,12 @@ fn handle_osc_133(
                 row.exit_status = None;
             });
             *current_prompt_row = Some(abs);
+            *shell_integration_phase = ShellIntegrationPhase::Prompt;
             // Seed the metadata entry so B/C/D can fill it in.
             command_metas.insert(abs, CommandMeta::new());
         }
         b"B" => {
+            *shell_integration_phase = ShellIntegrationPhase::Command;
             // Prompt end / command start. Record the cursor column so
             // "select command" can skip the prompt decoration.
             if let Some(prompt_abs) = *current_prompt_row {
@@ -421,6 +428,7 @@ fn handle_osc_133(
             }
         }
         b"C" => {
+            *shell_integration_phase = ShellIntegrationPhase::Output;
             let abs = mark_current_row(screen, viewport, |row| {
                 row.output_start = true;
             });
@@ -432,6 +440,7 @@ fn handle_osc_133(
             }
         }
         b"D" => {
+            *shell_integration_phase = ShellIntegrationPhase::Finished;
             let exit = parse_osc_133_d_exit(args);
             if let Some(abs) = *current_prompt_row
                 && let Some(local) = absolute_to_local(screen, abs)
@@ -723,6 +732,7 @@ mod tests {
         viewport: Viewport,
         title: Option<String>,
         prompt_row: Option<u64>,
+        shell_integration_phase: ShellIntegrationPhase,
         command_metas: HashMap<u64, CommandMeta>,
         palette: color::ColorPalette,
     }
@@ -753,6 +763,7 @@ mod tests {
                 viewport: Viewport { rows, cols, top: 0 },
                 title: None,
                 prompt_row: None,
+                shell_integration_phase: ShellIntegrationPhase::None,
                 command_metas: HashMap::new(),
                 palette: color::ColorPalette::default(),
             }
@@ -777,6 +788,7 @@ mod tests {
                 .viewport(&self.viewport)
                 .current_title(&mut self.title)
                 .current_prompt_row(&mut self.prompt_row)
+                .shell_integration_phase(&mut self.shell_integration_phase)
                 .command_metas(&mut self.command_metas)
                 .palette(&self.palette)
                 .cell_width(8)
