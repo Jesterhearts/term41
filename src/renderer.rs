@@ -260,56 +260,6 @@ fn point_in_rect(
     x >= rx && x < rx + rw && y >= ry && y < ry + rh
 }
 
-#[cfg(test)]
-mod permission_modal_tests {
-    use super::*;
-
-    #[test]
-    fn permission_buttons_are_centered_in_panel() {
-        let panel = permission_panel_rect("the clipboard", 10.0, 20.0, 800.0, 600.0, 20.0);
-        let buttons = permission_button_layout("the clipboard", 10.0, 20.0, 800.0, 600.0, 20.0);
-        let left_gap = buttons.yes.0 - panel.0;
-        let right_gap = panel.0 + panel.2 - (buttons.no.0 + buttons.no.2);
-        assert!((left_gap - right_gap).abs() < 0.01);
-    }
-
-    #[test]
-    fn permission_button_hit_testing_distinguishes_yes_and_no() {
-        let buttons = permission_button_layout("the clipboard", 10.0, 20.0, 800.0, 600.0, 20.0);
-        let yes = permission_modal_button_at(
-            "the clipboard",
-            buttons.yes.0 + 1.0,
-            buttons.yes.1 + 1.0,
-            10.0,
-            20.0,
-            800.0,
-            600.0,
-            20.0,
-        );
-        let no = permission_modal_button_at(
-            "the clipboard",
-            buttons.no.0 + 1.0,
-            buttons.no.1 + 1.0,
-            10.0,
-            20.0,
-            800.0,
-            600.0,
-            20.0,
-        );
-        assert_eq!(yes, Some(PermissionChoice::Allow));
-        assert_eq!(no, Some(PermissionChoice::Deny));
-    }
-
-    #[test]
-    fn permission_feature_line_sanitizes_untrusted_label() {
-        let line = permission_feature_line("clipboard\nread");
-        assert_eq!(line, "A program would like to use clipboard read.");
-
-        let long = permission_feature_line("abcdefghijklmnopqrstuvwxyz0123456789");
-        assert!(long.contains("abcdefghijklmnopqrstuvwxyz012345..."));
-    }
-}
-
 fn resize_tab_to_grid(
     tab: &mut Tab,
     cols: u32,
@@ -2276,5 +2226,55 @@ mod kitty_encode_tests {
         )
         .expect("encoded");
         assert_eq!(bytes, b"7");
+    }
+}
+
+#[cfg(test)]
+mod permission_modal_tests {
+    use super::*;
+
+    #[test]
+    fn permission_buttons_are_centered_in_panel() {
+        let panel = permission_panel_rect("the clipboard", 10.0, 20.0, 800.0, 600.0, 20.0);
+        let buttons = permission_button_layout("the clipboard", 10.0, 20.0, 800.0, 600.0, 20.0);
+        let left_gap = buttons.yes.0 - panel.0;
+        let right_gap = panel.0 + panel.2 - (buttons.no.0 + buttons.no.2);
+        assert!((left_gap - right_gap).abs() < 0.01);
+    }
+
+    #[test]
+    fn permission_button_hit_testing_distinguishes_yes_and_no() {
+        let buttons = permission_button_layout("the clipboard", 10.0, 20.0, 800.0, 600.0, 20.0);
+        let yes = permission_modal_button_at(
+            "the clipboard",
+            buttons.yes.0 + 1.0,
+            buttons.yes.1 + 1.0,
+            10.0,
+            20.0,
+            800.0,
+            600.0,
+            20.0,
+        );
+        let no = permission_modal_button_at(
+            "the clipboard",
+            buttons.no.0 + 1.0,
+            buttons.no.1 + 1.0,
+            10.0,
+            20.0,
+            800.0,
+            600.0,
+            20.0,
+        );
+        assert_eq!(yes, Some(PermissionChoice::Allow));
+        assert_eq!(no, Some(PermissionChoice::Deny));
+    }
+
+    #[test]
+    fn permission_feature_line_sanitizes_untrusted_label() {
+        let line = permission_feature_line("clipboard\nread");
+        assert_eq!(line, "A program would like to use clipboard read.");
+
+        let long = permission_feature_line("abcdefghijklmnopqrstuvwxyz0123456789");
+        assert!(long.contains("abcdefghijklmnopqrstuvwxyz012345..."));
     }
 }

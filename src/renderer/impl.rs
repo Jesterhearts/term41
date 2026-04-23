@@ -215,82 +215,6 @@ pub(crate) fn drcs_geometry_class(snap: &TermSnapshot) -> Option<font41::DrcsGeo
     }
 }
 
-#[cfg(test)]
-mod tests {
-    use std::sync::Arc;
-
-    use font41::DrcsGeometryClass;
-    use font41::attrs::CellAttrs;
-    use font41::attrs::UnderlineStyle;
-    use palette::Srgb;
-    use terminal41::ColorPalette;
-    use terminal41::CursorStyle;
-    use terminal41::LineAttr;
-
-    use super::RowSnapshot;
-    use super::TermSnapshot;
-    use super::drcs_geometry_class;
-
-    fn blank_row(cols: usize) -> RowSnapshot {
-        RowSnapshot {
-            cells: vec![smol_str::SmolStr::new_inline(" "); cols],
-            attrs: vec![CellAttrs::default(); cols],
-            fg: vec![Srgb::new(255, 255, 255); cols],
-            bg: vec![Srgb::new(0, 0, 0); cols],
-            underline: vec![UnderlineStyle::None; cols],
-            underline_color: vec![None; cols],
-            has_link: vec![false; cols],
-            line_attr: LineAttr::Normal,
-            selected: vec![false; cols],
-            matched: vec![false; cols],
-            active_match: vec![false; cols],
-            prompt_start: false,
-            exit_status: None,
-        }
-    }
-
-    fn snapshot(
-        cols: u32,
-        rows: u32,
-    ) -> TermSnapshot {
-        let palette = ColorPalette::default();
-        TermSnapshot {
-            rows: (0..rows).map(|_| blank_row(cols as usize)).collect(),
-            viewport_rows: rows,
-            viewport_cols: cols,
-            status_line_row: None,
-            drcs_glyphs: Arc::new(std::collections::HashMap::new()),
-            dec_color: terminal41::dec_color_state_from_palette(&palette),
-            palette,
-            search_active: false,
-            search: None,
-            cursor: None,
-            cursor_style: CursorStyle::default(),
-            screen_reverse: false,
-        }
-    }
-
-    #[test]
-    fn drcs_geometry_class_buckets_to_nearest_compatible_size() {
-        assert_eq!(
-            drcs_geometry_class(&snapshot(80, 24)),
-            Some(DrcsGeometryClass::Col80Line24)
-        );
-        assert_eq!(
-            drcs_geometry_class(&snapshot(80, 30)),
-            Some(DrcsGeometryClass::Col80Line36)
-        );
-        assert_eq!(
-            drcs_geometry_class(&snapshot(80, 60)),
-            Some(DrcsGeometryClass::Col80Line48)
-        );
-        assert_eq!(
-            drcs_geometry_class(&snapshot(100, 30)),
-            Some(DrcsGeometryClass::Col132Line36)
-        );
-    }
-}
-
 /// Emit background-pass quads for the given underline style. `uy` is the
 /// baseline Y position for a single underline; `cell_w` and `cell_h` set
 /// the horizontal span and vertical budget for multi-line / patterned
@@ -4125,5 +4049,81 @@ mod preedit_tests {
         // 啊 and 不 are 3 bytes each in UTF-8. Byte range 3..6 = char 1..2.
         let text = "啊不";
         assert_eq!(byte_range_to_char_range(text, 3, 6, 2), (1, 2));
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::sync::Arc;
+
+    use font41::DrcsGeometryClass;
+    use font41::attrs::CellAttrs;
+    use font41::attrs::UnderlineStyle;
+    use palette::Srgb;
+    use terminal41::ColorPalette;
+    use terminal41::CursorStyle;
+    use terminal41::LineAttr;
+
+    use super::RowSnapshot;
+    use super::TermSnapshot;
+    use super::drcs_geometry_class;
+
+    fn blank_row(cols: usize) -> RowSnapshot {
+        RowSnapshot {
+            cells: vec![smol_str::SmolStr::new_inline(" "); cols],
+            attrs: vec![CellAttrs::default(); cols],
+            fg: vec![Srgb::new(255, 255, 255); cols],
+            bg: vec![Srgb::new(0, 0, 0); cols],
+            underline: vec![UnderlineStyle::None; cols],
+            underline_color: vec![None; cols],
+            has_link: vec![false; cols],
+            line_attr: LineAttr::Normal,
+            selected: vec![false; cols],
+            matched: vec![false; cols],
+            active_match: vec![false; cols],
+            prompt_start: false,
+            exit_status: None,
+        }
+    }
+
+    fn snapshot(
+        cols: u32,
+        rows: u32,
+    ) -> TermSnapshot {
+        let palette = ColorPalette::default();
+        TermSnapshot {
+            rows: (0..rows).map(|_| blank_row(cols as usize)).collect(),
+            viewport_rows: rows,
+            viewport_cols: cols,
+            status_line_row: None,
+            drcs_glyphs: Arc::new(std::collections::HashMap::new()),
+            dec_color: terminal41::dec_color_state_from_palette(&palette),
+            palette,
+            search_active: false,
+            search: None,
+            cursor: None,
+            cursor_style: CursorStyle::default(),
+            screen_reverse: false,
+        }
+    }
+
+    #[test]
+    fn drcs_geometry_class_buckets_to_nearest_compatible_size() {
+        assert_eq!(
+            drcs_geometry_class(&snapshot(80, 24)),
+            Some(DrcsGeometryClass::Col80Line24)
+        );
+        assert_eq!(
+            drcs_geometry_class(&snapshot(80, 30)),
+            Some(DrcsGeometryClass::Col80Line36)
+        );
+        assert_eq!(
+            drcs_geometry_class(&snapshot(80, 60)),
+            Some(DrcsGeometryClass::Col80Line48)
+        );
+        assert_eq!(
+            drcs_geometry_class(&snapshot(100, 30)),
+            Some(DrcsGeometryClass::Col132Line36)
+        );
     }
 }

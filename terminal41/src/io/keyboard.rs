@@ -124,6 +124,87 @@ impl KittyKeyboardState {
     }
 }
 
+/// Dispatcher for `CSI <intermediate> <params> u`. The intermediate (one of
+/// `>`, `<`, `=`, `?`) selects which kitty operation runs; query writes its
+/// reply through `pending_output`.
+#[cfg(test)]
+pub fn handle_kitty_keyboard(
+    intermediate: u8,
+    params: &Params,
+    state: &mut KittyKeyboardState,
+    c1_mode: C1Mode,
+    pending_output: &mut Vec<u8>,
+) {
+    let groups: Vec<&[u16]> = params.iter().collect();
+    handle_kitty_keyboard_groups(intermediate, &groups, state, c1_mode, pending_output);
+}
+
+pub fn handle_kitty_keyboard_groups(
+    intermediate: u8,
+    params: &[&[u16]],
+    state: &mut KittyKeyboardState,
+    c1_mode: C1Mode,
+    pending_output: &mut Vec<u8>,
+) {
+    let first = params.first().and_then(|g| g.first().copied());
+    let second = params.get(1).and_then(|g| g.first().copied());
+
+    match intermediate {
+        b'>' => {
+            let flags = KittyFlags::from_bits_truncate(first.unwrap_or(0) as u8);
+            state.push(flags);
+        }
+        b'<' => {
+            // Default pop count is 1 when no parameter is given.
+            let n = first.map(u32::from).unwrap_or(1);
+            state.pop(n);
+        }
+        b'=' => {
+            let flags = KittyFlags::from_bits_truncate(first.unwrap_or(0) as u8);
+            // Mode defaults to 1 (set) when omitted, per the spec.
+            let mode = second.map(u32::from).unwrap_or(1);
+            state.set(flags, mode);
+        }
+        b'?' => {
+            // Query: respond with `CSI ? flags u`. Use write! into the Vec so
+            // we only allocate once and skip the formatter detour.
+            let flags = state.current().bits();
+            conformance::write_csi(pending_output, c1_mode, format_args!("?{flags}u"));
+        }
+        _ => {}
+    }
+}
+
+#[cfg(test)]
+mod integration_tests {
+    use super::*;
+    use crate::test_support::TestTerm;
+
+    #[test]
+    fn kitty_push_records_flags_through_process() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[>1u");
+        assert_eq!(
+            term.kitty_keyboard.current(),
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES
+        );
+    }
+
+    #[test]
+    fn kitty_pop_default_unwinds_one_frame_through_process() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[>1u\x1b[<u");
+        assert!(term.kitty_keyboard.current().is_empty());
+    }
+
+    #[test]
+    fn kitty_query_writes_response_to_pending_output_through_process() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[>3u\x1b[?u");
+        assert_eq!(term.take_pending_output(), b"\x1b[?3u");
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -200,57 +281,6 @@ mod tests {
     }
 }
 
-/// Dispatcher for `CSI <intermediate> <params> u`. The intermediate (one of
-/// `>`, `<`, `=`, `?`) selects which kitty operation runs; query writes its
-/// reply through `pending_output`.
-#[cfg(test)]
-pub fn handle_kitty_keyboard(
-    intermediate: u8,
-    params: &Params,
-    state: &mut KittyKeyboardState,
-    c1_mode: C1Mode,
-    pending_output: &mut Vec<u8>,
-) {
-    let groups: Vec<&[u16]> = params.iter().collect();
-    handle_kitty_keyboard_groups(intermediate, &groups, state, c1_mode, pending_output);
-}
-
-pub fn handle_kitty_keyboard_groups(
-    intermediate: u8,
-    params: &[&[u16]],
-    state: &mut KittyKeyboardState,
-    c1_mode: C1Mode,
-    pending_output: &mut Vec<u8>,
-) {
-    let first = params.first().and_then(|g| g.first().copied());
-    let second = params.get(1).and_then(|g| g.first().copied());
-
-    match intermediate {
-        b'>' => {
-            let flags = KittyFlags::from_bits_truncate(first.unwrap_or(0) as u8);
-            state.push(flags);
-        }
-        b'<' => {
-            // Default pop count is 1 when no parameter is given.
-            let n = first.map(u32::from).unwrap_or(1);
-            state.pop(n);
-        }
-        b'=' => {
-            let flags = KittyFlags::from_bits_truncate(first.unwrap_or(0) as u8);
-            // Mode defaults to 1 (set) when omitted, per the spec.
-            let mode = second.map(u32::from).unwrap_or(1);
-            state.set(flags, mode);
-        }
-        b'?' => {
-            // Query: respond with `CSI ? flags u`. Use write! into the Vec so
-            // we only allocate once and skip the formatter detour.
-            let flags = state.current().bits();
-            conformance::write_csi(pending_output, c1_mode, format_args!("?{flags}u"));
-        }
-        _ => {}
-    }
-}
-
 #[cfg(test)]
 mod dispatch_tests {
     use vtepp::Action;
@@ -314,35 +344,5 @@ mod dispatch_tests {
             state.current(),
             KittyFlags::DISAMBIGUATE_ESCAPE_CODES | KittyFlags::REPORT_EVENT_TYPES
         );
-    }
-}
-
-#[cfg(test)]
-mod integration_tests {
-    use super::*;
-    use crate::test_support::TestTerm;
-
-    #[test]
-    fn kitty_push_records_flags_through_process() {
-        let mut term = TestTerm::new(20, 3, 100, 16, 8);
-        term.process(b"\x1b[>1u");
-        assert_eq!(
-            term.kitty_keyboard.current(),
-            KittyFlags::DISAMBIGUATE_ESCAPE_CODES
-        );
-    }
-
-    #[test]
-    fn kitty_pop_default_unwinds_one_frame_through_process() {
-        let mut term = TestTerm::new(20, 3, 100, 16, 8);
-        term.process(b"\x1b[>1u\x1b[<u");
-        assert!(term.kitty_keyboard.current().is_empty());
-    }
-
-    #[test]
-    fn kitty_query_writes_response_to_pending_output_through_process() {
-        let mut term = TestTerm::new(20, 3, 100, 16, 8);
-        term.process(b"\x1b[>3u\x1b[?u");
-        assert_eq!(term.take_pending_output(), b"\x1b[?3u");
     }
 }

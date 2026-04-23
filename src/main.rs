@@ -2060,75 +2060,6 @@ fn permission_key_decision(key: &Key) -> Option<PermissionDecision> {
     }
 }
 
-#[cfg(test)]
-mod permission_tests {
-    use super::*;
-
-    #[test]
-    fn permission_keys_accept_y_only() {
-        assert_eq!(
-            permission_key_decision(&Key::Character("y".into())),
-            Some(PermissionDecision::Allow)
-        );
-        assert_eq!(
-            permission_key_decision(&Key::Character("Y".into())),
-            Some(PermissionDecision::Allow)
-        );
-    }
-
-    #[test]
-    fn permission_keys_default_to_no_for_n_enter_and_escape() {
-        assert_eq!(
-            permission_key_decision(&Key::Character("n".into())),
-            Some(PermissionDecision::Deny)
-        );
-        assert_eq!(
-            permission_key_decision(&Key::Named(NamedKey::Enter)),
-            Some(PermissionDecision::Deny)
-        );
-        assert_eq!(
-            permission_key_decision(&Key::Named(NamedKey::Escape)),
-            Some(PermissionDecision::Deny)
-        );
-    }
-}
-
-#[cfg(test)]
-mod popup_command_tests {
-    use terminal41::test_support::TestTerm;
-
-    use super::*;
-
-    #[test]
-    fn popup_command_text_prefers_screen_observed_command() {
-        let mut term = TestTerm::new(20, 4, 100, 16, 8);
-        term.process(b"\x1b]633;A\x07");
-        term.process(b"$ ");
-        term.process(b"\x1b]633;B\x07");
-        term.process(b"cargo test");
-        term.process(b"\x1b]633;E;cargo\\x20metadata\x07");
-
-        let text = popup_command_text(0, &term.metadata.command_metas, &term.active);
-        match text {
-            Some(PopupCommandText::Observed(text)) => assert_eq!(text, "cargo test"),
-            _ => panic!("expected observed command text"),
-        }
-    }
-
-    #[test]
-    fn popup_command_text_falls_back_to_untrusted_metadata() {
-        let mut term = TestTerm::new(20, 4, 100, 16, 8);
-        term.process(b"\x1b]633;A\x07");
-        term.process(b"\x1b]633;E;cargo\\x20test\x07");
-
-        let text = popup_command_text(0, &term.metadata.command_metas, &term.active);
-        match text {
-            Some(PopupCommandText::Untrusted(text)) => assert_eq!(text, "cargo test"),
-            _ => panic!("expected untrusted command text"),
-        }
-    }
-}
-
 #[derive(Clone, Copy)]
 enum WindowButton {
     Minimize = 0,
@@ -2927,4 +2858,73 @@ fn parse_command_args() -> Option<Vec<String>> {
         rest.remove(0);
     }
     if rest.is_empty() { None } else { Some(rest) }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn permission_keys_accept_y_only() {
+        assert_eq!(
+            permission_key_decision(&Key::Character("y".into())),
+            Some(PermissionDecision::Allow)
+        );
+        assert_eq!(
+            permission_key_decision(&Key::Character("Y".into())),
+            Some(PermissionDecision::Allow)
+        );
+    }
+
+    #[test]
+    fn permission_keys_default_to_no_for_n_enter_and_escape() {
+        assert_eq!(
+            permission_key_decision(&Key::Character("n".into())),
+            Some(PermissionDecision::Deny)
+        );
+        assert_eq!(
+            permission_key_decision(&Key::Named(NamedKey::Enter)),
+            Some(PermissionDecision::Deny)
+        );
+        assert_eq!(
+            permission_key_decision(&Key::Named(NamedKey::Escape)),
+            Some(PermissionDecision::Deny)
+        );
+    }
+}
+
+#[cfg(test)]
+mod popup_command_tests {
+    use terminal41::test_support::TestTerm;
+
+    use super::*;
+
+    #[test]
+    fn popup_command_text_prefers_screen_observed_command() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        term.process(b"\x1b]633;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]633;B\x07");
+        term.process(b"cargo test");
+        term.process(b"\x1b]633;E;cargo\\x20metadata\x07");
+
+        let text = popup_command_text(0, &term.metadata.command_metas, &term.active);
+        match text {
+            Some(PopupCommandText::Observed(text)) => assert_eq!(text, "cargo test"),
+            _ => panic!("expected observed command text"),
+        }
+    }
+
+    #[test]
+    fn popup_command_text_falls_back_to_untrusted_metadata() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        term.process(b"\x1b]633;A\x07");
+        term.process(b"\x1b]633;E;cargo\\x20test\x07");
+
+        let text = popup_command_text(0, &term.metadata.command_metas, &term.active);
+        match text {
+            Some(PopupCommandText::Untrusted(text)) => assert_eq!(text, "cargo test"),
+            _ => panic!("expected untrusted command text"),
+        }
+    }
 }

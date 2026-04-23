@@ -1,3 +1,21 @@
+#[cfg(not(feature = "testonly-perf-ctrl-c"))]
+mod disabled {
+    use crate::TabId;
+
+    pub(crate) fn record_ctrl_c_hit(_tab_id: TabId) {}
+
+    pub(crate) fn observe_pty_output(
+        _tab_id: TabId,
+        _bytes: &[u8],
+    ) {
+    }
+}
+
+#[cfg(not(feature = "testonly-perf-ctrl-c"))]
+pub(crate) use disabled::*;
+#[cfg(feature = "testonly-perf-ctrl-c")]
+pub(crate) use enabled::*;
+
 #[cfg(feature = "testonly-perf-ctrl-c")]
 mod enabled {
     use std::collections::HashMap;
@@ -103,21 +121,3 @@ mod enabled {
         }
     }
 }
-
-#[cfg(not(feature = "testonly-perf-ctrl-c"))]
-mod disabled {
-    use crate::TabId;
-
-    pub(crate) fn record_ctrl_c_hit(_tab_id: TabId) {}
-
-    pub(crate) fn observe_pty_output(
-        _tab_id: TabId,
-        _bytes: &[u8],
-    ) {
-    }
-}
-
-#[cfg(not(feature = "testonly-perf-ctrl-c"))]
-pub(crate) use disabled::*;
-#[cfg(feature = "testonly-perf-ctrl-c")]
-pub(crate) use enabled::*;

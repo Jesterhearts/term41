@@ -663,118 +663,6 @@ pub fn copy_selection(
 }
 
 #[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::Row;
-
-    fn row_from(text: &str) -> Row {
-        use crate::ColorPalette;
-        let pal = ColorPalette::default();
-        let mut r = Row::new(text.chars().count() as u32, pal.fg, pal.bg);
-        let mut buf = [0u8; 4];
-        for (i, c) in text.chars().enumerate() {
-            r.cells[i] = smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf));
-        }
-        r
-    }
-
-    fn pt(
-        row: u64,
-        col: u32,
-    ) -> SelectionPoint {
-        SelectionPoint { row, col }
-    }
-
-    fn sel(
-        anchor: SelectionPoint,
-        head: SelectionPoint,
-        mode: SelectionMode,
-    ) -> Selection {
-        Selection {
-            anchor,
-            head,
-            mode,
-            origin: anchor,
-        }
-    }
-
-    #[test]
-    fn ordered_swaps_when_anchor_after_head() {
-        let s = sel(pt(5, 10), pt(2, 3), SelectionMode::Char);
-        assert_eq!(s.ordered(), (pt(2, 3), pt(5, 10)));
-    }
-
-    #[test]
-    fn empty_char_selection_is_empty() {
-        let s = sel(pt(3, 4), pt(3, 4), SelectionMode::Char);
-        assert!(s.is_empty());
-    }
-
-    #[test]
-    fn word_selection_is_never_empty() {
-        let s = sel(pt(3, 4), pt(3, 4), SelectionMode::Word);
-        assert!(!s.is_empty());
-    }
-
-    #[test]
-    fn contains_inclusive_on_both_ends_single_row() {
-        let s = sel(pt(0, 3), pt(0, 7), SelectionMode::Char);
-        assert!(!s.contains(pt(0, 2)));
-        assert!(s.contains(pt(0, 3)));
-        assert!(s.contains(pt(0, 5)));
-        assert!(s.contains(pt(0, 7)));
-        assert!(!s.contains(pt(0, 8)));
-    }
-
-    #[test]
-    fn contains_multi_row_excludes_cells_before_start_col() {
-        let s = sel(pt(0, 5), pt(2, 3), SelectionMode::Char);
-        assert!(!s.contains(pt(0, 4)));
-        assert!(s.contains(pt(0, 5)));
-        assert!(s.contains(pt(0, 79))); // anywhere in first row past start
-        assert!(s.contains(pt(1, 0))); // middle row — everything
-        assert!(s.contains(pt(2, 0))); // last row up to end_col
-        assert!(s.contains(pt(2, 3)));
-        assert!(!s.contains(pt(2, 4)));
-    }
-
-    #[test]
-    fn line_mode_covers_full_rows() {
-        let s = sel(pt(1, 5), pt(3, 2), SelectionMode::Line);
-        assert!(!s.contains(pt(0, 100)));
-        assert!(s.contains(pt(1, 0)));
-        assert!(s.contains(pt(2, 42))); // middle row
-        assert!(s.contains(pt(3, 999)));
-        assert!(!s.contains(pt(4, 0)));
-    }
-
-    #[test]
-    fn expand_to_word_picks_word_around_col() {
-        let row = row_from("hello world foo");
-        // click on `l` in hello
-        assert_eq!(expand_to_word(&row, 3), (0, 4));
-        // click on space — the whitespace run is the segment
-        assert_eq!(expand_to_word(&row, 5), (5, 5));
-        // click on `r` in world
-        assert_eq!(expand_to_word(&row, 8), (6, 10));
-    }
-
-    #[test]
-    fn expand_to_word_handles_punctuation_as_own_segment() {
-        let row = row_from("foo=bar");
-        assert_eq!(expand_to_word(&row, 0), (0, 2)); // foo
-        assert_eq!(expand_to_word(&row, 3), (3, 3)); // =
-        assert_eq!(expand_to_word(&row, 4), (4, 6)); // bar
-    }
-
-    #[test]
-    fn expand_to_line_covers_full_row() {
-        let row = row_from("hello");
-        assert_eq!(expand_to_line(&row), (0, 4));
-    }
-}
-
-#[cfg(test)]
 mod integration_tests {
     use clip41::Clipboard;
     use clip41::ClipboardKind;
@@ -1249,5 +1137,117 @@ mod integration_tests {
         term.inner.selection = None;
         assert!(term.inner.selection.is_none());
         assert!(selection_text(term.inner.selection.as_ref(), &term.inner.active).is_none());
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use crate::Row;
+
+    fn row_from(text: &str) -> Row {
+        use crate::ColorPalette;
+        let pal = ColorPalette::default();
+        let mut r = Row::new(text.chars().count() as u32, pal.fg, pal.bg);
+        let mut buf = [0u8; 4];
+        for (i, c) in text.chars().enumerate() {
+            r.cells[i] = smol_str::SmolStr::new_inline(c.encode_utf8(&mut buf));
+        }
+        r
+    }
+
+    fn pt(
+        row: u64,
+        col: u32,
+    ) -> SelectionPoint {
+        SelectionPoint { row, col }
+    }
+
+    fn sel(
+        anchor: SelectionPoint,
+        head: SelectionPoint,
+        mode: SelectionMode,
+    ) -> Selection {
+        Selection {
+            anchor,
+            head,
+            mode,
+            origin: anchor,
+        }
+    }
+
+    #[test]
+    fn ordered_swaps_when_anchor_after_head() {
+        let s = sel(pt(5, 10), pt(2, 3), SelectionMode::Char);
+        assert_eq!(s.ordered(), (pt(2, 3), pt(5, 10)));
+    }
+
+    #[test]
+    fn empty_char_selection_is_empty() {
+        let s = sel(pt(3, 4), pt(3, 4), SelectionMode::Char);
+        assert!(s.is_empty());
+    }
+
+    #[test]
+    fn word_selection_is_never_empty() {
+        let s = sel(pt(3, 4), pt(3, 4), SelectionMode::Word);
+        assert!(!s.is_empty());
+    }
+
+    #[test]
+    fn contains_inclusive_on_both_ends_single_row() {
+        let s = sel(pt(0, 3), pt(0, 7), SelectionMode::Char);
+        assert!(!s.contains(pt(0, 2)));
+        assert!(s.contains(pt(0, 3)));
+        assert!(s.contains(pt(0, 5)));
+        assert!(s.contains(pt(0, 7)));
+        assert!(!s.contains(pt(0, 8)));
+    }
+
+    #[test]
+    fn contains_multi_row_excludes_cells_before_start_col() {
+        let s = sel(pt(0, 5), pt(2, 3), SelectionMode::Char);
+        assert!(!s.contains(pt(0, 4)));
+        assert!(s.contains(pt(0, 5)));
+        assert!(s.contains(pt(0, 79))); // anywhere in first row past start
+        assert!(s.contains(pt(1, 0))); // middle row — everything
+        assert!(s.contains(pt(2, 0))); // last row up to end_col
+        assert!(s.contains(pt(2, 3)));
+        assert!(!s.contains(pt(2, 4)));
+    }
+
+    #[test]
+    fn line_mode_covers_full_rows() {
+        let s = sel(pt(1, 5), pt(3, 2), SelectionMode::Line);
+        assert!(!s.contains(pt(0, 100)));
+        assert!(s.contains(pt(1, 0)));
+        assert!(s.contains(pt(2, 42))); // middle row
+        assert!(s.contains(pt(3, 999)));
+        assert!(!s.contains(pt(4, 0)));
+    }
+
+    #[test]
+    fn expand_to_word_picks_word_around_col() {
+        let row = row_from("hello world foo");
+        // click on `l` in hello
+        assert_eq!(expand_to_word(&row, 3), (0, 4));
+        // click on space — the whitespace run is the segment
+        assert_eq!(expand_to_word(&row, 5), (5, 5));
+        // click on `r` in world
+        assert_eq!(expand_to_word(&row, 8), (6, 10));
+    }
+
+    #[test]
+    fn expand_to_word_handles_punctuation_as_own_segment() {
+        let row = row_from("foo=bar");
+        assert_eq!(expand_to_word(&row, 0), (0, 2)); // foo
+        assert_eq!(expand_to_word(&row, 3), (3, 3)); // =
+        assert_eq!(expand_to_word(&row, 4), (4, 6)); // bar
+    }
+
+    #[test]
+    fn expand_to_line_covers_full_row() {
+        let row = row_from("hello");
+        assert_eq!(expand_to_line(&row), (0, 4));
     }
 }
