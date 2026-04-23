@@ -17,7 +17,10 @@ mod svg;
 
 use std::collections::HashMap;
 use std::sync::Arc;
+use std::sync::Mutex;
 use std::sync::RwLock;
+use std::sync::atomic::AtomicU64;
+use std::sync::atomic::Ordering;
 use std::thread;
 
 use harfrust::Direction;
@@ -103,7 +106,8 @@ pub struct ShapedGlyph {
 
 /// A loaded font with its shaping data and raw bytes.
 struct LoadedFont {
-    data: Arc<Vec<u8>>,
+    data: SharedFontData,
+    face_index: u32,
     shaper_data: ShaperData,
     units_per_em: f32,
     /// True if the font carries colour glyph tables (COLR, CBDT, sbix, or
@@ -117,6 +121,16 @@ struct LoadedFont {
     is_bold: bool,
     /// True when the face was loaded as an italic/oblique variant.
     is_italic: bool,
+}
+
+type SharedFontData = Arc<dyn AsRef<[u8]> + Send + Sync>;
+
+fn font_bytes(data: &SharedFontData) -> &[u8] {
+    data.as_ref().as_ref()
+}
+
+fn loaded_font_ref(loaded: &LoadedFont) -> Result<FontRef<'_>, read_fonts::ReadError> {
+    FontRef::from_index(font_bytes(&loaded.data), loaded.face_index)
 }
 
 /// The set of weight/style variants loaded for one user-requested family.
@@ -142,11 +156,17 @@ struct PlanKey {
 
 static FONTS: RwLock<Vec<LoadedFont>> = RwLock::new(Vec::new());
 static FAMILIES: RwLock<Vec<FamilyVariants>> = RwLock::new(Vec::new());
+static FONT_LOAD_STATE: Mutex<FontLoadState> = Mutex::new(FontLoadState::NotStarted);
+static FONT_LOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
 
-/// Scan system fonts for the families listed in `fonts_config` (comma-
-/// separated) and install them into the global FONTS/FAMILIES tables.
-/// Called from a background thread at startup and synchronously on reload.
-fn load_and_install_fonts(fonts_config: Option<String>) {
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum FontLoadState {
+    NotStarted,
+    Loading,
+    Loaded,
+}
+
+fn load_fonts(fonts_config: Option<String>) -> (Vec<LoadedFont>, Vec<FamilyVariants>) {
     let mut fonts: Vec<LoadedFont> = Vec::new();
     let mut families: Vec<FamilyVariants> = Vec::new();
 
@@ -167,7 +187,7 @@ fn load_and_install_fonts(fonts_config: Option<String>) {
             };
 
             let Some(regular) = load_family_variant(
-                &db,
+                &mut db,
                 &mut fonts,
                 &family,
                 fontdb::Weight::NORMAL,
@@ -179,7 +199,7 @@ fn load_and_install_fonts(fonts_config: Option<String>) {
                 continue;
             };
             let bold = load_family_variant(
-                &db,
+                &mut db,
                 &mut fonts,
                 &family,
                 fontdb::Weight::BOLD,
@@ -188,7 +208,7 @@ fn load_and_install_fonts(fonts_config: Option<String>) {
                 false,
             );
             let italic = load_family_variant(
-                &db,
+                &mut db,
                 &mut fonts,
                 &family,
                 fontdb::Weight::NORMAL,
@@ -197,7 +217,7 @@ fn load_and_install_fonts(fonts_config: Option<String>) {
                 true,
             );
             let bold_italic = load_family_variant(
-                &db,
+                &mut db,
                 &mut fonts,
                 &family,
                 fontdb::Weight::BOLD,
@@ -220,8 +240,52 @@ fn load_and_install_fonts(fonts_config: Option<String>) {
         }
     }
 
+    (fonts, families)
+}
+
+fn install_fonts(
+    fonts: Vec<LoadedFont>,
+    families: Vec<FamilyVariants>,
+) {
     *FONTS.write().unwrap() = fonts;
     *FAMILIES.write().unwrap() = families;
+}
+
+fn start_background_font_load(fonts_config: Option<String>) {
+    let mut state = FONT_LOAD_STATE.lock().unwrap();
+    if *state != FontLoadState::NotStarted {
+        return;
+    }
+
+    *state = FontLoadState::Loading;
+    let epoch = FONT_LOAD_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
+    let spawn_result = thread::Builder::new()
+        .name("font-loader".into())
+        .spawn(move || finish_background_font_load(epoch, fonts_config));
+    if let Err(err) = spawn_result {
+        warn!("failed to start font-loader thread: {err}");
+        *state = FontLoadState::NotStarted;
+    }
+}
+
+fn finish_background_font_load(
+    epoch: u64,
+    fonts_config: Option<String>,
+) {
+    let (fonts, families) = load_fonts(fonts_config);
+    if FONT_LOAD_EPOCH.load(Ordering::Acquire) == epoch {
+        install_fonts(fonts, families);
+        *FONT_LOAD_STATE.lock().unwrap() = FontLoadState::Loaded;
+    }
+}
+
+fn reload_fonts(fonts_config: Option<String>) {
+    let epoch = FONT_LOAD_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
+    let (fonts, families) = load_fonts(fonts_config);
+    if FONT_LOAD_EPOCH.load(Ordering::Acquire) == epoch {
+        install_fonts(fonts, families);
+        *FONT_LOAD_STATE.lock().unwrap() = FontLoadState::Loaded;
+    }
 }
 
 /// Font system: manages an ordered list of fonts with fallback and plan
@@ -260,17 +324,14 @@ impl FontSystem {
         // Kick off font loading in the background so the window appears
         // immediately. FONTS/FAMILIES start empty; shape_row falls through
         // to the embedded fallback until they're populated.
-        if FONTS.read().unwrap().is_empty() {
-            let _ = thread::Builder::new()
-                .name("font-loader".into())
-                .spawn(|| load_and_install_fonts(fonts_config));
-        }
+        start_background_font_load(fonts_config);
 
         // Always append embedded Fairfax HD as ultimate fallback. It ships
         // only a regular face; cells that want bold/italic from the fallback
         // route get the regular glyph plus any synthesis the renderer can
         // still apply on top.
-        let final_font = load_font(FAIRFAX_HD, false, false).expect("Failed to load embedded font");
+        let final_font =
+            load_font(Arc::new(FAIRFAX_HD), 0, false, false).expect("Failed to load embedded font");
 
         let mut fs = Self {
             final_font,
@@ -296,7 +357,7 @@ impl FontSystem {
         font_size: f32,
         supersample: u32,
     ) {
-        load_and_install_fonts(fonts_config);
+        reload_fonts(fonts_config);
         let scale = self.font_size / self.base_font_size;
         self.base_font_size = font_size;
         self.font_size = font_size * scale;
@@ -309,7 +370,7 @@ impl FontSystem {
     /// fallback font's metrics and the current base_font_size. Shared by
     /// `new()`, `reload()`, and `set_scale_factor()`.
     fn recompute_metrics(&mut self) {
-        let rf = read_fonts::FontRef::new(&self.final_font.data).expect("parse font");
+        let rf = loaded_font_ref(&self.final_font).expect("parse font");
         let hhea = rf.hhea().expect("hhea table");
         let hmtx = rf.hmtx().expect("hmtx table");
 
@@ -552,7 +613,7 @@ impl FontSystem {
                 .chain(std::iter::once(&self.final_font))
                 .enumerate()
             {
-                let font_ref = match FontRef::new(&loaded.data) {
+                let font_ref = match loaded_font_ref(loaded) {
                     Ok(f) => f,
                     Err(_) => continue,
                 };
@@ -699,7 +760,7 @@ impl FontSystem {
         let loaded = fonts.get(font_index).unwrap_or(&self.final_font);
         let scale = self.font_size / loaded.units_per_em;
 
-        let Ok(font) = read_fonts::FontRef::new(&loaded.data) else {
+        let Ok(font) = loaded_font_ref(loaded) else {
             return empty_glyph();
         };
 
@@ -812,14 +873,15 @@ fn empty_glyph() -> RasterizedGlyph {
 }
 
 fn load_font(
-    data: &[u8],
+    data: SharedFontData,
+    face_index: u32,
     is_bold: bool,
     is_italic: bool,
 ) -> Option<LoadedFont> {
-    let data = Arc::new(data.to_vec());
-    let font_ref = FontRef::new(&data).ok()?;
+    let bytes = font_bytes(&data);
+    let font_ref = FontRef::from_index(bytes, face_index).ok()?;
     let shaper_data = ShaperData::new(&font_ref);
-    let rf = read_fonts::FontRef::new(&data).ok()?;
+    let rf = read_fonts::FontRef::from_index(bytes, face_index).ok()?;
     let head = rf.head().ok()?;
     let units_per_em = head.units_per_em() as f32;
     // Probe for colour glyph tables. If any is present, we treat this as a
@@ -829,6 +891,7 @@ fn load_font(
 
     Some(LoadedFont {
         data,
+        face_index,
         shaper_data,
         units_per_em,
         is_color,
@@ -843,7 +906,7 @@ fn load_font(
 /// hits so a missing variant stays missing and the caller can record it as
 /// `None` in the family table.
 fn load_family_variant(
-    db: &fontdb::Database,
+    db: &mut fontdb::Database,
     fonts: &mut Vec<LoadedFont>,
     family: &fontdb::Family,
     weight: fontdb::Weight,
@@ -853,7 +916,7 @@ fn load_family_variant(
 ) -> Option<usize> {
     if let fontdb::Family::Name(name) = family {
         let id = pick_named_family_face(db, name, weight, style)?;
-        let loaded = db.with_face_data(id, |data, _| load_font(data, is_bold, is_italic))??;
+        let loaded = load_font_from_database(db, id, is_bold, is_italic)?;
         let idx = fonts.len();
         fonts.push(loaded);
         return Some(idx);
@@ -870,10 +933,23 @@ fn load_family_variant(
     if face.weight != weight || face.style != style {
         return None;
     }
-    let loaded = db.with_face_data(id, |data, _| load_font(data, is_bold, is_italic))??;
+    let loaded = load_font_from_database(db, id, is_bold, is_italic)?;
     let idx = fonts.len();
     fonts.push(loaded);
     Some(idx)
+}
+
+fn load_font_from_database(
+    db: &mut fontdb::Database,
+    id: fontdb::ID,
+    is_bold: bool,
+    is_italic: bool,
+) -> Option<LoadedFont> {
+    // SAFETY: term41 only reads font files through the returned mapping. The
+    // usual mmap caveat applies: external mutation of installed font files
+    // while the terminal is running can expose changed bytes to this process.
+    let (data, face_index) = unsafe { db.make_shared_face_data(id)? };
+    load_font(data, face_index, is_bold, is_italic)
 }
 
 fn pick_named_family_face(
@@ -890,7 +966,7 @@ fn pick_named_family_face(
                 && face.families.iter().any(|family| family.0 == name)
         })
         .max_by_key(|face| {
-            db.with_face_data(face.id, |data, _| color_table_score(data))
+            db.with_face_data(face.id, color_table_score)
                 .unwrap_or_default()
         })
         .map(|face| face.id)
@@ -926,8 +1002,11 @@ fn color_tables(rf: &read_fonts::FontRef<'_>) -> ColorTables {
     }
 }
 
-fn color_table_score(data: &[u8]) -> u8 {
-    read_fonts::FontRef::new(data)
+fn color_table_score(
+    data: &[u8],
+    face_index: u32,
+) -> u8 {
+    read_fonts::FontRef::from_index(data, face_index)
         .map(|rf| color_tables(&rf).score())
         .unwrap_or_default()
 }
