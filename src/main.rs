@@ -9,6 +9,7 @@ mod renderer;
 
 use std::cell::RefCell;
 use std::collections::HashMap;
+use std::collections::VecDeque;
 use std::fmt;
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -84,6 +85,8 @@ use crate::keybindings::Action;
 use crate::keybindings::Keybindings;
 use crate::output_recording::RecorderControl;
 use crate::output_recording::next_recording_path;
+use crate::renderer::PermissionChoice;
+use crate::renderer::PermissionModal;
 use crate::renderer::PreeditState;
 use crate::renderer::RenderEvent;
 use crate::renderer::TabContextMenu;
@@ -138,6 +141,13 @@ enum AppEvent {
     },
     RemoveInputEndpoint(TabId),
     SetActiveInputTab(Option<TabId>),
+    // Future security gates can send this to the trusted window thread and
+    // wait on the response channel without letting terminal41 own UI policy.
+    #[allow(dead_code)]
+    RequestPermission {
+        feature: String,
+        response_tx: mpsc::Sender<PermissionDecision>,
+    },
     DismissRecordingPopup(u64),
     ShowToast(String),
     DismissToast(u64),
@@ -254,6 +264,21 @@ struct ToastView {
     text: String,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PermissionDecision {
+    Allow,
+    Deny,
+}
+
+struct PermissionRequest {
+    feature: String,
+    response_tx: mpsc::Sender<PermissionDecision>,
+}
+
+struct PermissionModalState {
+    response_tx: mpsc::Sender<PermissionDecision>,
+}
+
 enum RecordingPopupState {
     PendingStart { path: PathBuf },
     Completed { token: u64 },
@@ -270,6 +295,7 @@ pub(crate) struct InputState {
     tab_context_menu: Option<TabContextMenu>,
     gutter_popup: Option<renderer::GutterPopup>,
     recording_popup: Option<RecordingPopupView>,
+    permission_modal: Option<PermissionModal>,
     toast: Option<ToastView>,
     preedit: Option<PreeditState>,
 }
@@ -308,6 +334,8 @@ struct WindowHost {
     render_thread_handle: Arc<OnceLock<std::thread::Thread>>,
     event_proxy: EventLoopProxy<AppEvent>,
     recording_popup: Option<RecordingPopupState>,
+    permission_modal: Option<PermissionModalState>,
+    queued_permission_requests: VecDeque<PermissionRequest>,
     next_recording_popup_token: u64,
     next_toast_token: u64,
 }
@@ -551,6 +579,29 @@ impl WindowHost {
         self.notify_interaction_changed();
     }
 
+    fn update_permission_modal_view(
+        &mut self,
+        modal: Option<PermissionModal>,
+    ) {
+        self.input_state.lock().permission_modal = modal;
+        self.notify_interaction_changed();
+    }
+
+    fn update_permission_hover(
+        &mut self,
+        hovered: Option<PermissionChoice>,
+    ) {
+        let mut state = self.input_state.lock();
+        let Some(modal) = state.permission_modal.as_mut() else {
+            return;
+        };
+        if modal.hovered != hovered {
+            modal.hovered = hovered;
+            drop(state);
+            self.notify_interaction_changed();
+        }
+    }
+
     fn update_toast_view(
         &mut self,
         toast: Option<ToastView>,
@@ -585,6 +636,50 @@ impl WindowHost {
         ];
         self.recording_popup = Some(RecordingPopupState::PendingStart { path });
         self.update_recording_popup_view(Some(RecordingPopupView { lines }));
+    }
+
+    fn request_permission(
+        &mut self,
+        feature: String,
+        response_tx: mpsc::Sender<PermissionDecision>,
+    ) {
+        let request = PermissionRequest {
+            feature,
+            response_tx,
+        };
+        if self.permission_modal.is_some() {
+            self.queued_permission_requests.push_back(request);
+            return;
+        }
+        self.show_permission_modal(request);
+    }
+
+    fn show_permission_modal(
+        &mut self,
+        request: PermissionRequest,
+    ) {
+        self.close_gutter_popup();
+        self.update_tab_context_menu(None);
+        self.permission_modal = Some(PermissionModalState {
+            response_tx: request.response_tx,
+        });
+        self.update_permission_modal_view(Some(PermissionModal {
+            feature: request.feature,
+            hovered: None,
+        }));
+    }
+
+    fn settle_permission_modal(
+        &mut self,
+        decision: PermissionDecision,
+    ) {
+        if let Some(modal) = self.permission_modal.take() {
+            let _ = modal.response_tx.send(decision);
+        }
+        self.update_permission_modal_view(None);
+        if let Some(next) = self.queued_permission_requests.pop_front() {
+            self.show_permission_modal(next);
+        }
     }
 
     fn show_recording_completed_popup(
@@ -668,6 +763,16 @@ impl WindowHost {
                 _ => false,
             },
         }
+    }
+
+    fn handle_permission_modal_key(
+        &mut self,
+        key: &Key,
+    ) {
+        let Some(decision) = permission_key_decision(key) else {
+            return;
+        };
+        self.settle_permission_modal(decision);
     }
 
     fn write_host_bytes(
@@ -887,6 +992,11 @@ impl WindowHost {
         location: KeyLocation,
         physical: PhysicalKey,
     ) {
+        if self.permission_modal.is_some() {
+            self.handle_permission_modal_key(&key);
+            return;
+        }
+
         if self.ime_preedit_active && matches!(key, Key::Character(_)) {
             return;
         }
@@ -1098,6 +1208,10 @@ impl WindowHost {
         y: f64,
     ) {
         self.mouse_pos = (x, y);
+        if self.permission_modal.is_some() {
+            self.update_permission_hover(self.permission_choice_at(x, y));
+            return;
+        }
         if self.recording_popup.is_some() {
             return;
         }
@@ -1182,11 +1296,48 @@ impl WindowHost {
         self.notify_interaction_changed();
     }
 
+    fn permission_choice_at(
+        &self,
+        x: f64,
+        y: f64,
+    ) -> Option<PermissionChoice> {
+        let state = self.input_state.lock();
+        let modal = state.permission_modal.as_ref()?;
+        let tab_bar_h = if state.tab_count > 0 {
+            state.cell_height as f32
+        } else {
+            0.0
+        };
+        renderer::permission_modal_button_at(
+            &modal.feature,
+            x as f32,
+            y as f32,
+            state.cell_width as f32,
+            state.cell_height as f32,
+            self.window_size.0 as f32,
+            self.window_size.1 as f32,
+            tab_bar_h,
+        )
+    }
+
     fn handle_mouse_input(
         &mut self,
         pressed: bool,
         button: MouseButton,
     ) {
+        if self.permission_modal.is_some() {
+            if pressed
+                && button == MouseButton::Left
+                && let Some(choice) = self.permission_choice_at(self.mouse_pos.0, self.mouse_pos.1)
+            {
+                let decision = match choice {
+                    PermissionChoice::Allow => PermissionDecision::Allow,
+                    PermissionChoice::Deny => PermissionDecision::Deny,
+                };
+                self.settle_permission_modal(decision);
+            }
+            return;
+        }
         if self.recording_popup.is_some() {
             return;
         }
@@ -1449,6 +1600,9 @@ impl WindowHost {
         raw_y: f64,
         pixels: bool,
     ) {
+        if self.permission_modal.is_some() {
+            return;
+        }
         if self.recording_popup.is_some() {
             return;
         }
@@ -1840,6 +1994,50 @@ impl WindowHost {
     }
 }
 
+fn permission_key_decision(key: &Key) -> Option<PermissionDecision> {
+    match key {
+        Key::Character(text) if text.eq_ignore_ascii_case("y") => Some(PermissionDecision::Allow),
+        Key::Character(text) if text.eq_ignore_ascii_case("n") => Some(PermissionDecision::Deny),
+        Key::Named(NamedKey::Enter) | Key::Named(NamedKey::Escape) => {
+            Some(PermissionDecision::Deny)
+        }
+        _ => None,
+    }
+}
+
+#[cfg(test)]
+mod permission_tests {
+    use super::*;
+
+    #[test]
+    fn permission_keys_accept_y_only() {
+        assert_eq!(
+            permission_key_decision(&Key::Character("y".into())),
+            Some(PermissionDecision::Allow)
+        );
+        assert_eq!(
+            permission_key_decision(&Key::Character("Y".into())),
+            Some(PermissionDecision::Allow)
+        );
+    }
+
+    #[test]
+    fn permission_keys_default_to_no_for_n_enter_and_escape() {
+        assert_eq!(
+            permission_key_decision(&Key::Character("n".into())),
+            Some(PermissionDecision::Deny)
+        );
+        assert_eq!(
+            permission_key_decision(&Key::Named(NamedKey::Enter)),
+            Some(PermissionDecision::Deny)
+        );
+        assert_eq!(
+            permission_key_decision(&Key::Named(NamedKey::Escape)),
+            Some(PermissionDecision::Deny)
+        );
+    }
+}
+
 #[derive(Clone, Copy)]
 enum WindowButton {
     Minimize = 0,
@@ -1975,6 +2173,12 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 if let Some(tab_id) = tab_id {
                     self.request_window_size_for_tab(tab_id);
                 }
+            }
+            AppEvent::RequestPermission {
+                feature,
+                response_tx,
+            } => {
+                self.request_permission(feature, response_tx);
             }
             AppEvent::DismissRecordingPopup(token) => {
                 let dismiss = matches!(
@@ -2428,6 +2632,7 @@ fn main() {
         tab_context_menu: None,
         gutter_popup: None,
         recording_popup: None,
+        permission_modal: None,
         toast: None,
         preedit: None,
     }));
@@ -2514,6 +2719,8 @@ fn main() {
         render_thread_handle,
         event_proxy: proxy,
         recording_popup: None,
+        permission_modal: None,
+        queued_permission_requests: VecDeque::new(),
         next_recording_popup_token: 1,
         next_toast_token: 1,
     };

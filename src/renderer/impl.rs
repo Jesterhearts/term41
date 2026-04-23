@@ -1215,6 +1215,7 @@ impl Renderer {
         controls: &WindowControls,
         gutter_popup: Option<&GutterPopup>,
         recording_popup: Option<&crate::renderer::RecordingPopup>,
+        permission_modal: Option<&crate::renderer::PermissionModal>,
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
     ) {
@@ -1227,6 +1228,7 @@ impl Renderer {
             controls,
             gutter_popup,
             recording_popup,
+            permission_modal,
             toast,
             preedit,
             &layout,
@@ -1326,6 +1328,7 @@ impl Renderer {
         controls: &WindowControls,
         gutter_popup: Option<&GutterPopup>,
         recording_popup: Option<&crate::renderer::RecordingPopup>,
+        permission_modal: Option<&crate::renderer::PermissionModal>,
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
         layout: &FrameLayout,
@@ -1436,6 +1439,18 @@ impl Renderer {
             self.render_toast(
                 font_system,
                 toast,
+                layout,
+                &mut geometry.overlay_bg_vertices,
+                &mut geometry.overlay_bg_indices,
+                &mut geometry.overlay_fg_vertices,
+                &mut geometry.overlay_fg_indices,
+            );
+        }
+
+        if let Some(modal) = permission_modal {
+            self.render_permission_modal(
+                font_system,
+                modal,
                 layout,
                 &mut geometry.overlay_bg_vertices,
                 &mut geometry.overlay_bg_indices,
@@ -2996,6 +3011,199 @@ impl Renderer {
                 fg_indices,
             );
         }
+    }
+
+    fn render_permission_modal(
+        &mut self,
+        font_system: &mut FontSystem,
+        modal: &crate::renderer::PermissionModal,
+        layout: &FrameLayout,
+        bg_vertices: &mut Vec<BgVertex>,
+        bg_indices: &mut Vec<u32>,
+        fg_vertices: &mut Vec<FgVertex>,
+        fg_indices: &mut Vec<u32>,
+    ) {
+        let surface_w = self.surface_config.width as f32;
+        let surface_h = self.surface_config.height as f32;
+        let panel = crate::renderer::permission_panel_rect(
+            &modal.feature,
+            layout.cell_w,
+            layout.cell_h,
+            surface_w,
+            surface_h,
+            layout.tab_bar_h,
+        );
+        let buttons = crate::renderer::permission_button_layout(
+            &modal.feature,
+            layout.cell_w,
+            layout.cell_h,
+            surface_w,
+            surface_h,
+            layout.tab_bar_h,
+        );
+
+        let dim = pack_color(&palette::Srgb::new(0, 0, 0), 120);
+        let panel_bg = pack_color(&palette::Srgb::new(24, 24, 32), 248);
+        let border = pack_color(&palette::Srgb::new(132, 132, 164), 255);
+        let button_bg = pack_color(&palette::Srgb::new(46, 46, 58), 255);
+        let button_hover = pack_color(&palette::Srgb::new(74, 74, 94), 255);
+        let button_no_bg = pack_color(&palette::Srgb::new(52, 42, 46), 255);
+        let button_no_hover = pack_color(&palette::Srgb::new(88, 58, 64), 255);
+        let text_fg = pack_color(&palette::Srgb::new(238, 238, 244), 255);
+        let hint_fg = pack_color(&palette::Srgb::new(202, 202, 214), 255);
+
+        push_rect(0.0, 0.0, surface_w, surface_h, dim, bg_vertices, bg_indices);
+        push_rect(
+            panel.0,
+            panel.1,
+            panel.2,
+            panel.3,
+            panel_bg,
+            bg_vertices,
+            bg_indices,
+        );
+        push_rect(
+            panel.0,
+            panel.1,
+            panel.2,
+            1.0,
+            border,
+            bg_vertices,
+            bg_indices,
+        );
+        push_rect(
+            panel.0,
+            panel.1 + panel.3 - 1.0,
+            panel.2,
+            1.0,
+            border,
+            bg_vertices,
+            bg_indices,
+        );
+        push_rect(
+            panel.0,
+            panel.1,
+            1.0,
+            panel.3,
+            border,
+            bg_vertices,
+            bg_indices,
+        );
+        push_rect(
+            panel.0 + panel.2 - 1.0,
+            panel.1,
+            1.0,
+            panel.3,
+            border,
+            bg_vertices,
+            bg_indices,
+        );
+
+        let yes_bg = if modal.hovered == Some(crate::renderer::PermissionChoice::Allow) {
+            button_hover
+        } else {
+            button_bg
+        };
+        let no_bg = if modal.hovered == Some(crate::renderer::PermissionChoice::Deny) {
+            button_no_hover
+        } else {
+            button_no_bg
+        };
+        push_rect(
+            buttons.yes.0,
+            buttons.yes.1,
+            buttons.yes.2,
+            buttons.yes.3,
+            yes_bg,
+            bg_vertices,
+            bg_indices,
+        );
+        push_rect(
+            buttons.no.0,
+            buttons.no.1,
+            buttons.no.2,
+            buttons.no.3,
+            no_bg,
+            bg_vertices,
+            bg_indices,
+        );
+
+        let baseline = font_system.baseline_offset();
+        let feature_line = crate::renderer::permission_feature_line(&modal.feature);
+        self.shape_centered_popup_line(
+            font_system,
+            &feature_line,
+            panel,
+            panel.1 + layout.cell_h,
+            baseline,
+            layout.cell_w,
+            text_fg,
+            fg_vertices,
+            fg_indices,
+        );
+        self.shape_centered_popup_line(
+            font_system,
+            "Would you like to allow this?",
+            panel,
+            panel.1 + 2.0 * layout.cell_h,
+            baseline,
+            layout.cell_w,
+            text_fg,
+            fg_vertices,
+            fg_indices,
+        );
+        self.shape_popup_line(
+            font_system,
+            "[y]es",
+            buttons.yes.0 + layout.cell_w,
+            buttons.yes.1,
+            baseline,
+            layout.cell_w,
+            layout.cell_h,
+            hint_fg,
+            fg_vertices,
+            fg_indices,
+        );
+        self.shape_popup_line(
+            font_system,
+            "[n]o",
+            buttons.no.0 + layout.cell_w,
+            buttons.no.1,
+            baseline,
+            layout.cell_w,
+            layout.cell_h,
+            hint_fg,
+            fg_vertices,
+            fg_indices,
+        );
+    }
+
+    fn shape_centered_popup_line(
+        &mut self,
+        font_system: &mut FontSystem,
+        text: &str,
+        panel: (f32, f32, f32, f32),
+        y: f32,
+        baseline: f32,
+        cell_w: f32,
+        color: u32,
+        fg_vertices: &mut Vec<FgVertex>,
+        fg_indices: &mut Vec<u32>,
+    ) {
+        let width = text.chars().count() as f32 * cell_w;
+        let x = panel.0 + (panel.2 - width) * 0.5;
+        self.shape_popup_line(
+            font_system,
+            text,
+            x,
+            y,
+            baseline,
+            cell_w,
+            0.0,
+            color,
+            fg_vertices,
+            fg_indices,
+        );
     }
 
     fn render_toast(
