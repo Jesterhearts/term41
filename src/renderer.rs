@@ -869,6 +869,10 @@ impl RenderHost {
             self.font_system.cell_width,
             self.config.palette.clone(),
         );
+        settings::set_emoji_compatibility_mode(
+            &mut terminal.emoji_compatibility_mode,
+            self.config.compatibility.emoji,
+        );
         if let Some(tab) = self.active_tab() {
             settings::set_default_cursor_style(
                 &mut terminal.cursor_style,
@@ -1012,10 +1016,15 @@ impl RenderHost {
                 base_palette,
                 dec_color,
                 default_status_display,
+                emoji_compatibility_mode,
                 protocol,
                 ..
             } = terminal;
             settings::set_default_cursor_style(cursor_style, cfg.cursor_style);
+            settings::set_emoji_compatibility_mode(
+                emoji_compatibility_mode,
+                cfg.compatibility.emoji,
+            );
             settings::set_default_status_display(
                 active,
                 stash,
@@ -1043,6 +1052,7 @@ impl RenderHost {
         self.config.status_line = cfg.status_line;
         self.config.palette = cfg.palette.clone();
         self.config.feature_permissions = cfg.feature_permissions.clone();
+        self.config.compatibility = cfg.compatibility;
 
         if cfg.gutter != self.config.gutter {
             self.config.gutter = cfg.gutter;

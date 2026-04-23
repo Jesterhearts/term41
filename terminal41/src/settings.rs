@@ -3,6 +3,7 @@
 use crate::ColorPalette;
 use crate::CursorStyle;
 use crate::DecColorState;
+use crate::EmojiCompatibilityMode;
 use crate::FeaturePermissions;
 use crate::Screen;
 use crate::StatusDisplayKind;
@@ -21,6 +22,14 @@ pub fn set_default_cursor_style(
     style: CursorStyle,
 ) {
     *cursor_style = style;
+}
+
+/// Replace the default legacy emoji compatibility mode.
+pub fn set_emoji_compatibility_mode(
+    emoji_compatibility_mode: &mut EmojiCompatibilityMode,
+    mode: EmojiCompatibilityMode,
+) {
+    *emoji_compatibility_mode = mode;
 }
 
 /// Replace the base palette and rebase DEC color-table entries that still

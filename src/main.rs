@@ -2264,6 +2264,10 @@ fn main() {
         config.palette.clone(),
     );
     settings::set_default_cursor_style(&mut terminal.cursor_style, config.cursor_style);
+    settings::set_emoji_compatibility_mode(
+        &mut terminal.emoji_compatibility_mode,
+        config.compatibility.emoji,
+    );
     let terminal = Arc::new(Mutex::new(terminal));
 
     terminal_thread.spawn(

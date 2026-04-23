@@ -6,6 +6,7 @@ use serde::Deserialize;
 use terminal41::ColorPalette;
 use terminal41::CursorShape;
 use terminal41::CursorStyle;
+use terminal41::EmojiCompatibilityMode;
 use terminal41::FeaturePermissions;
 use terminal41::ProgramAllowlist;
 use terminal41::StatusDisplayKind;
@@ -130,6 +131,27 @@ struct AllowFeaturesConfig {
 struct SecuritySettings {
     #[serde(default)]
     features: Option<AllowFeaturesConfig>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CompatibilityConfig {
+    pub emoji: EmojiCompatibilityMode,
+}
+
+impl Default for CompatibilityConfig {
+    fn default() -> Self {
+        Self {
+            emoji: EmojiCompatibilityMode::Auto,
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct CompatibilitySettings {
+    /// Legacy shell emoji editing compatibility: `auto`, `off`, or `on`.
+    #[serde(deserialize_with = "emoji_compatibility_mode_opt")]
+    #[serde(default)]
+    emoji: Option<EmojiCompatibilityMode>,
 }
 
 #[derive(Deserialize, Default)]
@@ -337,6 +359,8 @@ struct ConfigFile {
     /// Security-sensitive settings.
     #[serde(default)]
     security: Option<SecuritySettings>,
+    #[serde(default)]
+    compatibility: Option<CompatibilitySettings>,
 }
 
 #[derive(Debug)]
@@ -366,6 +390,7 @@ pub struct Config {
     /// Color palette (ANSI 16 colors, default fg/bg, cursor, selection).
     pub palette: ColorPalette,
     pub feature_permissions: FeaturePermissions,
+    pub compatibility: CompatibilityConfig,
 }
 
 impl Default for Config {
@@ -388,6 +413,7 @@ impl Default for Config {
             font_supersampling: 4,
             palette: ColorPalette::default(),
             feature_permissions: FeaturePermissions::default(),
+            compatibility: CompatibilityConfig::default(),
         }
     }
 }
@@ -426,6 +452,7 @@ fn parse_config(
     let palette = build_palette(file.colors);
     let security = file.security.unwrap_or_default();
     let features = security.features.unwrap_or_default();
+    let compatibility = build_compatibility(file.compatibility);
 
     Config {
         opacity: file.opacity.unwrap_or(1.0),
@@ -447,6 +474,14 @@ fn parse_config(
         feature_permissions: FeaturePermissions {
             macros: features.macros.unwrap_or_default(),
         },
+        compatibility,
+    }
+}
+
+fn build_compatibility(raw: Option<CompatibilitySettings>) -> CompatibilityConfig {
+    let settings = raw.unwrap_or_default();
+    CompatibilityConfig {
+        emoji: settings.emoji.unwrap_or_default(),
     }
 }
 
@@ -699,6 +734,21 @@ where
     }
 }
 
+fn emoji_compatibility_mode_opt<'de, D>(
+    deserializer: D
+) -> Result<Option<EmojiCompatibilityMode>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<EmojiCompatibilityMode>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse emoji compatibility mode in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
 fn u32_opt_clamp_1_16<'de, D>(deserializer: D) -> Result<Option<u32>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -782,6 +832,43 @@ mod tests {
                 .feature_permissions
                 .macros,
             ProgramAllowlist::AllowAll
+        );
+    }
+
+    #[test]
+    fn compatibility_emoji_defaults_to_auto() {
+        assert_eq!(parse("").compatibility.emoji, EmojiCompatibilityMode::Auto);
+    }
+
+    #[test]
+    fn compatibility_emoji_accepts_modes() {
+        assert_eq!(
+            parse("[compatibility]\nemoji = \"off\"\n")
+                .compatibility
+                .emoji,
+            EmojiCompatibilityMode::Off
+        );
+        assert_eq!(
+            parse("[compatibility]\nemoji = \"on\"\n")
+                .compatibility
+                .emoji,
+            EmojiCompatibilityMode::On
+        );
+        assert_eq!(
+            parse("[compatibility]\nemoji = \"auto\"\n")
+                .compatibility
+                .emoji,
+            EmojiCompatibilityMode::Auto
+        );
+    }
+
+    #[test]
+    fn invalid_compatibility_emoji_falls_back_to_auto() {
+        assert_eq!(
+            parse("[compatibility]\nemoji = \"sometimes\"\n")
+                .compatibility
+                .emoji,
+            EmojiCompatibilityMode::Auto
         );
     }
 

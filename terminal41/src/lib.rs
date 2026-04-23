@@ -114,7 +114,8 @@ use crate::selection::Selection;
 use crate::selection::search::SearchState;
 
 /// How term41 should handle legacy shell emoji editing compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
 pub enum EmojiCompatibilityMode {
     /// Enable only in a shell-integration command-editing phase.
     #[default]
