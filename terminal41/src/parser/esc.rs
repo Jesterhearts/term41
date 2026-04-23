@@ -967,6 +967,7 @@ mod tests {
         let feature_permissions = FeaturePermissions::default();
         let mut macros = MacroStore::default();
         let mut drcs = DrcsStore::default();
+        let mut udks = UdkState::default();
 
         for chunk in [b"\x1b)>\x1b~\xc3".as_slice(), b"\xa1".as_slice()] {
             for action in parser.parse(chunk) {
@@ -1021,6 +1022,7 @@ mod tests {
                             .intermediates(intermediates.as_slice())
                             .action(action)
                             .feature_permissions(&feature_permissions)
+                            .udks(&mut udks)
                             .call();
                     }
                     Action::EscDispatch {
@@ -1051,6 +1053,7 @@ mod tests {
                             .drcs(&mut drcs)
                             .intermediates(intermediates.as_slice())
                             .byte(byte)
+                            .udks(&mut udks)
                             .call();
                     }
                     _ => {}

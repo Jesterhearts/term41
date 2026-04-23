@@ -840,6 +840,7 @@ pub(super) mod test_support {
         let feature_permissions = FeaturePermissions::default();
         let mut macros = MacroStore::default();
         let mut drcs = DrcsStore::default();
+        let mut udks = UdkState::default();
 
         for action in parser.parse(input) {
             // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
@@ -945,6 +946,7 @@ pub(super) mod test_support {
                         .cell_width(8)
                         .cell_height(16)
                         .feature_permissions(&feature_permissions)
+                        .udks(&mut udks)
                         .call();
                 }
                 Action::EscDispatch {
@@ -975,6 +977,7 @@ pub(super) mod test_support {
                         .drcs(&mut drcs)
                         .intermediates(intermediates.as_slice())
                         .byte(byte)
+                        .udks(&mut udks)
                         .call();
                 }
                 _ => {}
@@ -1033,6 +1036,7 @@ pub(super) mod test_support {
         let feature_permissions = FeaturePermissions::default();
         let mut macros = MacroStore::default();
         let mut drcs = DrcsStore::default();
+        let mut udks = UdkState::default();
 
         for action in parser.parse(input) {
             // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
@@ -1138,6 +1142,7 @@ pub(super) mod test_support {
                         .intermediates(intermediates.as_slice())
                         .action(action)
                         .feature_permissions(&feature_permissions)
+                        .udks(&mut udks)
                         .call();
                 }
                 Action::EscDispatch {
@@ -1168,6 +1173,7 @@ pub(super) mod test_support {
                         .drcs(&mut drcs)
                         .intermediates(intermediates.as_slice())
                         .byte(byte)
+                        .udks(&mut udks)
                         .call();
                 }
                 _ => {}
