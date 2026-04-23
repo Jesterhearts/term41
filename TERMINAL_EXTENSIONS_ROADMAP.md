@@ -139,12 +139,16 @@ Implemented:
 
 - OSC 7 current directory
 - OSC 133 prompt, command, output, and exit-status marks
+- OSC 633 prompt, command, output, exit-status marks, current-directory
+  property, and untrusted command-line metadata storage
 - prompt navigation and gutter status markers
 
 Maintenance direction:
 
 - Keep OSC 133 aligned with FinalTerm, iTerm2, WezTerm, Ghostty, and Windows
   Terminal behavior.
+- Keep OSC 633 aligned with VS Code's shell-integration subset, mapping safe
+  overlap into the same prompt model as OSC 133.
 - Preserve the distinction between host-provided semantic marks and
   terminal-owned UI. Prompt marks may annotate rows; they must not become
   trusted banners.
@@ -155,34 +159,6 @@ Security:
 - Prompt metadata is spoofable by any process that can write to the PTY.
 
 ## Planned
-
-### OSC 633 Shell Integration
-
-Status:
-
-- `Planned`
-
-Why:
-
-- VS Code's integrated terminal uses OSC 633 for richer shell integration,
-  including prompt boundaries, command boundaries, current directory, and an
-  optional nonce for command-line metadata.
-- OSC 633 overlaps with OSC 133 enough that `term41` can map the safe subset
-  into the existing shell-integration model.
-
-Scope:
-
-- Support `OSC 633 ; A/B/C/D` as aliases for existing prompt lifecycle marks.
-- Support `OSC 633 ; P ; Cwd=...` as a current-directory update, with the same
-  local-path filtering as OSC 7.
-- Treat `OSC 633 ; E ; <commandline> [; <nonce>]` as untrusted metadata unless
-  `term41` eventually owns a shell-integration script and nonce handshake.
-
-Security:
-
-- `MEDIUM`
-- Command-line metadata is useful, but spoofable. Display it only as untrusted
-  terminal-content annotation.
 
 ### Clipboard Policy Controls
 

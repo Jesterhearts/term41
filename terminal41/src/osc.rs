@@ -1,4 +1,5 @@
 use std::collections::HashMap;
+use std::path::Path;
 use std::path::PathBuf;
 use std::time::Instant;
 
@@ -40,6 +41,7 @@ pub enum OscCommand {
     ResetBg = 111,
     ResetCursorColor = 112,
     ShellIntegration = 133,
+    VscodeShellIntegration = 633,
     Iterm2 = 1337,
 }
 
@@ -62,6 +64,7 @@ impl TryFrom<u16> for OscCommand {
             111 => Ok(Self::ResetBg),
             112 => Ok(Self::ResetCursorColor),
             133 => Ok(Self::ShellIntegration),
+            633 => Ok(Self::VscodeShellIntegration),
             1337 => Ok(Self::Iterm2),
             _ => Err(()),
         }
@@ -148,6 +151,32 @@ mod process_tests {
         let prompt_row = &term.active.grid.rows[0];
         assert!(prompt_row.prompt_start);
         assert_eq!(prompt_row.exit_status, Some(0));
+    }
+
+    #[test]
+    fn osc_633_marks_prompt_lifecycle_through_process() {
+        let mut term = TestTerm::new(10, 6, 100, 16, 8);
+        term.process(b"\x1b]633;A\x1b\\");
+        term.process(b"$ ls");
+        term.process(b"\x1b]633;B\x1b\\");
+        term.process(b"\n\x1b]633;C\x1b\\");
+        term.process(b"out\n");
+        term.process(b"\x1b]633;D;7\x1b\\");
+
+        let prompt_row = &term.active.grid.rows[0];
+        assert!(prompt_row.prompt_start);
+        assert_eq!(prompt_row.exit_status, Some(7));
+        assert!(term.active.grid.rows[1].output_start);
+    }
+
+    #[test]
+    fn osc_633_cwd_property_updates_terminal_cwd() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b]633;P;Cwd=/tmp/work\x1b\\");
+        assert_eq!(
+            term.metadata.current_directory.as_deref(),
+            Some(std::path::Path::new("/tmp/work"))
+        );
     }
 
     #[test]
@@ -370,6 +399,15 @@ pub(super) fn handle_osc(
             shell_integration_phase,
             command_metas,
         ),
+        OscCommand::VscodeShellIntegration => handle_osc_633(
+            rest,
+            current_directory,
+            active_screen,
+            viewport,
+            current_prompt_row,
+            shell_integration_phase,
+            command_metas,
+        ),
         // iTerm2 proprietary commands. Image commands (File=, MultipartFile=,
         // etc.) are routed separately in terminal.rs. ReportCellSize gets a
         // reply; other non-image commands are silently accepted as no-ops.
@@ -414,6 +452,68 @@ fn handle_osc_133(
 ) {
     let (kind, args) = split_osc(rest);
     match kind {
+        b"A" | b"B" | b"C" | b"D" => handle_shell_integration_lifecycle_mark(
+            kind,
+            args,
+            screen,
+            viewport,
+            current_prompt_row,
+            shell_integration_phase,
+            command_metas,
+        ),
+        _ => {}
+    }
+}
+
+/// OSC 633 — VS Code shell integration. The safe subset maps directly onto
+/// the same row marks and metadata as OSC 133:
+///
+/// ```text
+/// OSC 633 ; A/B/C/D ST       — prompt lifecycle marks
+/// OSC 633 ; P ; Cwd=... ST   — current-directory property
+/// OSC 633 ; E ; command [; nonce] ST — untrusted command-line metadata
+/// ```
+///
+/// `E` is stored as untrusted metadata only. It never mutates the
+/// terminal-observed command text; UI code may display it as an annotation or
+/// use it as a lower-trust fallback when the screen does not contain a
+/// recoverable command line.
+fn handle_osc_633(
+    rest: &[u8],
+    current_directory: &mut Option<PathBuf>,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
+    command_metas: &mut HashMap<u64, CommandMeta>,
+) {
+    let (kind, args) = split_osc(rest);
+    match kind {
+        b"A" | b"B" | b"C" | b"D" => handle_shell_integration_lifecycle_mark(
+            kind,
+            args,
+            screen,
+            viewport,
+            current_prompt_row,
+            shell_integration_phase,
+            command_metas,
+        ),
+        b"P" => handle_osc_633_property(args, current_directory),
+        b"E" => handle_osc_633_command_line(args, *current_prompt_row, command_metas),
+        _ => {}
+    }
+}
+
+fn handle_shell_integration_lifecycle_mark(
+    kind: &[u8],
+    args: &[u8],
+    screen: &mut Screen,
+    viewport: &Viewport,
+    current_prompt_row: &mut Option<u64>,
+    shell_integration_phase: &mut ShellIntegrationPhase,
+    command_metas: &mut HashMap<u64, CommandMeta>,
+) {
+    match kind {
         b"A" => {
             let abs = mark_current_row(screen, viewport, |row| {
                 row.prompt_start = true;
@@ -424,7 +524,7 @@ fn handle_osc_133(
             });
             *current_prompt_row = Some(abs);
             *shell_integration_phase = ShellIntegrationPhase::Prompt;
-            // Seed the metadata entry so B/C/D can fill it in.
+            // Seed the metadata entry so B/C/D/E can fill it in.
             command_metas.insert(abs, CommandMeta::new());
         }
         b"B" => {
@@ -453,7 +553,7 @@ fn handle_osc_133(
         }
         b"D" => {
             *shell_integration_phase = ShellIntegrationPhase::Finished;
-            let exit = parse_osc_133_d_exit(args);
+            let exit = parse_shell_integration_exit(args);
             if let Some(abs) = *current_prompt_row
                 && let Some(local) = absolute_to_local(screen, abs)
             {
@@ -507,7 +607,7 @@ fn absolute_to_local(
 /// argument is the exit status; non-numeric or missing values are treated
 /// as success (`0`) so a shell that merely reports "command finished"
 /// without the numeric status doesn't accidentally paint every prompt red.
-fn parse_osc_133_d_exit(args: &[u8]) -> i32 {
+fn parse_shell_integration_exit(args: &[u8]) -> i32 {
     let (first, _) = split_osc(args);
     std::str::from_utf8(first)
         .ok()
@@ -710,6 +810,97 @@ fn handle_osc_7(
     };
 
     *current_directory = Some(PathBuf::from(path));
+}
+
+fn handle_osc_633_property(
+    args: &[u8],
+    current_directory: &mut Option<PathBuf>,
+) {
+    let (key, value) = match args.iter().position(|&b| b == b'=') {
+        Some(i) => (&args[..i], &args[i + 1..]),
+        None => return,
+    };
+    if key != b"Cwd" {
+        return;
+    }
+    handle_osc_633_cwd(value, current_directory);
+}
+
+fn handle_osc_633_cwd(
+    value: &[u8],
+    current_directory: &mut Option<PathBuf>,
+) {
+    if value.is_empty() {
+        *current_directory = None;
+        return;
+    }
+
+    let Ok(path) = std::str::from_utf8(value) else {
+        return;
+    };
+    if path.starts_with("file://") {
+        handle_osc_7(value, current_directory);
+        return;
+    }
+    if !Path::new(path).is_absolute() {
+        return;
+    }
+    *current_directory = Some(PathBuf::from(path));
+}
+
+fn handle_osc_633_command_line(
+    args: &[u8],
+    current_prompt_row: Option<u64>,
+    command_metas: &mut HashMap<u64, CommandMeta>,
+) {
+    let Some(prompt_abs) = current_prompt_row else {
+        return;
+    };
+    let Some(meta) = command_metas.get_mut(&prompt_abs) else {
+        return;
+    };
+    let (command_line, _) = split_osc(args);
+    let Some(command_line) = decode_osc_633_command_line(command_line) else {
+        return;
+    };
+    meta.untrusted_command_line = Some(command_line);
+}
+
+fn decode_osc_633_command_line(command_line: &[u8]) -> Option<String> {
+    let mut decoded = Vec::with_capacity(command_line.len());
+    let mut i = 0;
+    while i < command_line.len() {
+        if command_line[i] != b'\\' {
+            decoded.push(command_line[i]);
+            i += 1;
+            continue;
+        }
+
+        let escaped = *command_line.get(i + 1)?;
+        match escaped {
+            b'\\' => {
+                decoded.push(b'\\');
+                i += 2;
+            }
+            b'x' | b'X' => {
+                let hi = *command_line.get(i + 2)?;
+                let lo = *command_line.get(i + 3)?;
+                decoded.push((hex_nibble(hi)? << 4) | hex_nibble(lo)?);
+                i += 4;
+            }
+            _ => return None,
+        }
+    }
+    String::from_utf8(decoded).ok()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 /// OSC 8 — hyperlinks. `OSC 8 ; params ; URI ST` opens a hyperlink span;
@@ -1409,5 +1600,90 @@ mod tests {
         bag.move_cursor(0, 0);
         bag.dispatch(b"133;A");
         assert_eq!(bag.row_at(0).exit_status, None);
+    }
+
+    // ---- OSC 633 — VS Code shell integration ----
+
+    #[test]
+    fn osc_633_a_b_c_d_alias_osc_133_lifecycle() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.move_cursor(0, 1);
+        bag.dispatch(b"633;A");
+        bag.move_cursor(2, 1);
+        bag.dispatch(b"633;B");
+        bag.move_cursor(0, 2);
+        bag.dispatch(b"633;C");
+        bag.dispatch(b"633;D;12");
+
+        assert!(bag.row_at(1).prompt_start);
+        assert!(bag.row_at(2).output_start);
+        assert_eq!(bag.row_at(1).exit_status, Some(12));
+        let meta = bag.command_metas.get(&1).expect("prompt metadata");
+        assert_eq!(meta.command_col, Some(2));
+        assert_eq!(meta.command_row, Some(1));
+        assert_eq!(meta.output_row, Some(2));
+        assert!(meta.started_at.is_some());
+        assert!(meta.finished_at.is_some());
+    }
+
+    #[test]
+    fn osc_633_cwd_property_accepts_absolute_local_path() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"633;P;Cwd=/tmp/project");
+        assert_eq!(bag.cwd.as_deref(), Some(Path::new("/tmp/project")));
+    }
+
+    #[test]
+    fn osc_633_cwd_property_accepts_file_uri_like_osc_7() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"633;P;Cwd=file://localhost/tmp/project%20space");
+        assert_eq!(bag.cwd.as_deref(), Some(Path::new("/tmp/project space")));
+    }
+
+    #[test]
+    fn osc_633_cwd_property_rejects_relative_path() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"633;P;Cwd=relative/project");
+        assert_eq!(bag.cwd, None);
+    }
+
+    #[test]
+    fn osc_633_command_line_is_recorded_as_untrusted_metadata() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.dispatch(b"633;A");
+        bag.dispatch(b"633;E;cargo\\x20test;nonce-123");
+
+        let meta = bag.command_metas.get(&0).expect("prompt metadata");
+        assert_eq!(meta.untrusted_command_line.as_deref(), Some("cargo test"));
+    }
+
+    #[test]
+    fn osc_633_command_line_decodes_escaped_ascii_and_backslash() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.dispatch(b"633;A");
+        bag.dispatch(b"633;E;printf\\x20foo\\x3Bbar\\\\baz\\x0Aline2");
+
+        let meta = bag.command_metas.get(&0).expect("prompt metadata");
+        assert_eq!(
+            meta.untrusted_command_line.as_deref(),
+            Some("printf foo;bar\\baz\nline2")
+        );
+    }
+
+    #[test]
+    fn osc_633_command_line_invalid_escape_is_ignored() {
+        let mut bag = Bag::with_screen(10, 4);
+        bag.dispatch(b"633;A");
+        bag.dispatch(b"633;E;cargo\\qtest");
+
+        let meta = bag.command_metas.get(&0).expect("prompt metadata");
+        assert_eq!(meta.untrusted_command_line, None);
+    }
+
+    #[test]
+    fn osc_633_command_line_without_prompt_is_silent() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"633;E;cargo test;nonce-123");
+        assert!(bag.command_metas.is_empty());
     }
 }

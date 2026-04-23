@@ -48,6 +48,7 @@ use terminal41::prompt::command_text_at;
 use terminal41::prompt::find_prompt_for_screen_row;
 use terminal41::prompt::output_text_at;
 use terminal41::prompt::select_command_at;
+use terminal41::prompt::untrusted_command_line_at;
 use terminal41::selection::SelectionMode;
 use terminal41::selection::close_search;
 use terminal41::selection::copy_selection;
@@ -1808,27 +1809,38 @@ impl WindowHost {
             0 => {
                 let mut guard = target.terminal.lock();
                 let terminal = &mut *guard;
-                if let Some(cmd) = command_text_at(
+                if let Some(cmd) = popup_command_text(
                     popup.prompt_abs_row,
                     &terminal.metadata.command_metas,
                     &terminal.active,
                 ) {
-                    let cmd = cmd.trim().to_owned();
                     terminal.selection = None;
                     drop(guard);
-                    let text = format!("{cmd}\r");
-                    Self::emit_host_input(target, HostInput::PasteText(&text), true);
+                    match cmd {
+                        PopupCommandText::Observed(cmd) => {
+                            let text = format!("{}\r", cmd.trim());
+                            Self::emit_host_input(target, HostInput::PasteText(&text), true);
+                        }
+                        PopupCommandText::Untrusted(cmd) => {
+                            Self::emit_host_input(target, HostInput::PasteText(&cmd), true);
+                            self.show_toast("Pasted command metadata; review before Enter");
+                        }
+                    }
                 }
             }
             1 => {
                 let mut guard = target.terminal.lock();
                 let terminal = &mut *guard;
-                if let Some(text) = command_text_at(
+                if let Some(text) = popup_command_text(
                     popup.prompt_abs_row,
                     &terminal.metadata.command_metas,
                     &terminal.active,
                 ) {
-                    copy_to_clipboard(&mut terminal.clipboard, text.trim());
+                    let text = match text {
+                        PopupCommandText::Observed(text) => text.trim().to_owned(),
+                        PopupCommandText::Untrusted(text) => text,
+                    };
+                    copy_to_clipboard(&mut terminal.clipboard, &text);
                 }
                 terminal.selection = None;
             }
@@ -2081,6 +2093,42 @@ mod permission_tests {
     }
 }
 
+#[cfg(test)]
+mod popup_command_tests {
+    use terminal41::test_support::TestTerm;
+
+    use super::*;
+
+    #[test]
+    fn popup_command_text_prefers_screen_observed_command() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        term.process(b"\x1b]633;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]633;B\x07");
+        term.process(b"cargo test");
+        term.process(b"\x1b]633;E;cargo\\x20metadata\x07");
+
+        let text = popup_command_text(0, &term.metadata.command_metas, &term.active);
+        match text {
+            Some(PopupCommandText::Observed(text)) => assert_eq!(text, "cargo test"),
+            _ => panic!("expected observed command text"),
+        }
+    }
+
+    #[test]
+    fn popup_command_text_falls_back_to_untrusted_metadata() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        term.process(b"\x1b]633;A\x07");
+        term.process(b"\x1b]633;E;cargo\\x20test\x07");
+
+        let text = popup_command_text(0, &term.metadata.command_metas, &term.active);
+        match text {
+            Some(PopupCommandText::Untrusted(text)) => assert_eq!(text, "cargo test"),
+            _ => panic!("expected untrusted command text"),
+        }
+    }
+}
+
 #[derive(Clone, Copy)]
 enum WindowButton {
     Minimize = 0,
@@ -2098,6 +2146,11 @@ enum TabMenuActionLocal {
 const RESIZE_BORDER: f32 = 5.0;
 const TAB_MENU_WIDTH_CELLS: f32 = 16.0;
 const POPUP_WIDTH_CELLS: f32 = 20.0;
+
+enum PopupCommandText {
+    Observed(String),
+    Untrusted(String),
+}
 
 fn popup_item_at(
     popup: Option<&renderer::GutterPopup>,
@@ -2142,6 +2195,18 @@ fn format_duration(d: Duration) -> String {
         let m = ((secs - h * 3600.0) / 60.0).floor();
         format!("{h:.0}h {m:.0}m")
     }
+}
+
+fn popup_command_text(
+    prompt_abs: u64,
+    command_metas: &HashMap<u64, terminal41::CommandMeta>,
+    screen: &terminal41::Screen,
+) -> Option<PopupCommandText> {
+    if let Some(command) = command_text_at(prompt_abs, command_metas, screen) {
+        return Some(PopupCommandText::Observed(command));
+    }
+    untrusted_command_line_at(prompt_abs, command_metas)
+        .map(|command| PopupCommandText::Untrusted(command.to_owned()))
 }
 
 /// Maximum time between clicks that still count as part of a sequence.

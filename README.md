@@ -173,7 +173,8 @@ triggered the prompt.
 - Kitty keyboard protocol
 - xterm mouse tracking modes and encodings
 - scrollback search
-- OSC 133 shell integration with prompt navigation and gutter status markers
+- OSC 133 / OSC 633 shell integration with prompt navigation and gutter status
+  markers
 - copy/paste, primary selection, hyperlink opening, and image paste as wallpaper
 
 </details>

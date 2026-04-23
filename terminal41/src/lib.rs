@@ -169,8 +169,8 @@ pub enum ShellIntegrationPhase {
     Finished,
 }
 
-/// Per-prompt metadata recorded from OSC 133 B/C/D sequences. Keyed by
-/// the absolute row of the prompt (`A` mark) in
+/// Per-prompt metadata recorded from OSC 133 / OSC 633 shell-integration
+/// sequences. Keyed by the absolute row of the prompt (`A` mark) in
 /// [`TerminalMetadata::command_metas`]. Enables command selection, rerun, text
 /// extraction, and duration display in the gutter popup.
 #[derive(Debug)]
@@ -187,6 +187,11 @@ pub struct CommandMeta {
     pub started_at: Option<Instant>,
     /// When the command finished (timestamped at `D`).
     pub finished_at: Option<Instant>,
+    /// Command line reported by OSC 633 `E`. This is host-provided metadata,
+    /// not terminal-observed text. Screen-extracted command text remains the
+    /// preferred source; UI code may only display this as an annotation or
+    /// use it as a lower-trust fallback when no observed command text exists.
+    pub untrusted_command_line: Option<String>,
 }
 
 impl CommandMeta {
@@ -197,6 +202,7 @@ impl CommandMeta {
             output_row: None,
             started_at: None,
             finished_at: None,
+            untrusted_command_line: None,
         }
     }
 }
@@ -253,8 +259,8 @@ pub struct TerminalMetadata {
     /// Per-prompt metadata (command column, output row, timing) keyed by the
     /// absolute row of the prompt's `A` mark.
     pub command_metas: HashMap<u64, CommandMeta>,
-    /// Most recent OSC 133 phase. Used only as a compatibility hint; terminal
-    /// semantics still come from explicit VT input.
+    /// Most recent OSC 133 / OSC 633 phase. Used only as a compatibility hint;
+    /// terminal semantics still come from explicit VT input.
     pub shell_integration_phase: ShellIntegrationPhase,
 }
 

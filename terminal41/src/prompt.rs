@@ -50,8 +50,27 @@ fn running_command_text(
     if !command_running {
         return None;
     }
+    display_command_text_at(prompt_abs, command_metas, screen)
+}
+
+fn display_command_text_at(
+    prompt_abs: u64,
+    command_metas: &HashMap<u64, CommandMeta>,
+    screen: &Screen,
+) -> Option<String> {
+    if let Some(command) = untrusted_command_line_at(prompt_abs, command_metas) {
+        return flatten_status_command_text(command);
+    }
     let command = command_text_at(prompt_abs, command_metas, screen)?;
-    let flattened = command.split_whitespace().collect::<Vec<_>>().join(" ");
+    flatten_status_command_text(&command)
+}
+
+fn flatten_status_command_text(command: &str) -> Option<String> {
+    let sanitized: String = command
+        .chars()
+        .map(|ch| if ch.is_control() { ' ' } else { ch })
+        .collect();
+    let flattened = sanitized.split_whitespace().collect::<Vec<_>>().join(" ");
     (!flattened.is_empty()).then_some(flattened)
 }
 
@@ -153,6 +172,18 @@ pub fn command_text_at(
     }
     let text = extract_rows_text(screen, start_row, start_col, end_row);
     if text.is_empty() { None } else { Some(text) }
+}
+
+/// Return the OSC 633 `E` command-line metadata associated with a prompt row.
+pub fn untrusted_command_line_at(
+    prompt_abs: u64,
+    command_metas: &HashMap<u64, CommandMeta>,
+) -> Option<&str> {
+    command_metas
+        .get(&prompt_abs)?
+        .untrusted_command_line
+        .as_deref()
+        .filter(|text| !text.is_empty())
 }
 
 fn command_text_end(
@@ -306,6 +337,24 @@ mod tests {
         assert_eq!(
             term.indicator_status_text().as_deref(),
             Some("/ > tmp > project")
+        );
+    }
+
+    #[test]
+    fn indicator_status_prefers_osc_633_command_metadata() {
+        let mut term = TestTerm::new(24, 4, 100, 16, 8);
+        term.metadata.current_directory = Some(PathBuf::from("/tmp/project"));
+        term.process(b"\x1b[1$~");
+        term.process(b"\x1b]633;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]633;B\x07");
+        term.process(b"screen text");
+        term.process(b"\x1b]633;E;cargo\\x20test\\x20--workspace\x07");
+        term.process(b"\x1b]633;C\x07");
+
+        assert_eq!(
+            term.indicator_status_text().as_deref(),
+            Some("/ > tmp > project > cargo test --workspace")
         );
     }
 
