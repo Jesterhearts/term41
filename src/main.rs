@@ -7,7 +7,6 @@ mod output_recording;
 mod perf_ctrl_c;
 mod renderer;
 
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::collections::VecDeque;
 use std::fmt;
@@ -249,7 +248,7 @@ struct Tab {
 
 struct InputEndpoint {
     terminal: Arc<Mutex<Terminal>>,
-    writer: RefCell<PtyWriter>,
+    writer: PtyWriter,
     recorder: RecorderControl,
 }
 
@@ -350,9 +349,9 @@ impl WindowHost {
         }
     }
 
-    fn active_input_target(&self) -> Option<&InputEndpoint> {
+    fn active_input_target(&mut self) -> Option<&mut InputEndpoint> {
         let tab_id = self.active_input_tab?;
-        self.input_endpoints.get(&tab_id)
+        self.input_endpoints.get_mut(&tab_id)
     }
 
     fn startup_tab_titles(&self) -> Vec<(String, bool)> {
@@ -775,23 +774,21 @@ impl WindowHost {
     }
 
     fn write_host_bytes(
-        &self,
-        target: &InputEndpoint,
+        target: &mut InputEndpoint,
         host_bytes: Vec<u8>,
         reset_viewport: bool,
     ) {
         if host_bytes.is_empty() {
             return;
         }
-        let _ = target.writer.borrow_mut().write(&host_bytes);
+        let _ = target.writer.write(&host_bytes);
         if reset_viewport {
             view::reset_viewport(&mut target.terminal.lock().active);
         }
     }
 
     fn emit_host_input(
-        &self,
-        target: &InputEndpoint,
+        target: &mut InputEndpoint,
         input: HostInput<'_>,
         reset_viewport: bool,
     ) {
@@ -799,7 +796,7 @@ impl WindowHost {
             let mut terminal = target.terminal.lock();
             apply_host_input(&mut terminal, input)
         };
-        self.write_host_bytes(target, effects.host_bytes, reset_viewport);
+        Self::write_host_bytes(target, effects.host_bytes, reset_viewport);
     }
 
     fn apply_terminal_effects(
@@ -807,7 +804,7 @@ impl WindowHost {
         tab_id: TabId,
         effects: TerminalEffects,
     ) {
-        let Some(target) = self.input_endpoints.get(&tab_id) else {
+        let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return;
         };
         let TerminalEffects {
@@ -816,7 +813,7 @@ impl WindowHost {
             bell,
             clipboard_requests,
         } = effects;
-        self.write_host_bytes(target, host_bytes, false);
+        Self::write_host_bytes(target, host_bytes, false);
         if let Some((cols, rows)) = resize_request
             && self.active_input_tab == Some(tab_id)
         {
@@ -857,14 +854,14 @@ impl WindowHost {
         if decision != PermissionDecision::Allow {
             return;
         }
-        let Some(target) = self.input_endpoints.get(&tab_id) else {
+        let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return;
         };
         let host_bytes = {
             let mut terminal = target.terminal.lock();
             terminal41::io::clipboard::apply_clipboard_request(&mut terminal.clipboard, request)
         };
-        self.write_host_bytes(target, host_bytes, false);
+        Self::write_host_bytes(target, host_bytes, false);
     }
 
     fn handle_focus_event(
@@ -875,7 +872,7 @@ impl WindowHost {
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            self.emit_host_input(target, HostInput::FocusChanged { focused }, true);
+            Self::emit_host_input(target, HostInput::FocusChanged { focused }, true);
         }
         self.notify_interaction_changed();
     }
@@ -936,7 +933,7 @@ impl WindowHost {
         action: Action,
         tab_id: TabId,
     ) -> bool {
-        let Some(target) = self.input_endpoints.get(&tab_id) else {
+        let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return true;
         };
         match action {
@@ -967,7 +964,7 @@ impl WindowHost {
                 true
             }
             Action::Paste => {
-                self.emit_host_input(
+                Self::emit_host_input(
                     target,
                     HostInput::PasteFromClipboard {
                         kind: ClipboardKind::Clipboard,
@@ -1070,13 +1067,15 @@ impl WindowHost {
             return;
         }
 
-        let target = &self.input_endpoints[&active_tab_id];
+        let Some(target) = self.input_endpoints.get_mut(&active_tab_id) else {
+            return;
+        };
 
         if let Some(selector) = dec_udk_selector(&key, self.modifiers) {
             let bytes = { target.terminal.lock().user_defined_key(selector) };
             if let Some(bytes) = bytes {
                 view::reset_viewport(&mut target.terminal.lock().active);
-                let _ = target.writer.borrow_mut().write(&bytes);
+                let _ = target.writer.write(&bytes);
                 self.notify_interaction_changed();
                 return;
             }
@@ -1100,7 +1099,7 @@ impl WindowHost {
         };
         if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags, c1_mode) {
             view::reset_viewport(&mut target.terminal.lock().active);
-            let _ = target.writer.borrow_mut().write(&bytes);
+            let _ = target.writer.write(&bytes);
             self.notify_interaction_changed();
             return;
         }
@@ -1118,9 +1117,9 @@ impl WindowHost {
                 }
                 view::reset_viewport(&mut target.terminal.lock().active);
                 if self.modifiers.alt_key() {
-                    let _ = target.writer.borrow_mut().write(&[0x1b, byte]);
+                    let _ = target.writer.write(&[0x1b, byte]);
                 } else {
-                    let _ = target.writer.borrow_mut().write(&[byte]);
+                    let _ = target.writer.write(&[byte]);
                 }
                 self.notify_interaction_changed();
                 return;
@@ -1168,7 +1167,7 @@ impl WindowHost {
 
         if let Some(bytes) = bytes {
             view::reset_viewport(&mut target.terminal.lock().active);
-            let _ = target.writer.borrow_mut().write(&bytes);
+            let _ = target.writer.write(&bytes);
             self.notify_interaction_changed();
         }
     }
@@ -1215,7 +1214,7 @@ impl WindowHost {
             }
             bytes
         };
-        self.write_host_bytes(target, bytes, false);
+        Self::write_host_bytes(target, bytes, false);
     }
 
     fn handle_ime_commit(
@@ -1238,7 +1237,7 @@ impl WindowHost {
             text.as_bytes().to_vec()
         };
         view::reset_viewport(&mut target.terminal.lock().active);
-        let _ = target.writer.borrow_mut().write(&bytes);
+        let _ = target.writer.write(&bytes);
         self.notify_interaction_changed();
     }
 
@@ -1293,17 +1292,19 @@ impl WindowHost {
                 return;
             }
             self.last_motion_cell = Some(cell);
+            let button = self.mouse_buttons.primary_held();
+            let mods = self.mouse_modifiers();
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            self.emit_host_input(
+            Self::emit_host_input(
                 target,
                 HostInput::Mouse(HostMouse {
                     kind: MouseEventKind::Motion,
-                    button: self.mouse_buttons.primary_held(),
+                    button,
                     col: cell.0,
                     row: cell.1,
-                    mods: self.mouse_modifiers(),
+                    mods,
                 }),
                 true,
             );
@@ -1532,17 +1533,18 @@ impl WindowHost {
             } else {
                 MouseEventKind::Release
             };
+            let mods = self.mouse_modifiers();
             let Some(target) = self.active_input_target() else {
                 return;
             };
-            self.emit_host_input(
+            Self::emit_host_input(
                 target,
                 HostInput::Mouse(HostMouse {
                     kind,
                     button: term_button,
                     col,
                     row,
-                    mods: self.mouse_modifiers(),
+                    mods,
                 }),
                 true,
             );
@@ -1616,7 +1618,7 @@ impl WindowHost {
                         terminal.selection = None;
                     } else {
                         drop(guard);
-                        self.emit_host_input(
+                        Self::emit_host_input(
                             target,
                             HostInput::PasteFromClipboard {
                                 kind: ClipboardKind::Clipboard,
@@ -1658,6 +1660,7 @@ impl WindowHost {
 
         if self.forward_mouse_to_app() {
             let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+            let mods = self.mouse_modifiers();
             let Some(target) = self.active_input_target() else {
                 return;
             };
@@ -1673,7 +1676,7 @@ impl WindowHost {
                                 button: TermMouseButton::WheelUp,
                                 col,
                                 row,
-                                mods: self.mouse_modifiers(),
+                                mods,
                             }),
                         ));
                     }
@@ -1686,7 +1689,7 @@ impl WindowHost {
                                 button: TermMouseButton::WheelDown,
                                 col,
                                 row,
-                                mods: self.mouse_modifiers(),
+                                mods,
                             }),
                         ));
                     }
@@ -1700,7 +1703,7 @@ impl WindowHost {
                                 button: TermMouseButton::WheelLeft,
                                 col,
                                 row,
-                                mods: self.mouse_modifiers(),
+                                mods,
                             }),
                         ));
                     }
@@ -1713,14 +1716,14 @@ impl WindowHost {
                                 button: TermMouseButton::WheelRight,
                                 col,
                                 row,
-                                mods: self.mouse_modifiers(),
+                                mods,
                             }),
                         ));
                     }
                 }
                 effects
             };
-            self.write_host_bytes(target, effects.host_bytes, true);
+            Self::write_host_bytes(target, effects.host_bytes, true);
             self.notify_interaction_changed();
             return;
         }
@@ -1814,7 +1817,7 @@ impl WindowHost {
                     terminal.selection = None;
                     drop(guard);
                     let text = format!("{cmd}\r");
-                    self.emit_host_input(target, HostInput::PasteText(&text), true);
+                    Self::emit_host_input(target, HostInput::PasteText(&text), true);
                 }
             }
             1 => {
@@ -1864,10 +1867,10 @@ impl WindowHost {
         }
     }
 
-    fn forward_mouse_to_app(&self) -> bool {
+    fn forward_mouse_to_app(&mut self) -> bool {
+        let is_shift = self.modifiers.shift_key();
         self.active_input_target().is_some_and(|target| {
-            host::mouse_tracking_enabled(target.terminal.lock().modes.mouse_tracking)
-                && !self.modifiers.shift_key()
+            host::mouse_tracking_enabled(target.terminal.lock().modes.mouse_tracking) && !is_shift
         })
     }
 
@@ -1887,7 +1890,7 @@ impl WindowHost {
     }
 
     fn cell_at(
-        &self,
+        &mut self,
         x: f64,
         y: f64,
     ) -> (u32, u32) {
@@ -2200,7 +2203,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     tab_id,
                     InputEndpoint {
                         terminal,
-                        writer: RefCell::new(writer),
+                        writer,
                         recorder,
                     },
                 );
@@ -2731,7 +2734,7 @@ fn main() {
             TabId(0),
             InputEndpoint {
                 terminal: terminal.clone(),
-                writer: RefCell::new(pty_writer),
+                writer: pty_writer,
                 recorder: initial_recorder,
             },
         )]),
