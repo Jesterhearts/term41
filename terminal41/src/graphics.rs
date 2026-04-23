@@ -24,14 +24,19 @@ pub(crate) fn handle_kitty_graphics(
         return;
     }
 
-    let cmd = image41::kitty::parse_command(&data[1..]);
-    let cmd = match chunked.feed(cmd) {
-        Some(cmd) => cmd,
-        None => return,
+    let parsed = image41::kitty::parse_command(&data[1..]);
+    let cmd = if parsed.action == b'd' {
+        chunked.clear();
+        parsed
+    } else {
+        match chunked.feed(parsed) {
+            Some(cmd) => cmd,
+            None => return,
+        }
     };
 
     match cmd.action {
-        b'q' => handle_kitty_query(&cmd, store, c1_mode, pending_output),
+        b'q' => handle_kitty_query(&cmd, c1_mode, pending_output),
         b'T' => handle_kitty_transmit_display(
             &cmd,
             store,
@@ -55,7 +60,23 @@ pub(crate) fn handle_kitty_graphics(
             c1_mode,
             pending_output,
         ),
-        b'd' => handle_kitty_delete(&cmd, screen, store, cell_height),
+        b'd' => handle_kitty_delete(
+            &cmd,
+            screen,
+            viewport,
+            store,
+            chunked,
+            cell_height,
+            cell_width,
+        ),
+        b'a' | b'c' | b'f' => send_kitty_response(
+            &cmd,
+            response_image_id(&cmd),
+            false,
+            "ENOTSUP",
+            c1_mode,
+            pending_output,
+        ),
         _ => {}
     }
 }
@@ -68,21 +89,42 @@ fn decode_kitty_image(cmd: &image41::kitty::KittyCommand) -> Option<image41::Dec
     }
 }
 
+fn unsupported_transmission(cmd: &image41::kitty::KittyCommand) -> Option<&'static str> {
+    if cmd.transmission == b's' {
+        Some("ENOTSUP")
+    } else {
+        None
+    }
+}
+
+fn command_has_conflicting_ids(cmd: &image41::kitty::KittyCommand) -> bool {
+    cmd.image_id != 0 && cmd.image_number != 0
+}
+
+fn response_image_id(cmd: &image41::kitty::KittyCommand) -> u32 {
+    cmd.image_id
+}
+
 fn place_kitty_image(
     image: image41::DecodedImage,
     cmd: &image41::kitty::KittyCommand,
+    kitty_image_id: u32,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
     cell_height: u32,
     cell_width: u32,
-) {
+) -> Result<(), &'static str> {
+    if cmd.virtual_placement {
+        return Err("ENOTSUP");
+    }
+
     let image = image41::kitty::crop_source_rect(image, cmd);
 
     let id = *next_image_id;
     *next_image_id += 1;
 
-    let row = screen::active_row_index(screen, viewport);
+    let (row, col, move_cursor) = placement_anchor(cmd, screen, viewport)?;
     let (display_width, display_height) = match (cmd.columns > 0, cmd.rows > 0) {
         (true, true) => (cmd.columns * cell_width, cmd.rows * cell_height),
         (true, false) => {
@@ -108,28 +150,26 @@ fn place_kitty_image(
 
     let image_rows = display_height.div_ceil(cell_height);
 
-    crate::image::remove_overlapping(
-        &mut screen.images,
-        row,
-        image_rows.max(1) as usize,
-        screen.cursor.col,
-        cell_height,
-    );
-
     screen.images.insert(
         id,
         PlacedImage {
             image,
             id,
+            kitty_image_id: (kitty_image_id != 0).then_some(kitty_image_id),
+            kitty_placement_id: (kitty_image_id != 0 && cmd.placement_id != 0)
+                .then_some(cmd.placement_id),
             row,
-            col: screen.cursor.col,
+            col,
             display_width,
             display_height,
+            cell_x_offset: cmd.cell_x_offset,
+            cell_y_offset: cmd.cell_y_offset,
+            z_index: cmd.z_index,
             placed_at: Instant::now(),
         },
     );
 
-    if !cmd.no_move_cursor {
+    if move_cursor && !cmd.no_move_cursor {
         let advance_rows = image_rows;
         for _ in 0..advance_rows {
             screen.cursor.row += 1;
@@ -140,6 +180,34 @@ fn place_kitty_image(
         }
         screen.cursor.col = 0;
     }
+
+    Ok(())
+}
+
+fn placement_anchor(
+    cmd: &image41::kitty::KittyCommand,
+    screen: &Screen,
+    viewport: &Viewport,
+) -> Result<(usize, u32, bool), &'static str> {
+    if cmd.parent_image_id == 0 && cmd.parent_placement_id == 0 {
+        return Ok((
+            screen::active_row_index(screen, viewport),
+            screen.cursor.col,
+            true,
+        ));
+    }
+    let Some(parent) = screen.images.values().find(|img| {
+        img.kitty_image_id == Some(cmd.parent_image_id)
+            && img.kitty_placement_id.unwrap_or(0) == cmd.parent_placement_id
+    }) else {
+        return Err("ENOPARENT");
+    };
+
+    let row = parent
+        .row
+        .saturating_add_signed(cmd.relative_row_offset as isize);
+    let col = parent.col.saturating_add_signed(cmd.relative_col_offset);
+    Ok((row, col, false))
 }
 
 fn send_kitty_response(
@@ -157,21 +225,48 @@ fn send_kitty_response(
         return;
     }
     let status = if ok { "OK" } else { message };
+    let image_number = if cmd.image_number != 0 {
+        format!(",I={}", cmd.image_number)
+    } else {
+        String::new()
+    };
+    let placement = if cmd.placement_id != 0 && image_id != 0 {
+        format!(",p={}", cmd.placement_id)
+    } else {
+        String::new()
+    };
     conformance::write_apc(
         pending_output,
         c1_mode,
-        format_args!("Gi={image_id};{status}"),
+        format_args!("Gi={image_id}{image_number}{placement};{status}"),
     );
 }
 
 fn handle_kitty_query(
     cmd: &image41::kitty::KittyCommand,
-    store: &mut image41::kitty::KittyImageStore,
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
-    let id = store.resolve_id(cmd);
-    send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
+    if command_has_conflicting_ids(cmd) {
+        send_kitty_response(
+            cmd,
+            response_image_id(cmd),
+            false,
+            "EINVAL",
+            c1_mode,
+            pending_output,
+        );
+        return;
+    }
+    let id = response_image_id(cmd);
+    if let Some(message) = unsupported_transmission(cmd) {
+        send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
+        return;
+    }
+    match decode_kitty_image(cmd) {
+        Some(_) => send_kitty_response(cmd, id, true, "", c1_mode, pending_output),
+        None => send_kitty_response(cmd, id, false, "EINVAL", c1_mode, pending_output),
+    }
 }
 
 fn handle_kitty_transmit(
@@ -180,10 +275,34 @@ fn handle_kitty_transmit(
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
-    let id = store.resolve_id(cmd);
+    if command_has_conflicting_ids(cmd) {
+        send_kitty_response(
+            cmd,
+            response_image_id(cmd),
+            false,
+            "EINVAL",
+            c1_mode,
+            pending_output,
+        );
+        return;
+    }
+    if let Some(message) = unsupported_transmission(cmd) {
+        send_kitty_response(
+            cmd,
+            response_image_id(cmd),
+            false,
+            message,
+            c1_mode,
+            pending_output,
+        );
+        return;
+    }
+    let id = store.resolve_transmission_id(cmd);
     match decode_kitty_image(cmd) {
         Some(image) => {
-            store.store(id, image);
+            if id != 0 {
+                store.store(id, image);
+            }
             send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
         }
         None => send_kitty_response(cmd, id, false, "EINVAL", c1_mode, pending_output),
@@ -201,20 +320,50 @@ fn handle_kitty_transmit_display(
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
-    let id = store.resolve_id(cmd);
+    if command_has_conflicting_ids(cmd) {
+        send_kitty_response(
+            cmd,
+            response_image_id(cmd),
+            false,
+            "EINVAL",
+            c1_mode,
+            pending_output,
+        );
+        return;
+    }
+    if let Some(message) = unsupported_transmission(cmd) {
+        send_kitty_response(
+            cmd,
+            response_image_id(cmd),
+            false,
+            message,
+            c1_mode,
+            pending_output,
+        );
+        return;
+    }
+    let id = store.resolve_transmission_id(cmd);
     match decode_kitty_image(cmd) {
         Some(image) => {
-            store.store(id, image.clone());
-            place_kitty_image(
+            if id != 0 {
+                store.store(id, image.clone());
+            }
+            let placed = place_kitty_image(
                 image,
                 cmd,
+                id,
                 screen,
                 viewport,
                 next_image_id,
                 cell_height,
                 cell_width,
             );
-            send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
+            match placed {
+                Ok(()) => send_kitty_response(cmd, id, true, "", c1_mode, pending_output),
+                Err(message) => {
+                    send_kitty_response(cmd, id, false, message, c1_mode, pending_output)
+                }
+            }
         }
         None => send_kitty_response(cmd, id, false, "EINVAL", c1_mode, pending_output),
     }
@@ -231,20 +380,47 @@ fn handle_kitty_place(
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
 ) {
-    let id = store.resolve_id(cmd);
+    if command_has_conflicting_ids(cmd) {
+        send_kitty_response(
+            cmd,
+            response_image_id(cmd),
+            false,
+            "EINVAL",
+            c1_mode,
+            pending_output,
+        );
+        return;
+    }
+    let Some(id) = store.resolve_existing_id(cmd) else {
+        send_kitty_response(
+            cmd,
+            response_image_id(cmd),
+            false,
+            "ENOENT",
+            c1_mode,
+            pending_output,
+        );
+        return;
+    };
     match store.get(id) {
         Some(image) => {
             let image = image.clone();
-            place_kitty_image(
+            let placed = place_kitty_image(
                 image,
                 cmd,
+                id,
                 screen,
                 viewport,
                 next_image_id,
                 cell_height,
                 cell_width,
             );
-            send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
+            match placed {
+                Ok(()) => send_kitty_response(cmd, id, true, "", c1_mode, pending_output),
+                Err(message) => {
+                    send_kitty_response(cmd, id, false, message, c1_mode, pending_output)
+                }
+            }
         }
         None => send_kitty_response(cmd, id, false, "ENOENT", c1_mode, pending_output),
     }
@@ -253,9 +429,13 @@ fn handle_kitty_place(
 fn handle_kitty_delete(
     cmd: &image41::kitty::KittyCommand,
     screen: &mut Screen,
+    viewport: &Viewport,
     store: &mut image41::kitty::KittyImageStore,
+    chunked: &mut image41::kitty::ChunkedTransmission,
     cell_height: u32,
+    cell_width: u32,
 ) {
+    chunked.clear();
     let uppercase = cmd.delete.is_ascii_uppercase();
     match cmd.delete.to_ascii_lowercase() {
         b'a' | 0 => {
@@ -267,53 +447,123 @@ fn handle_kitty_delete(
         b'i' => {
             let id = cmd.image_id;
             if cmd.placement_id != 0 {
-                if let Some(stored) = store.get(id) {
-                    let (sw, sh) = (stored.width, stored.height);
-                    screen
-                        .images
-                        .retain(|_, img| img.image.width != sw || img.image.height != sh);
-                }
-            } else if let Some(stored) = store.get(id) {
-                let (sw, sh) = (stored.width, stored.height);
+                screen.images.retain(|_, img| {
+                    !(img.kitty_image_id == Some(id)
+                        && img.kitty_placement_id == Some(cmd.placement_id))
+                });
+            } else {
                 screen
                     .images
-                    .retain(|_, img| img.image.width != sw || img.image.height != sh);
+                    .retain(|_, img| img.kitty_image_id != Some(id));
+            }
+            if uppercase {
+                store.remove(id);
+            }
+        }
+        b'n' => {
+            let Some(id) = store.resolve_existing_id(cmd) else {
+                return;
+            };
+            if cmd.placement_id != 0 {
+                screen.images.retain(|_, img| {
+                    !(img.kitty_image_id == Some(id)
+                        && img.kitty_placement_id == Some(cmd.placement_id))
+                });
+            } else {
+                screen
+                    .images
+                    .retain(|_, img| img.kitty_image_id != Some(id));
             }
             if uppercase {
                 store.remove(id);
             }
         }
         b'c' => {
-            let cursor_row = screen.grid.active_row_index(
-                &screen.cursor,
-                &Viewport {
-                    rows: screen.grid.rows.len() as u32,
-                    cols: 0,
-                    top: 0,
-                },
-            );
+            let cursor_row = screen::active_row_index(screen, viewport);
             let cursor_col = screen.cursor.col;
             screen.images.retain(|_, img| {
-                if img.col != cursor_col {
-                    return true;
-                }
-                let img_rows = img.image.height.div_ceil(cell_height).max(1) as usize;
-                let img_bottom = img.row + img_rows;
-                !(img.row <= cursor_row && cursor_row < img_bottom)
+                !placement_intersects_cell(img, cursor_row, cursor_col, cell_height, cell_width)
+            });
+        }
+        b'p' => {
+            let row = viewport.top + cmd.src_y.saturating_sub(1) as usize;
+            let col = cmd.src_x.saturating_sub(1);
+            screen.images.retain(|_, img| {
+                !placement_intersects_cell(img, row, col, cell_height, cell_width)
+            });
+        }
+        b'q' => {
+            let row = viewport.top + cmd.src_y.saturating_sub(1) as usize;
+            let col = cmd.src_x.saturating_sub(1);
+            screen.images.retain(|_, img| {
+                img.z_index != cmd.z_index
+                    || !placement_intersects_cell(img, row, col, cell_height, cell_width)
             });
         }
         b'r' => {
             let lo = cmd.src_x;
             let hi = cmd.src_y;
-            if let Some(lo_stored) = store.get(lo) {
-                let _ = lo_stored;
-            }
+            screen.images.retain(|_, img| {
+                img.kitty_image_id
+                    .map(|id| id < lo || id > hi)
+                    .unwrap_or(true)
+            });
             if uppercase {
                 store.remove_range(lo, hi);
             }
         }
+        b'x' => {
+            let col = cmd.src_x.saturating_sub(1);
+            screen
+                .images
+                .retain(|_, img| !placement_intersects_col(img, col, cell_width));
+        }
+        b'y' => {
+            let row = viewport.top + cmd.src_y.saturating_sub(1) as usize;
+            screen
+                .images
+                .retain(|_, img| !placement_intersects_row(img, row, cell_height));
+        }
+        b'z' => {
+            screen.images.retain(|_, img| img.z_index != cmd.z_index);
+        }
         _ => {}
     }
+}
+
+fn placement_intersects_cell(
+    img: &PlacedImage,
+    row: usize,
+    col: u32,
+    cell_height: u32,
+    cell_width: u32,
+) -> bool {
+    placement_intersects_row(img, row, cell_height)
+        && placement_intersects_col(img, col, cell_width)
+}
+
+fn placement_intersects_row(
+    img: &PlacedImage,
+    row: usize,
+    cell_height: u32,
+) -> bool {
+    let top = img.row as u64 * cell_height as u64 + img.cell_y_offset as u64;
+    let bottom = top + img.display_height as u64;
+    let cell_top = row as u64 * cell_height as u64;
+    let cell_bottom = cell_top + cell_height as u64;
+    top < cell_bottom && bottom > cell_top
+}
+
+fn placement_intersects_col(
+    img: &PlacedImage,
+    col: u32,
+    cell_width: u32,
+) -> bool {
+    let left = img.col as u64 * cell_width as u64 + img.cell_x_offset as u64;
+    let right = left + img.display_width as u64;
+    let cell_left = col as u64 * cell_width as u64;
+    let cell_right = cell_left + cell_width as u64;
+    left < cell_right && right > cell_left
 }
 
 pub(crate) fn is_iterm_image_cmd(rest: &[u8]) -> bool {
@@ -427,10 +677,15 @@ fn place_iterm_image(
         PlacedImage {
             image,
             id,
+            kitty_image_id: None,
+            kitty_placement_id: None,
             row,
             col: screen.cursor.col,
             display_width,
             display_height,
+            cell_x_offset: 0,
+            cell_y_offset: 0,
+            z_index: 0,
             placed_at: Instant::now(),
         },
     );
@@ -444,5 +699,32 @@ fn place_iterm_image(
             }
         }
         screen.cursor.col = 0;
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use crate::test_support::TestTerm;
+
+    #[test]
+    fn kitty_shared_memory_query_is_explicitly_unsupported() {
+        let mut term = TestTerm::new_80x24();
+
+        term.process(b"\x1b_Ga=q,t=s,i=7;AAAA\x1b\\");
+
+        assert_eq!(term.take_pending_output(), b"\x1b_Gi=7;ENOTSUP\x1b\\");
+    }
+
+    #[test]
+    fn kitty_shared_memory_transmit_does_not_allocate_image_number() {
+        let mut term = TestTerm::new_80x24();
+
+        term.process(b"\x1b_Ga=t,t=s,I=13;AAAA\x1b\\");
+        term.process(b"\x1b_Ga=p,I=13\x1b\\");
+
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1b_Gi=0,I=13;ENOTSUP\x1b\\\x1b_Gi=0,I=13;ENOENT\x1b\\"
+        );
     }
 }

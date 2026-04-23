@@ -1171,7 +1171,8 @@ impl Renderer {
         preedit: Option<&crate::renderer::PreeditState>,
     ) {
         let layout = self.frame_layout(font_system, tabs);
-        let image_geometry = self.build_image_geometry(visible_images, &layout);
+        let under_text_image_geometry = self.build_image_geometry(visible_images, &layout, true);
+        let over_text_image_geometry = self.build_image_geometry(visible_images, &layout, false);
         let geometry = self.build_render_geometry(
             font_system,
             snap,
@@ -1184,7 +1185,12 @@ impl Renderer {
             preedit,
             &layout,
         );
-        self.submit_render_passes(acquired, geometry, image_geometry);
+        self.submit_render_passes(
+            acquired,
+            geometry,
+            under_text_image_geometry,
+            over_text_image_geometry,
+        );
     }
 
     fn frame_layout(
@@ -1207,9 +1213,13 @@ impl Renderer {
         &mut self,
         visible_images: &[VisibleImage],
         layout: &FrameLayout,
+        under_text: bool,
     ) -> ImageGeometry {
         let mut geometry = ImageGeometry::default();
         for vis in visible_images {
+            if (vis.z_index < 0) != under_text {
+                continue;
+            }
             let entry = match self.image_atlas.ensure_cached(
                 &self.queue,
                 vis.id,
@@ -1220,8 +1230,10 @@ impl Renderer {
                 None => continue,
             };
 
-            let base_x = vis.screen_col as f32 * layout.cell_w + layout.gutter_px;
-            let base_y = vis.screen_row as f32 * layout.cell_h + layout.tab_bar_h;
+            let base_x =
+                vis.screen_col as f32 * layout.cell_w + layout.gutter_px + vis.cell_x_offset as f32;
+            let base_y =
+                vis.screen_row as f32 * layout.cell_h + layout.tab_bar_h + vis.cell_y_offset as f32;
             let scale_x = if vis.image.width > 0 {
                 vis.display_width as f32 / vis.image.width as f32
             } else {
@@ -1841,7 +1853,8 @@ impl Renderer {
         &mut self,
         acquired: (wgpu::SurfaceTexture, wgpu::TextureView),
         geometry: RenderGeometry,
-        image_geometry: ImageGeometry,
+        under_text_image_geometry: ImageGeometry,
+        over_text_image_geometry: ImageGeometry,
     ) {
         let (frame, view) = acquired;
         let mut encoder = self
@@ -1901,6 +1914,8 @@ impl Renderer {
             }
         }
 
+        self.submit_image_pass(&mut encoder, &view, &under_text_image_geometry);
+
         if !geometry.fg_indices.is_empty() {
             let fg_vbuf = self
                 .device
@@ -1939,43 +1954,7 @@ impl Renderer {
             pass.draw_indexed(0..geometry.fg_indices.len() as u32, 0, 0..1);
         }
 
-        if !image_geometry.indices.is_empty() {
-            let img_vbuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("img_verts"),
-                    contents: bytemuck::cast_slice(&image_geometry.vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let img_ibuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("img_idx"),
-                    contents: bytemuck::cast_slice(&image_geometry.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("image_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                ..Default::default()
-            });
-
-            pass.set_pipeline(&self.image_pipeline);
-            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_bind_group(1, self.image_atlas.bind_group(), &[]);
-            pass.set_vertex_buffer(0, img_vbuf.slice(..));
-            pass.set_index_buffer(img_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..image_geometry.indices.len() as u32, 0, 0..1);
-        }
+        self.submit_image_pass(&mut encoder, &view, &over_text_image_geometry);
 
         if !geometry.overlay_bg_indices.is_empty() {
             let overlay_bg_vbuf =
@@ -2054,6 +2033,53 @@ impl Renderer {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+    }
+
+    fn submit_image_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        image_geometry: &ImageGeometry,
+    ) {
+        if image_geometry.indices.is_empty() {
+            return;
+        }
+
+        let img_vbuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("img_verts"),
+                contents: bytemuck::cast_slice(&image_geometry.vertices),
+                usage: wgpu::BufferUsages::VERTEX,
+            });
+        let img_ibuf = self
+            .device
+            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                label: Some("img_idx"),
+                contents: bytemuck::cast_slice(&image_geometry.indices),
+                usage: wgpu::BufferUsages::INDEX,
+            });
+
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("image_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            ..Default::default()
+        });
+
+        pass.set_pipeline(&self.image_pipeline);
+        pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+        pass.set_bind_group(1, self.image_atlas.bind_group(), &[]);
+        pass.set_vertex_buffer(0, img_vbuf.slice(..));
+        pass.set_index_buffer(img_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+        pass.draw_indexed(0..image_geometry.indices.len() as u32, 0, 0..1);
     }
 
     /// Clear all cached glyphs so they are re-rasterized at the current

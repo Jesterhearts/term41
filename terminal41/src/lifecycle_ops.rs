@@ -156,24 +156,34 @@ pub(crate) fn visible_images(
     let viewport_top = view.top_index(screen.grid.rows.len());
     let viewport_bottom = viewport_top + view.rows as usize;
 
-    screen.images.values().filter_map(move |img| {
-        let img_rows = img.display_height.div_ceil(cell_height).max(1) as usize;
-        let img_bottom = img.row + img_rows;
-        if img.row < viewport_bottom && img_bottom > viewport_top {
-            let elapsed = now.saturating_duration_since(img.placed_at);
-            Some(VisibleImage {
-                image: img.image.clone(),
-                id: img.id,
-                screen_row: img.row as i32 - viewport_top as i32,
-                screen_col: img.col,
-                display_width: img.display_width,
-                display_height: img.display_height,
-                frame_index: img.image.frame_at(elapsed),
-            })
-        } else {
-            None
-        }
-    })
+    let mut visible = screen
+        .images
+        .values()
+        .filter_map(move |img| {
+            let img_rows = img.display_height.div_ceil(cell_height).max(1) as usize;
+            let img_bottom = img.row + img_rows;
+            if img.row < viewport_bottom && img_bottom > viewport_top {
+                let elapsed = now.saturating_duration_since(img.placed_at);
+                Some(VisibleImage {
+                    image: img.image.clone(),
+                    id: img.id,
+                    kitty_image_id: img.kitty_image_id,
+                    screen_row: img.row as i32 - viewport_top as i32,
+                    screen_col: img.col,
+                    cell_x_offset: img.cell_x_offset,
+                    cell_y_offset: img.cell_y_offset,
+                    display_width: img.display_width,
+                    display_height: img.display_height,
+                    frame_index: img.image.frame_at(elapsed),
+                    z_index: img.z_index,
+                })
+            } else {
+                None
+            }
+        })
+        .collect::<Vec<_>>();
+    visible.sort_by_key(|img| (img.z_index, img.kitty_image_id.unwrap_or(u32::MAX), img.id));
+    visible.into_iter()
 }
 
 pub(crate) fn resize(

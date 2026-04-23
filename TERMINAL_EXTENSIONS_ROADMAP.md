@@ -78,8 +78,9 @@ Implemented:
 
 - sixel graphics
 - kitty graphics protocol core parsing, direct/file/temp-file transmission,
-  PNG/RGB/RGBA decode, placement, cropping, deletion, z-index, chunking, and
-  bounded image storage
+  PNG/RGB/RGBA decode, placement IDs, relative placement, cell offsets,
+  cropping, expanded deletion selectors, z-index ordering, chunking, image
+  numbers, query/ack responses, and bounded image storage
 - iTerm2 OSC 1337 inline images, including multipart image payloads
 - iTerm2 OSC 1337 `ReportCellSize`
 
@@ -90,16 +91,17 @@ Maintenance direction:
 - Add compatibility probes for common senders: `kitty +kitten icat`,
   `wezterm imgcat`, `chafa`, `yazi`, `onefetch`, `notcurses`, and
   `libsixel`-based tools.
-- Audit kitty graphics parity against the current spec before filling gaps.
-  Candidate follow-ups are query/ack behavior, Unicode placeholders,
-  placement-id edge cases, and animation.
+- Keep kitty graphics parity focused on real tools. The remaining deliberately
+  scoped follow-ups are Unicode placeholder virtual placements and kitty
+  animation frame actions.
 
 Security:
 
 - `MEDIUM`
 - Image protocols are parser and resource-exhaustion surfaces. They should
   remain quota-bound and should never access arbitrary local files outside the
-  protocol's safe temp-file rules.
+  protocol's safe temp-file rules. Kitty shared-memory transport (`t=s`) is
+  intentionally not supported.
 
 ### Keyboard And Input
 
@@ -160,7 +162,7 @@ Security:
 
 ## Planned
 
-### Kitty Graphics Parity Audit
+### Kitty Graphics Placeholder And Animation Follow-Ups
 
 Status:
 
@@ -168,22 +170,30 @@ Status:
 
 Why:
 
-- `term41` has a substantial kitty graphics implementation, but the upstream
-  protocol has grown to include features such as Unicode placeholders,
-  animation, richer query behavior, and more deletion/placement variants.
+- `term41` now covers the practical kitty graphics transmit/place/delete
+  surface, including placement IDs, z-index, image numbers, relative placement,
+  and expanded delete selectors.
+- The remaining upstream protocol areas are larger semantic features rather
+  than missing parser keys.
 
 Scope:
 
-- Produce a compatibility matrix against the current kitty graphics spec.
-- Implement missing behavior only when it affects real tools.
-- Keep animation and placeholder support separately scoped because both affect
-  renderer lifecycle and scrollback semantics.
+- Implement Unicode placeholder virtual placements only if real tools need
+  them. This requires interpreting `U+10EEEE`, foreground-color image IDs, and
+  row/column combining marks inside the text grid.
+- Implement kitty animation frame actions only as a separate project. These
+  mutate stored frame data and affect renderer lifecycle, quotas, and scrollback
+  semantics.
+- Keep kitty shared-memory transport (`t=s`) unsupported unless a future design
+  introduces a local policy gate and a safe copy-only implementation model.
 
 Security:
 
 - `MEDIUM`
-- The audit should verify quotas, temp-file restrictions, and response
-  suppression behavior.
+- Placeholder rendering must not make text extraction dishonest.
+- Animation support needs explicit quotas for frame storage and mutation.
+- Shared-memory transport is a local cross-process attack surface and remains
+  out of scope.
 
 ### Capability Reporting
 
@@ -364,6 +374,28 @@ Why:
 - These cross from terminal rendering into local filesystem brokerage.
 - Local file access should be initiated by the user through local UI or shell
   tools, not by an untrusted PTY stream.
+
+Security:
+
+- `HIGH`
+
+### Shared-Memory Graphics Transport
+
+Status:
+
+- `Explicitly not planned`
+
+Includes:
+
+- kitty graphics shared-memory transmission (`t=s`)
+
+Why:
+
+- It creates a local cross-process data channel for untrusted PTY output.
+- The existing direct, file, and safe temp-file kitty graphics transports are
+  enough for current consumers.
+- Keeping it unsupported avoids designing local policy, lifetime, and
+  mutation-race semantics for a transport that is not needed.
 
 Security:
 

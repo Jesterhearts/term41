@@ -18,11 +18,13 @@ use crate::decode_png;
 /// All key=value fields from a single kitty graphics APC escape.
 #[derive(Debug, Clone)]
 pub struct KittyCommand {
-    /// `a` — action (default `T`).
+    /// `a` — action (default `t`).
     pub action: u8,
     /// `f` — pixel format: 24 (RGB), 32 (RGBA, default), 100 (PNG).
     pub format: u32,
     /// `t` — transmission medium: `d` direct, `f` file, `t` temp file.
+    /// The kitty protocol also defines `s` for shared memory; term41 parses
+    /// the value but intentionally rejects it in the terminal layer.
     pub transmission: u8,
     /// `o` — compression: 0 none, `z` zlib.
     pub compression: u8,
@@ -36,6 +38,10 @@ pub struct KittyCommand {
     pub width: u32,
     /// `v` — source image height in pixels (required for raw formats).
     pub height: u32,
+    /// `S` — bytes to read from file payloads (0 = to end).
+    pub data_size: u32,
+    /// `O` — byte offset to read from file payloads.
+    pub data_offset: u32,
     /// `x` — left edge of the source rectangle (pixels).
     pub src_x: u32,
     /// `y` — top edge of the source rectangle (pixels).
@@ -60,6 +66,16 @@ pub struct KittyCommand {
     pub quiet: u8,
     /// `C` — cursor movement: 0 = move cursor, 1 = don't move.
     pub no_move_cursor: bool,
+    /// `U` — create a virtual placement for Unicode placeholders.
+    pub virtual_placement: bool,
+    /// `P` — parent image id for relative placement.
+    pub parent_image_id: u32,
+    /// `Q` — parent placement id for relative placement.
+    pub parent_placement_id: u32,
+    /// `H` — horizontal cell offset from the parent placement.
+    pub relative_col_offset: i32,
+    /// `V` — vertical cell offset from the parent placement.
+    pub relative_row_offset: i32,
     /// `d` — delete specifier character.
     pub delete: u8,
     /// Raw base64 payload (not yet decoded).
@@ -69,7 +85,7 @@ pub struct KittyCommand {
 impl Default for KittyCommand {
     fn default() -> Self {
         Self {
-            action: b'T',
+            action: b't',
             format: 32,
             transmission: b'd',
             compression: 0,
@@ -78,6 +94,8 @@ impl Default for KittyCommand {
             placement_id: 0,
             width: 0,
             height: 0,
+            data_size: 0,
+            data_offset: 0,
             src_x: 0,
             src_y: 0,
             src_w: 0,
@@ -90,6 +108,11 @@ impl Default for KittyCommand {
             more: 0,
             quiet: 0,
             no_move_cursor: false,
+            virtual_placement: false,
+            parent_image_id: 0,
+            parent_placement_id: 0,
+            relative_col_offset: 0,
+            relative_row_offset: 0,
             delete: 0,
             payload: Vec::new(),
         }
@@ -176,6 +199,8 @@ fn apply_key(
         b'p' => cmd.placement_id = parse_u32(val),
         b's' => cmd.width = parse_u32(val),
         b'v' => cmd.height = parse_u32(val),
+        b'S' => cmd.data_size = parse_u32(val),
+        b'O' => cmd.data_offset = parse_u32(val),
         b'x' => cmd.src_x = parse_u32(val),
         b'y' => cmd.src_y = parse_u32(val),
         b'w' => cmd.src_w = parse_u32(val),
@@ -188,6 +213,11 @@ fn apply_key(
         b'm' => cmd.more = parse_u32(val) as u8,
         b'q' => cmd.quiet = parse_u32(val) as u8,
         b'C' => cmd.no_move_cursor = parse_u32(val) == 1,
+        b'U' => cmd.virtual_placement = parse_u32(val) == 1,
+        b'P' => cmd.parent_image_id = parse_u32(val),
+        b'Q' => cmd.parent_placement_id = parse_u32(val),
+        b'H' => cmd.relative_col_offset = parse_i32(val),
+        b'V' => cmd.relative_row_offset = parse_i32(val),
         b'd' => {
             if let Some(&v) = val.first() {
                 cmd.delete = v;
@@ -214,21 +244,7 @@ pub fn decode_payload(
 
     let decoded = engine.decode(raw_b64).ok()?;
 
-    let pixels = if cmd.compression == b'z' {
-        let mut inflated = Vec::new();
-        flate2::read::ZlibDecoder::new(&decoded[..])
-            .read_to_end(&mut inflated)
-            .ok()?;
-        inflated
-    } else {
-        decoded
-    };
-
-    match cmd.format {
-        100 => decode_png(&pixels),
-        24 => decode_rgb(&pixels, cmd.width, cmd.height),
-        _ => decode_rgba(&pixels, cmd.width, cmd.height),
-    }
+    decode_data(cmd, decoded)
 }
 
 /// Load image data from a file path (base64-encoded in the payload).
@@ -256,20 +272,27 @@ pub fn decode_file_payload(
         }
     }
 
-    let file_data = std::fs::read(path).ok()?;
+    let file_data = read_ranged_file(path, cmd)?;
 
     if delete {
         let _ = std::fs::remove_file(path);
     }
 
+    decode_data(cmd, file_data)
+}
+
+fn decode_data(
+    cmd: &KittyCommand,
+    data: Vec<u8>,
+) -> Option<DecodedImage> {
     let pixels = if cmd.compression == b'z' {
         let mut inflated = Vec::new();
-        flate2::read::ZlibDecoder::new(&file_data[..])
+        flate2::read::ZlibDecoder::new(&data[..])
             .read_to_end(&mut inflated)
             .ok()?;
         inflated
     } else {
-        file_data
+        data
     };
 
     match cmd.format {
@@ -277,6 +300,23 @@ pub fn decode_file_payload(
         24 => decode_rgb(&pixels, cmd.width, cmd.height),
         _ => decode_rgba(&pixels, cmd.width, cmd.height),
     }
+}
+
+fn read_ranged_file(
+    path: &Path,
+    cmd: &KittyCommand,
+) -> Option<Vec<u8>> {
+    let data = std::fs::read(path).ok()?;
+    let start = cmd.data_offset as usize;
+    if start > data.len() {
+        return None;
+    }
+    let end = if cmd.data_size == 0 {
+        data.len()
+    } else {
+        start.saturating_add(cmd.data_size as usize).min(data.len())
+    };
+    Some(data[start..end].to_vec())
 }
 
 fn decode_rgb(
@@ -377,24 +417,31 @@ impl KittyImageStore {
         }
     }
 
-    /// Resolve or assign an image id from a command's `i=` / `I=` keys.
-    pub fn resolve_id(
+    /// Resolve an existing image id from `i=` / `I=` keys.
+    pub fn resolve_existing_id(
+        &self,
+        cmd: &KittyCommand,
+    ) -> Option<u32> {
+        if cmd.image_id != 0 || cmd.image_number == 0 {
+            return Some(cmd.image_id);
+        }
+        self.number_to_id.get(&cmd.image_number).copied()
+    }
+
+    /// Resolve or assign the id for a new image transmission.
+    pub fn resolve_transmission_id(
         &mut self,
         cmd: &KittyCommand,
     ) -> u32 {
         if cmd.image_id != 0 {
             return cmd.image_id;
         }
-        if cmd.image_number != 0
-            && let Some(&id) = self.number_to_id.get(&cmd.image_number)
-        {
-            return id;
+        if cmd.image_number == 0 {
+            return 0;
         }
         let id = self.next_id;
         self.next_id = self.next_id.wrapping_add(1).max(1);
-        if cmd.image_number != 0 {
-            self.number_to_id.insert(cmd.image_number, id);
-        }
+        self.number_to_id.insert(cmd.image_number, id);
         id
     }
 
@@ -458,6 +505,12 @@ impl ChunkedTransmission {
     /// Create an empty chunk accumulator.
     pub fn new() -> Self {
         Self::default()
+    }
+
+    /// Abort any in-progress multi-part upload.
+    pub fn clear(&mut self) {
+        self.cmd = None;
+        self.payload.clear();
     }
 
     /// Feed a command. Returns `Some(merged_command)` when the final chunk
@@ -530,10 +583,25 @@ mod tests {
     #[test]
     fn parse_defaults() {
         let cmd = parse_command(b";AAAA");
-        assert_eq!(cmd.action, b'T');
+        assert_eq!(cmd.action, b't');
         assert_eq!(cmd.format, 32);
         assert_eq!(cmd.transmission, b'd');
         assert_eq!(cmd.payload, b"AAAA");
+    }
+
+    #[test]
+    fn parse_file_range_and_relative_placement_keys() {
+        let cmd = parse_command(b"a=p,i=5,p=9,S=123,O=7,U=1,P=3,Q=4,H=-2,V=6;");
+        assert_eq!(cmd.action, b'p');
+        assert_eq!(cmd.image_id, 5);
+        assert_eq!(cmd.placement_id, 9);
+        assert_eq!(cmd.data_size, 123);
+        assert_eq!(cmd.data_offset, 7);
+        assert!(cmd.virtual_placement);
+        assert_eq!(cmd.parent_image_id, 3);
+        assert_eq!(cmd.parent_placement_id, 4);
+        assert_eq!(cmd.relative_col_offset, -2);
+        assert_eq!(cmd.relative_row_offset, 6);
     }
 
     #[test]
@@ -581,6 +649,21 @@ mod tests {
         assert_eq!(final_cmd.format, 100);
         assert_eq!(final_cmd.image_id, 5);
         assert_eq!(final_cmd.payload, b"AAAABBBBCCCC");
+    }
+
+    #[test]
+    fn image_number_transmissions_allocate_fresh_ids() {
+        let mut store = KittyImageStore::new();
+        let cmd = KittyCommand {
+            image_number: 13,
+            ..Default::default()
+        };
+
+        let first = store.resolve_transmission_id(&cmd);
+        let second = store.resolve_transmission_id(&cmd);
+
+        assert_ne!(first, second);
+        assert_eq!(store.resolve_existing_id(&cmd), Some(second));
     }
 
     #[test]

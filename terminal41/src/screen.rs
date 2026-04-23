@@ -1032,10 +1032,15 @@ mod integration_tests {
             crate::PlacedImage {
                 image: image41::DecodedImage::single_frame(1, 16, vec![]),
                 id,
+                kitty_image_id: None,
+                kitty_placement_id: None,
                 row: 3,
                 col: 0,
                 display_width: 1,
                 display_height: 16,
+                cell_x_offset: 0,
+                cell_y_offset: 0,
+                z_index: 0,
                 placed_at: std::time::Instant::now(),
             },
         );

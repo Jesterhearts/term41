@@ -13,6 +13,10 @@ pub struct PlacedImage {
     pub image: DecodedImage,
     /// Terminal-local image id used for storage and renderer diffing.
     pub id: u64,
+    /// Kitty protocol image id, when this placement came from kitty graphics.
+    pub kitty_image_id: Option<u32>,
+    /// Kitty protocol placement id, unique only together with `kitty_image_id`.
+    pub kitty_placement_id: Option<u32>,
     /// Absolute row index in `grid.rows` where the image top-left is placed.
     pub row: usize,
     /// Column position of the image top-left.
@@ -24,6 +28,13 @@ pub struct PlacedImage {
     /// Final rendered pixel height. For sixel this matches `image.height`;
     /// for kitty this can differ when the app requested `r=` rows of display.
     pub display_height: u32,
+    /// Pixel offset from the left edge of the placement's first cell.
+    pub cell_x_offset: u32,
+    /// Pixel offset from the top edge of the placement's first cell.
+    pub cell_y_offset: u32,
+    /// Kitty z-index. Negative images render below text; zero and positive
+    /// images render above text. Sixel/iTerm placements use zero.
+    pub z_index: i32,
     /// Wall-clock timestamp of placement. Drives the animation clock for
     /// multi-frame images (`Instant::now() - placed_at` modulo
     /// `image.cycle_duration()` selects the current frame).
@@ -36,6 +47,8 @@ pub struct VisibleImage {
     pub image: DecodedImage,
     /// Terminal-local image id.
     pub id: u64,
+    /// Kitty protocol image id, when available.
+    pub kitty_image_id: Option<u32>,
     /// Row of the image's top edge relative to the top of the viewport.
     /// Negative when the image's top is scrolled above the viewport; the
     /// renderer emits a quad extending above the screen, which the GPU clips
@@ -43,6 +56,10 @@ pub struct VisibleImage {
     pub screen_row: i32,
     /// Column position.
     pub screen_col: u32,
+    /// Pixel offset from the placement cell.
+    pub cell_x_offset: u32,
+    /// Pixel offset from the placement cell.
+    pub cell_y_offset: u32,
     /// Final rendered pixel width (see [`PlacedImage::display_width`]).
     pub display_width: u32,
     /// Final rendered pixel height (see [`PlacedImage::display_height`]).
@@ -50,6 +67,8 @@ pub struct VisibleImage {
     /// Index into `image.frames` to render right now. Always `0` for static
     /// images; selected by [`DecodedImage::frame_at`] for animated ones.
     pub frame_index: usize,
+    /// Vertical stacking order.
+    pub z_index: i32,
 }
 
 /// Remove any existing image that would overlap a new image placed at
@@ -194,10 +213,15 @@ mod tests {
             PlacedImage {
                 image: DecodedImage::single_frame(1, height_px, vec![]),
                 id,
+                kitty_image_id: None,
+                kitty_placement_id: None,
                 row,
                 col,
                 display_width: 1,
                 display_height: height_px,
+                cell_x_offset: 0,
+                cell_y_offset: 0,
+                z_index: 0,
                 placed_at: Instant::now(),
             },
         );

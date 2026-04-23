@@ -905,10 +905,15 @@ impl Terminal {
             PlacedImage {
                 image,
                 id,
+                kitty_image_id: None,
+                kitty_placement_id: None,
                 row,
                 col: self.active.cursor.col,
                 display_width,
                 display_height,
+                cell_x_offset: 0,
+                cell_y_offset: 0,
+                z_index: 0,
                 placed_at: Instant::now(),
             },
         );

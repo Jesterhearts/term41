@@ -1045,8 +1045,8 @@ fn paint_visible_images(
             continue;
         }
 
-        let dst_x = gutter_w + image.screen_col as i32 * cell_w;
-        let dst_y = tab_bar_h + image.screen_row * cell_h;
+        let dst_x = gutter_w + image.screen_col as i32 * cell_w + image.cell_x_offset as i32;
+        let dst_y = tab_bar_h + image.screen_row * cell_h + image.cell_y_offset as i32;
         blit_scaled_rgba(
             buffer,
             width,
