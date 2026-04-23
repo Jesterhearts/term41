@@ -60,6 +60,11 @@ The codebase is split into a few focused crates:
 - `vtepp`: pull-based VTE parser
 - `font41`, `image41`, `pty-pipe41`: supporting subsystems
 
+Roadmap notes live in:
+
+- `VT_COMPATIBILITY_ROADMAP.md` for DEC VT-family compatibility decisions
+- `TERMINAL_EXTENSIONS_ROADMAP.md` for modern terminal extension protocols
+
 ## Building
 
 If you just want to build it and run it:
