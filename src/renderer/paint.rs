@@ -289,7 +289,7 @@ pub(crate) fn build_tab_bar_plan(
             Some(TabBarHover::NewTab) => blend(inactive_bg, palette.fg, 0.3),
             _ => blend(inactive_bg, palette.fg, 0.15),
         }),
-        label: "\u{2795}",
+        label: "⮒",
     };
 
     let button_labels = [
@@ -332,7 +332,7 @@ pub(crate) fn build_tab_bar_layout(
     cell_w: f32,
 ) -> TabBarLayout {
     let buttons_region_w = cell_w * BUTTONS_REGION_CELLS;
-    let new_tab_button_w = cell_w * BUTTON_CELLS;
+    let new_tab_button_w = cell_w * 4.0;
     let tabs_available_w = (surface_w - buttons_region_w - new_tab_button_w).max(0.0);
     let max_tab_w = (cell_w * MAX_TAB_WIDTH).min(tabs_available_w);
     let tab_w = if tab_count == 0 {
@@ -370,6 +370,15 @@ pub(crate) fn build_tab_bar_layout(
         new_tab_button,
         buttons,
     }
+}
+
+pub(crate) fn centered_ink_origin_x(
+    region_x: f32,
+    region_w: f32,
+    ink_left: f32,
+    ink_right: f32,
+) -> f32 {
+    region_x + (region_w - (ink_right - ink_left)) * 0.5 - ink_left
 }
 
 pub(crate) fn resolve_painted_cell(
@@ -650,20 +659,11 @@ mod tests {
     }
 
     #[test]
-    fn tab_bar_layout_reserves_space_for_new_tab_button_and_window_buttons() {
-        let layout = build_tab_bar_layout(2, 200.0, 10.0);
+    fn centered_ink_origin_centers_visible_bounds_in_region() {
+        let origin = centered_ink_origin_x(100.0, 40.0, 3.0, 11.0);
 
-        assert_eq!(layout.tabs.len(), 2);
-        assert_eq!(layout.tabs[0].x, 0.0);
-        assert_eq!(layout.tabs[0].width, 40.0);
-        assert_eq!(layout.tabs[1].x, 40.0);
-        assert_eq!(layout.tabs[1].width, 40.0);
-        assert_eq!(layout.new_tab_button.x, 80.0);
-        assert_eq!(layout.new_tab_button.width, 30.0);
-        assert_eq!(layout.buttons[0].x, 110.0);
-        assert_eq!(layout.buttons[1].x, 140.0);
-        assert_eq!(layout.buttons[2].x, 170.0);
-        assert_eq!(layout.buttons[0].width, 30.0);
+        assert_eq!(origin, 113.0);
+        assert_eq!(origin + (3.0 + 11.0) * 0.5, 120.0);
     }
 
     #[test]

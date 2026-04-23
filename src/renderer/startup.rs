@@ -40,6 +40,7 @@ use crate::renderer::r#impl::collect_row_glyphs;
 use crate::renderer::r#impl::snapshot_terminal;
 use crate::renderer::paint::blink_animation_enabled;
 use crate::renderer::paint::build_tab_bar_plan;
+use crate::renderer::paint::centered_ink_origin_x;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
 
@@ -541,7 +542,13 @@ fn paint_tab_bar(
         );
     }
     let row = label_row(plan.new_tab_button.label, fg, plan.base_bg, false);
-    let x = plan.new_tab_button.x + (plan.new_tab_button.width - cell_w as f32) * 0.5;
+    let x = centered_label_x(
+        font_system,
+        snap,
+        &row,
+        plan.new_tab_button.x,
+        plan.new_tab_button.width,
+    );
     paint_shaped_label(font_system, snap, buffer, width, height, &row, x, 0.0);
 
     for button in &plan.buttons {
@@ -558,7 +565,7 @@ fn paint_tab_bar(
             );
         }
         let row = label_row(button.label, fg, plan.base_bg, false);
-        let x = button.x + (button.width - cell_w as f32) * 0.5;
+        let x = centered_label_x(font_system, snap, &row, button.x, button.width);
         paint_shaped_label(font_system, snap, buffer, width, height, &row, x, 0.0);
     }
 
@@ -795,6 +802,65 @@ fn label_row(
         underline_color: vec![None; len],
         prompt_start,
     }
+}
+
+fn centered_label_x(
+    font_system: &mut FontSystem,
+    snap: &TermSnapshot,
+    row: &RowSnapshot,
+    region_x: f32,
+    region_w: f32,
+) -> f32 {
+    let Some((left, right)) = software_label_ink_bounds(font_system, snap, row) else {
+        return region_x;
+    };
+
+    centered_ink_origin_x(region_x, region_w, left, right)
+}
+
+fn software_label_ink_bounds(
+    font_system: &mut FontSystem,
+    snap: &TermSnapshot,
+    row: &RowSnapshot,
+) -> Option<(f32, f32)> {
+    let glyphs = collect_row_glyphs(
+        font_system,
+        snap,
+        row,
+        u32::MAX,
+        row.cells.len() as u32,
+        None,
+        false,
+        false,
+    );
+    let mut cache = HashMap::new();
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+
+    for glyph in glyphs {
+        let raster = cached_glyph(
+            &mut cache,
+            font_system,
+            glyph.font_index,
+            glyph.glyph_id,
+            glyph.cells_wide,
+            false,
+            super::r#impl::drcs_geometry_class(snap)
+                .map(|geometry| (geometry, snap.drcs_glyphs.clone())),
+        );
+        if raster.width == 0 || raster.height == 0 {
+            continue;
+        }
+
+        let glyph_left = glyph.col as f32 * font_system.cell_width as f32
+            + raster.bearing_x as f32
+            + glyph.x_offset;
+        let glyph_right = glyph_left + raster.width as f32;
+        left = left.min(glyph_left);
+        right = right.max(glyph_right);
+    }
+
+    left.is_finite().then_some((left, right))
 }
 
 fn paint_shaped_label(

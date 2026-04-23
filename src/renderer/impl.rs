@@ -38,12 +38,14 @@ use crate::renderer::background;
 use crate::renderer::background::Background;
 use crate::renderer::background::BgImageVertex;
 use crate::renderer::glyph_atlas::GlyphAtlas;
+use crate::renderer::glyph_atlas::GlyphSlot;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
 use crate::renderer::paint::UdkIndicator;
 use crate::renderer::paint::blink_animation_enabled;
 use crate::renderer::paint::bold_glyph_enabled;
 use crate::renderer::paint::build_tab_bar_plan;
+use crate::renderer::paint::centered_ink_origin_x;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_indicator_row;
 use crate::renderer::paint::status_line_label_row;
@@ -74,6 +76,14 @@ struct FgVertex {
     flags: u32,
 }
 
+#[derive(Clone, Copy)]
+struct LabelGlyph {
+    slot: GlyphSlot,
+    col: u16,
+    x_offset: f32,
+    y_offset: f32,
+}
+
 /// Packed vertex for image quads: position + UV + atlas layer.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
@@ -88,6 +98,23 @@ fn pack_color(
     alpha: u8,
 ) -> u32 {
     u32::from_be_bytes([c.red, c.green, c.blue, alpha])
+}
+
+fn label_ink_bounds(
+    glyphs: &[LabelGlyph],
+    cell_w: f32,
+) -> Option<(f32, f32)> {
+    let mut left = f32::INFINITY;
+    let mut right = f32::NEG_INFINITY;
+
+    for glyph in glyphs {
+        let glyph_left = glyph.col as f32 * cell_w + glyph.slot.bearing_x as f32 + glyph.x_offset;
+        let glyph_right = glyph_left + glyph.slot.width() as f32;
+        left = left.min(glyph_left);
+        right = right.max(glyph_right);
+    }
+
+    left.is_finite().then_some((left, right))
 }
 
 /// Linearly interpolate between two sRGB byte colours in component space.
@@ -2133,6 +2160,7 @@ impl Renderer {
                 0.0,
                 baseline,
                 cell_w,
+                None,
                 label_fg,
                 fg_vertices,
                 fg_indices,
@@ -2153,10 +2181,11 @@ impl Renderer {
         self.shape_and_render_label(
             font_system,
             plan.new_tab_button.label,
-            plan.new_tab_button.x + (plan.new_tab_button.width - cell_w) / 2.0,
+            plan.new_tab_button.x,
             0.0,
             baseline,
             cell_w,
+            Some(plan.new_tab_button.width),
             label_fg,
             fg_vertices,
             fg_indices,
@@ -2177,10 +2206,11 @@ impl Renderer {
             self.shape_and_render_label(
                 font_system,
                 button.label,
-                button.x + (button.width - cell_w) / 2.0,
+                button.x,
                 0.0,
                 baseline,
                 cell_w,
+                Some(button.width),
                 label_fg,
                 fg_vertices,
                 fg_indices,
@@ -2254,6 +2284,7 @@ impl Renderer {
                     iy,
                     baseline,
                     cell_w,
+                    None,
                     normal_fg,
                     overlay_fg_vertices,
                     overlay_fg_indices,
@@ -2300,6 +2331,7 @@ impl Renderer {
         y: f32,
         baseline: f32,
         cell_w: f32,
+        centered_width: Option<f32>,
         color: u32,
         fg_vertices: &mut Vec<FgVertex>,
         fg_indices: &mut Vec<u32>,
@@ -2314,6 +2346,7 @@ impl Renderer {
             .collect();
         let attrs = vec![CellAttrs::default(); cells.len()];
         let shaped = font_system.shape_row(&cells, &attrs);
+        let mut glyphs = Vec::with_capacity(shaped.len());
 
         for sg in &shaped {
             let slot = match self.glyph_atlas.ensure_cached(
@@ -2332,21 +2365,35 @@ impl Renderer {
                 continue;
             }
 
-            let sx = slot.x();
-            let sy = slot.y();
-            let sw = slot.width();
-            let sh = slot.height();
+            glyphs.push(LabelGlyph {
+                slot,
+                col: sg.col,
+                x_offset: sg.x_offset,
+                y_offset: sg.y_offset,
+            });
+        }
 
-            let gx = x + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
+        let x = match (centered_width, label_ink_bounds(&glyphs, cell_w)) {
+            (Some(width), Some((left, right))) => centered_ink_origin_x(x, width, left, right),
+            _ => x,
+        };
+
+        for glyph in glyphs {
+            let sx = glyph.slot.x();
+            let sy = glyph.slot.y();
+            let sw = glyph.slot.width();
+            let sh = glyph.slot.height();
+
+            let gx = x + glyph.col as f32 * cell_w + glyph.slot.bearing_x as f32 + glyph.x_offset;
             let gx = gx.floor();
 
-            let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
+            let gy = y + baseline - glyph.slot.bearing_y as f32 - glyph.y_offset;
             let gy = gy.floor();
 
             let gw = sw as f32;
             let gh = sh as f32;
 
-            let flags: u32 = if slot.is_color { 1 } else { 0 };
+            let flags: u32 = if glyph.slot.is_color { 1 } else { 0 };
 
             let fi = fg_vertices.len() as u32;
             fg_vertices.extend_from_slice(&[
