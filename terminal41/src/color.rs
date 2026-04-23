@@ -144,7 +144,7 @@ pub const fn default_bg() -> Srgb<u8> {
 }
 
 /// Runtime color palette. Stores the 16 ANSI colors, default fg/bg,
-/// cursor color, and selection colors. Built from the `[colors]` config
+/// cursor colors, and selection colors. Built from the `[colors]` config
 /// section (Rio palette format), falling back to the hardcoded defaults
 /// for any value not overridden.
 #[derive(Debug, Clone)]
@@ -159,6 +159,9 @@ pub struct ColorPalette {
     pub status_line_bg: Srgb<u8>,
     /// Cursor color. `None` = use cell foreground (current behavior).
     pub cursor: Option<Srgb<u8>>,
+    /// Text color used under a block cursor. `None` = invert against the
+    /// cell background (current behavior).
+    pub cursor_text: Option<Srgb<u8>>,
     /// Selection background. `None` = invert (current behavior).
     pub selection_bg: Option<Srgb<u8>>,
     /// Selection text color. `None` = invert (current behavior).
@@ -177,6 +180,7 @@ impl Default for ColorPalette {
             status_line_fg: fg,
             status_line_bg: blend_colors(bg, fg, 0.25),
             cursor: None,
+            cursor_text: None,
             selection_bg: None,
             selection_fg: None,
             ansi: DEFAULT_ANSI_COLORS,

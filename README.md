@@ -231,6 +231,14 @@ vsync = "auto"
 # foreground = "#d8dee9"
 # background = "#3b4252"
 
+# Either form is accepted:
+# [colors]
+# cursor = "#88c0d0"
+#
+# [colors.cursor]
+# cursor = "#88c0d0"
+# text = "#2e3440"
+
 keybindings = [
   { keys = "Shift+PageUp", action = "ScrollPageUp" },
   { keys = "Shift+PageDown", action = "ScrollPageDown" },

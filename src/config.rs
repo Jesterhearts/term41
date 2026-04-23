@@ -88,8 +88,9 @@ pub enum BellMode {
 /// Top-level `[colors]` table in the config file.
 #[derive(Deserialize, Default)]
 struct ColorsConfig {
-    /// Cursor color override (hex string, e.g. `"#009fff"`).
-    cursor: Option<String>,
+    /// Cursor color override, either `cursor = "#009fff"` or
+    /// `[colors.cursor] cursor = "#009fff" text = "#000000"`.
+    cursor: Option<CursorColorsConfig>,
     /// `[colors.primary]` — default foreground / background.
     primary: Option<PrimaryColors>,
     /// `[colors.selection]` — selection highlight colors.
@@ -100,6 +101,19 @@ struct ColorsConfig {
     normal: Option<AnsiColors>,
     /// `[colors.bright]` — the 8 bright ANSI colors.
     bright: Option<AnsiColors>,
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CursorColorsConfig {
+    Color(String),
+    Table(CursorColors),
+}
+
+#[derive(Deserialize, Default)]
+struct CursorColors {
+    cursor: Option<String>,
+    text: Option<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -191,6 +205,19 @@ fn parse_color_or_default(
     }
 }
 
+fn parse_color_optional(
+    s: &str,
+    label: &str,
+) -> Option<Srgb<u8>> {
+    Srgb::from_str(s)
+        .ok()
+        .or_else(|| palette::named::from_str(s))
+        .or_else(|| {
+            warn!("invalid color for {label}: {s:?}; ignoring");
+            None
+        })
+}
+
 /// Build a [`ColorPalette`] from the deserialized `[colors]` config,
 /// falling back to hardcoded defaults for any value not specified.
 fn build_palette(colors: Option<ColorsConfig>) -> ColorPalette {
@@ -217,15 +244,23 @@ fn build_palette(colors: Option<ColorsConfig>) -> ColorPalette {
         pal.status_line_bg = blend_colors(pal.bg, pal.status_line_fg, 0.25);
     }
 
-    pal.cursor = c.cursor.as_ref().and_then(|s| {
-        Srgb::from_str(s)
-            .ok()
-            .or_else(|| palette::named::from_str(s))
-            .or_else(|| {
-                warn!("invalid hex color for colors.cursor: {s:?}; ignoring");
-                None
-            })
-    });
+    if let Some(ref cursor) = c.cursor {
+        match cursor {
+            CursorColorsConfig::Color(s) => {
+                pal.cursor = parse_color_optional(s, "colors.cursor");
+            }
+            CursorColorsConfig::Table(table) => {
+                pal.cursor = table
+                    .cursor
+                    .as_ref()
+                    .and_then(|s| parse_color_optional(s, "colors.cursor.cursor"));
+                pal.cursor_text = table
+                    .text
+                    .as_ref()
+                    .and_then(|s| parse_color_optional(s, "colors.cursor.text"));
+            }
+        }
+    }
 
     if let Some(ref sel) = c.selection {
         pal.selection_bg = sel.background.as_ref().and_then(|s| {
@@ -992,6 +1027,7 @@ mod tests {
             blend_colors(cfg.palette.bg, cfg.palette.fg, 0.25)
         );
         assert!(cfg.palette.cursor.is_none());
+        assert!(cfg.palette.cursor_text.is_none());
         assert!(cfg.palette.selection_bg.is_none());
         // Default ANSI red
         assert_eq!(cfg.palette.ansi[1], Srgb::new(205, 0, 0));
@@ -1065,6 +1101,7 @@ white = "#fbfbfb"
         assert_eq!(cfg.palette.fg, Srgb::new(0xfb, 0xfb, 0xfb));
         assert_eq!(cfg.palette.bg, Srgb::new(0x07, 0x07, 0x07));
         assert_eq!(cfg.palette.cursor, Some(Srgb::new(0x00, 0x9f, 0xff)));
+        assert!(cfg.palette.cursor_text.is_none());
         assert_eq!(cfg.palette.selection_bg, Some(Srgb::new(0xfb, 0xfb, 0xfb)));
         assert_eq!(cfg.palette.selection_fg, Some(Srgb::new(0x07, 0x07, 0x07)));
         // Spot-check a few ANSI colors
@@ -1072,6 +1109,19 @@ white = "#fbfbfb"
         assert_eq!(cfg.palette.ansi[1], Srgb::new(0xff, 0x2e, 0x3f)); // normal red
         assert_eq!(cfg.palette.ansi[8], Srgb::new(0x6c, 0x6c, 0x71)); // bright black
         assert_eq!(cfg.palette.ansi[15], Srgb::new(0xfb, 0xfb, 0xfb)); // bright white
+    }
+
+    #[test]
+    fn cursor_table_palette_parses_cursor_and_text_colors() {
+        let cfg = parse(
+            r##"
+[colors.cursor]
+cursor = "#009fff"
+text = "#070707"
+"##,
+        );
+        assert_eq!(cfg.palette.cursor, Some(Srgb::new(0x00, 0x9f, 0xff)));
+        assert_eq!(cfg.palette.cursor_text, Some(Srgb::new(0x07, 0x07, 0x07)));
     }
 
     #[test]

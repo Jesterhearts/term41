@@ -404,7 +404,9 @@ pub(crate) fn resolve_painted_cell(
         base_fg
     } else if selected {
         snap.palette.selection_fg.unwrap_or(base_bg)
-    } else if matched || block_cursor_here {
+    } else if block_cursor_here {
+        snap.palette.cursor_text.unwrap_or(base_bg)
+    } else if matched {
         base_bg
     } else {
         base_fg
@@ -634,6 +636,17 @@ mod tests {
         let fill = painted.fill_bg.expect("mono mode still fills the cell");
         assert_eq!(fill.red, fill.green);
         assert_eq!(fill.green, fill.blue);
+    }
+
+    #[test]
+    fn block_cursor_uses_configured_cursor_text_color() {
+        let dec = terminal41::dec_color_state_from_palette(&ColorPalette::default());
+        let mut snap = test_snapshot(dec);
+        snap.palette.cursor_text = Some(Srgb::new(1, 2, 3));
+        let row = test_row(&snap.palette);
+
+        let painted = resolve_painted_cell(&snap, &row, 0, 0, Some((0, 0)), false);
+        assert_eq!(painted.fg, Srgb::new(1, 2, 3));
     }
 
     #[test]
