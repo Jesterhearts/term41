@@ -1,11 +1,14 @@
 # VT420/VT520/VT525 Coverage Roadmap
 
-This document tracks the major DEC VT-family features that `term41` does not yet
-implement, based on the currently published VT420 and VT520/VT525 manuals.
+This document tracks major DEC VT-family feature coverage in `term41`, based on
+the currently published VT420 and VT520/VT525 manuals. It records both
+implemented compatibility work and explicit non-goals.
 
 It is intentionally DEC-spec-focused. `term41` already implements a useful
-subset of VT220/VT420-style screen control plus modern xterm/kitty features, but
-it is still far from full VT420/VT520/VT525 coverage.
+subset of VT220/VT420-style screen control plus modern xterm/kitty features.
+Full VT420/VT520/VT525 coverage is no longer a project goal when the remaining
+features are better handled by local tools, carry disproportionate complexity,
+or cross security-sensitive trust boundaries.
 
 ## Security Legend
 
@@ -96,11 +99,15 @@ Why it matters:
 - Full VT420/VT520 behavior requires a real ISO-2022-style designation and
   invocation model.
 
-Remaining follow-up work:
+Explicitly unplanned follow-up work:
 
-- [ ] Batch raw 8-bit graphic-byte runs in `vtepp` for performance parity with
-  `PrintAscii` / `PrintText` (correctness is complete; current raw-byte path is
-  scalar)
+- Batch raw 8-bit graphic-byte runs in `vtepp` for performance parity with
+  `PrintAscii` / `PrintText`.
+
+Decision:
+
+- Correctness is complete, and the remaining scalar raw-byte path is not worth
+  the parser complexity unless profiling shows it matters in real workloads.
 
 Security:
 
@@ -258,18 +265,27 @@ Security:
 - This is one of the clearest shell-injection vectors in the DEC feature set.
 - `term41` therefore keeps the feature default-deny.
 
-### [ ] 10. Answerback and auto-answerback
+### [x] 10. Answerback and auto-answerback
 
-Missing:
+Status:
 
-- [ ] `ENQ` answerback handling
-- [ ] `DECAAM`
-- [ ] related answerback setup/report plumbing
+- Explicitly not planned.
 
-Why it matters:
+Not planned:
 
-- The VT420 summary explicitly lists `ENQ` answerback behavior, and later DEC
-  terminals define auto-answerback mode as a private mode.
+- `ENQ` answerback handling
+- `DECAAM`
+- related answerback setup/report plumbing
+
+Decision:
+
+- Answerback is a legacy terminal-identity mechanism with little practical
+  value for modern shells and terminal applications.
+- It creates a host-triggered terminal-originated string surface. Even if
+  user-configured rather than host-programmable, that is another input-like
+  path whose behavior is easy to misunderstand.
+- The compatibility benefit does not justify the security model, configuration
+  surface, and reporting complexity.
 
 Security:
 
@@ -280,18 +296,28 @@ Security:
   appear in the session.
 - If implemented, keep answerback user-configured, not host-programmable.
 
-### [ ] 11. Remaining DEC keyboard modes and reports
+### [x] 11. Remaining DEC keyboard modes and reports
 
-Missing or incomplete:
+Status:
 
-- [ ] `DECBKM`
-- [ ] `DECKBUM`
-- [ ] DEC keyboard identify / report families such as `DECEKBD`
-- [ ] full DEC keypad / editing-key compatibility behavior
+- Explicitly not planned.
 
-Why it matters:
+Not planned:
 
-- VT420/VT520 compatibility includes more than cursor-key and keypad-app mode.
+- `DECBKM`
+- `DECKBUM`
+- DEC keyboard identify / report families such as `DECEKBD`
+- full DEC keypad / editing-key compatibility behavior
+
+Decision:
+
+- These are narrow compatibility controls that let the host reshape local
+  keyboard semantics.
+- The modern value is low compared with the complexity of faithfully modeling
+  old DEC keyboard variants, reporting behavior, and local overrides.
+- `term41` should keep local keybindings and trust-sensitive keyboard behavior
+  under local configuration, with only broadly useful compatibility modes
+  exposed to host applications.
 
 Security:
 
@@ -301,23 +327,31 @@ Security:
 
 ## Priority 3: Printer, Media Copy, and External I/O
 
-### [ ] 12. Printer port control and media-copy family
+### [x] 12. Printer port control and media-copy family
 
-Missing:
+Status:
 
-- [ ] `DECPEX`
-- [ ] `DECPFF`
-- [ ] `MC` media-copy family
-- [ ] autoprint mode
-- [ ] printer controller mode
-- [ ] print-page / print-screen / print-line variants
-- [ ] printer-to-host session and printer assignment controls
+- Explicitly not planned.
 
-Why it matters:
+Not planned:
 
-- Printer support is a large, explicit section of VT420/VT520 behavior.
-- The current code advertises printer capability in DA1-style replies without
-  implementing a printer subsystem.
+- `DECPEX`
+- `DECPFF`
+- `MC` media-copy family
+- autoprint mode
+- printer controller mode
+- print-page / print-screen / print-line variants
+- printer-to-host session and printer assignment controls
+
+Decision:
+
+- Printer support is a large, explicit part of VT420/VT520 behavior, but it is
+  an external-I/O subsystem rather than normal terminal rendering.
+- Modern users are better served by shell tools, print commands, and local
+  desktop print flows than by host-controlled terminal printer modes.
+- Implementing this would add parser, buffering, routing, configuration, and
+  device/security-policy complexity for a feature that should almost never be
+  exposed to an untrusted host.
 
 Security:
 
@@ -327,19 +361,27 @@ Security:
 - Printer controller mode also creates another raw byte-stream parser and I/O
   path that should not be exposed by default.
 
-### [ ] 13. Session management and multi-port behavior
+### [x] 13. Session management and multi-port behavior
 
-Missing:
+Status:
 
-- [ ] session-management control families
-- [ ] dual-session routing behavior
-- [ ] host-selectable printer/session coupling
-- [ ] page-memory and split-session behavior
+- Explicitly not planned.
 
-Why it matters:
+Not planned:
 
-- VT420 and later hardware supported multi-session use cases that `term41` does
-  not model at all.
+- session-management control families
+- dual-session routing behavior
+- host-selectable printer/session coupling
+- page-memory and split-session behavior
+
+Decision:
+
+- VT420 and later hardware supported multi-session use cases, but that design
+  belongs to terminal hardware with multiple ports.
+- In a modern emulator, this overlaps with local tabs, windows, `tmux`, and
+  `zellij`, which provide clearer user-controlled session routing.
+- Host-selectable session and port routing is a poor fit for `term41`'s trust
+  boundary.
 
 Security:
 
@@ -349,21 +391,27 @@ Security:
 
 ## Priority 4: VT52 Completeness
 
-### [ ] 14. Remaining VT52 printer / media-copy controls
+### [x] 14. Remaining VT52 printer / media-copy controls
 
-Missing from the VT52 subset:
+Status:
 
-- [ ] `ESC ^` enter autoprint mode
-- [ ] `ESC _` exit autoprint mode
-- [ ] `ESC W` enter printer controller mode
-- [ ] `ESC X` exit printer controller mode
-- [ ] `ESC ]` print screen
-- [ ] `ESC V` print cursor line
+- Explicitly not planned.
 
-Why it matters:
+Not planned from the VT52 subset:
 
-- The current VT52 implementation covers only the common cursor/erase/identify
-  subset.
+- `ESC ^` enter autoprint mode
+- `ESC _` exit autoprint mode
+- `ESC W` enter printer controller mode
+- `ESC X` exit printer controller mode
+- `ESC ]` print screen
+- `ESC V` print cursor line
+
+Decision:
+
+- These inherit the same external-I/O and spoofing concerns as the ANSI/DEC
+  printer and media-copy controls.
+- `term41` will keep VT52 support focused on common cursor, erase, and identify
+  behavior rather than adding legacy printer routing.
 
 Security:
 
@@ -373,18 +421,26 @@ Security:
 
 ## Priority 5: VT500 / VT520 / VT525-Only Features
 
-### [ ] 15. Bidirectional text, Hebrew, and VT500 internationalization features
+### [x] 15. Bidirectional text, Hebrew, and VT500 internationalization features
 
-Missing:
+Status:
 
-- [ ] `DECRLM`
-- [ ] `DECRLCM`
-- [ ] VT500-era keyboard and charset variants tied to bidi / Hebrew support
+- Explicitly not planned.
 
-Why it matters:
+Not planned:
 
-- These are part of real VT520/VT525 coverage, even though they are irrelevant
-  to most Unix full-screen programs.
+- `DECRLM`
+- `DECRLCM`
+- VT500-era keyboard and charset variants tied to bidi / Hebrew support
+
+Decision:
+
+- These are part of real VT520/VT525 coverage, but faithful bidi/Hebrew support
+  would require substantial text-layout, keyboard, charset, selection, and
+  rendering work.
+- That complexity would serve very little modern terminal software and would
+  increase the risk of inconsistent visual ordering, confusing copy/paste
+  behavior, and spoofing-adjacent text presentation bugs.
 
 Security:
 
@@ -394,7 +450,7 @@ Security:
 
 Status:
 
-- Explicitly not implemented.
+- Explicitly not planned.
 
 Decision:
 
@@ -411,29 +467,39 @@ Security:
   become spoofing hazards if they are rendered too similarly to normal shell
   content.
 
-### [ ] 17. Additional VT500 report / setup families
+### [x] 17. Additional VT500 report / setup families
 
-Missing:
+Status:
 
-- [ ] VT500-specific status and setup report controls
-- [ ] broader host-manageable desktop and setup surfaces
+- Explicitly not planned.
 
-Why it matters:
+Not planned:
 
-- These close the gap between "VT420-ish emulator" and "VT525 emulator."
+- VT500-specific status and setup report controls
+- broader host-manageable desktop and setup surfaces
+
+Decision:
+
+- These close the gap between "VT420-ish emulator" and "VT525 emulator," but
+  they mostly expose setup and desktop surfaces that do not map cleanly onto a
+  modern, locally configured emulator.
+- Host-manageable setup surfaces increase fingerprinting and spoofing risk
+  without enough practical compatibility value.
 
 Security:
 
 - `LOW` to `MEDIUM`
 
-## Features That Should Probably Stay Disabled By Default
+## High-Risk Features And Non-Goals
 
-Even if implemented for spec completeness, these should almost certainly be off
-unless the user explicitly enables them:
+Host-programmable input and external-I/O features are either default-deny when
+implemented or explicitly not planned when their complexity and security risk
+outweigh their compatibility value:
 
 - [x] `DECUDK`
 - [x] `DECDMAC` / `DECINVM`
-- [ ] printer controller mode
-- [ ] autoprint / print-page / print-screen features
-- [ ] printer-to-host session features
-- [ ] any feature that reroutes data between sessions or external ports
+- [x] printer controller mode: explicitly not planned
+- [x] autoprint / print-page / print-screen features: explicitly not planned
+- [x] printer-to-host session features: explicitly not planned
+- [x] any feature that reroutes data between sessions or external ports:
+  explicitly not planned
