@@ -79,6 +79,10 @@ pub use crate::dec::color::select_lookup_table as dec_select_lookup_table;
 pub use crate::dec::color::state_from_palette as dec_color_state_from_palette;
 pub use crate::dec::color::table_color as dec_table_color;
 use crate::dec::r#macro::MacroStore;
+pub use crate::dec::udk::DecModifierKey;
+pub use crate::dec::udk::LocalFunctionKeyControl;
+pub use crate::dec::udk::ModifierKeyControl;
+use crate::dec::udk::UdkState;
 use crate::dispatch::TerminalAction;
 use crate::drcs::DrcsStore;
 pub use crate::feature::FeaturePermissions;
@@ -254,6 +258,8 @@ pub struct TerminalProtocolState {
     pub macros: MacroStore,
     /// Tracks nested macro expansion depth to prevent runaway recursion.
     pub macro_invocation_depth: usize,
+    /// DEC user-defined keys and related keyboard-control state.
+    pub udks: UdkState,
     /// Soft character-set storage for DRCS loads and reports.
     pub drcs: DrcsStore,
 }
@@ -581,6 +587,11 @@ impl Terminal {
         feature::macro_feature_enabled(&self.protocol.feature_permissions)
     }
 
+    /// Whether DEC user-defined keys and related keyboard controls are allowed.
+    pub fn udk_feature_enabled(&self) -> bool {
+        feature::udk_feature_enabled(&self.protocol.feature_permissions)
+    }
+
     fn define_macro(
         &mut self,
         params: vtepp::Params,
@@ -592,6 +603,68 @@ impl Terminal {
             params,
             payload,
         );
+    }
+
+    fn define_udk(
+        &mut self,
+        params: vtepp::Params,
+        payload: &[u8],
+    ) {
+        feature::define_udk(
+            self.udk_feature_enabled(),
+            &mut self.protocol.udks,
+            params,
+            payload,
+        );
+    }
+
+    pub fn user_defined_key(
+        &self,
+        selector: u16,
+    ) -> Option<Vec<u8>> {
+        feature::lookup_udk(self.udk_feature_enabled(), &self.protocol.udks, selector)
+    }
+
+    pub fn programmed_udk_selectors(&self) -> Vec<u16> {
+        if self.udk_feature_enabled() {
+            self.protocol.udks.programmed_selectors()
+        } else {
+            Vec::new()
+        }
+    }
+
+    pub fn udks_locked(&self) -> bool {
+        self.udk_feature_enabled() && self.protocol.udks.locked()
+    }
+
+    pub fn local_function_key_control(
+        &self,
+        selector: u16,
+    ) -> Option<LocalFunctionKeyControl> {
+        feature::local_function_key_control(
+            self.udk_feature_enabled(),
+            &self.protocol.udks,
+            selector,
+        )
+    }
+
+    pub fn modifier_key_control(
+        &self,
+        key: DecModifierKey,
+    ) -> ModifierKeyControl {
+        feature::modifier_key_control(self.udk_feature_enabled(), &self.protocol.udks, key)
+    }
+
+    pub fn dec_modifier_key_report(
+        &self,
+        key: DecModifierKey,
+        pressed: bool,
+    ) -> Option<Vec<u8>> {
+        (self.modifier_key_control(key) == ModifierKeyControl::Report).then(|| {
+            let mut out = Vec::new();
+            crate::dec::udk::write_modifier_report(&mut out, self.modes.c1_mode, key, pressed);
+            out
+        })
     }
 
     /// Current cell width in pixels.
@@ -713,6 +786,7 @@ impl Terminal {
                 &mut self.vt52_cursor_addr,
                 &mut self.protocol.macros,
                 self.protocol.macro_invocation_depth,
+                &mut self.protocol.udks,
                 &self.protocol.feature_permissions,
                 &mut self.protocol.drcs,
                 &mut self.palette,
@@ -742,6 +816,7 @@ impl Terminal {
                     &mut effects.host_bytes,
                     &mut self.vt52_cursor_addr,
                     &mut self.protocol.macros,
+                    &mut self.protocol.udks,
                     &mut self.protocol.drcs,
                 );
                 dispatch::PendingApplication::None

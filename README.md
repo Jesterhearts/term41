@@ -50,7 +50,7 @@ What I wanted out of this terminal was pretty straightforward:
 - Unicode shaping and fallback fonts
 - modern image protocols (`sixel`, Kitty, OSC 1337)
 - DEC/VT-style terminal emulation, including page geometry, rectangular ops,
-  status lines, and macro support
+  status lines, macros, and user-defined keys
 - shell integration, tabs, scrollback search, hyperlinks, and background images
 
 The codebase is split into a few focused crates:
@@ -114,12 +114,12 @@ In practice, extensions that allow either of these should be default-deny:
 So the default is: do nothing unless the user explicitly opted in, or the
 feature has a real authorization path.
 
-The concrete example today is VT420 macros. They stay denied unless you
-explicitly allow them. This is currently a binary toggle between None/All
-processes. As far as I know, there's no reliable way to say "these bytes in the
-pty came from this process", so there's no safe way to authenticate that some
-set of bytes in the input is from `good` vs `evil`. If such a way becomes
-available, I'm open to adding a per-process allowlist.
+The concrete examples today are VT420 macros and DEC user-defined keys. They
+stay denied unless you explicitly allow them. This is currently a binary toggle
+between None/All processes. As far as I know, there's no reliable way to say
+"these bytes in the pty came from this process", so there's no safe way to
+authenticate that some set of bytes in the input is from `good` vs `evil`. If
+such a way becomes available, I'm open to adding a per-process allowlist.
 
 An example of a grey area is clipboard integration. I currently don't gate it
 behind an allowlist because I think it would be surprising if it was broken due
@@ -154,7 +154,7 @@ wouldn't hurt too bad.
 - DEC character-set engine including NRC sets, GL/GR invocation, UTF-8 and 8-bit
   text modes
 - VT420 page/geometry controls, rectangular-area controls, and DEC status lines
-- VT420 macros with allowlist-based gating
+- VT420 macros and DEC user-defined keys with allowlist-based gating
 
 ### Images and Media
 
@@ -220,6 +220,7 @@ vsync = "auto"
 [security.features]
 # Only turn this on if you need it.
 # macros = "all"
+# udks = "all"
 
 [colors.status_line]
 # foreground = "#d8dee9"
@@ -239,8 +240,11 @@ Notes:
 - `keybindings` replaces the default binding set rather than merging with it.
 - `strict_altscreen_scrollback = true` restores a zero-scrollback alternate
   screen.
-- `status_line = "indicator"` enables the DEC indicator line by default.
-- `allow_features.macros` can be `"all"` or a list of executable names/paths.
+- `status_line = "indicator"` enables the emulator-owned DEC indicator line by
+  default; when UDKs are enabled, it also shows UDK status and programmed key
+  badges such as `[F6]`.
+- `security.features.macros` and `security.features.udks` can be `"all"` or
+  omitted/default-denied.
 
 </details>
 

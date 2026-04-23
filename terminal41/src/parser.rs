@@ -16,6 +16,7 @@ use crate::dec::color::DecColorState;
 use crate::dec::color::effective_palette;
 use crate::dec::color::erase_background_color;
 use crate::dec::r#macro::MacroStore;
+use crate::dec::udk::UdkState;
 use crate::dec_color_state_from_palette;
 use crate::drcs::DrcsStore;
 use crate::io::keyboard::KittyKeyboardState;
@@ -262,6 +263,15 @@ pub(super) enum ParsedCsiAction {
     ReportUserPreferredSupplementalSet,
     ResetWithConfirmation {
         confirmation_param: Option<u16>,
+    },
+    SetLocalFunctions {
+        params: OwnedParams,
+    },
+    SetLocalFunctionKeys {
+        params: OwnedParams,
+    },
+    SetModifierKeyReporting {
+        params: OwnedParams,
     },
     ReportXtVersion,
     ReportSecondaryDeviceAttrs,
@@ -597,6 +607,7 @@ fn apply_hard_reset_state(
     dec_color: &mut DecColorState,
     default_status_display: &StatusDisplayKind,
     macros: &mut MacroStore,
+    udks: &mut UdkState,
     drcs: &mut DrcsStore,
     conformance_level: ConformanceLevel,
     c1_mode: C1Mode,
@@ -662,6 +673,7 @@ fn apply_hard_reset_state(
     *bell_pending = false;
     *vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
     macros.clear();
+    udks.clear();
     drcs.clear();
 }
 
@@ -1274,10 +1286,100 @@ mod integration_tests {
     }
 
     #[test]
+    fn da1_advertises_udks_only_when_allowlisted() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        settings::set_feature_permissions(
+            &mut term.inner.protocol,
+            FeaturePermissions {
+                udks: ProgramAllowlist::AllowAll,
+                ..FeaturePermissions::default()
+            },
+        );
+        term.process(b"\x1b[c");
+        assert_eq!(term.take_pending_output(), b"\x1b[?64;7;8;21;22;28;29c");
+    }
+
+    #[test]
+    fn decudk_is_default_denied() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1bP0;1|17/414243\x1b\\");
+        assert_eq!(term.user_defined_key(17), None);
+    }
+
+    #[test]
+    fn decudk_loads_when_allowlisted() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        settings::set_feature_permissions(
+            &mut term.inner.protocol,
+            FeaturePermissions {
+                udks: ProgramAllowlist::AllowAll,
+                ..FeaturePermissions::default()
+            },
+        );
+        term.process(b"\x1bP0;1|17/414243\x1b\\");
+        assert_eq!(term.user_defined_key(17), Some(b"ABC".to_vec()));
+    }
+
+    #[test]
+    fn private_dsr_reports_udk_lock_state_when_allowlisted() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        settings::set_feature_permissions(
+            &mut term.inner.protocol,
+            FeaturePermissions {
+                udks: ProgramAllowlist::AllowAll,
+                ..FeaturePermissions::default()
+            },
+        );
+        term.process(b"\x1b[?25n");
+        assert_eq!(term.take_pending_output(), b"\x1b[?21n");
+        term.process(b"\x1bP0;0|17/41\x1b\\");
+        term.process(b"\x1b[?25n");
+        assert_eq!(term.take_pending_output(), b"\x1b[?20n");
+    }
+
+    #[test]
+    fn dec_keyboard_controls_are_default_denied() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[1;3*}\x1b[1;2+r");
+        assert_eq!(term.local_function_key_control(1), None);
+        assert_eq!(
+            term.dec_modifier_key_report(crate::DecModifierKey::LeftShift, true),
+            None
+        );
+    }
+
+    #[test]
+    fn dec_keyboard_controls_apply_when_allowlisted() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        settings::set_feature_permissions(
+            &mut term.inner.protocol,
+            FeaturePermissions {
+                udks: ProgramAllowlist::AllowAll,
+                ..FeaturePermissions::default()
+            },
+        );
+        term.process(b"\x1b[1;3*}\x1b[1;2+r");
+        assert_eq!(
+            term.local_function_key_control(1),
+            Some(crate::LocalFunctionKeyControl::Disabled)
+        );
+        assert_eq!(
+            term.dec_modifier_key_report(crate::DecModifierKey::LeftShift, true),
+            Some(b"\x1b_:0011\x1b\\".to_vec())
+        );
+    }
+
+    #[test]
     fn ris_clears_stored_macros() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         let macros = ProgramAllowlist::AllowAll;
-        settings::set_feature_permissions(&mut term.inner.protocol, FeaturePermissions { macros });
+        settings::set_feature_permissions(
+            &mut term.inner.protocol,
+            FeaturePermissions {
+                macros,
+                ..FeaturePermissions::default()
+            },
+        );
         term.process(b"\x1bP1;1;1!z414243\x1b\\");
         term.process(b"\x1bc");
         term.process(b"\x1b[1*z");

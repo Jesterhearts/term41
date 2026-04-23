@@ -23,6 +23,7 @@ use crate::charset;
 use crate::color::apply_sgr_groups;
 use crate::conformance;
 use crate::dec::r#macro::MacroStore;
+use crate::dec::udk::UdkState;
 use crate::drcs::DrcsStore;
 use crate::io::keyboard::handle_kitty_keyboard_groups;
 use crate::io::mouse::apply_mouse_mode;
@@ -645,6 +646,7 @@ pub(crate) fn csi_parse(
             '|' => ParsedCsiAction::SetScreenLines {
                 lines: first_group_param(&params, 24),
             },
+            '}' => ParsedCsiAction::SetLocalFunctionKeys { params },
             'x' => match first_group_param(&params, 0) {
                 2 => ParsedCsiAction::SetAttrChangeExtent {
                     extent: grid::AttrChangeExtent::Rectangle,
@@ -710,6 +712,8 @@ pub(crate) fn csi_parse(
         b"+" if action == 'p' => ParsedCsiAction::ResetWithConfirmation {
             confirmation_param: params.get(0).and_then(|group| group.first().copied()),
         },
+        b"+" if action == 'q' => ParsedCsiAction::SetLocalFunctions { params },
+        b"+" if action == 'r' => ParsedCsiAction::SetModifierKeyReporting { params },
         [b'>' | b'<' | b'='] => match (intermediates[0], action) {
             (b'>' | b'<' | b'=', 'u') => ParsedCsiAction::KittyKeyboard {
                 intermediate: intermediates[0],
@@ -756,6 +760,7 @@ fn apply_main_csi(
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
+    udks: &mut UdkState,
     feature_permissions: &FeaturePermissions,
     drcs: &mut DrcsStore,
 ) {
@@ -792,6 +797,7 @@ fn apply_main_csi(
                     .dec_color(dec_color)
                     .default_status_display(default_status_display)
                     .macros(macros)
+                    .udks(udks)
                     .drcs(drcs)
                     .conformance_level(ConformanceLevel::Level4)
                     .c1_mode(C1Mode::SevenBit)
@@ -800,16 +806,18 @@ fn apply_main_csi(
         }
         MainCsiAction::ReportPrimaryDeviceAttrs => {
             let macro_allowed = feature_permissions.macros.allow();
-            let level = if macro_allowed {
+            let udk_allowed = feature_permissions.udks.allow();
+            let level = if macro_allowed || udk_allowed {
                 modes.conformance_level.da1_code()
             } else {
                 modes.conformance_level.da1_code().min(63)
             };
+            let udk_feature = if udk_allowed { ";8" } else { "" };
             let macro_feature = if macro_allowed { ";32" } else { "" };
             conformance::write_csi(
                 pending_output,
                 modes.c1_mode,
-                format_args!("?{level};7;21;22;28;29{macro_feature}c"),
+                format_args!("?{level};7{udk_feature};21;22;28;29{macro_feature}c"),
             );
         }
         MainCsiAction::DeviceStatusReport { selector } => {
@@ -1225,6 +1233,7 @@ pub(crate) fn csi_apply(
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
+    udks: &mut UdkState,
     feature_permissions: &FeaturePermissions,
     drcs: &mut DrcsStore,
 ) {
@@ -1261,6 +1270,7 @@ pub(crate) fn csi_apply(
                 .bell_pending(bell_pending)
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .macros(macros)
+                .udks(udks)
                 .feature_permissions(feature_permissions)
                 .drcs(drcs)
                 .call();
@@ -1391,6 +1401,9 @@ pub(crate) fn csi_apply(
                     modes.c1_mode,
                     format_args!("?{row};{col};{page}R"),
                 );
+            } else if selector == 25 && feature_permissions.udks.allow() {
+                let status = if udks.locked() { 20 } else { 21 };
+                conformance::write_csi(pending_output, modes.c1_mode, format_args!("?{status}n"));
             }
         }
         ParsedCsiAction::QueryPrivateMode { mode: ps } => {
@@ -1819,6 +1832,7 @@ pub(crate) fn csi_apply(
                 .dec_color(dec_color)
                 .default_status_display(default_status_display)
                 .macros(macros)
+                .udks(udks)
                 .drcs(drcs)
                 .palette(palette)
                 .base_palette(base_palette)
@@ -1828,6 +1842,24 @@ pub(crate) fn csi_apply(
 
             if let Some(pr) = confirmation_param {
                 conformance::write_csi(pending_output, modes.c1_mode, format_args!("{pr}*q"));
+            }
+        }
+        ParsedCsiAction::SetLocalFunctions { params } => {
+            if feature_permissions.udks.allow() {
+                let groups: Vec<&[u16]> = params.iter().collect();
+                udks.set_local_functions(&groups);
+            }
+        }
+        ParsedCsiAction::SetLocalFunctionKeys { params } => {
+            if feature_permissions.udks.allow() {
+                let groups: Vec<&[u16]> = params.iter().collect();
+                udks.set_local_function_keys(&groups);
+            }
+        }
+        ParsedCsiAction::SetModifierKeyReporting { params } => {
+            if feature_permissions.udks.allow() {
+                let groups: Vec<&[u16]> = params.iter().collect();
+                udks.set_modifier_keys(&groups);
             }
         }
         ParsedCsiAction::ReportXtVersion => {
@@ -1877,6 +1909,7 @@ pub(crate) fn csi_dispatch(
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
+    udks: &mut UdkState,
     feature_permissions: &FeaturePermissions,
     drcs: &mut DrcsStore,
 ) {
@@ -1907,6 +1940,7 @@ pub(crate) fn csi_dispatch(
         .bell_pending(bell_pending)
         .vt52_cursor_addr(vt52_cursor_addr)
         .macros(macros)
+        .udks(udks)
         .feature_permissions(feature_permissions)
         .drcs(drcs)
         .call();

@@ -128,34 +128,108 @@ pub(crate) fn status_line_label_row(
     }
 }
 
-pub(crate) fn status_line_text_row(
+pub(crate) struct UdkIndicator {
+    pub enabled: bool,
+    pub locked: bool,
+    pub keys: Vec<String>,
+}
+
+pub(crate) fn status_line_indicator_row(
     text: &str,
+    udks: UdkIndicator,
     cols: u32,
     palette: &ColorPalette,
 ) -> RowSnapshot {
-    let segments: Vec<_> = text.graphemes(true).collect();
-    let clipped = clip_status_line_tail(&segments, cols as usize);
-    let mut row = RowSnapshot {
-        line_attr: LineAttr::Normal,
-        fg: vec![palette.status_line_fg; cols as usize],
-        bg: vec![palette.status_line_bg; cols as usize],
-        attrs: vec![CellAttrs::default(); cols as usize],
-        selected: vec![false; cols as usize],
-        matched: vec![false; cols as usize],
-        active_match: vec![false; cols as usize],
-        cells: vec![smol_str::SmolStr::new_inline(" "); cols as usize],
-        exit_status: None,
-        has_link: vec![false; cols as usize],
-        underline: vec![UnderlineStyle::None; cols as usize],
-        underline_color: vec![None; cols as usize],
-        prompt_start: false,
+    let mut row = blank_status_line_row(cols as usize, palette);
+    let right = format_udk_indicator(udks);
+    let left_graphemes: Vec<_> = text.graphemes(true).collect();
+    let right_graphemes: Vec<_> = right.graphemes(true).collect();
+    let left_budget = if right_graphemes.is_empty() {
+        cols as usize
+    } else {
+        (cols as usize).saturating_sub(right_graphemes.len() + 2)
     };
-    for (idx, grapheme) in clipped.into_iter().enumerate() {
-        let mut builder = SmolStrBuilder::new();
-        builder.push_str(grapheme);
-        row.cells[idx] = builder.finish();
+    let clipped_left = clip_status_line_tail(&left_graphemes, left_budget);
+
+    for (idx, grapheme) in clipped_left.into_iter().enumerate() {
+        set_status_cell(&mut row, idx, grapheme, palette.status_line_fg);
     }
+
+    if !right_graphemes.is_empty() {
+        let start = (cols as usize).saturating_sub(right_graphemes.len());
+        let warning_fg = Srgb::new(224, 116, 116);
+        let dim_fg = blend(palette.status_line_fg, palette.status_line_bg, 0.45);
+        let mut in_badge = false;
+        for (offset, grapheme) in right_graphemes.into_iter().enumerate() {
+            if grapheme == "[" {
+                in_badge = true;
+            }
+            let fg = if in_badge { warning_fg } else { dim_fg };
+            set_status_cell(&mut row, start + offset, grapheme, fg);
+            if grapheme == "]" {
+                in_badge = false;
+            }
+        }
+    }
+
     row
+}
+
+fn blank_status_line_row(
+    cols: usize,
+    palette: &ColorPalette,
+) -> RowSnapshot {
+    RowSnapshot {
+        line_attr: LineAttr::Normal,
+        fg: vec![palette.status_line_fg; cols],
+        bg: vec![palette.status_line_bg; cols],
+        attrs: vec![CellAttrs::default(); cols],
+        selected: vec![false; cols],
+        matched: vec![false; cols],
+        active_match: vec![false; cols],
+        cells: vec![smol_str::SmolStr::new_inline(" "); cols],
+        exit_status: None,
+        has_link: vec![false; cols],
+        underline: vec![UnderlineStyle::None; cols],
+        underline_color: vec![None; cols],
+        prompt_start: false,
+    }
+}
+
+fn set_status_cell(
+    row: &mut RowSnapshot,
+    idx: usize,
+    grapheme: &str,
+    fg: Srgb<u8>,
+) {
+    if idx >= row.cells.len() {
+        return;
+    }
+    let mut builder = SmolStrBuilder::new();
+    builder.push_str(grapheme);
+    row.cells[idx] = builder.finish();
+    row.fg[idx] = fg;
+}
+
+fn format_udk_indicator(udks: UdkIndicator) -> String {
+    if !udks.enabled {
+        return String::new();
+    }
+    if udks.keys.is_empty() {
+        return "UDK enabled".to_string();
+    }
+    let mut out = if udks.locked {
+        "UDK locked".to_string()
+    } else {
+        "UDK".to_string()
+    };
+    for key in udks.keys {
+        out.push(' ');
+        out.push('[');
+        out.push_str(&key);
+        out.push(']');
+    }
+    out
 }
 
 fn clip_status_line_tail<'a>(
@@ -479,6 +553,47 @@ mod tests {
             prompt_start: false,
             exit_status: None,
         }
+    }
+
+    fn row_text(row: &RowSnapshot) -> String {
+        row.cells.concat()
+    }
+
+    #[test]
+    fn status_line_indicator_right_aligns_programmed_udks() {
+        let palette = ColorPalette::default();
+        let row = status_line_indicator_row(
+            "cwd",
+            UdkIndicator {
+                enabled: true,
+                locked: false,
+                keys: vec!["F6".to_string(), "F12".to_string()],
+            },
+            36,
+            &palette,
+        );
+
+        assert_eq!(row_text(&row), "cwd                   UDK [F6] [F12]");
+        let badge_start = row_text(&row).find("[F6]").expect("badge");
+        assert_eq!(row.fg[badge_start], Srgb::new(224, 116, 116));
+        assert_eq!(row.fg[badge_start + 1], Srgb::new(224, 116, 116));
+    }
+
+    #[test]
+    fn status_line_indicator_shows_enabled_udks_without_programmed_keys() {
+        let palette = ColorPalette::default();
+        let row = status_line_indicator_row(
+            "",
+            UdkIndicator {
+                enabled: true,
+                locked: false,
+                keys: vec![],
+            },
+            16,
+            &palette,
+        );
+
+        assert_eq!(row_text(&row), "     UDK enabled");
     }
 
     #[test]

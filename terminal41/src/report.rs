@@ -128,6 +128,18 @@ pub(crate) fn handle_decrqss(
             };
             conformance::write_dcs(out, c1_mode, format_args!("1$r{ps}$~"));
         }
+        b"+q" if terminal.udk_feature_enabled() => {
+            let report = terminal.protocol.udks.report_local_functions();
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{report}+q"));
+        }
+        b"*}" if terminal.udk_feature_enabled() => {
+            let report = terminal.protocol.udks.report_local_function_keys();
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{report}*}}"));
+        }
+        b"+r" if terminal.udk_feature_enabled() => {
+            let report = terminal.protocol.udks.report_modifier_keys();
+            conformance::write_dcs(out, c1_mode, format_args!("1$r{report}+r"));
+        }
         [item @ b'0'..=b'9', b',', kind @ (b'|' | b'}')] => {
             let item = (item - b'0') as u16;
             let report = if *kind == b'|' {

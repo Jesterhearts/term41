@@ -125,6 +125,9 @@ struct AllowFeaturesConfig {
     #[serde(deserialize_with = "program_allowlist_opt")]
     #[serde(default)]
     macros: Option<ProgramAllowlist>,
+    #[serde(deserialize_with = "program_allowlist_opt")]
+    #[serde(default)]
+    udks: Option<ProgramAllowlist>,
 }
 
 #[derive(Deserialize, Default)]
@@ -473,6 +476,7 @@ fn parse_config(
         palette,
         feature_permissions: FeaturePermissions {
             macros: features.macros.unwrap_or_default(),
+            udks: features.udks.unwrap_or_default(),
         },
         compatibility,
     }
@@ -831,6 +835,24 @@ mod tests {
             parse("[security.features]\nmacros = \"*\"\n")
                 .feature_permissions
                 .macros,
+            ProgramAllowlist::AllowAll
+        );
+    }
+
+    #[test]
+    fn udks_allowlist_defaults_to_deny_all() {
+        assert_eq!(
+            parse("").feature_permissions.udks,
+            ProgramAllowlist::DenyAll
+        );
+    }
+
+    #[test]
+    fn udks_allowlist_accepts_all_string() {
+        assert_eq!(
+            parse("[security.features]\nudks = \"all\"\n")
+                .feature_permissions
+                .udks,
             ProgramAllowlist::AllowAll
         );
     }

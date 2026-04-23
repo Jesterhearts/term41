@@ -922,6 +922,28 @@ impl WindowHost {
 
         let target = &self.input_endpoints[&active_tab_id];
 
+        if let Some(selector) = dec_udk_selector(&key, self.modifiers) {
+            let bytes = { target.terminal.lock().user_defined_key(selector) };
+            if let Some(bytes) = bytes {
+                view::reset_viewport(&mut target.terminal.lock().active);
+                let _ = target.writer.borrow_mut().write(&bytes);
+                self.notify_interaction_changed();
+                return;
+            }
+        }
+
+        if let Some(selector) = dec_local_function_key_selector(&key, self.modifiers) {
+            let control = { target.terminal.lock().local_function_key_control(selector) };
+            match control {
+                Some(terminal41::LocalFunctionKeyControl::Local)
+                | Some(terminal41::LocalFunctionKeyControl::Disabled) => {
+                    self.notify_interaction_changed();
+                    return;
+                }
+                Some(terminal41::LocalFunctionKeyControl::SendSequence) | None => {}
+            }
+        }
+
         let (kitty_flags, c1_mode) = {
             let terminal = target.terminal.lock();
             (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
@@ -999,6 +1021,51 @@ impl WindowHost {
             let _ = target.writer.borrow_mut().write(&bytes);
             self.notify_interaction_changed();
         }
+    }
+
+    fn handle_modifiers_changed(
+        &mut self,
+        mods: ModifiersState,
+    ) {
+        let old = self.modifiers;
+        self.modifiers = mods;
+
+        let Some(target) = self.active_input_target() else {
+            return;
+        };
+
+        let changes = [
+            (
+                terminal41::DecModifierKey::LeftShift,
+                old.shift_key(),
+                mods.shift_key(),
+            ),
+            (
+                terminal41::DecModifierKey::Ctrl,
+                old.control_key(),
+                mods.control_key(),
+            ),
+            (
+                terminal41::DecModifierKey::LeftAltFunction,
+                old.alt_key(),
+                mods.alt_key(),
+            ),
+        ];
+
+        let bytes = {
+            let terminal = target.terminal.lock();
+            let mut bytes = Vec::new();
+            for (key, was_pressed, is_pressed) in changes {
+                if was_pressed == is_pressed {
+                    continue;
+                }
+                if let Some(report) = terminal.dec_modifier_key_report(key, is_pressed) {
+                    bytes.extend(report);
+                }
+            }
+            bytes
+        };
+        self.write_host_bytes(target, bytes, false);
     }
 
     fn handle_ime_commit(
@@ -2051,7 +2118,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::ModifiersChanged(mods) => {
-                self.modifiers = mods.state();
+                self.handle_modifiers_changed(mods.state());
                 return;
             }
 
@@ -2098,6 +2165,56 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             _ => return,
         };
         self.send(ev);
+    }
+}
+
+fn dec_udk_selector(
+    key: &Key,
+    mods: ModifiersState,
+) -> Option<u16> {
+    if !mods.shift_key() {
+        return None;
+    }
+    match key {
+        Key::Named(named) => dec_function_key_selector(*named),
+        _ => None,
+    }
+}
+
+fn dec_local_function_key_selector(
+    key: &Key,
+    mods: ModifiersState,
+) -> Option<u16> {
+    if mods.shift_key() || mods.control_key() || mods.alt_key() || mods.super_key() {
+        return None;
+    }
+    match key {
+        Key::Named(NamedKey::F1) => Some(1),
+        Key::Named(NamedKey::F2) => Some(2),
+        Key::Named(NamedKey::F3) => Some(3),
+        Key::Named(NamedKey::F4) => Some(4),
+        _ => None,
+    }
+}
+
+fn dec_function_key_selector(named: NamedKey) -> Option<u16> {
+    match named {
+        NamedKey::F6 => Some(17),
+        NamedKey::F7 => Some(18),
+        NamedKey::F8 => Some(19),
+        NamedKey::F9 => Some(20),
+        NamedKey::F10 => Some(21),
+        NamedKey::F11 => Some(23),
+        NamedKey::F12 => Some(24),
+        NamedKey::F13 => Some(25),
+        NamedKey::F14 => Some(26),
+        NamedKey::F15 => Some(28),
+        NamedKey::F16 => Some(29),
+        NamedKey::F17 => Some(31),
+        NamedKey::F18 => Some(32),
+        NamedKey::F19 => Some(33),
+        NamedKey::F20 => Some(34),
+        _ => None,
     }
 }
 

@@ -200,29 +200,38 @@ Security:
 
 ## Priority 2: Keyboard, Local Functions, and Input Programming
 
-### [ ] 8. User-defined keys (`DECUDK`) and related controls
+### [x] 8. User-defined keys (`DECUDK`) and related controls
 
-Missing:
+Implemented:
 
-- [ ] `DECUDK`
-- [ ] `DECLFKC`
-- [ ] `DECELF`
-- [ ] `DECSMKR`
-- [ ] legacy DEC keyboard reports and compatibility behaviors
+- [x] `DECUDK`
+- [x] `DECLFKC`
+- [x] `DECELF`
+- [x] `DECSMKR`
+- [x] UDK lock DSR (`CSI ? 25 n`)
+- [x] DA1 advertisement gated on UDK authorization
+- [x] bounded UDK storage
+- [x] basic legacy DEC modifier reports for aggregate Shift/Ctrl/Alt state
+- [x] emulator-owned indicator-line UDK status badges
 
 Why it matters:
 
-- VT420/VT520 keyboards are host-programmable in ways `term41` does not model.
-- The current code supports kitty keyboard mode negotiation, not DEC UDK /
-  local-function programming.
+- VT420/VT520 keyboards are host-programmable.
+- `term41` now implements the host-visible VT420 UDK surface while keeping it
+  behind the same style of explicit security gate as downloaded macros.
 
 Security:
 
 - `HIGH`
 - A hostile host can redefine function keys so that a later local keypress emits
   shell commands or control sequences into the session.
-- If implemented at all, UDK loading should be disabled by default and surfaced
-  prominently to the user.
+- UDK loading and related keyboard-control mutations are disabled by default.
+  Users can opt in with `[security.features] udks = "all"`.
+- Users who also enable `status_line = "indicator"` get a visible terminal-owned
+  status surface showing UDK enablement and programmed keys such as `[F6]`.
+- winit exposes aggregate modifier state rather than reliable left/right DEC
+  modifier identity, so `term41` reports aggregate Shift/Ctrl/Alt transitions
+  through the closest DEC modifier selectors.
 
 ### [x] 9. Downloaded macros (`DECDMAC`, `DECINVM`)
 
@@ -422,7 +431,7 @@ Security:
 Even if implemented for spec completeness, these should almost certainly be off
 unless the user explicitly enables them:
 
-- [ ] `DECUDK`
+- [x] `DECUDK`
 - [ ] `DECDMAC` / `DECINVM`
 - [ ] printer controller mode
 - [ ] autoprint / print-page / print-screen features

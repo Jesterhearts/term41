@@ -17,6 +17,7 @@ use crate::charset::CharacterSet;
 use crate::charset::GraphicSetSlot;
 use crate::color;
 use crate::dec::r#macro::MacroStore;
+use crate::dec::udk::UdkState;
 use crate::drcs::DrcsStore;
 use crate::mode;
 use crate::parser::ParsedEscAction;
@@ -408,6 +409,7 @@ pub(crate) fn esc_apply(
     pending_output: &mut Vec<u8>,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
+    udks: &mut UdkState,
     drcs: &mut DrcsStore,
 ) {
     match action {
@@ -475,6 +477,7 @@ pub(crate) fn esc_apply(
                 .dec_color(dec_color)
                 .default_status_display(default_status_display)
                 .macros(macros)
+                .udks(udks)
                 .drcs(drcs)
                 .conformance_level(conformance_level)
                 .c1_mode(c1_mode)
@@ -584,6 +587,7 @@ pub(crate) fn esc_dispatch(
     pending_output: &mut Vec<u8>,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
     macros: &mut MacroStore,
+    udks: &mut UdkState,
     drcs: &mut DrcsStore,
     intermediates: &[u8],
     byte: u8,
@@ -611,6 +615,7 @@ pub(crate) fn esc_dispatch(
         .pending_output(pending_output)
         .vt52_cursor_addr(vt52_cursor_addr)
         .macros(macros)
+        .udks(udks)
         .drcs(drcs)
         .call();
 }

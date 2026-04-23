@@ -23,6 +23,7 @@ use crate::dec::color::TEXT_COLOR_ASSIGNMENT_CLASS;
 use crate::dec::color::assign_color;
 use crate::dec::color::effective_palette;
 use crate::dec::r#macro::MacroStore;
+use crate::dec::udk::UdkState;
 use crate::dec_assign_alternate_text_color;
 use crate::dec_select_lookup_table;
 use crate::graphics;
@@ -268,6 +269,7 @@ pub(super) fn apply_csi_action(
     vt52_cursor_addr: &mut Vt52CursorAddr,
     macros: &mut MacroStore,
     macro_invocation_depth: usize,
+    udks: &mut UdkState,
     feature_permissions: &FeaturePermissions,
     drcs: &mut crate::drcs::DrcsStore,
     palette: &mut ColorPalette,
@@ -312,6 +314,7 @@ pub(super) fn apply_csi_action(
                 .bell_pending(bell_pending)
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .macros(macros)
+                .udks(udks)
                 .feature_permissions(feature_permissions)
                 .drcs(drcs)
                 .palette(palette)
@@ -345,6 +348,7 @@ pub(super) fn apply_esc_action(
     pending_output: &mut Vec<u8>,
     vt52_cursor_addr: &mut Vt52CursorAddr,
     macros: &mut MacroStore,
+    udks: &mut UdkState,
     drcs: &mut crate::drcs::DrcsStore,
 ) {
     match action {
@@ -371,6 +375,7 @@ pub(super) fn apply_esc_action(
                 .pending_output(pending_output)
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .macros(macros)
+                .udks(udks)
                 .drcs(drcs)
                 .call();
         }

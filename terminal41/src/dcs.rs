@@ -1,6 +1,7 @@
 use crate::Terminal;
 use crate::TerminalEffects;
 use crate::charset;
+use crate::dec::udk;
 use crate::drcs;
 use crate::report;
 
@@ -16,7 +17,11 @@ fn hook_payload_limit(
     action: char,
     intermediates: &[u8],
 ) -> Option<usize> {
-    (action == '{' && intermediates.is_empty()).then_some(drcs::MAX_DRCS_PAYLOAD_BYTES)
+    match (action, intermediates) {
+        ('{', []) => Some(drcs::MAX_DRCS_PAYLOAD_BYTES),
+        ('|', []) => Some(udk::MAX_DECUDK_PAYLOAD_BYTES),
+        _ => None,
+    }
 }
 
 pub(crate) fn push_hook_state(
@@ -111,6 +116,8 @@ fn handle_dcs(
     } else if action == '{' && intermediates.is_empty() {
         let flat_params: Vec<u16> = params.iter().flat_map(|g| g.iter().copied()).collect();
         terminal.protocol.drcs.define(&flat_params, payload);
+    } else if action == '|' && intermediates.is_empty() {
+        terminal.define_udk(params, payload);
     } else if action == 't' && intermediates == b"$" {
         let ps = params
             .iter()

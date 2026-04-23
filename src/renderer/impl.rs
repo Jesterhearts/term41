@@ -40,12 +40,13 @@ use crate::renderer::background::BgImageVertex;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
+use crate::renderer::paint::UdkIndicator;
 use crate::renderer::paint::blink_animation_enabled;
 use crate::renderer::paint::bold_glyph_enabled;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::resolve_painted_cell;
+use crate::renderer::paint::status_line_indicator_row;
 use crate::renderer::paint::status_line_label_row;
-use crate::renderer::paint::status_line_text_row;
 use crate::renderer::paint::underline_style_for_render;
 
 pub const MAX_TAB_WIDTH: f32 = 30.0;
@@ -559,8 +560,24 @@ fn snapshot_status_line_row(
     terminal: &Terminal,
     vp_cols: u32,
 ) -> Option<RowSnapshot> {
-    if let Some(text) = view::indicator_status_text(&terminal.metadata, &terminal.active) {
-        return Some(status_line_text_row(&text, vp_cols, &terminal.palette));
+    if view::status_display_kind(&terminal.active) == terminal41::StatusDisplayKind::Indicator {
+        let text =
+            view::indicator_status_text(&terminal.metadata, &terminal.active).unwrap_or_default();
+        return Some(status_line_indicator_row(
+            &text,
+            UdkIndicator {
+                enabled: terminal.udk_feature_enabled(),
+                locked: terminal.udks_locked(),
+                keys: terminal
+                    .programmed_udk_selectors()
+                    .into_iter()
+                    .filter_map(udk_selector_label)
+                    .map(str::to_string)
+                    .collect(),
+            },
+            vp_cols,
+            &terminal.palette,
+        ));
     }
     let grid_row = view::status_line_row(&terminal.active)?;
     Some(RowSnapshot {
@@ -578,6 +595,27 @@ fn snapshot_status_line_row(
         prompt_start: false,
         exit_status: None,
     })
+}
+
+fn udk_selector_label(selector: u16) -> Option<&'static str> {
+    match selector {
+        17 => Some("F6"),
+        18 => Some("F7"),
+        19 => Some("F8"),
+        20 => Some("F9"),
+        21 => Some("F10"),
+        23 => Some("F11"),
+        24 => Some("F12"),
+        25 => Some("F13"),
+        26 => Some("F14"),
+        28 => Some("F15"),
+        29 => Some("F16"),
+        31 => Some("F17"),
+        32 => Some("F18"),
+        33 => Some("F19"),
+        34 => Some("F20"),
+        _ => None,
+    }
 }
 
 /// CSD window control state passed to the renderer each frame.

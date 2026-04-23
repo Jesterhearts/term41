@@ -1715,7 +1715,7 @@ pub(crate) fn legacy_encode_named(
         };
     }
 
-    // F5-F12 use tilde-style: CSI code [;mod] ~
+    // F5-F20 use tilde-style: CSI code [;mod] ~. DEC skips 22, 27, and 30.
     let fkey_code = match key {
         NamedKey::F5 => Some(15),
         NamedKey::F6 => Some(17),
@@ -1725,6 +1725,14 @@ pub(crate) fn legacy_encode_named(
         NamedKey::F10 => Some(21),
         NamedKey::F11 => Some(23),
         NamedKey::F12 => Some(24),
+        NamedKey::F13 => Some(25),
+        NamedKey::F14 => Some(26),
+        NamedKey::F15 => Some(28),
+        NamedKey::F16 => Some(29),
+        NamedKey::F17 => Some(31),
+        NamedKey::F18 => Some(32),
+        NamedKey::F19 => Some(33),
+        NamedKey::F20 => Some(34),
         _ => None,
     };
     if let Some(code) = fkey_code {

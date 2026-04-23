@@ -8,6 +8,10 @@ use crate::Viewport;
 use crate::dec::r#macro::MAX_MACRO_INVOCATION_DEPTH;
 use crate::dec::r#macro::MacroEncoding;
 use crate::dec::r#macro::MacroStore;
+use crate::dec::udk::DecModifierKey;
+use crate::dec::udk::LocalFunctionKeyControl;
+use crate::dec::udk::ModifierKeyControl;
+use crate::dec::udk::UdkState;
 use crate::screen;
 
 /// Permission gates for terminal features that can execute stored data or
@@ -16,6 +20,8 @@ use crate::screen;
 pub struct FeaturePermissions {
     /// Permission gate for VT420 programmable macros.
     pub macros: ProgramAllowlist,
+    /// Permission gate for DEC user-defined keys and related keyboard controls.
+    pub udks: ProgramAllowlist,
 }
 
 /// Coarse allow/deny gate for a protocol feature.
@@ -42,6 +48,10 @@ impl ProgramAllowlist {
 
 pub(crate) fn macro_feature_enabled(permissions: &FeaturePermissions) -> bool {
     permissions.macros.allow()
+}
+
+pub(crate) fn udk_feature_enabled(permissions: &FeaturePermissions) -> bool {
+    permissions.udks.allow()
 }
 
 pub(crate) fn define_macro(
@@ -92,6 +102,47 @@ pub(crate) fn invoke_macro(
 
 pub(crate) fn drcs_render_glyphs(drcs: &DrcsStore) -> font41::DrcsGlyphMap {
     drcs.render_glyphs()
+}
+
+pub(crate) fn define_udk(
+    enabled: bool,
+    udks: &mut UdkState,
+    params: vtepp::Params,
+    payload: &[u8],
+) {
+    if enabled {
+        udks.define(params, payload);
+    }
+}
+
+pub(crate) fn lookup_udk(
+    enabled: bool,
+    udks: &UdkState,
+    selector: u16,
+) -> Option<Vec<u8>> {
+    enabled
+        .then(|| udks.definition(selector).map(ToOwned::to_owned))
+        .flatten()
+}
+
+pub(crate) fn local_function_key_control(
+    enabled: bool,
+    udks: &UdkState,
+    selector: u16,
+) -> Option<LocalFunctionKeyControl> {
+    enabled.then(|| udks.local_function_key(selector)).flatten()
+}
+
+pub(crate) fn modifier_key_control(
+    enabled: bool,
+    udks: &UdkState,
+    key: DecModifierKey,
+) -> ModifierKeyControl {
+    if enabled {
+        udks.modifier_key(key)
+    } else {
+        ModifierKeyControl::Modifier
+    }
 }
 
 pub(crate) fn apply_status_display_mode(
