@@ -390,19 +390,19 @@ Security:
 
 - `LOW`
 
-### [ ] 16. VT500 page/window/session features
+### [x] 16. VT500 page/window/session features
 
-Missing:
+Status:
 
-- [ ] `DECVSSM`
-- [ ] `DECPCCM`
-- [ ] `CSI & x` session command family
-- [ ] other VT500 multi-session / multi-window controls
+- Explicitly not implemented.
 
-Why it matters:
+Decision:
 
-- VT500-class terminals are not just "VT420 plus a few more reports." They add
-  richer desktop/session concepts.
+- VT500-class terminals add richer desktop/session concepts, but those use
+  cases are covered better by local multiplexers such as `tmux` and `zellij`.
+- `term41` keeps session, tab, window, pane, and input-routing UI under local
+  terminal control rather than exposing host-driven escape-sequence controls
+  that can create or reshape those surfaces.
 
 Security:
 
@@ -432,7 +432,7 @@ Even if implemented for spec completeness, these should almost certainly be off
 unless the user explicitly enables them:
 
 - [x] `DECUDK`
-- [ ] `DECDMAC` / `DECINVM`
+- [x] `DECDMAC` / `DECINVM`
 - [ ] printer controller mode
 - [ ] autoprint / print-page / print-screen features
 - [ ] printer-to-host session features
