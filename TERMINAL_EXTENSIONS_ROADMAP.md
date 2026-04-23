@@ -173,13 +173,13 @@ Why:
 - `term41` now covers the practical kitty graphics transmit/place/delete
   surface, including placement IDs, z-index, image numbers, relative placement,
   and expanded delete selectors.
-- The remaining upstream protocol areas are larger semantic features rather
-  than missing parser keys.
+- The remaining upstream protocol areas are larger semantic features rather than
+  missing parser keys.
 
 Scope:
 
-- Implement Unicode placeholder virtual placements only if real tools need
-  them. This requires interpreting `U+10EEEE`, foreground-color image IDs, and
+- Implement Unicode placeholder virtual placements only if real tools need them.
+  This requires interpreting `U+10EEEE`, foreground-color image IDs, and
   row/column combining marks inside the text grid.
 - Implement kitty animation frame actions only as a separate project. These
   mutate stored frame data and affect renderer lifecycle, quotas, and scrollback
