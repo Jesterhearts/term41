@@ -55,12 +55,12 @@ Maintenance direction:
 
 - Keep these compatible with xterm, VTE, iTerm2, Ghostty, WezTerm, Alacritty,
   and common TUI libraries.
-- Add regression coverage from real application probes where possible:
-  `vttest`, shell-integration scripts, editor probes, `crossterm`, `vaxis`,
-  `ratatui`, and terminal image tools.
-- Revisit OSC 52 policy. Clipboard writes are common and useful; clipboard
-  reads are more sensitive and should move toward local configuration with
-  clear defaults.
+- Add regression coverage from real application probes where possible: `vttest`,
+  shell-integration scripts, editor probes, `crossterm`, `vaxis`, `ratatui`, and
+  terminal image tools.
+- Revisit OSC 52 policy. Clipboard writes are common and useful; clipboard reads
+  are more sensitive and should move toward local configuration with clear
+  defaults.
 
 Security:
 
@@ -126,8 +126,8 @@ Maintenance direction:
 Security:
 
 - `LOW` to `MEDIUM`
-- Rich keyboard reporting is opt-in by the foreground app. It should not let
-  the host disable local terminal keybindings or trusted UI actions.
+- Rich keyboard reporting is opt-in by the foreground app. It should not let the
+  host disable local terminal keybindings or trusted UI actions.
 
 ### Shell Integration And Prompt Marks
 
@@ -159,33 +159,6 @@ Security:
 - Prompt metadata is spoofable by any process that can write to the PTY.
 
 ## Planned
-
-### Clipboard Policy Controls
-
-Status:
-
-- `Planned`
-
-Why:
-
-- Alacritty and Ghostty expose explicit OSC 52 policy controls because
-  clipboard reads and writes have different risk profiles.
-- `term41` currently implements OSC 52, but the policy should be visible and
-  user-configurable.
-
-Scope:
-
-- Add configuration for OSC 52 read and write behavior.
-- Strong candidate defaults:
-  - writes allowed or ask, because editor-copy use cases are common
-  - reads denied or ask, because they exfiltrate local clipboard contents
-- Keep per-tab clipboard scoping where it already exists.
-- Add payload size limits and clear failure behavior.
-
-Security:
-
-- `HIGH` for reads
-- `MEDIUM` for writes
 
 ### Kitty Graphics Parity Audit
 
@@ -458,8 +431,8 @@ Includes:
 
 Why:
 
-- This overlaps with local tabs/windows and with multiplexers such as `tmux`
-  and `zellij`.
+- This overlaps with local tabs/windows and with multiplexers such as `tmux` and
+  `zellij`.
 - Host output should not decide where local input goes.
 
 Security:
@@ -483,8 +456,8 @@ Why:
 
 - `term41` already implements standard rectangular operations where they belong
   in the terminal model.
-- New region styling extensions create surprising retroactive visual changes
-  and make spoofing analysis harder.
+- New region styling extensions create surprising retroactive visual changes and
+  make spoofing analysis harder.
 
 Security:
 
