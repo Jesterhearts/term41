@@ -119,17 +119,16 @@ In practice, extensions that allow either of these should be default-deny:
 So the default is: do nothing unless the user explicitly opted in, or the
 feature has a real authorization path.
 
-The concrete examples today are VT420 macros and DEC user-defined keys. They
-stay denied unless you explicitly allow them. This is currently a binary toggle
-between None/All processes. As far as I know, there's no reliable way to say
-"these bytes in the pty came from this process", so there's no safe way to
-authenticate that some set of bytes in the input is from `good` vs `evil`. If
-such a way becomes available, I'm open to adding a per-process allowlist.
+VT420 macros and DEC user-defined keys stay denied unless you explicitly allow
+them. This is currently a binary toggle between None/All processes. As far as I
+know, there's no reliable way to say "these bytes in the pty came from this
+process", so there's no safe way to authenticate that some set of bytes in the
+input is from `good` vs `evil`. If such a way becomes available, I'm open to
+adding a per-process allowlist.
 
-An example of a grey area is clipboard integration. I currently don't gate it
-behind an allowlist because I think it would be surprising if it was broken due
-to this. I'd really like to move it behind a gate if it turns out restricting it
-wouldn't hurt too bad.
+OSC 52 clipboard reads and writes default to asking for each request. Allowing
+from the confirmation modal applies only to the single clipboard request that
+triggered the prompt.
 
 
 <details>
@@ -227,6 +226,11 @@ vsync = "auto"
 # macros = "all"
 # udks = "all"
 
+[security.clipboard]
+# read/write accept "ask", "all", "*", "allow", "deny", "no", or "none".
+# read = "ask"
+# write = "ask"
+
 [colors.status_line]
 # foreground = "#d8dee9"
 # background = "#3b4252"
@@ -258,6 +262,9 @@ Notes:
   badges such as `[F6]`.
 - `security.features.macros` and `security.features.udks` can be `"all"` or
   omitted/default-denied.
+- `security.clipboard.read` and `security.clipboard.write` default to `"ask"`;
+  `"allow"`/`"all"`/`"*"` skips the prompt, while `"deny"`/`"no"`/`"none"`
+  blocks OSC 52 access.
 
 </details>
 

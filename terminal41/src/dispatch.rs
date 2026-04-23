@@ -387,6 +387,8 @@ pub(super) fn apply_osc_action(
     action: OscAction,
     clipboard: &mut Clipboard,
     pending_output: &mut Vec<u8>,
+    clipboard_requests: &mut Vec<crate::ClipboardRequest>,
+    feature_permissions: &FeaturePermissions,
     c1_mode: C1Mode,
     current_directory: &mut Option<PathBuf>,
     hyperlinks: &mut HyperlinkRegistry,
@@ -408,6 +410,8 @@ pub(super) fn apply_osc_action(
                 .payload(&data)
                 .clipboard(clipboard)
                 .pending_output(pending_output)
+                .clipboard_requests(clipboard_requests)
+                .clipboard_permissions(&feature_permissions.clipboard)
                 .c1_mode(c1_mode)
                 .current_directory(current_directory)
                 .hyperlinks(hyperlinks)

@@ -14,6 +14,9 @@ use crate::Row;
 use crate::ShellIntegrationPhase;
 use crate::color;
 use crate::conformance;
+use crate::feature::ClipboardPermission;
+use crate::feature::ClipboardPermissions;
+use crate::io::clipboard::ClipboardRequest;
 use crate::screen::Screen;
 use crate::screen::grid::Viewport;
 use crate::screen::hyperlink::HyperlinkId;
@@ -280,6 +283,8 @@ pub(super) fn handle_osc(
     payload: &[u8],
     clipboard: &mut Clipboard,
     pending_output: &mut Vec<u8>,
+    clipboard_requests: &mut Vec<ClipboardRequest>,
+    clipboard_permissions: &ClipboardPermissions,
     c1_mode: C1Mode,
     current_directory: &mut Option<PathBuf>,
     hyperlinks: &mut HyperlinkRegistry,
@@ -343,7 +348,14 @@ pub(super) fn handle_osc(
         OscCommand::CursorColor => {
             handle_osc_cursor_color_query(rest, palette, c1_mode, pending_output)
         }
-        OscCommand::Clipboard => handle_osc_52(rest, clipboard, c1_mode, pending_output),
+        OscCommand::Clipboard => handle_osc_52(
+            rest,
+            clipboard,
+            c1_mode,
+            pending_output,
+            clipboard_requests,
+            clipboard_permissions,
+        ),
         // Reset palette/fg/bg/cursor color. Accepted but currently no-op —
         // the palette is immutable at this level.
         OscCommand::ResetPalette
@@ -603,6 +615,8 @@ fn handle_osc_52(
     clipboard: &mut Clipboard,
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
+    clipboard_requests: &mut Vec<ClipboardRequest>,
+    clipboard_permissions: &ClipboardPermissions,
 ) {
     let (pc, pd) = split_osc(rest);
     let kinds = resolve_selectors(pc);
@@ -611,17 +625,23 @@ fn handle_osc_52(
         // Only one response is meaningful even when multiple selectors are
         // requested — pick the first resolved kind.
         let Some(&kind) = kinds.first() else { return };
-        let Some(text) = clipboard.get(kind) else {
-            return;
-        };
-        let encoded = BASE64.encode(text.as_bytes());
-        let pc_resp: &[u8] = if pc.is_empty() { b"c" } else { pc };
-        conformance::push_osc_prefix(pending_output, c1_mode);
-        pending_output.extend_from_slice(b"52;");
-        pending_output.extend_from_slice(pc_resp);
-        pending_output.push(b';');
-        pending_output.extend_from_slice(encoded.as_bytes());
-        conformance::push_st(pending_output, c1_mode);
+        let response_selector: &[u8] = if pc.is_empty() { b"c" } else { pc };
+        match clipboard_permissions.read {
+            ClipboardPermission::Allow => {
+                pending_output.extend(crate::io::clipboard::osc52_read_response(
+                    clipboard,
+                    kind,
+                    response_selector,
+                    c1_mode,
+                ));
+            }
+            ClipboardPermission::Ask => clipboard_requests.push(ClipboardRequest::Read {
+                kind,
+                response_selector: response_selector.to_vec(),
+                c1_mode,
+            }),
+            ClipboardPermission::Deny => {}
+        }
         return;
     }
 
@@ -631,8 +651,20 @@ fn handle_osc_52(
     let Ok(text) = std::str::from_utf8(&decoded) else {
         return;
     };
-    for kind in kinds {
-        clipboard.set(kind, text);
+    if kinds.is_empty() {
+        return;
+    }
+    match clipboard_permissions.write {
+        ClipboardPermission::Allow => {
+            for kind in kinds {
+                clipboard.set(kind, text);
+            }
+        }
+        ClipboardPermission::Ask => clipboard_requests.push(ClipboardRequest::Write {
+            kinds,
+            text: text.to_owned(),
+        }),
+        ClipboardPermission::Deny => {}
     }
 }
 
@@ -735,6 +767,8 @@ mod tests {
         shell_integration_phase: ShellIntegrationPhase,
         command_metas: HashMap<u64, CommandMeta>,
         palette: color::ColorPalette,
+        clipboard_requests: Vec<ClipboardRequest>,
+        clipboard_permissions: ClipboardPermissions,
     }
 
     impl Bag {
@@ -766,7 +800,20 @@ mod tests {
                 shell_integration_phase: ShellIntegrationPhase::None,
                 command_metas: HashMap::new(),
                 palette: color::ColorPalette::default(),
+                clipboard_requests: Vec::new(),
+                clipboard_permissions: ClipboardPermissions {
+                    read: ClipboardPermission::Allow,
+                    write: ClipboardPermission::Allow,
+                },
             }
+        }
+
+        fn with_clipboard_permissions(
+            mut self,
+            clipboard_permissions: ClipboardPermissions,
+        ) -> Self {
+            self.clipboard_permissions = clipboard_permissions;
+            self
         }
 
         fn current_link(&self) -> Option<HyperlinkId> {
@@ -781,6 +828,8 @@ mod tests {
                 .payload(payload)
                 .clipboard(&mut self.clipboard)
                 .pending_output(&mut self.pending)
+                .clipboard_requests(&mut self.clipboard_requests)
+                .clipboard_permissions(&self.clipboard_permissions)
                 .c1_mode(C1Mode::SevenBit)
                 .current_directory(&mut self.cwd)
                 .hyperlinks(&mut self.registry)
@@ -880,6 +929,65 @@ mod tests {
         bag.clipboard.set(ClipboardKind::Primary, "hi");
         bag.dispatch(b"52;p;?");
         assert_eq!(bag.pending, b"\x1b]52;p;aGk=\x1b\\");
+    }
+
+    #[test]
+    fn osc_52_ask_write_defers_clipboard_mutation() {
+        let mut bag = Bag::new().with_clipboard_permissions(ClipboardPermissions {
+            read: ClipboardPermission::Allow,
+            write: ClipboardPermission::Ask,
+        });
+        bag.dispatch(b"52;c;aGVsbG8=");
+
+        assert_eq!(
+            bag.clipboard.get(ClipboardKind::Clipboard).as_deref(),
+            Some("")
+        );
+        assert_eq!(
+            bag.clipboard_requests,
+            vec![ClipboardRequest::Write {
+                kinds: vec![ClipboardKind::Clipboard],
+                text: "hello".to_string(),
+            }]
+        );
+    }
+
+    #[test]
+    fn osc_52_ask_read_defers_clipboard_query() {
+        let mut bag = Bag::new().with_clipboard_permissions(ClipboardPermissions {
+            read: ClipboardPermission::Ask,
+            write: ClipboardPermission::Allow,
+        });
+        bag.clipboard.set(ClipboardKind::Clipboard, "hi");
+        bag.dispatch(b"52;;?");
+
+        assert!(bag.pending.is_empty());
+        assert_eq!(
+            bag.clipboard_requests,
+            vec![ClipboardRequest::Read {
+                kind: ClipboardKind::Clipboard,
+                response_selector: b"c".to_vec(),
+                c1_mode: C1Mode::SevenBit,
+            }]
+        );
+    }
+
+    #[test]
+    fn osc_52_deny_blocks_clipboard_access() {
+        let mut bag = Bag::new().with_clipboard_permissions(ClipboardPermissions {
+            read: ClipboardPermission::Deny,
+            write: ClipboardPermission::Deny,
+        });
+        bag.clipboard.set(ClipboardKind::Clipboard, "old");
+        bag.dispatch(b"52;c;aGVsbG8=");
+        bag.dispatch(b"52;c;?");
+
+        assert_eq!(
+            bag.clipboard.get(ClipboardKind::Clipboard).as_deref(),
+            Some("old")
+        );
+        assert!(bag.pending.is_empty());
+        assert!(bag.clipboard_requests.is_empty());
     }
 
     #[test]

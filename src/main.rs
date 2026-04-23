@@ -30,6 +30,7 @@ use pty_pipe41::PtyWriter;
 use renderer::RenderHost;
 use renderer::startup::StartupPresenter;
 use renderer::startup::StartupTab;
+use terminal41::ClipboardRequest;
 use terminal41::HostInput;
 use terminal41::HostInputEffects;
 use terminal41::HostMouse;
@@ -141,12 +142,10 @@ enum AppEvent {
     },
     RemoveInputEndpoint(TabId),
     SetActiveInputTab(Option<TabId>),
-    // Future security gates can send this to the trusted window thread and
-    // wait on the response channel without letting terminal41 own UI policy.
-    #[allow(dead_code)]
-    RequestPermission {
-        feature: String,
-        response_tx: mpsc::Sender<PermissionDecision>,
+    ResolveClipboardRequest {
+        tab_id: TabId,
+        request: ClipboardRequest,
+        decision: PermissionDecision,
     },
     DismissRecordingPopup(u64),
     ShowToast(String),
@@ -815,6 +814,7 @@ impl WindowHost {
             host_bytes,
             resize_request,
             bell,
+            clipboard_requests,
         } = effects;
         self.write_host_bytes(target, host_bytes, false);
         if let Some((cols, rows)) = resize_request
@@ -825,6 +825,46 @@ impl WindowHost {
         if bell {
             self.send(RenderEvent::Bell(tab_id));
         }
+        for request in clipboard_requests {
+            self.request_clipboard_permission(tab_id, request);
+        }
+    }
+
+    fn request_clipboard_permission(
+        &mut self,
+        tab_id: TabId,
+        request: ClipboardRequest,
+    ) {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.request_permission(request.permission_feature().to_string(), response_tx);
+        let proxy = self.event_proxy.clone();
+        thread::spawn(move || {
+            let decision = response_rx.recv().unwrap_or(PermissionDecision::Deny);
+            let _ = proxy.send_event(AppEvent::ResolveClipboardRequest {
+                tab_id,
+                request,
+                decision,
+            });
+        });
+    }
+
+    fn resolve_clipboard_request(
+        &mut self,
+        tab_id: TabId,
+        request: ClipboardRequest,
+        decision: PermissionDecision,
+    ) {
+        if decision != PermissionDecision::Allow {
+            return;
+        }
+        let Some(target) = self.input_endpoints.get(&tab_id) else {
+            return;
+        };
+        let host_bytes = {
+            let mut terminal = target.terminal.lock();
+            terminal41::io::clipboard::apply_clipboard_request(&mut terminal.clipboard, request)
+        };
+        self.write_host_bytes(target, host_bytes, false);
     }
 
     fn handle_focus_event(
@@ -2174,11 +2214,12 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     self.request_window_size_for_tab(tab_id);
                 }
             }
-            AppEvent::RequestPermission {
-                feature,
-                response_tx,
+            AppEvent::ResolveClipboardRequest {
+                tab_id,
+                request,
+                decision,
             } => {
-                self.request_permission(feature, response_tx);
+                self.resolve_clipboard_request(tab_id, request, decision);
             }
             AppEvent::DismissRecordingPopup(token) => {
                 let dismiss = matches!(

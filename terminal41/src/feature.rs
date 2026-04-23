@@ -22,6 +22,8 @@ pub struct FeaturePermissions {
     pub macros: ProgramAllowlist,
     /// Permission gate for DEC user-defined keys and related keyboard controls.
     pub udks: ProgramAllowlist,
+    /// Permission gates for host-driven OSC 52 clipboard access.
+    pub clipboard: ClipboardPermissions,
 }
 
 /// Coarse allow/deny gate for a protocol feature.
@@ -44,6 +46,30 @@ impl ProgramAllowlist {
             Self::AllowAll => true,
         }
     }
+}
+
+/// Read/write permission gates for host-driven clipboard access.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClipboardPermissions {
+    /// Whether host programs may read local clipboard contents.
+    pub read: ClipboardPermission,
+    /// Whether host programs may write local clipboard contents.
+    pub write: ClipboardPermission,
+}
+
+/// Permission policy for one clipboard access direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum ClipboardPermission {
+    /// Ask the user for this request.
+    #[default]
+    Ask,
+    /// Allow every request without prompting.
+    #[serde(alias = "*", alias = "all")]
+    Allow,
+    /// Deny every request without prompting.
+    #[serde(alias = "no", alias = "none")]
+    Deny,
 }
 
 pub(crate) fn macro_feature_enabled(permissions: &FeaturePermissions) -> bool {

@@ -1,10 +1,43 @@
 //! Clipboard-to-host byte conversion helpers.
 
+use base64::Engine;
+use base64::engine::general_purpose::STANDARD as BASE64;
 use clip41::Clipboard;
 use clip41::ClipboardKind;
 use vte_mode41::C1Mode;
 
 use crate::conformance;
+
+/// Host-driven OSC 52 clipboard operation that needs app-level approval.
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ClipboardRequest {
+    /// Read one local clipboard selection and report it to the PTY.
+    Read {
+        /// Selection requested by the host.
+        kind: ClipboardKind,
+        /// Selector bytes to echo in the OSC 52 response.
+        response_selector: Vec<u8>,
+        /// C1 encoding mode for the OSC response.
+        c1_mode: C1Mode,
+    },
+    /// Write text to one or more local clipboard selections.
+    Write {
+        /// Selections targeted by the host.
+        kinds: Vec<ClipboardKind>,
+        /// Decoded UTF-8 text to write.
+        text: String,
+    },
+}
+
+impl ClipboardRequest {
+    /// Short human-readable feature name for permission UI.
+    pub fn permission_feature(&self) -> &'static str {
+        match self {
+            Self::Read { .. } => "clipboard read",
+            Self::Write { .. } => "clipboard write",
+        }
+    }
+}
 
 /// Append pasted text to `pending_output`, wrapping it in bracketed-paste
 /// markers when mode 2004 is active.
@@ -49,6 +82,48 @@ pub fn copy_to_clipboard(
     text: &str,
 ) {
     clipboard.set(ClipboardKind::Clipboard, text);
+}
+
+/// Apply one approved OSC 52 clipboard request. Write requests mutate the
+/// clipboard and return no host bytes; read requests return an OSC 52 response
+/// when the selected clipboard contains text.
+pub fn apply_clipboard_request(
+    clipboard: &mut Clipboard,
+    request: ClipboardRequest,
+) -> Vec<u8> {
+    match request {
+        ClipboardRequest::Read {
+            kind,
+            response_selector,
+            c1_mode,
+        } => osc52_read_response(clipboard, kind, &response_selector, c1_mode),
+        ClipboardRequest::Write { kinds, text } => {
+            for kind in kinds {
+                clipboard.set(kind, &text);
+            }
+            Vec::new()
+        }
+    }
+}
+
+pub(crate) fn osc52_read_response(
+    clipboard: &mut Clipboard,
+    kind: ClipboardKind,
+    response_selector: &[u8],
+    c1_mode: C1Mode,
+) -> Vec<u8> {
+    let Some(text) = clipboard.get(kind) else {
+        return Vec::new();
+    };
+    let encoded = BASE64.encode(text.as_bytes());
+    let mut pending_output = Vec::new();
+    conformance::push_osc_prefix(&mut pending_output, c1_mode);
+    pending_output.extend_from_slice(b"52;");
+    pending_output.extend_from_slice(response_selector);
+    pending_output.push(b';');
+    pending_output.extend_from_slice(encoded.as_bytes());
+    conformance::push_st(&mut pending_output, c1_mode);
+    pending_output
 }
 
 #[cfg(test)]

@@ -3,6 +3,8 @@ use std::str::FromStr;
 
 use palette::Srgb;
 use serde::Deserialize;
+use terminal41::ClipboardPermission;
+use terminal41::ClipboardPermissions;
 use terminal41::ColorPalette;
 use terminal41::CursorShape;
 use terminal41::CursorStyle;
@@ -148,6 +150,18 @@ struct AllowFeaturesConfig {
 struct SecuritySettings {
     #[serde(default)]
     features: Option<AllowFeaturesConfig>,
+    #[serde(default)]
+    clipboard: Option<ClipboardPermissionsConfig>,
+}
+
+#[derive(Deserialize, Default)]
+struct ClipboardPermissionsConfig {
+    #[serde(deserialize_with = "clipboard_permission_opt")]
+    #[serde(default)]
+    read: Option<ClipboardPermission>,
+    #[serde(deserialize_with = "clipboard_permission_opt")]
+    #[serde(default)]
+    write: Option<ClipboardPermission>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -490,6 +504,7 @@ fn parse_config(
     let palette = build_palette(file.colors);
     let security = file.security.unwrap_or_default();
     let features = security.features.unwrap_or_default();
+    let clipboard = security.clipboard.unwrap_or_default();
     let compatibility = build_compatibility(file.compatibility);
 
     Config {
@@ -512,6 +527,10 @@ fn parse_config(
         feature_permissions: FeaturePermissions {
             macros: features.macros.unwrap_or_default(),
             udks: features.udks.unwrap_or_default(),
+            clipboard: ClipboardPermissions {
+                read: clipboard.read.unwrap_or_default(),
+                write: clipboard.write.unwrap_or_default(),
+            },
         },
         compatibility,
     }
@@ -747,6 +766,21 @@ where
     }
 }
 
+fn clipboard_permission_opt<'de, D>(
+    deserializer: D
+) -> Result<Option<ClipboardPermission>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<ClipboardPermission>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse clipboard permission in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
 fn power_preference_opt<'de, D>(deserializer: D) -> Result<Option<PowerPreference>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -890,6 +924,49 @@ mod tests {
                 .udks,
             ProgramAllowlist::AllowAll
         );
+    }
+
+    #[test]
+    fn clipboard_permissions_default_to_ask() {
+        let permissions = parse("").feature_permissions.clipboard;
+        assert_eq!(permissions.read, ClipboardPermission::Ask);
+        assert_eq!(permissions.write, ClipboardPermission::Ask);
+    }
+
+    #[test]
+    fn clipboard_permissions_accept_read_and_write_modes() {
+        let allow = parse("[security.clipboard]\nread = \"all\"\nwrite = \"allow\"\n")
+            .feature_permissions
+            .clipboard;
+        assert_eq!(allow.read, ClipboardPermission::Allow);
+        assert_eq!(allow.write, ClipboardPermission::Allow);
+
+        let wildcard = parse("[security.clipboard]\nread = \"*\"\n")
+            .feature_permissions
+            .clipboard;
+        assert_eq!(wildcard.read, ClipboardPermission::Allow);
+        assert_eq!(wildcard.write, ClipboardPermission::Ask);
+
+        let deny = parse("[security.clipboard]\nread = \"deny\"\nwrite = \"no\"\n")
+            .feature_permissions
+            .clipboard;
+        assert_eq!(deny.read, ClipboardPermission::Deny);
+        assert_eq!(deny.write, ClipboardPermission::Deny);
+
+        let none = parse("[security.clipboard]\nread = \"none\"\n")
+            .feature_permissions
+            .clipboard;
+        assert_eq!(none.read, ClipboardPermission::Deny);
+        assert_eq!(none.write, ClipboardPermission::Ask);
+    }
+
+    #[test]
+    fn invalid_clipboard_permission_falls_back_to_ask() {
+        let permissions = parse("[security.clipboard]\nread = \"sometimes\"\n")
+            .feature_permissions
+            .clipboard;
+        assert_eq!(permissions.read, ClipboardPermission::Ask);
+        assert_eq!(permissions.write, ClipboardPermission::Ask);
     }
 
     #[test]

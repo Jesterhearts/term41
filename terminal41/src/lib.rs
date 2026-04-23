@@ -85,11 +85,14 @@ pub use crate::dec::udk::ModifierKeyControl;
 use crate::dec::udk::UdkState;
 use crate::dispatch::TerminalAction;
 use crate::drcs::DrcsStore;
+pub use crate::feature::ClipboardPermission;
+pub use crate::feature::ClipboardPermissions;
 pub use crate::feature::FeaturePermissions;
 pub use crate::feature::ProgramAllowlist;
 pub(crate) use crate::feature::apply_status_display_mode;
 pub use crate::image::PlacedImage;
 pub use crate::image::VisibleImage;
+pub use crate::io::clipboard::ClipboardRequest;
 pub use crate::io::keyboard::KittyFlags;
 pub use crate::io::keyboard::KittyKeyboardState;
 pub use crate::io::keyboard::KittyKeys;
@@ -208,12 +211,17 @@ pub struct TerminalEffects {
     pub resize_request: Option<(u32, u32)>,
     /// True if at least one BEL was seen while producing this batch.
     pub bell: bool,
+    /// Host-driven OSC 52 clipboard requests that need app-level approval.
+    pub clipboard_requests: Vec<ClipboardRequest>,
 }
 
 impl TerminalEffects {
     /// Return whether this batch produced no host-visible side effects.
     pub fn is_empty(&self) -> bool {
-        self.host_bytes.is_empty() && self.resize_request.is_none() && !self.bell
+        self.host_bytes.is_empty()
+            && self.resize_request.is_none()
+            && !self.bell
+            && self.clipboard_requests.is_empty()
     }
 
     /// Merge another batch into this one, preserving the latest resize
@@ -227,6 +235,7 @@ impl TerminalEffects {
             self.resize_request = other.resize_request;
         }
         self.bell |= other.bell;
+        self.clipboard_requests.extend(other.clipboard_requests);
     }
 }
 
@@ -826,6 +835,8 @@ impl Terminal {
                     action,
                     &mut self.clipboard,
                     &mut effects.host_bytes,
+                    &mut effects.clipboard_requests,
+                    &self.protocol.feature_permissions,
                     self.modes.c1_mode,
                     &mut self.metadata.current_directory,
                     &mut self.hyperlinks,
