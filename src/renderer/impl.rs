@@ -13,14 +13,9 @@ use smol_str::SmolStrBuilder;
 use terminal41::ColorPalette;
 use terminal41::CursorShape;
 use terminal41::LineAttr;
-use terminal41::Terminal;
+use terminal41::RowSnapshot;
+use terminal41::TermSnapshot;
 use terminal41::VisibleImage;
-use terminal41::selection::is_cell_active_match;
-use terminal41::selection::is_cell_match;
-use terminal41::selection::is_cell_selected;
-use terminal41::selection::search_active;
-use terminal41::selection::search_state;
-use terminal41::view;
 use unicode_segmentation::UnicodeSegmentation;
 use utils41::lerp_u8;
 use wgpu::PowerPreference;
@@ -41,13 +36,11 @@ use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::glyph_atlas::GlyphSlot;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
-use crate::renderer::paint::UdkIndicator;
 use crate::renderer::paint::blink_animation_enabled;
 use crate::renderer::paint::bold_glyph_enabled;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::centered_ink_origin_x;
 use crate::renderer::paint::resolve_painted_cell;
-use crate::renderer::paint::status_line_indicator_row;
 use crate::renderer::paint::status_line_label_row;
 use crate::renderer::paint::underline_style_for_render;
 
@@ -232,7 +225,7 @@ pub(crate) fn collect_row_glyphs(
 }
 
 pub(crate) fn drcs_geometry_class(snap: &TermSnapshot) -> Option<font41::DrcsGeometryClass> {
-    match (snap.viewport_cols, snap.rows.len() as u32) {
+    match (snap.viewport_cols, snap.total_rows) {
         (0..=80, 0..=24) => Some(font41::DrcsGeometryClass::Col80Line24),
         (81.., 0..=24) => Some(font41::DrcsGeometryClass::Col132Line24),
         (0..=80, 25..=36) => Some(font41::DrcsGeometryClass::Col80Line36),
@@ -356,219 +349,6 @@ pub struct TabInfo<'s> {
     pub active: bool,
 }
 
-// ---------------------------------------------------------------------------
-// Terminal snapshot — captured under the lock, consumed without it
-// ---------------------------------------------------------------------------
-
-/// Per-row snapshot of terminal state. Cloned from the terminal grid under
-/// the lock so that font shaping and glyph caching can happen without
-/// holding the terminal mutex.
-pub struct RowSnapshot {
-    pub cells: Vec<smol_str::SmolStr>,
-    pub attrs: Vec<CellAttrs>,
-    pub fg: Vec<Srgb<u8>>,
-    pub bg: Vec<Srgb<u8>>,
-    pub underline: Vec<UnderlineStyle>,
-    pub underline_color: Vec<Option<Srgb<u8>>>,
-    pub has_link: Vec<bool>,
-    pub line_attr: LineAttr,
-    pub selected: Vec<bool>,
-    pub matched: Vec<bool>,
-    pub active_match: Vec<bool>,
-    /// Shell-integration: this row starts a prompt.
-    pub prompt_start: bool,
-    /// Shell-integration: exit status of the command at this prompt.
-    pub exit_status: Option<i32>,
-}
-
-/// Snapshot of the search bar state for rendering.
-pub struct SearchSnapshot {
-    pub query: String,
-    pub match_count: usize,
-    pub active_idx: usize,
-}
-
-/// All terminal state needed for one render frame, captured under the lock.
-pub struct TermSnapshot {
-    pub rows: Vec<RowSnapshot>,
-    pub viewport_rows: u32,
-    pub viewport_cols: u32,
-    pub status_line_row: Option<u32>,
-    pub drcs_glyphs: font41::DrcsGlyphMap,
-    pub dec_color: terminal41::DecColorState,
-    pub palette: ColorPalette,
-    pub search_active: bool,
-    pub search: Option<SearchSnapshot>,
-    /// Cursor position (row, col) if visible and not scrolled off.
-    pub cursor: Option<(u32, u32)>,
-    pub cursor_style: terminal41::CursorStyle,
-    /// DECSCNM — screen-wide reverse video. When true, default fg/bg are
-    /// swapped and per-cell REVERSE is XORed with this.
-    pub screen_reverse: bool,
-}
-
-/// Snapshot the terminal's visible state under the lock. The resulting
-/// struct owns all the data — the lock can be released immediately after.
-pub fn snapshot_terminal(terminal: &Terminal) -> TermSnapshot {
-    let vp_rows = terminal.viewport.rows;
-    let vp_cols = terminal.viewport.cols;
-    let search_active = search_active(&terminal.search);
-    let status_line_row = view::status_line_row(&terminal.active).map(|_| vp_rows);
-
-    let mut rows =
-        Vec::with_capacity(view::total_rows(&terminal.active, &terminal.viewport) as usize);
-    for row in 0..vp_rows {
-        // When the search bar is open it overlays the last row, so we
-        // still snapshot it (the bg still renders) but the caller can
-        // decide to skip fg glyphs.
-        let grid_row = view::visible_row(&terminal.active, &terminal.viewport, row);
-        let is_double = !matches!(grid_row.line_attr, LineAttr::Normal);
-        let cols = if is_double { vp_cols / 2 } else { vp_cols };
-
-        rows.push(RowSnapshot {
-            cells: grid_row.cells.clone(),
-            attrs: grid_row.attrs.clone(),
-            fg: grid_row.fg.clone(),
-            bg: grid_row.bg.clone(),
-            underline: grid_row.underline.clone(),
-            underline_color: grid_row.underline_color.clone(),
-            has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
-            line_attr: grid_row.line_attr,
-            selected: (0..cols)
-                .map(|c| {
-                    is_cell_selected(
-                        terminal.selection.as_ref(),
-                        &terminal.active,
-                        &terminal.viewport,
-                        row,
-                        c,
-                    )
-                })
-                .collect(),
-            matched: (0..cols)
-                .map(|c| {
-                    is_cell_match(
-                        &terminal.search,
-                        &terminal.active,
-                        &terminal.viewport,
-                        row,
-                        c,
-                    )
-                })
-                .collect(),
-            active_match: (0..cols)
-                .map(|c| {
-                    is_cell_active_match(
-                        &terminal.search,
-                        &terminal.active,
-                        &terminal.viewport,
-                        row,
-                        c,
-                    )
-                })
-                .collect(),
-            prompt_start: grid_row.prompt_start,
-            exit_status: grid_row.exit_status,
-        });
-    }
-    if let Some(status_row) = snapshot_status_line_row(terminal, vp_cols) {
-        rows.push(status_row);
-    }
-
-    let search = search_state(&terminal.search).map(|s| SearchSnapshot {
-        query: s.query.clone(),
-        match_count: s.matches.len(),
-        active_idx: s.active_idx,
-    });
-
-    let cursor = if terminal.active.offset == 0 && terminal.active.cursor_visible {
-        if let Some(col) = view::status_line_cursor_col(&terminal.active) {
-            Some((vp_rows, col))
-        } else {
-            Some((terminal.active.cursor.row, terminal.active.cursor.col))
-        }
-    } else {
-        None
-    };
-
-    TermSnapshot {
-        rows,
-        viewport_rows: vp_rows,
-        viewport_cols: vp_cols,
-        status_line_row,
-        drcs_glyphs: terminal.drcs_render_glyphs(),
-        dec_color: terminal.dec_color_state().clone(),
-        palette: terminal.palette.clone(),
-        search_active,
-        search,
-        cursor,
-        cursor_style: terminal.cursor_style,
-        screen_reverse: terminal.modes.screen_reverse,
-    }
-}
-
-fn snapshot_status_line_row(
-    terminal: &Terminal,
-    vp_cols: u32,
-) -> Option<RowSnapshot> {
-    if view::status_display_kind(&terminal.active) == terminal41::StatusDisplayKind::Indicator {
-        let text =
-            view::indicator_status_text(&terminal.metadata, &terminal.active).unwrap_or_default();
-        return Some(status_line_indicator_row(
-            &text,
-            UdkIndicator {
-                enabled: terminal.udk_feature_enabled(),
-                locked: terminal.udks_locked(),
-                keys: terminal
-                    .programmed_udk_selectors()
-                    .into_iter()
-                    .filter_map(udk_selector_label)
-                    .map(str::to_string)
-                    .collect(),
-            },
-            vp_cols,
-            &terminal.palette,
-        ));
-    }
-    let grid_row = view::status_line_row(&terminal.active)?;
-    Some(RowSnapshot {
-        cells: grid_row.cells.clone(),
-        attrs: grid_row.attrs.clone(),
-        fg: grid_row.fg.clone(),
-        bg: grid_row.bg.clone(),
-        underline: grid_row.underline.clone(),
-        underline_color: grid_row.underline_color.clone(),
-        has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
-        line_attr: grid_row.line_attr,
-        selected: vec![false; vp_cols as usize],
-        matched: vec![false; vp_cols as usize],
-        active_match: vec![false; vp_cols as usize],
-        prompt_start: false,
-        exit_status: None,
-    })
-}
-
-fn udk_selector_label(selector: u16) -> Option<&'static str> {
-    match selector {
-        17 => Some("F6"),
-        18 => Some("F7"),
-        19 => Some("F8"),
-        20 => Some("F9"),
-        21 => Some("F10"),
-        23 => Some("F11"),
-        24 => Some("F12"),
-        25 => Some("F13"),
-        26 => Some("F14"),
-        28 => Some("F15"),
-        29 => Some("F16"),
-        31 => Some("F17"),
-        32 => Some("F18"),
-        33 => Some("F19"),
-        34 => Some("F20"),
-        _ => None,
-    }
-}
-
 /// CSD window control state passed to the renderer each frame.
 pub struct WindowControls {
     /// Which button the mouse is hovering, if any.
@@ -628,6 +408,30 @@ impl Default for RenderGeometry {
     }
 }
 
+fn blank_cached_row(
+    screen_row: u32,
+    cols: u32,
+    palette: &ColorPalette,
+) -> RowSnapshot {
+    let cols = cols as usize;
+    RowSnapshot {
+        screen_row,
+        cells: vec![smol_str::SmolStr::new_inline(" "); cols],
+        attrs: vec![CellAttrs::default(); cols],
+        fg: vec![palette.fg; cols],
+        bg: vec![palette.bg; cols],
+        underline: vec![UnderlineStyle::None; cols],
+        underline_color: vec![None; cols],
+        has_link: vec![false; cols],
+        line_attr: LineAttr::Normal,
+        selected: vec![false; cols],
+        matched: vec![false; cols],
+        active_match: vec![false; cols],
+        prompt_start: false,
+        exit_status: None,
+    }
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -672,6 +476,9 @@ pub struct Renderer {
     /// the current cell metrics); when `false` the gutter is fully
     /// collapsed and every caller gets `0`.
     gutter_enabled: bool,
+
+    /// Materialized terminal rows reconstructed from dirty row snapshots.
+    terminal_rows: Vec<RowSnapshot>,
 }
 
 pub struct PreparedRenderer {
@@ -1008,6 +815,7 @@ impl Renderer {
             started: Instant::now(),
             bell_started: None,
             gutter_enabled,
+            terminal_rows: Vec::new(),
         };
 
         renderer.update_screen_size(size);
@@ -1173,9 +981,12 @@ impl Renderer {
         let layout = self.frame_layout(font_system, tabs);
         let under_text_image_geometry = self.build_image_geometry(visible_images, &layout, true);
         let over_text_image_geometry = self.build_image_geometry(visible_images, &layout, false);
+        self.apply_terminal_snapshot_rows(snap);
+        let terminal_rows = std::mem::take(&mut self.terminal_rows);
         let geometry = self.build_render_geometry(
             font_system,
             snap,
+            &terminal_rows,
             tabs,
             controls,
             gutter_popup,
@@ -1185,12 +996,36 @@ impl Renderer {
             preedit,
             &layout,
         );
+        self.terminal_rows = terminal_rows;
         self.submit_render_passes(
             acquired,
             geometry,
             under_text_image_geometry,
             over_text_image_geometry,
         );
+    }
+
+    fn apply_terminal_snapshot_rows(
+        &mut self,
+        snap: &TermSnapshot,
+    ) {
+        let total_rows = snap.total_rows as usize;
+        if snap.reset_cached_rows || self.terminal_rows.len() != total_rows {
+            self.terminal_rows = (0..total_rows)
+                .map(|row| blank_cached_row(row as u32, snap.viewport_cols, &snap.palette))
+                .collect();
+        }
+
+        for row in &snap.rows {
+            let idx = row.screen_row as usize;
+            if idx >= self.terminal_rows.len() {
+                self.terminal_rows.resize_with(idx + 1, || {
+                    blank_cached_row(0, snap.viewport_cols, &snap.palette)
+                });
+                self.terminal_rows[idx].screen_row = idx as u32;
+            }
+            self.terminal_rows[idx] = row.clone();
+        }
     }
 
     fn frame_layout(
@@ -1287,6 +1122,7 @@ impl Renderer {
         &mut self,
         font_system: &mut FontSystem,
         snap: &TermSnapshot,
+        rows: &[RowSnapshot],
         tabs: &[TabInfo],
         controls: &WindowControls,
         gutter_popup: Option<&GutterPopup>,
@@ -1305,8 +1141,8 @@ impl Renderer {
         let blink_off = (self.started.elapsed().as_millis() / 500) & 1 == 1;
         let rapid_blink_off = (self.started.elapsed().as_millis() / 250) & 1 == 1;
 
-        for (row_idx, snap_row) in snap.rows.iter().enumerate() {
-            let row = row_idx as u32;
+        for snap_row in rows {
+            let row = snap_row.screen_row;
             if snap.search_active && row == snap.viewport_rows - 1 {
                 continue;
             }
@@ -1328,7 +1164,7 @@ impl Renderer {
 
         if layout.gutter_px > 0.0 {
             render_gutter_markers(
-                snap,
+                rows,
                 layout.gutter_px,
                 layout.cell_h,
                 layout.tab_bar_h,
@@ -3755,7 +3591,7 @@ pub fn compute_gutter_width(cell_width: u32) -> u32 {
 /// Drawn as plain rectangular quads in the bg pass so we don't need an
 /// extra pipeline.
 fn render_gutter_markers(
-    snap: &TermSnapshot,
+    rows: &[RowSnapshot],
     gutter_px: f32,
     cell_h: f32,
     y_offset: f32,
@@ -3769,7 +3605,7 @@ fn render_gutter_markers(
     let bar_h = cell_h * 0.9;
     let bar_y = (cell_h - bar_h) * 0.5;
 
-    for (row_idx, row) in snap.rows.iter().enumerate() {
+    for row in rows {
         if !row.prompt_start {
             continue;
         }
@@ -3780,7 +3616,7 @@ fn render_gutter_markers(
         };
         let color = u32::from_be_bytes([rgb[0], rgb[1], rgb[2], 255]);
 
-        let y0 = row_idx as f32 * cell_h + bar_y + y_offset;
+        let y0 = row.screen_row as f32 * cell_h + bar_y + y_offset;
         let y1 = y0 + bar_h;
         let x0 = bar_x;
         let x1 = x0 + bar_w;
@@ -4143,6 +3979,7 @@ mod tests {
 
     fn blank_row(cols: usize) -> RowSnapshot {
         RowSnapshot {
+            screen_row: 0,
             cells: vec![smol_str::SmolStr::new_inline(" "); cols],
             attrs: vec![CellAttrs::default(); cols],
             fg: vec![Srgb::new(255, 255, 255); cols],
@@ -4165,7 +4002,14 @@ mod tests {
     ) -> TermSnapshot {
         let palette = ColorPalette::default();
         TermSnapshot {
-            rows: (0..rows).map(|_| blank_row(cols as usize)).collect(),
+            rows: (0..rows)
+                .map(|row| {
+                    let mut snapshot = blank_row(cols as usize);
+                    snapshot.screen_row = row;
+                    snapshot
+                })
+                .collect(),
+            total_rows: rows,
             viewport_rows: rows,
             viewport_cols: cols,
             status_line_row: None,
@@ -4177,6 +4021,7 @@ mod tests {
             cursor: None,
             cursor_style: CursorStyle::default(),
             screen_reverse: false,
+            reset_cached_rows: true,
         }
     }
 

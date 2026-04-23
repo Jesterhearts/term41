@@ -16,6 +16,8 @@ use softbuffer::Context;
 use softbuffer::Surface;
 use terminal41::CursorShape;
 use terminal41::LineAttr;
+use terminal41::RowSnapshot;
+use terminal41::TermSnapshot;
 use terminal41::VisibleImage;
 use unicode_segmentation::UnicodeSegmentation;
 use utils41::lerp_u8;
@@ -32,12 +34,9 @@ use crate::renderer::compute_gutter_width;
 use crate::renderer::r#impl::CURSOR_BLINK_HALF_PERIOD;
 use crate::renderer::r#impl::FAILURE;
 use crate::renderer::r#impl::RUNNING;
-use crate::renderer::r#impl::RowSnapshot;
 use crate::renderer::r#impl::SUCCESS;
 use crate::renderer::r#impl::TabInfo;
-use crate::renderer::r#impl::TermSnapshot;
 use crate::renderer::r#impl::collect_row_glyphs;
-use crate::renderer::r#impl::snapshot_terminal;
 use crate::renderer::paint::blink_animation_enabled;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::centered_ink_origin_x;
@@ -74,6 +73,7 @@ pub(crate) struct StartupPresenter {
     background: Option<CachedBackground>,
     started: Instant,
     first_frame: bool,
+    terminal_rows: Vec<RowSnapshot>,
 }
 
 impl StartupPresenter {
@@ -115,6 +115,7 @@ impl StartupPresenter {
             background: background_path.and_then(|path| load_cached_background(&path)),
             started: Instant::now(),
             first_frame: true,
+            terminal_rows: Vec::new(),
         })
     }
 
@@ -138,8 +139,8 @@ impl StartupPresenter {
         }
 
         let frame = {
-            let terminal = terminal.lock();
-            let snap = snapshot_terminal(&terminal);
+            let mut terminal = terminal.lock();
+            let mut snap = terminal41::snapshot_terminal(&mut terminal);
             let visible_images = terminal41::view::visible_images(
                 &terminal.active,
                 &terminal.viewport,
@@ -147,6 +148,8 @@ impl StartupPresenter {
                 Instant::now(),
             )
             .collect::<Vec<_>>();
+            self.apply_terminal_snapshot_rows(&snap);
+            snap.rows = self.terminal_rows.clone();
             build_startup_frame(snap, visible_images, self.started)
         };
 
@@ -215,7 +218,8 @@ impl StartupPresenter {
             _ => None,
         };
 
-        for (row_idx, row) in frame.snap.rows.iter().enumerate() {
+        for row in &frame.snap.rows {
+            let row_idx = row.screen_row;
             let y = tab_bar_h + row_idx as i32 * cell_h;
             if y >= height as i32 {
                 break;
@@ -235,7 +239,7 @@ impl StartupPresenter {
                 height,
                 &frame.snap,
                 row,
-                row_idx as u32,
+                row_idx,
                 y,
                 effective_cell_w,
                 cell_h,
@@ -248,7 +252,7 @@ impl StartupPresenter {
                 &mut self.font_system,
                 &frame.snap,
                 row,
-                row_idx as u32,
+                row_idx,
                 visible_cols,
                 block_cursor,
                 frame.blink_off,
@@ -351,6 +355,53 @@ impl StartupPresenter {
         }
 
         next_startup_redraw_delay(&frame, self.started)
+    }
+
+    fn apply_terminal_snapshot_rows(
+        &mut self,
+        snap: &TermSnapshot,
+    ) {
+        let total_rows = snap.total_rows as usize;
+        if snap.reset_cached_rows || self.terminal_rows.len() != total_rows {
+            self.terminal_rows = (0..total_rows)
+                .map(|row| blank_startup_row(row as u32, snap.viewport_cols, &snap.palette))
+                .collect();
+        }
+
+        for row in &snap.rows {
+            let idx = row.screen_row as usize;
+            if idx >= self.terminal_rows.len() {
+                self.terminal_rows.resize_with(idx + 1, || {
+                    blank_startup_row(0, snap.viewport_cols, &snap.palette)
+                });
+                self.terminal_rows[idx].screen_row = idx as u32;
+            }
+            self.terminal_rows[idx] = row.clone();
+        }
+    }
+}
+
+fn blank_startup_row(
+    screen_row: u32,
+    cols: u32,
+    palette: &terminal41::ColorPalette,
+) -> RowSnapshot {
+    let cols = cols as usize;
+    RowSnapshot {
+        screen_row,
+        cells: vec![smol_str::SmolStr::new_inline(" "); cols],
+        attrs: vec![CellAttrs::default(); cols],
+        fg: vec![palette.fg; cols],
+        bg: vec![palette.bg; cols],
+        underline: vec![UnderlineStyle::None; cols],
+        underline_color: vec![None; cols],
+        has_link: vec![false; cols],
+        line_attr: LineAttr::Normal,
+        selected: vec![false; cols],
+        matched: vec![false; cols],
+        active_match: vec![false; cols],
+        prompt_start: false,
+        exit_status: None,
     }
 }
 
@@ -781,6 +832,7 @@ fn label_row(
 ) -> RowSnapshot {
     let len = text.graphemes(true).count();
     RowSnapshot {
+        screen_row: 0,
         line_attr: LineAttr::Normal,
         fg: vec![fg; len],
         bg: vec![bg; len],
@@ -921,8 +973,8 @@ fn paint_row_backgrounds(
     buffer: &mut [u32],
     width: usize,
     height: usize,
-    snap: &crate::renderer::r#impl::TermSnapshot,
-    row: &crate::renderer::r#impl::RowSnapshot,
+    snap: &TermSnapshot,
+    row: &RowSnapshot,
     row_idx: u32,
     y: i32,
     cell_w: i32,
@@ -1172,7 +1224,7 @@ fn paint_cursor_overlay(
     buffer: &mut [u32],
     width: usize,
     height: usize,
-    snap: &crate::renderer::r#impl::TermSnapshot,
+    snap: &TermSnapshot,
     cursor_visible: bool,
     cell_w: i32,
     cell_h: i32,
@@ -1216,7 +1268,7 @@ fn paint_gutter_markers(
     let bar_h = ((cell_h as f32) * 0.9).round() as i32;
     let bar_y = (cell_h - bar_h) / 2;
 
-    for (row_idx, row) in snap.rows.iter().enumerate() {
+    for row in &snap.rows {
         if !row.prompt_start {
             continue;
         }
@@ -1230,7 +1282,7 @@ fn paint_gutter_markers(
             width,
             height,
             bar_x,
-            tab_bar_h + row_idx as i32 * cell_h + bar_y,
+            tab_bar_h + row.screen_row as i32 * cell_h + bar_y,
             bar_w,
             bar_h,
             pack_rgb(Srgb::new(color[0], color[1], color[2])),

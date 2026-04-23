@@ -5,15 +5,15 @@ use smol_str::SmolStrBuilder;
 use terminal41::ColorPalette;
 use terminal41::DecColorLookupTable;
 use terminal41::LineAttr;
+use terminal41::RowSnapshot;
+use terminal41::TermSnapshot;
 use unicode_segmentation::UnicodeSegmentation;
 
 use crate::renderer::BUTTON_CELLS;
 use crate::renderer::BUTTONS_REGION_CELLS;
 use crate::renderer::TabBarHover;
 use crate::renderer::r#impl::MAX_TAB_WIDTH;
-use crate::renderer::r#impl::RowSnapshot;
 use crate::renderer::r#impl::TabInfo;
-use crate::renderer::r#impl::TermSnapshot;
 use crate::renderer::r#impl::blend;
 use crate::renderer::r#impl::resolve_cell_colors;
 
@@ -105,6 +105,7 @@ pub(crate) fn status_line_label_row(
 ) -> RowSnapshot {
     let len = text.graphemes(true).count();
     RowSnapshot {
+        screen_row: 0,
         line_attr: LineAttr::Normal,
         fg: vec![palette.status_line_fg; len],
         bg: vec![palette.status_line_bg; len],
@@ -128,12 +129,14 @@ pub(crate) fn status_line_label_row(
     }
 }
 
+#[cfg(test)]
 pub(crate) struct UdkIndicator {
     pub enabled: bool,
     pub locked: bool,
     pub keys: Vec<String>,
 }
 
+#[cfg(test)]
 pub(crate) fn status_line_indicator_row(
     text: &str,
     udks: UdkIndicator,
@@ -175,11 +178,13 @@ pub(crate) fn status_line_indicator_row(
     row
 }
 
+#[cfg(test)]
 fn blank_status_line_row(
     cols: usize,
     palette: &ColorPalette,
 ) -> RowSnapshot {
     RowSnapshot {
+        screen_row: 0,
         line_attr: LineAttr::Normal,
         fg: vec![palette.status_line_fg; cols],
         bg: vec![palette.status_line_bg; cols],
@@ -196,6 +201,7 @@ fn blank_status_line_row(
     }
 }
 
+#[cfg(test)]
 fn set_status_cell(
     row: &mut RowSnapshot,
     idx: usize,
@@ -211,6 +217,7 @@ fn set_status_cell(
     row.fg[idx] = fg;
 }
 
+#[cfg(test)]
 fn format_udk_indicator(udks: UdkIndicator) -> String {
     if !udks.enabled {
         return String::new();
@@ -232,6 +239,7 @@ fn format_udk_indicator(udks: UdkIndicator) -> String {
     out
 }
 
+#[cfg(test)]
 fn clip_status_line_tail<'a>(
     segments: &[&'a str],
     cols: usize,
@@ -534,6 +542,7 @@ mod tests {
         };
         TermSnapshot {
             rows: Vec::new(),
+            total_rows: 1,
             viewport_rows: 1,
             viewport_cols: 1,
             status_line_row: None,
@@ -545,11 +554,13 @@ mod tests {
             cursor: None,
             cursor_style: CursorStyle::default(),
             screen_reverse: false,
+            reset_cached_rows: true,
         }
     }
 
     fn test_row(palette: &ColorPalette) -> RowSnapshot {
         RowSnapshot {
+            screen_row: 0,
             cells: vec![smol_str::SmolStr::new_inline("x")],
             attrs: vec![CellAttrs::BOLD],
             fg: vec![palette.fg],

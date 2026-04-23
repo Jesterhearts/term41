@@ -40,6 +40,7 @@ mod screen;
 pub mod selection;
 /// Runtime settings mutation helpers used by config reload and UI actions.
 pub mod settings;
+mod snapshot;
 #[doc(hidden)]
 pub mod test_support;
 /// Read-only view/navigation helpers for renderer and UI code.
@@ -119,6 +120,11 @@ pub use crate::screen::row::LineAttr;
 pub use crate::screen::row::Row;
 use crate::selection::Selection;
 use crate::selection::search::SearchState;
+pub use crate::snapshot::RowSnapshot;
+pub use crate::snapshot::SearchSnapshot;
+use crate::snapshot::SnapshotState;
+pub use crate::snapshot::TermSnapshot;
+pub use crate::snapshot::snapshot_terminal;
 
 /// How term41 should handle legacy shell emoji editing compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
@@ -478,6 +484,9 @@ pub struct Terminal {
     pub emoji_compatibility_mode: EmojiCompatibilityMode,
     /// Security-sensitive optional protocol state and feature storage.
     pub protocol: TerminalProtocolState,
+    /// Row-level snapshot invalidation state. The dirty rows live in one
+    /// sidecar vector instead of on individual [`Row`] values.
+    pub(crate) snapshot: SnapshotState,
 }
 
 /// Safety deadline for mode 2026 synchronized updates. If an app sends BSU
@@ -485,6 +494,29 @@ pub struct Terminal {
 /// forgot the terminator, etc.) rendering resumes after this window so the
 /// UI doesn't appear frozen. 150ms matches the contour-terminal spec.
 const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum SnapshotDirtyScope {
+    None,
+    CursorRows,
+    All,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct SnapshotDirtyBaseline {
+    active_display: screen::ActiveDisplay,
+    cursor_row: u32,
+    cursor_col: u32,
+    scroll_bottom: u32,
+    grid_rows_len: usize,
+    total_popped: usize,
+    viewport_top: usize,
+    viewport_rows: u32,
+    viewport_cols: u32,
+    offset: u32,
+    total_rows: u32,
+    status_line_row: Option<u32>,
+}
 
 impl Terminal {
     /// Create a terminal with primary and alternate screen buffers.
@@ -547,6 +579,7 @@ impl Terminal {
                 feature_permissions,
                 ..TerminalProtocolState::default()
             },
+            snapshot: SnapshotState::default(),
         };
         let Terminal {
             active,
@@ -725,7 +758,8 @@ impl Terminal {
             &mut self.viewport,
             cols,
             rows,
-        )
+        );
+        self.snapshot.mark_all();
     }
 
     /// Apply a single parsed VTE action to the terminal state. Called by the
@@ -748,7 +782,9 @@ impl Terminal {
             action,
         );
         debug!("Classified action: {:?}", action);
-        match action {
+        let dirty_before = self.snapshot_dirty_baseline();
+        let dirty_scope = self.snapshot_dirty_scope(&action, dirty_before);
+        let pending = match action {
             TerminalAction::Ignore => dispatch::PendingApplication::None,
             TerminalAction::Basic(action) => {
                 let preserve_top_origin_scrollback =
@@ -875,7 +911,9 @@ impl Terminal {
                 );
                 dispatch::PendingApplication::None
             }
-        }
+        };
+        self.mark_snapshot_dirty_after(dirty_before, dirty_scope);
+        pending
     }
 
     /// Place a fully-decoded sixel image at the current cursor position.
@@ -885,6 +923,7 @@ impl Terminal {
         &mut self,
         image: image41::DecodedImage,
     ) {
+        let dirty_before = self.snapshot_dirty_baseline();
         let popped_before: usize = self.active.grid.total_popped;
 
         let id = self.images.next_image_id;
@@ -929,6 +968,138 @@ impl Terminal {
         self.active.cursor.col = 0;
 
         self.track_scroll(popped_before);
+        self.mark_snapshot_dirty_after(dirty_before, SnapshotDirtyScope::CursorRows);
+    }
+
+    /// Mark every cached terminal row dirty. UI code should call this after
+    /// mutating renderer-visible state such as selection or search matches.
+    pub fn invalidate_snapshot_rows(&mut self) {
+        self.snapshot.mark_all();
+    }
+
+    fn snapshot_dirty_baseline(&self) -> SnapshotDirtyBaseline {
+        let status_line_row = view::status_line_row(&self.active).map(|_| self.viewport.rows);
+        SnapshotDirtyBaseline {
+            active_display: self.active.active_display,
+            cursor_row: self.active.cursor.row,
+            cursor_col: self.active.cursor.col,
+            scroll_bottom: self.active.scroll_bottom,
+            grid_rows_len: self.active.grid.rows.len(),
+            total_popped: self.active.grid.total_popped,
+            viewport_top: self.viewport.top_index(self.active.grid.rows.len()),
+            viewport_rows: self.viewport.rows,
+            viewport_cols: self.viewport.cols,
+            offset: self.active.offset,
+            total_rows: self.viewport.rows + u32::from(status_line_row.is_some()),
+            status_line_row,
+        }
+    }
+
+    fn snapshot_dirty_scope(
+        &self,
+        action: &TerminalAction<'_>,
+        before: SnapshotDirtyBaseline,
+    ) -> SnapshotDirtyScope {
+        match action {
+            TerminalAction::Ignore => SnapshotDirtyScope::None,
+            TerminalAction::Basic(action) => self.basic_action_dirty_scope(action, before),
+            TerminalAction::Vt52(action) => match action {
+                dispatch::Vt52Action::AwaitCursorColumn => SnapshotDirtyScope::None,
+                dispatch::Vt52Action::CursorPosition { trailing_ascii, .. } => {
+                    if trailing_ascii.is_empty() {
+                        SnapshotDirtyScope::CursorRows
+                    } else {
+                        SnapshotDirtyScope::All
+                    }
+                }
+            },
+            TerminalAction::Csi(_)
+            | TerminalAction::Esc(_)
+            | TerminalAction::Osc(_)
+            | TerminalAction::Apc(_) => SnapshotDirtyScope::All,
+        }
+    }
+
+    fn basic_action_dirty_scope(
+        &self,
+        action: &dispatch::BasicAction<'_>,
+        before: SnapshotDirtyBaseline,
+    ) -> SnapshotDirtyScope {
+        if before.active_display == screen::ActiveDisplay::Status {
+            return SnapshotDirtyScope::CursorRows;
+        }
+        if before.cursor_row != before.scroll_bottom {
+            return SnapshotDirtyScope::CursorRows;
+        }
+
+        match action {
+            dispatch::BasicAction::Execute(b'\n' | b'\x0b' | b'\x0c') => SnapshotDirtyScope::All,
+            dispatch::BasicAction::PrintAscii(run) => {
+                let cols = self.viewport.cols.max(1);
+                if before.cursor_col.saturating_add(run.len() as u32) > cols {
+                    SnapshotDirtyScope::All
+                } else {
+                    SnapshotDirtyScope::CursorRows
+                }
+            }
+            dispatch::BasicAction::PrintText(run) => {
+                if before.cursor_col.saturating_add(run.chars().count() as u32)
+                    > self.viewport.cols.max(1)
+                {
+                    SnapshotDirtyScope::All
+                } else {
+                    SnapshotDirtyScope::CursorRows
+                }
+            }
+            dispatch::BasicAction::Print(_) | dispatch::BasicAction::Print8Bit(_) => {
+                if before.cursor_col.saturating_add(1) > self.viewport.cols.max(1) {
+                    SnapshotDirtyScope::All
+                } else {
+                    SnapshotDirtyScope::CursorRows
+                }
+            }
+            dispatch::BasicAction::Execute(_) => SnapshotDirtyScope::CursorRows,
+        }
+    }
+
+    fn mark_snapshot_dirty_after(
+        &mut self,
+        before: SnapshotDirtyBaseline,
+        scope: SnapshotDirtyScope,
+    ) {
+        if scope == SnapshotDirtyScope::None {
+            return;
+        }
+
+        let after = self.snapshot_dirty_baseline();
+        if scope == SnapshotDirtyScope::All
+            || before.grid_rows_len != after.grid_rows_len
+            || before.total_popped != after.total_popped
+            || before.viewport_top != after.viewport_top
+            || before.viewport_rows != after.viewport_rows
+            || before.viewport_cols != after.viewport_cols
+            || before.offset != after.offset
+            || before.total_rows != after.total_rows
+            || before.status_line_row != after.status_line_row
+        {
+            self.snapshot.mark_all();
+            return;
+        }
+
+        match before.active_display {
+            screen::ActiveDisplay::Main => {
+                self.snapshot.mark_rows(before.cursor_row, after.cursor_row)
+            }
+            screen::ActiveDisplay::Status => {
+                if let Some(row) = before.status_line_row.or(after.status_line_row) {
+                    self.snapshot.mark_row(row);
+                }
+            }
+        }
+
+        if after.active_display != before.active_display {
+            self.snapshot.mark_all();
+        }
     }
 
     /// Adjust image positions and prune stale command metadata after rows

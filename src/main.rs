@@ -927,6 +927,7 @@ impl WindowHost {
             }
             _ => {}
         }
+        terminal.invalidate_snapshot_rows();
     }
 
     fn run_local_action(
@@ -943,12 +944,14 @@ impl WindowHost {
                 let rows = terminal.viewport.rows;
                 let viewport = terminal.viewport;
                 view::scroll_viewport_up(&mut terminal.active, &viewport, rows);
+                terminal.invalidate_snapshot_rows();
                 true
             }
             Action::ScrollPageDown => {
                 let mut terminal = target.terminal.lock();
                 let rows = terminal.viewport.rows;
                 view::scroll_viewport_down(&mut terminal.active, rows);
+                terminal.invalidate_snapshot_rows();
                 true
             }
             Action::Copy => {
@@ -975,19 +978,23 @@ impl WindowHost {
                 true
             }
             Action::OpenSearch => {
-                open_search(&mut target.terminal.lock().search);
+                let mut terminal = target.terminal.lock();
+                open_search(&mut terminal.search);
+                terminal.invalidate_snapshot_rows();
                 true
             }
             Action::ScrollPrevPrompt => {
                 let mut terminal = target.terminal.lock();
                 let viewport = terminal.viewport;
                 view::scroll_to_prev_prompt(&mut terminal.active, &viewport);
+                terminal.invalidate_snapshot_rows();
                 true
             }
             Action::ScrollNextPrompt => {
                 let mut terminal = target.terminal.lock();
                 let viewport = terminal.viewport;
                 view::scroll_to_next_prompt(&mut terminal.active, &viewport);
+                terminal.invalidate_snapshot_rows();
                 true
             }
             Action::OpenNewWindow => {
@@ -1329,6 +1336,7 @@ impl WindowHost {
                     )
                 {
                     terminal.selection = Some(new_sel);
+                    terminal.invalidate_snapshot_rows();
                 }
             }
             self.notify_interaction_changed();
@@ -1583,6 +1591,7 @@ impl WindowHost {
                     let target = &mut *target;
                     target.selection =
                         start_selection(&target.active, &target.viewport, col, row, mode);
+                    target.invalidate_snapshot_rows();
                 }
                 self.left_drag_active = true;
                 self.notify_interaction_changed();
@@ -1601,6 +1610,7 @@ impl WindowHost {
                         );
                     } else {
                         terminal.selection = None;
+                        terminal.invalidate_snapshot_rows();
                     }
                 }
                 self.notify_interaction_changed();
@@ -1617,6 +1627,7 @@ impl WindowHost {
                             ClipboardKind::Clipboard,
                         );
                         terminal.selection = None;
+                        terminal.invalidate_snapshot_rows();
                     } else {
                         drop(guard);
                         Self::emit_host_input(
@@ -1737,6 +1748,9 @@ impl WindowHost {
             } else if y_lines > 0 {
                 view::scroll_viewport_down(&mut terminal.active, y_lines as u32);
             }
+            if y_lines != 0 {
+                terminal.invalidate_snapshot_rows();
+            }
         }
         self.notify_interaction_changed();
     }
@@ -1758,7 +1772,9 @@ impl WindowHost {
     fn close_gutter_popup(&mut self) {
         let had_popup = self.input_state.lock().gutter_popup.take().is_some();
         if had_popup && let Some(target) = self.active_input_target() {
-            target.terminal.lock().selection = None;
+            let mut terminal = target.terminal.lock();
+            terminal.selection = None;
+            terminal.invalidate_snapshot_rows();
         }
     }
 
@@ -1782,6 +1798,7 @@ impl WindowHost {
             &terminal.metadata.command_metas,
             &terminal.active,
         );
+        terminal.invalidate_snapshot_rows();
         let duration_text =
             command_duration_at(prompt_abs, &terminal.metadata.command_metas).map(format_duration);
         drop(guard);
@@ -1815,6 +1832,7 @@ impl WindowHost {
                     &terminal.active,
                 ) {
                     terminal.selection = None;
+                    terminal.invalidate_snapshot_rows();
                     drop(guard);
                     match cmd {
                         PopupCommandText::Observed(cmd) => {
@@ -1843,6 +1861,7 @@ impl WindowHost {
                     copy_to_clipboard(&mut terminal.clipboard, &text);
                 }
                 terminal.selection = None;
+                terminal.invalidate_snapshot_rows();
             }
             2 => {
                 let mut terminal = target.terminal.lock();
@@ -1854,6 +1873,7 @@ impl WindowHost {
                     copy_to_clipboard(&mut terminal.clipboard, text.trim());
                 }
                 terminal.selection = None;
+                terminal.invalidate_snapshot_rows();
             }
             3 => {
                 let mut terminal = target.terminal.lock();
@@ -1865,6 +1885,7 @@ impl WindowHost {
                     copy_to_clipboard(&mut terminal.clipboard, text.trim());
                 }
                 terminal.selection = None;
+                terminal.invalidate_snapshot_rows();
             }
             _ => return,
         }

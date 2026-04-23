@@ -1156,6 +1156,7 @@ impl RenderHost {
                 dec_color,
                 cfg.palette.clone(),
             );
+            terminal.invalidate_snapshot_rows();
         }
         self.config.keybindings = cfg.keybindings;
         self.sync_input_state();
@@ -1347,8 +1348,8 @@ impl RenderHost {
         // the terminal thread can continue processing PTY data while the
         // renderer does shaping, glyph caching, and image-atlas work.
         let (snap, visible_images) = {
-            let terminal = self.tabs[active_idx].terminal.lock();
-            let snap = r#impl::snapshot_terminal(&terminal);
+            let mut terminal = self.tabs[active_idx].terminal.lock();
+            let snap = terminal41::snapshot_terminal(&mut terminal);
             let visible_images = terminal41::view::visible_images(
                 &terminal.active,
                 &terminal.viewport,
