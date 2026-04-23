@@ -171,4 +171,41 @@ mod tests {
 
         assert_eq!(term.active.grid.rows[0].fg[0], old_fg);
     }
+
+    #[test]
+    fn set_palette_updates_existing_ansi_colors() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[31;41;58;5;1mX");
+        let mut new = term.palette.clone();
+        let new_red = Srgb::new(9, 10, 11);
+        new.ansi[1] = new_red;
+
+        term.set_palette(new);
+
+        let row = &term.active.grid.rows[0];
+        assert_eq!(row.fg[0], new_red);
+        assert_eq!(row.bg[0], new_red);
+        assert_eq!(row.underline_color[0], Some(new_red));
+        assert_eq!(term.active.fg, new_red);
+        assert_eq!(term.active.bg, new_red);
+        assert_eq!(term.active.underline_color, Some(new_red));
+    }
+
+    #[test]
+    fn set_palette_preserves_truecolor_values_outside_palette() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        let explicit = Srgb::new(1, 2, 3);
+        term.process(b"\x1b[38;2;1;2;3;48;2;4;5;6;58;2;7;8;9mX");
+        let mut new = term.palette.clone();
+        new.fg = Srgb::new(10, 20, 30);
+        new.bg = Srgb::new(40, 50, 60);
+        new.ansi[1] = Srgb::new(70, 80, 90);
+
+        term.set_palette(new);
+
+        let row = &term.active.grid.rows[0];
+        assert_eq!(row.fg[0], explicit);
+        assert_eq!(row.bg[0], Srgb::new(4, 5, 6));
+        assert_eq!(row.underline_color[0], Some(Srgb::new(7, 8, 9)));
+    }
 }
