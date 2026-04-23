@@ -25,6 +25,7 @@ terminal emulators and this one is nothing special, but I've always wanted to
 write my own, with the features I prefer.
 
 ## Possible Objections
+
 1. You use AI.
    - Fair enough.
 2. It's ugly.
@@ -65,6 +66,93 @@ Roadmap notes live in:
 - `VT_COMPATIBILITY_ROADMAP.md` for DEC VT-family compatibility decisions
 - `TERMINAL_EXTENSIONS_ROADMAP.md` for modern terminal extension protocols
 
+<details>
+<summary><strong>Protocol and Spec Compatibility</strong></summary>
+
+Legend:
+
+- ✅ Supported
+- ❌ Unplanned
+- 🟨 Planned, not supported yet
+- 🟦 Watching, not committed yet
+
+### DEC / VT Compatibility
+
+| Area                                       | Status       | Notes                                                                                                                   |
+| ------------------------------------------ | ------------ | ----------------------------------------------------------------------------------------------------------------------- |
+| VT100/VT220-style screen control           | ✅ Supported | Primary/alternate screen, cursor movement, erase/edit operations, scroll regions, tab stops, SGR, DA/DSR-style reports. |
+| VT420 conformance and 7-bit/8-bit controls | ✅ Supported | `DECSCL`, `S7C1T`, `S8C1T`, and VT100/VT200/VT400 switching behavior.                                                   |
+| DEC status lines                           | ✅ Supported | Host-writable status-line routing with visually distinct terminal rendering.                                            |
+| DEC character-set engine                   | ✅ Supported | NRC sets, DEC Technical, DEC Supplemental, 94/96 designation, GL/GR invocation, UTF-8 and raw 8-bit modes.              |
+| DRCS downloadable soft fonts               | ✅ Supported | `DECDLD` with bounded storage and render-path support.                                                                  |
+| VT420 page, tab, and geometry controls     | ✅ Supported | `DECSNLS`, `DECSLPP`, `DECSCPP`, page navigation/reporting, tab-stop reports, and host resize requests.                 |
+| VT420 rectangular-area controls            | ✅ Supported | `DECERA`, `DECFRA`, `DECCRA`, `DECSERA`, `DECSACE`, `DECCARA`, and `DECRARA`.                                           |
+| VT420 reset, test, and state reports       | ✅ Supported | `DECTST`, `DECSR`/`DECSRC`, `DECRPM`, `DECRQSS`, `DECRQPSR`/`DECCIR`, `DECRQTSR`/`DECRSTS`, and `DECRSPS`.              |
+| DEC user-defined keys                      | ✅ Supported | Implemented behind the `[security.features] udks` allowlist.                                                            |
+| DEC downloaded macros                      | ✅ Supported | `DECDMAC`/`DECINVM`, bounded and disabled unless explicitly allowed.                                                    |
+| Answerback / auto-answerback               | ❌ Unplanned | Legacy terminal-originated string surface with low modern value.                                                        |
+| DEC keyboard reshape/report families       | ❌ Unplanned | `DECBKM`, `DECKBUM`, `DECEKBD`, and related host-controlled keyboard behavior.                                          |
+| Printer and media-copy controls            | ❌ Unplanned | Printer controller, autoprint, print-screen/page/line, and printer-session controls.                                    |
+| Host-routed session / multi-port behavior  | ❌ Unplanned | Covered better by local tabs/windows and multiplexers.                                                                  |
+| VT52 cursor/erase/identify subset          | ✅ Supported | VT52 compatibility is focused on common cursor, erase, and identify behavior.                                           |
+| VT52 printer controls                      | ❌ Unplanned | Same external-I/O risk as DEC printer controls.                                                                         |
+| VT500 bidi/Hebrew features                 | ❌ Unplanned | Requires large text-layout and input work for little current app demand.                                                |
+| VT500 desktop/session/setup surfaces       | ❌ Unplanned | Host-manageable local UI/setup surfaces do not fit the trust model.                                                     |
+
+### Kitty Protocols
+
+| Area                                   | Status                        | Notes                                                                                                               |
+| -------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Kitty keyboard protocol                | ✅ Supported                  | Mode stack, key encoding, associated text, IME commits, and 7-bit/8-bit reply handling.                             |
+| Kitty graphics direct payloads         | ✅ Supported                  | RGB, RGBA, PNG, zlib compression, chunking, transmit, transmit-and-display, and placement.                          |
+| Kitty graphics file/temp-file payloads | ✅ Supported                  | File and temp-file media with byte range support and safe temp-file deletion rules.                                 |
+| Kitty graphics placement model         | ✅ Supported                  | Image IDs, image numbers, placement IDs, relative placements, cell offsets, z-index, and expanded delete selectors. |
+| Kitty graphics shared memory (`t=s`)   | ❌ Unplanned                  | Rejected as a local cross-process attack surface.                                                                   |
+| Kitty graphics Unicode placeholders    | 🟨 Planned, not supported yet | Needs text-grid support for placeholder codepoints and combining marks.                                             |
+| Kitty graphics animation actions       | 🟨 Planned, not supported yet | Needs separate frame mutation, lifecycle, and quota design.                                                         |
+| Kitty text sizing protocol             | 🟦 Watching                   | Could be useful, but affects shaping, selection, hit testing, scrollback, and reflow.                               |
+| Kitty mouse pointer shapes             | 🟦 Watching                   | Reasonable if real applications use it; should stay scoped to terminal content.                                     |
+| Kitty color protocol additions         | 🟦 Watching                   | Watch for real app demand beyond existing OSC 4/10/11 and DEC color support.                                        |
+| Kitty file transfer                    | ❌ Unplanned                  | Local file brokerage from untrusted PTY output is outside scope.                                                    |
+
+### iTerm2 / OSC 1337
+
+| Area                                                 | Status       | Notes                                                                                                     |
+| ---------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------- |
+| OSC 1337 inline images                               | ✅ Supported | Includes multipart image payloads.                                                                        |
+| OSC 1337 `ReportCellSize`                            | ✅ Supported | Used by image-aware tools to size output.                                                                 |
+| OSC 1337 current-directory / user-var style metadata | ✅ Supported | Safe metadata subset is accepted as untrusted annotation data.                                            |
+| iTerm2 upload / download / silent file placement     | ❌ Unplanned | Host-triggered local file transfer is outside the trust model.                                            |
+| iTerm2 terminal chrome controls                      | ❌ Unplanned | Profile switching, focus stealing, cursor guides, attention effects, and similar trusted-UI manipulation. |
+| iTerm2 custom buttons                                | ❌ Unplanned | Host-defined UI that later emits input is too easy to confuse with trusted terminal controls.             |
+
+### Other Modern Extensions
+
+| Area                                           | Status                        | Notes                                                                              |
+| ---------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------- |
+| OSC 0 / OSC 2 titles                           | ✅ Supported                  | Common xterm-compatible title updates.                                             |
+| OSC 4 / OSC 10 / OSC 11 colors                 | ✅ Supported                  | Palette/default foreground/background queries and updates.                         |
+| OSC 7 current directory                        | ✅ Supported                  | Stored as untrusted metadata.                                                      |
+| OSC 8 hyperlinks                               | ✅ Supported                  | Hyperlinks attach to terminal cells.                                               |
+| OSC 52 clipboard                               | ✅ Supported                  | Read/write requests are policy-gated and default to asking.                        |
+| Bracketed paste                                | ✅ Supported                  | xterm-compatible paste wrapping.                                                   |
+| Focus reporting                                | ✅ Supported                  | Standard focus in/out reporting.                                                   |
+| xterm mouse protocols                          | ✅ Supported                  | Legacy, UTF-8, SGR, and URXVT-style encodings.                                     |
+| Window and cell size reports                   | ✅ Supported                  | Includes common size-query responses.                                              |
+| XTVERSION-style reports                        | ✅ Supported                  | Coarse terminal version reporting.                                                 |
+| Synchronized output (`DECSET 2026`)            | ✅ Supported                  | Buffered painting during synchronized update windows.                              |
+| OSC 133 shell integration                      | ✅ Supported                  | Prompt, command, output, and exit-status marks.                                    |
+| OSC 633 shell integration                      | ✅ Supported                  | VS Code-compatible safe subset mapped into the prompt model.                       |
+| Policy-filtered capability reporting           | 🟨 Planned, not supported yet | Useful for modern apps, but should avoid detailed fingerprinting.                  |
+| Glyph Protocol                                 | 🟦 Watching                   | Interesting fit for session-local PUA glyphs once adoption stabilizes.             |
+| Light/dark mode notifications                  | 🟦 Watching                   | Useful but fingerprinting-adjacent; would need coarse, configurable reporting.     |
+| Host-triggered desktop notifications           | ❌ Unplanned                  | Local attention and desktop integration should stay user-controlled.               |
+| Host-driven tabs/windows/panes/session routing | ❌ Unplanned                  | Local UI and input routing are not controlled by escape sequences.                 |
+| Arbitrary region styling extensions            | ❌ Unplanned                  | Retroactive host styling makes spoofing and text ownership harder to reason about. |
+| Rich non-text clipboard data                   | ❌ Unplanned                  | Non-text clipboard formats expand local-integration and parser surface.            |
+
+</details>
+
 ## Building
 
 If you just want to build it and run it:
@@ -84,11 +172,11 @@ cargo install --path .
 
 ### Cargo Features
 
-| Feature                | Default | Description |
-| ---------------------- | ------- | ----------- |
+| Feature                | Default | Description                                                                                                       |
+| ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------- |
 | `ffmpeg`               | on      | Enables GIF/video decode for inline images and animated backgrounds. Requires host `libav*` development packages. |
-| `vulkan`               | off     | Uses Vulkan instead of OpenGL for rendering. |
-| `wayland-data-control` | on      | Enables `zwlr_data_control_manager_v1` clipboard access on Wayland compositors that support it. |
+| `vulkan`               | off     | Uses Vulkan instead of OpenGL for rendering.                                                                      |
+| `wayland-data-control` | on      | Enables `zwlr_data_control_manager_v1` clipboard access on Wayland compositors that support it.                   |
 
 If you want a smaller build without ffmpeg or Wayland data-control:
 
@@ -129,7 +217,6 @@ adding a per-process allowlist.
 OSC 52 clipboard reads and writes default to asking for each request. Allowing
 from the confirmation modal applies only to the single clipboard request that
 triggered the prompt.
-
 
 <details>
 <summary><strong>Feature Set</strong></summary>
