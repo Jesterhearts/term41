@@ -23,6 +23,7 @@ use winit::dpi::PhysicalSize;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
+use crate::APP_START_TIME;
 use crate::config::VSync;
 use crate::renderer::GUTTER_MENU_ITEMS;
 use crate::renderer::GutterPopup;
@@ -879,11 +880,6 @@ pub struct Renderer {
 
     bg_alpha: u8,
 
-    /// When the renderer started; used as the reference for the cursor blink
-    /// phase. Wall-clock would work too — `Instant` keeps it monotonic
-    /// regardless of system clock changes.
-    started: Instant,
-
     /// When the current visual bell flash started, if one is in progress.
     /// Cleared back to `None` once the flash is past its fade-out window;
     /// `notify_bell` re-arms it.
@@ -1233,7 +1229,6 @@ impl Renderer {
             bg_image_layout,
             background,
             bg_alpha: (opacity * 255.0) as u8,
-            started: Instant::now(),
             bell_started: None,
             gutter_enabled,
             terminal_rows: Vec::new(),
@@ -1628,8 +1623,8 @@ impl Renderer {
         };
         let cursor_state = self.cursor_state_from_snapshot(snap);
         let popup_clip = self.popup_clip(gutter_popup, layout);
-        let blink_off = (self.started.elapsed().as_millis() / 500) & 1 == 1;
-        let rapid_blink_off = (self.started.elapsed().as_millis() / 250) & 1 == 1;
+        let blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 500) & 1 == 1;
+        let rapid_blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 250) & 1 == 1;
         let font_generation = font_system.font_generation();
 
         for snap_row in rows {
@@ -4037,7 +4032,7 @@ impl Renderer {
         };
         let style = snap.cursor_style;
         if style.blink {
-            let elapsed = self.started.elapsed().as_secs_f32();
+            let elapsed = APP_START_TIME.get().unwrap().elapsed().as_secs_f32();
             let half = CURSOR_BLINK_HALF_PERIOD.as_secs_f32();
             let phase = (elapsed / half) as u64;
             if phase & 1 == 1 {

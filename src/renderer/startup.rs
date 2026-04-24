@@ -70,7 +70,6 @@ pub(crate) struct StartupPresenter {
     glyph_cache: HashMap<StartupGlyphKey, RasterizedGlyph>,
     gutter_enabled: bool,
     background: Option<CachedBackground>,
-    started: Instant,
     first_frame: bool,
     terminal_rows: Vec<RowSnapshot>,
 }
@@ -112,7 +111,6 @@ impl StartupPresenter {
             glyph_cache: HashMap::new(),
             gutter_enabled,
             background: background_path.and_then(|path| load_cached_background(&path)),
-            started: Instant::now(),
             first_frame: true,
             terminal_rows: Vec::new(),
         })
@@ -149,7 +147,7 @@ impl StartupPresenter {
             .collect::<Vec<_>>();
             self.apply_terminal_snapshot_rows(&snap);
             snap.rows = self.terminal_rows.clone();
-            build_startup_frame(snap, visible_images, self.started)
+            build_startup_frame(snap, visible_images, *APP_START_TIME.get().unwrap())
         };
 
         let mut buffer = match self.surface.buffer_mut() {
@@ -353,7 +351,7 @@ impl StartupPresenter {
             );
         }
 
-        next_startup_redraw_delay(&frame, self.started)
+        next_startup_redraw_delay(&frame, *APP_START_TIME.get().unwrap())
     }
 
     fn apply_terminal_snapshot_rows(
