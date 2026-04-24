@@ -330,6 +330,14 @@ vsync = "auto"
 # kitty_graphics_payload_bytes = 33554432
 # kitty_graphics_storage_bytes = 134217728
 
+[security.scripts.status]
+# Scripts live in ~/.config/term41/scripts/<name>.lua.
+# All permissions default to false.
+# filesystem = true
+# shell = false
+# process_info = false
+# resource_usage = false
+
 [colors.status_line]
 # foreground = "#d8dee9"
 # background = "#3b4252"
@@ -367,6 +375,15 @@ Notes:
 - `[security.limits]` settings live-reload for new protocol actions. They
   control how much macro/UDK/DRCS/kitty graphics state term41 accepts or
   retains.
+- Lua scripts are discovered from `$XDG_CONFIG_HOME/term41/scripts/*.lua`.
+  Each script runs in its own Lua state on its own thread and can
+  `require("terminal")` to read the active tab title/cwd and set the current
+  tab title or indicator status text.
+- `[security.scripts.<script_name>]` controls which optional libraries a script
+  receives. The default sandbox has only basic string/table/math/utf8 support
+  plus `require("terminal")`.
+- Example scripts are available under `examples/`, including
+  `examples/sys_info.lua` for Linux CPU and memory status text.
 
 </details>
 

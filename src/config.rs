@@ -1,3 +1,4 @@
+use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
 
@@ -155,6 +156,8 @@ struct SecuritySettings {
     clipboard: Option<ClipboardPermissionsConfig>,
     #[serde(default)]
     limits: Option<LimitSettings>,
+    #[serde(default)]
+    scripts: Option<BTreeMap<String, ScriptPermissions>>,
 }
 
 #[derive(Deserialize, Default)]
@@ -214,6 +217,18 @@ struct LimitSettings {
     #[serde(deserialize_with = "usize_opt")]
     #[serde(default)]
     kitty_graphics_storage_bytes: Option<usize>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
+pub struct ScriptPermissions {
+    #[serde(default)]
+    pub filesystem: bool,
+    #[serde(default)]
+    pub shell: bool,
+    #[serde(default)]
+    pub process_info: bool,
+    #[serde(default)]
+    pub resource_usage: bool,
 }
 
 #[derive(Deserialize, Default)]
@@ -474,6 +489,7 @@ pub struct Config {
     pub palette: ColorPalette,
     pub feature_permissions: FeaturePermissions,
     pub limits: TerminalLimits,
+    pub script_permissions: BTreeMap<String, ScriptPermissions>,
     pub compatibility: CompatibilityConfig,
 }
 
@@ -498,6 +514,7 @@ impl Default for Config {
             palette: ColorPalette::default(),
             feature_permissions: FeaturePermissions::default(),
             limits: TerminalLimits::default(),
+            script_permissions: BTreeMap::new(),
             compatibility: CompatibilityConfig::default(),
         }
     }
@@ -539,6 +556,7 @@ fn parse_config(
         features,
         clipboard,
         limits,
+        scripts,
     } = file.security.unwrap_or_default();
     let features = features.unwrap_or_default();
     let clipboard = clipboard.unwrap_or_default();
@@ -571,6 +589,7 @@ fn parse_config(
             },
         },
         limits,
+        script_permissions: scripts.unwrap_or_default(),
         compatibility,
     }
 }
@@ -653,6 +672,10 @@ fn expand_path(path: PathBuf) -> PathBuf {
 /// Public so `main.rs` can hand the watcher the same path the loader uses.
 pub fn config_file_path() -> Option<PathBuf> {
     config_path()
+}
+
+pub fn scripts_dir_path() -> Option<PathBuf> {
+    dirs::config_dir().map(|d| d.join("term41").join("scripts"))
 }
 
 /// Map the optional `keybindings = [...]` toml field onto a
@@ -1071,6 +1094,42 @@ kitty_graphics_storage_bytes = 1048576
         assert_eq!(cfg.limits.drcs_storage_bytes, 524288);
         assert_eq!(cfg.limits.kitty_graphics_payload_bytes, 65536);
         assert_eq!(cfg.limits.kitty_graphics_storage_bytes, 1048576);
+    }
+
+    #[test]
+    fn script_permissions_default_to_empty_policy_map() {
+        assert!(parse("").script_permissions.is_empty());
+    }
+
+    #[test]
+    fn script_permissions_parse_under_security() {
+        let cfg = parse(
+            r#"
+[security.scripts.status]
+filesystem = true
+resource_usage = true
+
+[security.scripts.title]
+shell = true
+process_info = true
+"#,
+        );
+        assert_eq!(
+            cfg.script_permissions.get("status"),
+            Some(&ScriptPermissions {
+                filesystem: true,
+                resource_usage: true,
+                ..ScriptPermissions::default()
+            })
+        );
+        assert_eq!(
+            cfg.script_permissions.get("title"),
+            Some(&ScriptPermissions {
+                shell: true,
+                process_info: true,
+                ..ScriptPermissions::default()
+            })
+        );
     }
 
     #[test]

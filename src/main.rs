@@ -6,6 +6,7 @@ mod keybindings;
 mod output_recording;
 mod perf_ctrl_c;
 mod renderer;
+mod scripting;
 
 use std::collections::HashMap;
 use std::collections::VecDeque;
@@ -2806,6 +2807,7 @@ fn spawn_config_watcher(
         .name("config-watcher".into())
         .spawn(move || {
             let target = config_path.clone();
+            let scripts_dir = dir.join("scripts");
             let config_reload_for_handler = config_reload.clone();
             let mut watcher = match notify::recommended_watcher(move |res| {
                 let event: notify::Event = match res {
@@ -2815,8 +2817,11 @@ fn spawn_config_watcher(
                         return;
                     }
                 };
-                let touches_config = event.paths.iter().any(|p| p == &target);
-                if !touches_config {
+                let touches_config_or_script = event
+                    .paths
+                    .iter()
+                    .any(|p| p == &target || p.starts_with(&scripts_dir));
+                if !touches_config_or_script {
                     return;
                 }
                 if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
@@ -2834,7 +2839,7 @@ fn spawn_config_watcher(
                 }
             };
 
-            if let Err(e) = watcher.watch(&dir, RecursiveMode::NonRecursive) {
+            if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
                 warn!("failed to watch config dir {}: {e}", dir.display());
                 return;
             }

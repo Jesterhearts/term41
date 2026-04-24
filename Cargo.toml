@@ -49,6 +49,7 @@ harness = false
 name    = "vte_parse"
 
 [dependencies]
+arc-swap                       = "1.9.1"
 atomic-write-file              = "0.3.0"
 bitflags.workspace             = true
 bytemuck                       = { version = "1.25.0", features = [
@@ -66,6 +67,10 @@ harfrust                       = "0.6.0"
 image41.workspace              = true
 infer.workspace                = true
 log.workspace                  = true
+mlua                           = { version = "0.11.6", default-features = false, features = [
+  "lua54",
+  "vendored"
+] }
 notify                         = "8.2.0"
 open                           = "5.3.4"
 palette.workspace              = true

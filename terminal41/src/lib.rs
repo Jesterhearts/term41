@@ -123,9 +123,11 @@ use crate::selection::Selection;
 use crate::selection::search::SearchState;
 pub use crate::snapshot::RowSnapshot;
 pub use crate::snapshot::SearchSnapshot;
+pub use crate::snapshot::SnapshotOptions;
 use crate::snapshot::SnapshotState;
 pub use crate::snapshot::TermSnapshot;
 pub use crate::snapshot::snapshot_terminal;
+pub use crate::snapshot::snapshot_terminal_with_options;
 
 /// How term41 should handle legacy shell emoji editing compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]

@@ -53,6 +53,9 @@ use crate::renderer::r#impl::Renderer;
 use crate::renderer::r#impl::TabInfo;
 use crate::renderer::r#impl::WindowControls;
 pub use crate::renderer::r#impl::compute_gutter_width;
+use crate::scripting::ScriptInput;
+use crate::scripting::ScriptOutput;
+use crate::scripting::ScriptRuntime;
 
 // ---------------------------------------------------------------------------
 // Gutter popup — shown on click of a shell-integration gutter marker
@@ -320,6 +323,9 @@ pub struct RenderHost {
     config: Config,
 
     applied_title: Option<String>,
+    scripts: ScriptRuntime,
+    last_script_status_text: Option<String>,
+    last_script_error: Option<String>,
 
     /// Last known window size in physical pixels. Updated on Resized events.
     window_size: (u32, u32),
@@ -374,6 +380,11 @@ impl RenderHost {
         input_state: Arc<Mutex<InputState>>,
         render_thread_handle: Arc<OnceLock<Thread>>,
     ) -> Self {
+        let scripts = ScriptRuntime::discover(
+            crate::config::scripts_dir_path(),
+            &config.script_permissions,
+            render_thread_handle.clone(),
+        );
         Self {
             renderer: None,
             event_rx,
@@ -388,6 +399,9 @@ impl RenderHost {
             config_path,
             config,
             applied_title: None,
+            scripts,
+            last_script_status_text: None,
+            last_script_error: None,
             window_size: (0, 0),
             window_resize_epoch: 0,
             window: None,
@@ -1169,6 +1183,15 @@ impl RenderHost {
         self.config.palette = cfg.palette.clone();
         self.config.feature_permissions = cfg.feature_permissions.clone();
         self.config.limits = cfg.limits;
+        self.scripts = ScriptRuntime::discover(
+            crate::config::scripts_dir_path(),
+            &cfg.script_permissions,
+            self.render_thread_handle.clone(),
+        );
+        self.last_script_status_text = None;
+        self.last_script_error = None;
+        self.applied_title = None;
+        self.config.script_permissions = cfg.script_permissions.clone();
         self.config.compatibility = cfg.compatibility;
 
         if cfg.gutter != self.config.gutter {
@@ -1270,6 +1293,9 @@ impl RenderHost {
             .iter()
             .position(|t| t.id == self.active_tab_id)
             .expect("active tab must exist");
+        self.scripts.send_input(self.script_input(active_idx));
+        let script_output = self.scripts.output();
+        self.report_script_error(&script_output);
 
         {
             let guard = self.tabs[active_idx].terminal.lock();
@@ -1285,14 +1311,20 @@ impl RenderHost {
         let tab_titles: Vec<(String, bool)> = if self.tab_bar_visible() {
             self.tabs
                 .iter()
-                .map(|t| {
-                    let title = t
+                .enumerate()
+                .map(|(idx, t)| {
+                    let terminal_title = t
                         .terminal
                         .lock()
                         .metadata
                         .current_title
                         .clone()
                         .unwrap_or_else(|| "Shell".to_owned());
+                    let title = if idx == active_idx {
+                        script_output.title.clone().unwrap_or(terminal_title)
+                    } else {
+                        terminal_title
+                    };
                     (title, t.id == self.active_tab_id)
                 })
                 .collect()
@@ -1352,7 +1384,14 @@ impl RenderHost {
         // renderer does shaping, glyph caching, and image-atlas work.
         let (snap, visible_images) = {
             let mut terminal = self.tabs[active_idx].terminal.lock();
-            let snap = terminal41::snapshot_terminal(&mut terminal);
+            let force_status_line = self.last_script_status_text != script_output.status_text;
+            let snap = terminal41::snapshot_terminal_with_options(
+                &mut terminal,
+                terminal41::SnapshotOptions {
+                    indicator_status_text: script_output.status_text.as_deref(),
+                    force_status_line,
+                },
+            );
             let visible_images = terminal41::view::visible_images(
                 &terminal.active,
                 &terminal.viewport,
@@ -1362,6 +1401,7 @@ impl RenderHost {
             .collect::<Vec<_>>();
             (snap, visible_images)
         };
+        self.last_script_status_text = script_output.status_text.clone();
         renderer.render(
             acquired,
             &mut self.font_system,
@@ -1381,7 +1421,10 @@ impl RenderHost {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let base = tab.terminal.lock().metadata.current_title.clone();
+        let script_output = self.scripts.output();
+        let base = script_output
+            .title
+            .or_else(|| tab.terminal.lock().metadata.current_title.clone());
         let want = if self.tabs.len() > 1 {
             let idx = self
                 .tabs
@@ -1403,6 +1446,36 @@ impl RenderHost {
         let title = want.clone().unwrap_or_else(|| "term41".to_owned());
         let _ = self.proxy.send_event(AppEvent::SetTitle(title));
         self.applied_title = want;
+    }
+
+    fn script_input(
+        &self,
+        active_idx: usize,
+    ) -> ScriptInput {
+        let terminal = self.tabs[active_idx].terminal.lock();
+        ScriptInput {
+            tab_title: terminal.metadata.current_title.clone(),
+            cwd: terminal
+                .metadata
+                .current_directory
+                .as_ref()
+                .map(|path| path.to_string_lossy().into_owned()),
+            tab_count: self.tabs.len(),
+            active_tab_index: active_idx + 1,
+        }
+    }
+
+    fn report_script_error(
+        &mut self,
+        output: &ScriptOutput,
+    ) {
+        if self.last_script_error == output.error {
+            return;
+        }
+        if let Some(error) = output.error.as_ref() {
+            warn!("lua script error: {error}");
+        }
+        self.last_script_error = output.error.clone();
     }
 
     fn handle_bell(

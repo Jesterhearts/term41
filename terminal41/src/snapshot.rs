@@ -73,6 +73,12 @@ pub struct TermSnapshot {
     pub reset_cached_rows: bool,
 }
 
+#[derive(Debug, Clone, Copy, Default)]
+pub struct SnapshotOptions<'a> {
+    pub indicator_status_text: Option<&'a str>,
+    pub force_status_line: bool,
+}
+
 /// Dirty-row state for terminal snapshots.
 ///
 /// Keep row dirtiness in this single sidecar vector rather than on `Row`
@@ -124,6 +130,14 @@ struct SnapshotShape {
 
 /// Snapshot the terminal's visible state under the lock.
 pub fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
+    snapshot_terminal_with_options(terminal, SnapshotOptions::default())
+}
+
+/// Snapshot the terminal's visible state with renderer-owned overrides.
+pub fn snapshot_terminal_with_options(
+    terminal: &mut Terminal,
+    options: SnapshotOptions<'_>,
+) -> TermSnapshot {
     let vp_rows = terminal.viewport.rows;
     let vp_cols = terminal.viewport.cols;
     let search_active = search_active(&terminal.search);
@@ -151,13 +165,19 @@ pub fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
     let dirty_visible_rows: Vec<_> = (0..vp_rows)
         .filter(|&row| take_dirty_row(&mut terminal.snapshot, row))
         .collect();
-    let dirty_status_row =
-        status_line_row.filter(|&row| take_dirty_row(&mut terminal.snapshot, row));
+    let dirty_status_row = status_line_row
+        .map(|row| {
+            let terminal_dirty = take_dirty_row(&mut terminal.snapshot, row);
+            (row, terminal_dirty || options.force_status_line)
+        })
+        .filter(|(_, dirty)| *dirty)
+        .map(|(row, _)| row);
     for row in dirty_visible_rows {
         rows.push(snapshot_visible_row(terminal, row));
     }
     if dirty_status_row.is_some()
-        && let Some(status_row) = snapshot_status_line_row(terminal, vp_cols)
+        && let Some(status_row) =
+            snapshot_status_line_row(terminal, vp_cols, options.indicator_status_text)
     {
         rows.push(status_row);
     }
@@ -278,12 +298,20 @@ fn snapshot_visible_row(
 fn snapshot_status_line_row(
     terminal: &Terminal,
     vp_cols: u32,
+    indicator_status_text: Option<&str>,
 ) -> Option<RowSnapshot> {
     if view::status_display_kind(&terminal.active) == StatusDisplayKind::Indicator {
-        let text =
-            view::indicator_status_text(&terminal.metadata, &terminal.active).unwrap_or_default();
+        let default_text;
+        let text = match indicator_status_text {
+            Some(text) => text,
+            None => {
+                default_text = view::indicator_status_text(&terminal.metadata, &terminal.active)
+                    .unwrap_or_default();
+                &default_text
+            }
+        };
         return Some(status_line_indicator_row(
-            &text,
+            text,
             UdkIndicator {
                 enabled: terminal.udk_feature_enabled(),
                 locked: terminal.udks_locked(),
@@ -525,5 +553,41 @@ mod tests {
         assert_eq!(snap.rows.len(), 1);
         assert_eq!(snap.rows[0].screen_row, 0);
         assert_eq!(snap.rows[0].cells[0].as_str(), "A");
+    }
+
+    #[test]
+    fn forced_indicator_status_override_snapshots_status_row() {
+        let mut terminal = Terminal::new(
+            20,
+            3,
+            10,
+            StatusDisplayKind::None,
+            FeaturePermissions::default(),
+            TerminalLimits::default(),
+            16,
+            8,
+            ColorPalette::default(),
+        );
+        crate::settings::set_default_status_display(
+            &mut terminal.active,
+            &mut terminal.stash,
+            &mut terminal.viewport,
+            &terminal.palette,
+            &mut terminal.default_status_display,
+            StatusDisplayKind::Indicator,
+        );
+        let _ = snapshot_terminal(&mut terminal);
+
+        let snap = snapshot_terminal_with_options(
+            &mut terminal,
+            SnapshotOptions {
+                indicator_status_text: Some("lua status"),
+                force_status_line: true,
+            },
+        );
+
+        assert_eq!(snap.rows.len(), 1);
+        assert_eq!(snap.rows[0].screen_row, terminal.viewport.rows);
+        assert_eq!(snap.rows[0].cells[..10].concat(), "lua status");
     }
 }
