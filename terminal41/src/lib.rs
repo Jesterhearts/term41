@@ -90,6 +90,7 @@ pub use crate::feature::ClipboardPermission;
 pub use crate::feature::ClipboardPermissions;
 pub use crate::feature::FeaturePermissions;
 pub use crate::feature::ProgramAllowlist;
+pub use crate::feature::TerminalLimits;
 pub(crate) use crate::feature::apply_status_display_mode;
 pub use crate::image::PlacedImage;
 pub use crate::image::VisibleImage;
@@ -275,6 +276,8 @@ pub struct TerminalMetadata {
 pub struct TerminalProtocolState {
     /// Host-configured permission gates for optional terminal features.
     pub feature_permissions: FeaturePermissions,
+    /// Host-configured resource limits for protocol-owned state.
+    pub limits: TerminalLimits,
     /// VT420 macro definitions accumulated from DECDMAC / related controls.
     pub macros: MacroStore,
     /// Tracks nested macro expansion depth to prevent runaway recursion.
@@ -526,6 +529,7 @@ impl Terminal {
         scrollback_limit: u32,
         default_status_display: StatusDisplayKind,
         feature_permissions: FeaturePermissions,
+        limits: TerminalLimits,
         cell_height: u32,
         cell_width: u32,
         palette: ColorPalette,
@@ -577,6 +581,7 @@ impl Terminal {
             emoji_compatibility_mode: EmojiCompatibilityMode::Auto,
             protocol: TerminalProtocolState {
                 feature_permissions,
+                limits,
                 ..TerminalProtocolState::default()
             },
             snapshot: SnapshotState::default(),
@@ -650,6 +655,7 @@ impl Terminal {
             &mut self.protocol.macros,
             params,
             payload,
+            self.protocol.limits,
         );
     }
 
@@ -663,6 +669,7 @@ impl Terminal {
             &mut self.protocol.udks,
             params,
             payload,
+            self.protocol.limits,
         );
     }
 
@@ -839,6 +846,7 @@ impl Terminal {
                 self.protocol.macro_invocation_depth,
                 &mut self.protocol.udks,
                 &self.protocol.feature_permissions,
+                self.protocol.limits,
                 &mut self.protocol.drcs,
                 &mut self.palette,
                 &self.base_palette,
@@ -901,6 +909,7 @@ impl Terminal {
                     action,
                     &mut self.images.kitty_images,
                     &mut self.images.kitty_chunked,
+                    self.protocol.limits,
                     &mut self.active,
                     &self.viewport,
                     &mut self.images.next_image_id,

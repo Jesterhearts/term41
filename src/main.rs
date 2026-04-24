@@ -2641,6 +2641,7 @@ fn main() {
         config.scrollback_lines,
         config.status_line.display_kind(),
         config.feature_permissions.clone(),
+        config.limits,
         cell_height,
         cell_width,
         config.palette.clone(),

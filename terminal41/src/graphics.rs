@@ -4,6 +4,7 @@ use vte_mode41::C1Mode;
 
 use crate::PlacedImage;
 use crate::Screen;
+use crate::TerminalLimits;
 use crate::Viewport;
 use crate::conformance;
 use crate::screen;
@@ -12,6 +13,7 @@ pub(crate) fn handle_kitty_graphics(
     data: &[u8],
     store: &mut image41::kitty::KittyImageStore,
     chunked: &mut image41::kitty::ChunkedTransmission,
+    limits: TerminalLimits,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -25,13 +27,28 @@ pub(crate) fn handle_kitty_graphics(
     }
 
     let parsed = image41::kitty::parse_command(&data[1..]);
+    if parsed.payload.len() > limits.kitty_graphics_payload_bytes {
+        send_kitty_response(
+            &parsed,
+            response_image_id(&parsed),
+            false,
+            "ENOSPC",
+            c1_mode,
+            pending_output,
+        );
+        return;
+    }
     let cmd = if parsed.action == b'd' {
         chunked.clear();
         parsed
     } else {
-        match chunked.feed(parsed) {
-            Some(cmd) => cmd,
-            None => return,
+        match chunked.feed(parsed, limits.kitty_graphics_payload_bytes) {
+            Ok(Some(cmd)) => cmd,
+            Ok(None) => return,
+            Err(_) => {
+                chunked.clear();
+                return;
+            }
         }
     };
 
@@ -47,8 +64,9 @@ pub(crate) fn handle_kitty_graphics(
             cell_width,
             c1_mode,
             pending_output,
+            limits,
         ),
-        b't' => handle_kitty_transmit(&cmd, store, c1_mode, pending_output),
+        b't' => handle_kitty_transmit(&cmd, store, c1_mode, pending_output, limits),
         b'p' => handle_kitty_place(
             &cmd,
             store,
@@ -103,6 +121,20 @@ fn command_has_conflicting_ids(cmd: &image41::kitty::KittyCommand) -> bool {
 
 fn response_image_id(cmd: &image41::kitty::KittyCommand) -> u32 {
     cmd.image_id
+}
+
+fn store_kitty_image(
+    store: &mut image41::kitty::KittyImageStore,
+    id: u32,
+    image: image41::DecodedImage,
+    limits: TerminalLimits,
+) -> Result<(), &'static str> {
+    if id == 0 {
+        return Ok(());
+    }
+    store
+        .store(id, image, limits.kitty_graphics_storage_bytes)
+        .map_err(|_| "ENOSPC")
 }
 
 fn place_kitty_image(
@@ -274,6 +306,7 @@ fn handle_kitty_transmit(
     store: &mut image41::kitty::KittyImageStore,
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
+    limits: TerminalLimits,
 ) {
     if command_has_conflicting_ids(cmd) {
         send_kitty_response(
@@ -300,8 +333,9 @@ fn handle_kitty_transmit(
     let id = store.resolve_transmission_id(cmd);
     match decode_kitty_image(cmd) {
         Some(image) => {
-            if id != 0 {
-                store.store(id, image);
+            if let Err(message) = store_kitty_image(store, id, image, limits) {
+                send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
+                return;
             }
             send_kitty_response(cmd, id, true, "", c1_mode, pending_output);
         }
@@ -319,6 +353,7 @@ fn handle_kitty_transmit_display(
     cell_width: u32,
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
+    limits: TerminalLimits,
 ) {
     if command_has_conflicting_ids(cmd) {
         send_kitty_response(
@@ -345,8 +380,9 @@ fn handle_kitty_transmit_display(
     let id = store.resolve_transmission_id(cmd);
     match decode_kitty_image(cmd) {
         Some(image) => {
-            if id != 0 {
-                store.store(id, image.clone());
+            if let Err(message) = store_kitty_image(store, id, image.clone(), limits) {
+                send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
+                return;
             }
             let placed = place_kitty_image(
                 image,
@@ -704,6 +740,8 @@ fn place_iterm_image(
 
 #[cfg(test)]
 mod tests {
+    use crate::TerminalLimits;
+    use crate::settings;
     use crate::test_support::TestTerm;
 
     #[test]
@@ -726,5 +764,21 @@ mod tests {
             term.take_pending_output(),
             b"\x1b_Gi=0,I=13;ENOTSUP\x1b\\\x1b_Gi=0,I=13;ENOENT\x1b\\"
         );
+    }
+
+    #[test]
+    fn kitty_payload_limit_reports_no_space() {
+        let mut term = TestTerm::new_80x24();
+        settings::set_terminal_limits(
+            &mut term.inner.protocol,
+            TerminalLimits {
+                kitty_graphics_payload_bytes: 3,
+                ..TerminalLimits::default()
+            },
+        );
+
+        term.process(b"\x1b_Ga=t,i=7;AAAA\x1b\\");
+
+        assert_eq!(term.take_pending_output(), b"\x1b_Gi=7;ENOSPC\x1b\\");
     }
 }

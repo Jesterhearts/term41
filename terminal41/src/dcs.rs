@@ -1,13 +1,13 @@
 use crate::Terminal;
 use crate::TerminalEffects;
 use crate::charset;
-use crate::dec::udk;
-use crate::drcs;
+use crate::feature::TerminalLimits;
 use crate::report;
 
 #[derive(Default)]
 pub(crate) struct HookAccumulator {
     hooks: Vec<HookState>,
+    limits: TerminalLimits,
 }
 
 pub(crate) enum HookAccumulation<'a> {
@@ -25,6 +25,13 @@ pub(crate) struct HookState {
 }
 
 impl HookAccumulator {
+    pub(crate) fn set_limits(
+        &mut self,
+        limits: TerminalLimits,
+    ) {
+        self.limits = limits;
+    }
+
     pub(crate) fn consume<'a>(
         &mut self,
         action: vtepp::Action<'a>,
@@ -75,7 +82,9 @@ impl HookAccumulator {
         if last.truncated {
             return;
         }
-        if let Some(limit) = hook_payload_limit(last.action, last.intermediates.as_slice()) {
+        if let Some(limit) =
+            hook_payload_limit(last.action, last.intermediates.as_slice(), self.limits)
+        {
             let remaining = limit.saturating_sub(last.bytes.len());
             let take = remaining.min(chunk.len());
             last.bytes.extend_from_slice(&chunk[..take]);
@@ -138,10 +147,11 @@ enum ParsedDcsAction {
 fn hook_payload_limit(
     action: char,
     intermediates: &[u8],
+    limits: TerminalLimits,
 ) -> Option<usize> {
     match (action, intermediates) {
-        ('{', []) => Some(drcs::MAX_DRCS_PAYLOAD_BYTES),
-        ('|', []) => Some(udk::MAX_DECUDK_PAYLOAD_BYTES),
+        ('{', []) => Some(limits.drcs_payload_bytes),
+        ('|', []) => Some(limits.decudk_payload_bytes),
         _ => None,
     }
 }
@@ -243,7 +253,10 @@ fn apply_dcs_action(
             }
         }
         ParsedDcsAction::DefineDrcs { params, payload } => {
-            terminal.protocol.drcs.define(&params, &payload);
+            terminal
+                .protocol
+                .drcs
+                .define(&params, &payload, terminal.protocol.limits);
         }
         ParsedDcsAction::DefineUserDefinedKeys { params, payload } => {
             terminal.define_udk(params, &payload);
@@ -275,6 +288,7 @@ fn apply_dcs_action(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::drcs;
 
     #[test]
     fn accumulator_returns_non_dcs_actions_to_caller() {

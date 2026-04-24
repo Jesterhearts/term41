@@ -15,6 +15,7 @@ use crate::DecColorState;
 use crate::FeaturePermissions;
 use crate::KittyKeyboardState;
 use crate::ShellIntegrationPhase;
+use crate::TerminalLimits;
 use crate::TerminalModes;
 use crate::Vt52CursorAddr;
 use crate::color::ColorPalette;
@@ -271,6 +272,7 @@ pub(super) fn apply_csi_action(
     macro_invocation_depth: usize,
     udks: &mut UdkState,
     feature_permissions: &FeaturePermissions,
+    limits: TerminalLimits,
     drcs: &mut crate::drcs::DrcsStore,
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
@@ -288,6 +290,7 @@ pub(super) fn apply_csi_action(
             .pending_output(pending_output)
             .c1_mode(modes.c1_mode)
             .feature_permissions(feature_permissions)
+            .limits(limits)
             .macros(macros)
             .macro_invocation_depth(macro_invocation_depth)
             .call(),
@@ -444,6 +447,7 @@ pub(super) fn apply_apc_action(
     action: ApcAction,
     kitty_images: &mut image41::kitty::KittyImageStore,
     kitty_chunked: &mut image41::kitty::ChunkedTransmission,
+    limits: TerminalLimits,
     active: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -456,6 +460,7 @@ pub(super) fn apply_apc_action(
         ApcAction::KittyGraphics(data) => apply_kitty_graphics(
             kitty_images,
             kitty_chunked,
+            limits,
             active,
             viewport,
             next_image_id,
@@ -623,13 +628,18 @@ pub(super) fn apply_special_csi(
     pending_output: &mut Vec<u8>,
     c1_mode: C1Mode,
     feature_permissions: &FeaturePermissions,
+    limits: TerminalLimits,
     macros: &crate::dec::r#macro::MacroStore,
     macro_invocation_depth: usize,
 ) -> PendingApplication {
     match special {
-        SpecialCsi::InvokeMacro(id) => {
-            invoke_macro(feature_permissions, macros, macro_invocation_depth, id)
-        }
+        SpecialCsi::InvokeMacro(id) => invoke_macro(
+            feature_permissions,
+            macros,
+            macro_invocation_depth,
+            id,
+            limits,
+        ),
         SpecialCsi::AssignDecColor { item, fg, bg } => {
             assign_dec_color(
                 active,
@@ -685,6 +695,7 @@ pub(super) fn apply_iterm_graphics(
 pub(super) fn apply_kitty_graphics(
     kitty_images: &mut image41::kitty::KittyImageStore,
     kitty_chunked: &mut image41::kitty::ChunkedTransmission,
+    limits: TerminalLimits,
     active: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -698,6 +709,7 @@ pub(super) fn apply_kitty_graphics(
         data,
         kitty_images,
         kitty_chunked,
+        limits,
         active,
         viewport,
         next_image_id,
@@ -875,9 +887,11 @@ fn invoke_macro(
     macros: &crate::dec::r#macro::MacroStore,
     macro_invocation_depth: usize,
     id: u16,
+    limits: TerminalLimits,
 ) -> PendingApplication {
     let enabled = crate::feature::macro_feature_enabled(feature_permissions);
-    let Some(bytes) = crate::feature::invoke_macro(enabled, macros, macro_invocation_depth, id)
+    let Some(bytes) =
+        crate::feature::invoke_macro(enabled, macros, macro_invocation_depth, id, limits)
     else {
         return PendingApplication::None;
     };

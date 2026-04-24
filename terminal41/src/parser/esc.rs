@@ -678,7 +678,11 @@ mod tests {
     fn esc_parse_resolves_soft_charset_designations_semantically() {
         let modes = TerminalModes::new();
         let mut drcs = DrcsStore::default();
-        drcs.define(&[0, 0, 0, 0, 0, 0, 0, 0], b"@?");
+        drcs.define(
+            &[0, 0, 0, 0, 0, 0, 0, 0],
+            b"@?",
+            crate::TerminalLimits::default(),
+        );
         assert!(matches!(
             parse_esc_action_with(b"\x1b(@", &modes, &drcs),
             ParsedEscAction::DesignateCharset {

@@ -9,6 +9,7 @@ use font41::encode_drcs_char;
 use smol_str::SmolStr;
 
 use crate::charset::CharacterSet;
+use crate::feature::TerminalLimits;
 
 pub const MAX_DRCS_PAYLOAD_BYTES: usize = 64 * 1024;
 pub const MAX_DRCS_TOTAL_STORAGE_BYTES: usize = 256 * 1024;
@@ -133,8 +134,9 @@ impl DrcsStore {
         &mut self,
         params: &[u16],
         payload: &[u8],
+        limits: TerminalLimits,
     ) {
-        if payload.len() > MAX_DRCS_PAYLOAD_BYTES {
+        if payload.len() > limits.drcs_payload_bytes {
             warn!("DRCS load payload too large, ignoring");
             return;
         }
@@ -198,7 +200,7 @@ impl DrcsStore {
                 self.total_storage_bytes = self.total_storage_bytes.saturating_sub(size);
             }
             let size = glyph_storage_bytes(&glyph);
-            if self.total_storage_bytes.saturating_add(size) > MAX_DRCS_TOTAL_STORAGE_BYTES {
+            if self.total_storage_bytes.saturating_add(size) > limits.drcs_storage_bytes {
                 warn!("DRCS store is full, cannot load more glyphs");
                 continue;
             }

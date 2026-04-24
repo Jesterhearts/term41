@@ -319,6 +319,17 @@ vsync = "auto"
 # read = "ask"
 # write = "ask"
 
+[security.limits]
+# Byte counts and nesting limits for terminal-owned protocol state.
+# macro_storage_bytes = 6144
+# macro_invocation_depth = 32
+# udk_storage_bytes = 256
+# decudk_payload_bytes = 2048
+# drcs_payload_bytes = 65536
+# drcs_storage_bytes = 262144
+# kitty_graphics_payload_bytes = 33554432
+# kitty_graphics_storage_bytes = 134217728
+
 [colors.status_line]
 # foreground = "#d8dee9"
 # background = "#3b4252"
@@ -353,6 +364,9 @@ Notes:
 - `security.clipboard.read` and `security.clipboard.write` default to `"ask"`;
   `"allow"`/`"all"`/`"*"` skips the prompt, while `"deny"`/`"no"`/`"none"`
   blocks OSC 52 access.
+- `[security.limits]` settings live-reload for new protocol actions. They
+  control how much macro/UDK/DRCS/kitty graphics state term41 accepts or
+  retains.
 
 </details>
 

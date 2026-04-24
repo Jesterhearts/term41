@@ -397,7 +397,7 @@ pub fn crop_source_rect(
 
 /// Stores transmitted images that have not yet been placed (or that can be
 /// placed multiple times via `a=p`).
-#[derive(Debug, Default)]
+#[derive(Debug)]
 pub struct KittyImageStore {
     /// Images keyed by their kitty image id.
     images: HashMap<u32, DecodedImage>,
@@ -405,6 +405,19 @@ pub struct KittyImageStore {
     number_to_id: HashMap<u32, u32>,
     /// Next auto-assigned image id (when client sends `I=` without `i=`).
     next_id: u32,
+    /// Decoded image bytes currently retained in `images`.
+    used_bytes: usize,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KittyStoreError {
+    StorageLimitExceeded,
+}
+
+impl Default for KittyImageStore {
+    fn default() -> Self {
+        Self::new()
+    }
 }
 
 impl KittyImageStore {
@@ -414,6 +427,7 @@ impl KittyImageStore {
             images: HashMap::new(),
             number_to_id: HashMap::new(),
             next_id: 1,
+            used_bytes: 0,
         }
     }
 
@@ -450,8 +464,20 @@ impl KittyImageStore {
         &mut self,
         id: u32,
         image: DecodedImage,
-    ) {
+        max_storage_bytes: usize,
+    ) -> Result<(), KittyStoreError> {
+        let previous_bytes = self.images.get(&id).map_or(0, image_storage_bytes);
+        let image_bytes = image_storage_bytes(&image);
+        let projected = self
+            .used_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(image_bytes);
+        if projected > max_storage_bytes {
+            return Err(KittyStoreError::StorageLimitExceeded);
+        }
+        self.used_bytes = projected;
         self.images.insert(id, image);
+        Ok(())
     }
 
     /// Return the image stored under `id`, if any.
@@ -467,7 +493,9 @@ impl KittyImageStore {
         &mut self,
         id: u32,
     ) {
-        self.images.remove(&id);
+        if let Some(image) = self.images.remove(&id) {
+            self.used_bytes = self.used_bytes.saturating_sub(image_storage_bytes(&image));
+        }
         self.number_to_id.retain(|_, v| *v != id);
     }
 
@@ -475,6 +503,7 @@ impl KittyImageStore {
     pub fn clear(&mut self) {
         self.images.clear();
         self.number_to_id.clear();
+        self.used_bytes = 0;
     }
 
     /// Remove images by id range [lo, hi].
@@ -483,9 +512,23 @@ impl KittyImageStore {
         lo: u32,
         hi: u32,
     ) {
-        self.images.retain(|&id, _| id < lo || id > hi);
+        self.images.retain(|&id, image| {
+            let keep = id < lo || id > hi;
+            if !keep {
+                self.used_bytes = self.used_bytes.saturating_sub(image_storage_bytes(image));
+            }
+            keep
+        });
         self.number_to_id.retain(|_, v| *v < lo || *v > hi);
     }
+}
+
+fn image_storage_bytes(image: &DecodedImage) -> usize {
+    image
+        .frames
+        .iter()
+        .map(|frame| frame.pixels.len())
+        .sum::<usize>()
 }
 
 // ---------------------------------------------------------------------------
@@ -499,6 +542,11 @@ pub struct ChunkedTransmission {
     pub cmd: Option<KittyCommand>,
     /// Accumulated base64 payload across chunks.
     pub payload: Vec<u8>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ChunkedTransmissionError {
+    PayloadLimitExceeded,
 }
 
 impl ChunkedTransmission {
@@ -518,8 +566,13 @@ impl ChunkedTransmission {
     pub fn feed(
         &mut self,
         cmd: KittyCommand,
-    ) -> Option<KittyCommand> {
+        max_payload_bytes: usize,
+    ) -> Result<Option<KittyCommand>, ChunkedTransmissionError> {
         let more = cmd.more;
+        if self.payload.len().saturating_add(cmd.payload.len()) > max_payload_bytes {
+            self.clear();
+            return Err(ChunkedTransmissionError::PayloadLimitExceeded);
+        }
         self.payload.extend_from_slice(&cmd.payload);
 
         if self.cmd.is_none() {
@@ -531,13 +584,13 @@ impl ChunkedTransmission {
         }
 
         if more == 1 {
-            return None;
+            return Ok(None);
         }
 
         let mut final_cmd = self.cmd.take().unwrap();
         final_cmd.payload = std::mem::take(&mut self.payload);
         final_cmd.more = 0;
-        Some(final_cmd)
+        Ok(Some(final_cmd))
     }
 }
 
@@ -630,25 +683,45 @@ mod tests {
             payload: b"AAAA".to_vec(),
             ..Default::default()
         };
-        assert!(chunked.feed(c1).is_none());
+        assert!(chunked.feed(c1, usize::MAX).unwrap().is_none());
 
         let c2 = KittyCommand {
             more: 1,
             payload: b"BBBB".to_vec(),
             ..Default::default()
         };
-        assert!(chunked.feed(c2).is_none());
+        assert!(chunked.feed(c2, usize::MAX).unwrap().is_none());
 
         let c3 = KittyCommand {
             more: 0,
             payload: b"CCCC".to_vec(),
             ..Default::default()
         };
-        let final_cmd = chunked.feed(c3).unwrap();
+        let final_cmd = chunked.feed(c3, usize::MAX).unwrap().unwrap();
         assert_eq!(final_cmd.action, b'T');
         assert_eq!(final_cmd.format, 100);
         assert_eq!(final_cmd.image_id, 5);
         assert_eq!(final_cmd.payload, b"AAAABBBBCCCC");
+    }
+
+    #[test]
+    fn chunked_accumulation_enforces_payload_limit() {
+        let mut chunked = ChunkedTransmission::new();
+        let first = KittyCommand {
+            more: 1,
+            payload: b"AAAA".to_vec(),
+            ..Default::default()
+        };
+        assert!(chunked.feed(first, 8).unwrap().is_none());
+
+        let second = KittyCommand {
+            more: 0,
+            payload: b"BBBBB".to_vec(),
+            ..Default::default()
+        };
+        assert!(chunked.feed(second, 8).is_err());
+        assert!(chunked.cmd.is_none());
+        assert!(chunked.payload.is_empty());
     }
 
     #[test]
@@ -664,6 +737,28 @@ mod tests {
 
         assert_ne!(first, second);
         assert_eq!(store.resolve_existing_id(&cmd), Some(second));
+    }
+
+    #[test]
+    fn default_image_store_auto_assigns_nonzero_ids() {
+        let mut store = KittyImageStore::default();
+        let cmd = KittyCommand {
+            image_number: 13,
+            ..Default::default()
+        };
+
+        assert_ne!(store.resolve_transmission_id(&cmd), 0);
+    }
+
+    #[test]
+    fn image_store_enforces_decoded_storage_limit() {
+        let mut store = KittyImageStore::new();
+        let image = DecodedImage::single_frame(2, 1, vec![0; 8]);
+
+        assert!(store.store(1, image.clone(), 7).is_err());
+        assert!(store.get(1).is_none());
+        assert!(store.store(1, image, 8).is_ok());
+        assert!(store.get(1).is_some());
     }
 
     #[test]

@@ -468,6 +468,7 @@ fn udk_selector_label(selector: u16) -> Option<&'static str> {
 mod tests {
     use super::*;
     use crate::FeaturePermissions;
+    use crate::TerminalLimits;
     use crate::TerminalProcessor;
 
     fn terminal() -> Terminal {
@@ -477,6 +478,7 @@ mod tests {
             10,
             StatusDisplayKind::None,
             FeaturePermissions::default(),
+            TerminalLimits::default(),
             16,
             8,
             ColorPalette::default(),

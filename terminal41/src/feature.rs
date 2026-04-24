@@ -5,13 +5,18 @@ use crate::DrcsStore;
 use crate::Screen;
 use crate::StatusDisplayKind;
 use crate::Viewport;
+use crate::dec::r#macro::MAX_MACRO_BYTES;
 use crate::dec::r#macro::MAX_MACRO_INVOCATION_DEPTH;
 use crate::dec::r#macro::MacroEncoding;
 use crate::dec::r#macro::MacroStore;
 use crate::dec::udk::DecModifierKey;
 use crate::dec::udk::LocalFunctionKeyControl;
+use crate::dec::udk::MAX_DECUDK_PAYLOAD_BYTES;
+use crate::dec::udk::MAX_UDK_BYTES;
 use crate::dec::udk::ModifierKeyControl;
 use crate::dec::udk::UdkState;
+use crate::drcs::MAX_DRCS_PAYLOAD_BYTES;
+use crate::drcs::MAX_DRCS_TOTAL_STORAGE_BYTES;
 use crate::screen;
 
 /// Permission gates for terminal features that can execute stored data or
@@ -24,6 +29,46 @@ pub struct FeaturePermissions {
     pub udks: ProgramAllowlist,
     /// Permission gates for host-driven OSC 52 clipboard access.
     pub clipboard: ClipboardPermissions,
+}
+
+/// Runtime resource limits for terminal-owned protocol state.
+///
+/// These are deliberately grouped separately from feature permissions:
+/// permissions answer "may this feature run?", while limits answer "how much
+/// state may this terminal retain or process for enabled features?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalLimits {
+    /// Maximum decoded bytes retained across all VT macro definitions.
+    pub macro_storage_bytes: usize,
+    /// Maximum nested macro expansion depth.
+    pub macro_invocation_depth: usize,
+    /// Maximum decoded bytes retained across all DEC user-defined keys.
+    pub udk_storage_bytes: usize,
+    /// Maximum bytes accumulated for one DECUDK DCS payload.
+    pub decudk_payload_bytes: usize,
+    /// Maximum bytes accumulated for one DRCS DCS payload.
+    pub drcs_payload_bytes: usize,
+    /// Maximum decoded DRCS glyph storage retained by the terminal.
+    pub drcs_storage_bytes: usize,
+    /// Maximum base64 payload bytes accepted for one kitty graphics command.
+    pub kitty_graphics_payload_bytes: usize,
+    /// Maximum decoded kitty image bytes retained for reusable images.
+    pub kitty_graphics_storage_bytes: usize,
+}
+
+impl Default for TerminalLimits {
+    fn default() -> Self {
+        Self {
+            macro_storage_bytes: MAX_MACRO_BYTES,
+            macro_invocation_depth: MAX_MACRO_INVOCATION_DEPTH,
+            udk_storage_bytes: MAX_UDK_BYTES,
+            decudk_payload_bytes: MAX_DECUDK_PAYLOAD_BYTES,
+            drcs_payload_bytes: MAX_DRCS_PAYLOAD_BYTES,
+            drcs_storage_bytes: MAX_DRCS_TOTAL_STORAGE_BYTES,
+            kitty_graphics_payload_bytes: 32 * 1024 * 1024,
+            kitty_graphics_storage_bytes: 128 * 1024 * 1024,
+        }
+    }
 }
 
 /// Coarse allow/deny gate for a protocol feature.
@@ -85,6 +130,7 @@ pub(crate) fn define_macro(
     macros: &mut MacroStore,
     params: vtepp::Params,
     payload: &[u8],
+    limits: TerminalLimits,
 ) {
     if !enabled {
         return;
@@ -111,7 +157,13 @@ pub(crate) fn define_macro(
     else {
         return;
     };
-    macros.define(id, delete_existing, encoding, payload);
+    macros.define(
+        id,
+        delete_existing,
+        encoding,
+        payload,
+        limits.macro_storage_bytes,
+    );
 }
 
 pub(crate) fn invoke_macro(
@@ -119,8 +171,9 @@ pub(crate) fn invoke_macro(
     macros: &MacroStore,
     macro_invocation_depth: usize,
     id: u16,
+    limits: TerminalLimits,
 ) -> Option<Vec<u8>> {
-    if !enabled || macro_invocation_depth >= MAX_MACRO_INVOCATION_DEPTH {
+    if !enabled || macro_invocation_depth >= limits.macro_invocation_depth {
         return None;
     }
     macros.get(id).map(ToOwned::to_owned)
@@ -135,9 +188,10 @@ pub(crate) fn define_udk(
     udks: &mut UdkState,
     params: vtepp::Params,
     payload: &[u8],
+    limits: TerminalLimits,
 ) {
     if enabled {
-        udks.define(params, payload);
+        udks.define(params, payload, limits.udk_storage_bytes);
     }
 }
 

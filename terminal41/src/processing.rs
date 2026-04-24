@@ -184,6 +184,7 @@ impl TerminalProcessor {
         loop {
             let stack_depth = self.frames.len();
             let frame = self.frames.last_mut().expect("parser frame");
+            frame.dcs.set_limits(terminal.protocol.limits);
             let input = inputs.last_mut().expect("frame input");
             let mut parser = frame.parser.parse(input.remaining());
             let mut pushed_frame = false;

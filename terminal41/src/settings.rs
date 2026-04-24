@@ -7,6 +7,7 @@ use crate::EmojiCompatibilityMode;
 use crate::FeaturePermissions;
 use crate::Screen;
 use crate::StatusDisplayKind;
+use crate::TerminalLimits;
 use crate::TerminalProtocolState;
 use crate::Viewport;
 use crate::dec::color::effective_palette;
@@ -58,6 +59,14 @@ pub fn set_feature_permissions(
     permissions: FeaturePermissions,
 ) {
     protocol.feature_permissions = permissions;
+}
+
+/// Replace terminal resource limits for protocol-owned state.
+pub fn set_terminal_limits(
+    protocol: &mut TerminalProtocolState,
+    limits: TerminalLimits,
+) {
+    protocol.limits = limits;
 }
 
 /// Replace the stored cell pixel dimensions.

@@ -978,6 +978,7 @@ impl RenderHost {
             scrollback,
             self.config.status_line.display_kind(),
             self.config.feature_permissions.clone(),
+            self.config.limits,
             self.font_system.cell_height,
             self.font_system.cell_width,
             self.config.palette.clone(),
@@ -1148,6 +1149,7 @@ impl RenderHost {
             );
             settings::set_scrollback_policy(active, viewport, cfg.scrollback_lines);
             settings::set_feature_permissions(protocol, cfg.feature_permissions.clone());
+            settings::set_terminal_limits(protocol, cfg.limits);
             settings::set_palette(
                 active,
                 stash,
@@ -1166,6 +1168,7 @@ impl RenderHost {
         self.config.status_line = cfg.status_line;
         self.config.palette = cfg.palette.clone();
         self.config.feature_permissions = cfg.feature_permissions.clone();
+        self.config.limits = cfg.limits;
         self.config.compatibility = cfg.compatibility;
 
         if cfg.gutter != self.config.gutter {

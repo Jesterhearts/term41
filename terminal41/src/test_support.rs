@@ -15,6 +15,7 @@ use crate::Row;
 use crate::StatusDisplayKind;
 use crate::Terminal;
 use crate::TerminalEffects;
+use crate::TerminalLimits;
 use crate::TerminalProcessor;
 use crate::apply_host_input;
 use crate::selection;
@@ -44,6 +45,7 @@ impl TestTerm {
                 scrollback,
                 StatusDisplayKind::None,
                 FeaturePermissions::default(),
+                TerminalLimits::default(),
                 cell_h,
                 cell_w,
                 ColorPalette::default(),

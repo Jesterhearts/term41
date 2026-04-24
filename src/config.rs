@@ -12,6 +12,7 @@ use terminal41::EmojiCompatibilityMode;
 use terminal41::FeaturePermissions;
 use terminal41::ProgramAllowlist;
 use terminal41::StatusDisplayKind;
+use terminal41::TerminalLimits;
 use utils41::blend_colors;
 use wgpu::PowerPreference;
 
@@ -152,6 +153,8 @@ struct SecuritySettings {
     features: Option<AllowFeaturesConfig>,
     #[serde(default)]
     clipboard: Option<ClipboardPermissionsConfig>,
+    #[serde(default)]
+    limits: Option<LimitSettings>,
 }
 
 #[derive(Deserialize, Default)]
@@ -183,6 +186,34 @@ struct CompatibilitySettings {
     #[serde(deserialize_with = "emoji_compatibility_mode_opt")]
     #[serde(default)]
     emoji: Option<EmojiCompatibilityMode>,
+}
+
+#[derive(Deserialize, Default)]
+struct LimitSettings {
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    macro_storage_bytes: Option<usize>,
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    macro_invocation_depth: Option<usize>,
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    udk_storage_bytes: Option<usize>,
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    decudk_payload_bytes: Option<usize>,
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    drcs_payload_bytes: Option<usize>,
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    drcs_storage_bytes: Option<usize>,
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    kitty_graphics_payload_bytes: Option<usize>,
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    kitty_graphics_storage_bytes: Option<usize>,
 }
 
 #[derive(Deserialize, Default)]
@@ -442,6 +473,7 @@ pub struct Config {
     /// Color palette (ANSI 16 colors, default fg/bg, cursor, selection).
     pub palette: ColorPalette,
     pub feature_permissions: FeaturePermissions,
+    pub limits: TerminalLimits,
     pub compatibility: CompatibilityConfig,
 }
 
@@ -465,6 +497,7 @@ impl Default for Config {
             font_supersampling: 4,
             palette: ColorPalette::default(),
             feature_permissions: FeaturePermissions::default(),
+            limits: TerminalLimits::default(),
             compatibility: CompatibilityConfig::default(),
         }
     }
@@ -502,9 +535,14 @@ fn parse_config(
     let cursor_style = build_cursor_style(file.cursor_shape, file.cursor_blink);
     let keybindings = build_keybindings(file.keybindings, source);
     let palette = build_palette(file.colors);
-    let security = file.security.unwrap_or_default();
-    let features = security.features.unwrap_or_default();
-    let clipboard = security.clipboard.unwrap_or_default();
+    let SecuritySettings {
+        features,
+        clipboard,
+        limits,
+    } = file.security.unwrap_or_default();
+    let features = features.unwrap_or_default();
+    let clipboard = clipboard.unwrap_or_default();
+    let limits = build_limits(limits);
     let compatibility = build_compatibility(file.compatibility);
 
     Config {
@@ -532,7 +570,39 @@ fn parse_config(
                 write: clipboard.write.unwrap_or_default(),
             },
         },
+        limits,
         compatibility,
+    }
+}
+
+fn build_limits(raw: Option<LimitSettings>) -> TerminalLimits {
+    let settings = raw.unwrap_or_default();
+    let defaults = TerminalLimits::default();
+    TerminalLimits {
+        macro_storage_bytes: settings
+            .macro_storage_bytes
+            .unwrap_or(defaults.macro_storage_bytes),
+        macro_invocation_depth: settings
+            .macro_invocation_depth
+            .unwrap_or(defaults.macro_invocation_depth),
+        udk_storage_bytes: settings
+            .udk_storage_bytes
+            .unwrap_or(defaults.udk_storage_bytes),
+        decudk_payload_bytes: settings
+            .decudk_payload_bytes
+            .unwrap_or(defaults.decudk_payload_bytes),
+        drcs_payload_bytes: settings
+            .drcs_payload_bytes
+            .unwrap_or(defaults.drcs_payload_bytes),
+        drcs_storage_bytes: settings
+            .drcs_storage_bytes
+            .unwrap_or(defaults.drcs_storage_bytes),
+        kitty_graphics_payload_bytes: settings
+            .kitty_graphics_payload_bytes
+            .unwrap_or(defaults.kitty_graphics_payload_bytes),
+        kitty_graphics_storage_bytes: settings
+            .kitty_graphics_storage_bytes
+            .unwrap_or(defaults.kitty_graphics_storage_bytes),
     }
 }
 
@@ -670,6 +740,19 @@ where
         Ok(opt) => Ok(opt),
         Err(e) => {
             warn!("failed to parse integer in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
+fn usize_opt<'de, D>(deserializer: D) -> Result<Option<usize>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<usize>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse byte/depth limit in config: {e}");
             Ok(None)
         }
     }
@@ -958,6 +1041,36 @@ mod tests {
             .clipboard;
         assert_eq!(none.read, ClipboardPermission::Deny);
         assert_eq!(none.write, ClipboardPermission::Ask);
+    }
+
+    #[test]
+    fn limits_default_to_terminal_defaults() {
+        assert_eq!(parse("").limits, TerminalLimits::default());
+    }
+
+    #[test]
+    fn limits_accept_individual_overrides() {
+        let cfg = parse(
+            r#"
+[security.limits]
+macro_storage_bytes = 8192
+macro_invocation_depth = 12
+udk_storage_bytes = 1024
+decudk_payload_bytes = 4096
+drcs_payload_bytes = 131072
+drcs_storage_bytes = 524288
+kitty_graphics_payload_bytes = 65536
+kitty_graphics_storage_bytes = 1048576
+"#,
+        );
+        assert_eq!(cfg.limits.macro_storage_bytes, 8192);
+        assert_eq!(cfg.limits.macro_invocation_depth, 12);
+        assert_eq!(cfg.limits.udk_storage_bytes, 1024);
+        assert_eq!(cfg.limits.decudk_payload_bytes, 4096);
+        assert_eq!(cfg.limits.drcs_payload_bytes, 131072);
+        assert_eq!(cfg.limits.drcs_storage_bytes, 524288);
+        assert_eq!(cfg.limits.kitty_graphics_payload_bytes, 65536);
+        assert_eq!(cfg.limits.kitty_graphics_storage_bytes, 1048576);
     }
 
     #[test]

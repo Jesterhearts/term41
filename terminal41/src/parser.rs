@@ -1186,6 +1186,7 @@ mod integration_tests {
     use crate::ConformanceLevel;
     use crate::FeaturePermissions;
     use crate::ProgramAllowlist;
+    use crate::TerminalLimits;
     use crate::settings;
     use crate::test_support::TestTerm;
 
@@ -1325,6 +1326,27 @@ mod integration_tests {
     }
 
     #[test]
+    fn decudk_payload_limit_rejects_oversized_loads() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        settings::set_feature_permissions(
+            &mut term.inner.protocol,
+            FeaturePermissions {
+                udks: ProgramAllowlist::AllowAll,
+                ..FeaturePermissions::default()
+            },
+        );
+        settings::set_terminal_limits(
+            &mut term.inner.protocol,
+            TerminalLimits {
+                decudk_payload_bytes: 4,
+                ..TerminalLimits::default()
+            },
+        );
+        term.process(b"\x1bP0;1|17/414243\x1b\\");
+        assert_eq!(term.user_defined_key(17), None);
+    }
+
+    #[test]
     fn private_dsr_reports_udk_lock_state_when_allowlisted() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         settings::set_feature_permissions(
@@ -1386,6 +1408,50 @@ mod integration_tests {
         );
         term.process(b"\x1bP1;1;1!z414243\x1b\\");
         term.process(b"\x1bc");
+        term.process(b"\x1b[1*z");
+        assert!(visible_text(&term).trim().is_empty());
+    }
+
+    #[test]
+    fn macro_storage_limit_rejects_oversized_definitions() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        settings::set_feature_permissions(
+            &mut term.inner.protocol,
+            FeaturePermissions {
+                macros: ProgramAllowlist::AllowAll,
+                ..FeaturePermissions::default()
+            },
+        );
+        settings::set_terminal_limits(
+            &mut term.inner.protocol,
+            TerminalLimits {
+                macro_storage_bytes: 2,
+                ..TerminalLimits::default()
+            },
+        );
+        term.process(b"\x1bP1;1;1!z414243\x1b\\");
+        term.process(b"\x1b[1*z");
+        assert!(visible_text(&term).trim().is_empty());
+    }
+
+    #[test]
+    fn macro_invocation_depth_limit_blocks_expansion() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        settings::set_feature_permissions(
+            &mut term.inner.protocol,
+            FeaturePermissions {
+                macros: ProgramAllowlist::AllowAll,
+                ..FeaturePermissions::default()
+            },
+        );
+        settings::set_terminal_limits(
+            &mut term.inner.protocol,
+            TerminalLimits {
+                macro_invocation_depth: 0,
+                ..TerminalLimits::default()
+            },
+        );
+        term.process(b"\x1bP1;1;1!z414243\x1b\\");
         term.process(b"\x1b[1*z");
         assert!(visible_text(&term).trim().is_empty());
     }

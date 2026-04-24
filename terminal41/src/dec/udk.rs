@@ -131,6 +131,7 @@ impl UdkState {
         &mut self,
         params: vtepp::Params,
         payload: &[u8],
+        max_storage_bytes: usize,
     ) {
         if self.locked {
             return;
@@ -164,7 +165,7 @@ impl UdkState {
             if clear == 1 {
                 self.remove_definition(selector);
             }
-            if !self.set_definition(selector, definition) {
+            if !self.set_definition(selector, definition, max_storage_bytes) {
                 break;
             }
         }
@@ -310,6 +311,7 @@ impl UdkState {
         &mut self,
         selector: u16,
         definition: Vec<u8>,
+        max_storage_bytes: usize,
     ) -> bool {
         if !is_definable_key(selector) {
             return true;
@@ -319,7 +321,7 @@ impl UdkState {
             .used_bytes
             .saturating_sub(previous_len)
             .saturating_add(definition.len());
-        if projected > MAX_UDK_BYTES {
+        if projected > max_storage_bytes {
             return false;
         }
         self.used_bytes = projected;
@@ -409,15 +411,15 @@ mod tests {
     #[test]
     fn decudk_defines_hex_payload() {
         let mut state = UdkState::default();
-        state.define(params(&[&[0], &[1]]), b"17/414243");
+        state.define(params(&[&[0], &[1]]), b"17/414243", MAX_UDK_BYTES);
         assert_eq!(state.definition(17), Some(&b"ABC"[..]));
     }
 
     #[test]
     fn decudk_clear_one_replaces_only_target_key() {
         let mut state = UdkState::default();
-        state.define(params(&[&[0], &[1]]), b"17/41;18/42");
-        state.define(params(&[&[1], &[1]]), b"17/43");
+        state.define(params(&[&[0], &[1]]), b"17/41;18/42", MAX_UDK_BYTES);
+        state.define(params(&[&[1], &[1]]), b"17/43", MAX_UDK_BYTES);
         assert_eq!(state.definition(17), Some(&b"C"[..]));
         assert_eq!(state.definition(18), Some(&b"B"[..]));
     }
@@ -425,8 +427,8 @@ mod tests {
     #[test]
     fn locked_decudk_rejects_future_definitions() {
         let mut state = UdkState::default();
-        state.define(params(&[&[0], &[0]]), b"17/41");
-        state.define(params(&[&[1], &[1]]), b"17/42");
+        state.define(params(&[&[0], &[0]]), b"17/41", MAX_UDK_BYTES);
+        state.define(params(&[&[1], &[1]]), b"17/42", MAX_UDK_BYTES);
         assert_eq!(state.definition(17), Some(&b"A"[..]));
     }
 

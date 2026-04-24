@@ -22,6 +22,7 @@ impl MacroStore {
         delete_existing: bool,
         encoding: MacroEncoding,
         payload: &[u8],
+        max_storage_bytes: usize,
     ) {
         if id > MAX_MACRO_ID {
             return;
@@ -37,7 +38,7 @@ impl MacroStore {
             .used_bytes
             .saturating_sub(previous_len)
             .saturating_add(bytes.len());
-        if projected > MAX_MACRO_BYTES {
+        if projected > max_storage_bytes {
             return;
         }
         self.used_bytes = projected;
