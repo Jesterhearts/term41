@@ -44,6 +44,7 @@ use read_fonts::tables::loca::Loca;
 use read_fonts::types::GlyphId;
 use smol_str::SmolStr;
 use unicode_properties::GeneralCategory;
+use unicode_properties::UnicodeEmoji;
 use unicode_properties::UnicodeGeneralCategory;
 
 use crate::attrs::CellAttrs;
@@ -596,6 +597,7 @@ impl FontSystem {
                     ch.general_category(),
                     GeneralCategory::ModifierSymbol | GeneralCategory::ModifierLetter
                 )
+                && ch.is_emoji_component()
                 && cs.next().is_none()
             {
                 // Orphaned emoji components (e.g. a lone skin-tone modifier) need their own
