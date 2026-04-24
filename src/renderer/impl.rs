@@ -481,6 +481,7 @@ struct RowRenderKey {
     viewport_cols: u32,
     total_rows: u32,
     drcs_generation: usize,
+    font_generation: u64,
     glyph_atlas_generation: u64,
 }
 
@@ -1566,6 +1567,7 @@ impl Renderer {
     ) -> RenderGeometry {
         for attempt in 0..2 {
             let glyph_generation = self.glyph_atlas.generation();
+            let font_generation = font_system.font_generation();
             let geometry = self.build_render_geometry_once(
                 font_system,
                 snap,
@@ -1579,12 +1581,15 @@ impl Renderer {
                 preedit,
                 layout,
             );
-            if self.glyph_atlas.generation() == glyph_generation {
+            if self.glyph_atlas.generation() == glyph_generation
+                && font_system.font_generation() == font_generation
+            {
                 return geometry;
             }
             self.row_geometry_cache.clear();
             debug!(
-                "glyph atlas changed while building frame geometry; rebuilding attempt={attempt}"
+                "font/glyph generation changed while building frame geometry; rebuilding \
+                 attempt={attempt}"
             );
         }
 
@@ -1625,6 +1630,7 @@ impl Renderer {
         let popup_clip = self.popup_clip(gutter_popup, layout);
         let blink_off = (self.started.elapsed().as_millis() / 500) & 1 == 1;
         let rapid_blink_off = (self.started.elapsed().as_millis() / 250) & 1 == 1;
+        let font_generation = font_system.font_generation();
 
         for snap_row in rows {
             let row = snap_row.screen_row;
@@ -1639,6 +1645,7 @@ impl Renderer {
                 popup_clip.as_ref(),
                 blink_off,
                 rapid_blink_off,
+                font_generation,
                 layout,
             );
             if let Some(cached) = self
@@ -1672,6 +1679,7 @@ impl Renderer {
                 popup_clip.as_ref(),
                 blink_off,
                 rapid_blink_off,
+                font_generation,
                 layout,
             );
             append_cached_row_geometry(&mut geometry, &row_geometry);
@@ -1806,6 +1814,7 @@ impl Renderer {
         popup_clip: Option<&PopupClip>,
         blink_off: bool,
         rapid_blink_off: bool,
+        font_generation: u64,
         layout: &FrameLayout,
     ) -> RowRenderKey {
         RowRenderKey {
@@ -1825,6 +1834,7 @@ impl Renderer {
             viewport_cols: snap.viewport_cols,
             total_rows: snap.total_rows,
             drcs_generation: Arc::as_ptr(&snap.drcs_glyphs) as usize,
+            font_generation,
             glyph_atlas_generation: self.glyph_atlas.generation(),
         }
     }

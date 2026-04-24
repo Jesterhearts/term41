@@ -1242,6 +1242,7 @@ dependencies = [
  "fontdb",
  "harfrust",
  "log",
+ "memmap2",
  "png",
  "raqote",
  "read-fonts",

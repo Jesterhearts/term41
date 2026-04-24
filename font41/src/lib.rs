@@ -133,6 +133,60 @@ fn loaded_font_ref(loaded: &LoadedFont) -> Result<FontRef<'_>, read_fonts::ReadE
     FontRef::from_index(font_bytes(&loaded.data), loaded.face_index)
 }
 
+/// A configured font face whose bytes are mapped only when a row needs it.
+/// The descriptor is cheap to keep resident: it stores only the selected
+/// source, face index, and style/color hints, while the expensive file
+/// mapping lives behind `loaded`.
+struct LazyFontFace {
+    source: fontdb::Source,
+    face_index: u32,
+    is_color_hint: bool,
+    is_bold: bool,
+    is_italic: bool,
+    loaded: Mutex<Option<Arc<LoadedFont>>>,
+}
+
+impl LazyFontFace {
+    fn new(
+        source: fontdb::Source,
+        face_index: u32,
+        is_color_hint: bool,
+        is_bold: bool,
+        is_italic: bool,
+    ) -> Self {
+        Self {
+            source,
+            face_index,
+            is_color_hint,
+            is_bold,
+            is_italic,
+            loaded: Mutex::new(None),
+        }
+    }
+
+    fn load(&self) -> Option<Arc<LoadedFont>> {
+        let mut loaded = self.loaded.lock().unwrap();
+        if let Some(font) = loaded.as_ref() {
+            return Some(font.clone());
+        }
+
+        let data = shared_font_data_from_source(&self.source)?;
+        let font = load_font(data, self.face_index, self.is_bold, self.is_italic)?;
+        let font = Arc::new(font);
+        *loaded = Some(font.clone());
+        Some(font)
+    }
+
+    fn is_color(&self) -> bool {
+        self.loaded
+            .lock()
+            .unwrap()
+            .as_ref()
+            .map(|font| font.is_color)
+            .unwrap_or(self.is_color_hint)
+    }
+}
+
 /// The set of weight/style variants loaded for one user-requested family.
 /// `regular` is always present — if the regular weight/style can't be found,
 /// the family is dropped from the list outright. The other three variants
@@ -154,10 +208,11 @@ struct PlanKey {
     script: Script,
 }
 
-static FONTS: RwLock<Vec<LoadedFont>> = RwLock::new(Vec::new());
+static FONTS: RwLock<Vec<Arc<LazyFontFace>>> = RwLock::new(Vec::new());
 static FAMILIES: RwLock<Vec<FamilyVariants>> = RwLock::new(Vec::new());
 static FONT_LOAD_STATE: Mutex<FontLoadState> = Mutex::new(FontLoadState::NotStarted);
 static FONT_LOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
+static INSTALLED_FONT_GENERATION: AtomicU64 = AtomicU64::new(0);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FontLoadState {
@@ -166,8 +221,8 @@ enum FontLoadState {
     Loaded,
 }
 
-fn load_fonts(fonts_config: Option<String>) -> (Vec<LoadedFont>, Vec<FamilyVariants>) {
-    let mut fonts: Vec<LoadedFont> = Vec::new();
+fn load_fonts(fonts_config: Option<String>) -> (Vec<Arc<LazyFontFace>>, Vec<FamilyVariants>) {
+    let mut fonts: Vec<Arc<LazyFontFace>> = Vec::new();
     let mut families: Vec<FamilyVariants> = Vec::new();
 
     if let Some(families_str) = fonts_config {
@@ -187,7 +242,7 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<LoadedFont>, Vec<FamilyVaria
             };
 
             let Some(regular) = load_family_variant(
-                &mut db,
+                &db,
                 &mut fonts,
                 &family,
                 fontdb::Weight::NORMAL,
@@ -199,7 +254,7 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<LoadedFont>, Vec<FamilyVaria
                 continue;
             };
             let bold = load_family_variant(
-                &mut db,
+                &db,
                 &mut fonts,
                 &family,
                 fontdb::Weight::BOLD,
@@ -208,7 +263,7 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<LoadedFont>, Vec<FamilyVaria
                 false,
             );
             let italic = load_family_variant(
-                &mut db,
+                &db,
                 &mut fonts,
                 &family,
                 fontdb::Weight::NORMAL,
@@ -217,7 +272,7 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<LoadedFont>, Vec<FamilyVaria
                 true,
             );
             let bold_italic = load_family_variant(
-                &mut db,
+                &db,
                 &mut fonts,
                 &family,
                 fontdb::Weight::BOLD,
@@ -244,11 +299,12 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<LoadedFont>, Vec<FamilyVaria
 }
 
 fn install_fonts(
-    fonts: Vec<LoadedFont>,
+    fonts: Vec<Arc<LazyFontFace>>,
     families: Vec<FamilyVariants>,
 ) {
     *FONTS.write().unwrap() = fonts;
     *FAMILIES.write().unwrap() = families;
+    INSTALLED_FONT_GENERATION.fetch_add(1, Ordering::AcqRel);
 }
 
 fn start_background_font_load(fonts_config: Option<String>) {
@@ -298,6 +354,7 @@ pub struct FontSystem {
     final_font: LoadedFont,
 
     plan_cache: HashMap<PlanKey, ShapePlan>,
+    font_generation: u64,
     /// Current terminal cell width in physical pixels.
     pub cell_width: u32,
     /// Current terminal cell height in physical pixels.
@@ -336,6 +393,7 @@ impl FontSystem {
         let mut fs = Self {
             final_font,
             plan_cache: HashMap::new(),
+            font_generation: INSTALLED_FONT_GENERATION.load(Ordering::Acquire),
             cell_width: 0,
             cell_height: 0,
             font_size,
@@ -363,7 +421,20 @@ impl FontSystem {
         self.font_size = font_size * scale;
         self.supersample = supersample;
         self.plan_cache.clear();
+        self.font_generation = INSTALLED_FONT_GENERATION.load(Ordering::Acquire);
         self.recompute_metrics();
+    }
+
+    fn sync_font_generation(&mut self) {
+        let generation = INSTALLED_FONT_GENERATION.load(Ordering::Acquire);
+        if self.font_generation != generation {
+            self.plan_cache.clear();
+            self.font_generation = generation;
+        }
+    }
+
+    pub fn font_generation(&self) -> u64 {
+        INSTALLED_FONT_GENERATION.load(Ordering::Acquire)
     }
 
     /// Recompute cell_width, cell_height, ascent, and font_size from the
@@ -402,8 +473,8 @@ impl FontSystem {
             .read()
             .unwrap()
             .get(font_index)
-            .unwrap_or(&self.final_font)
-            .is_bold
+            .map(|font| font.is_bold)
+            .unwrap_or(self.final_font.is_bold)
     }
 
     /// Whether `font_index`'s face was loaded as an italic/oblique variant.
@@ -420,8 +491,8 @@ impl FontSystem {
             .read()
             .unwrap()
             .get(font_index)
-            .unwrap_or(&self.final_font)
-            .is_italic
+            .map(|font| font.is_italic)
+            .unwrap_or(self.final_font.is_italic)
     }
 
     /// Whether `font_index` is a colour-glyph font (COLR/CBDT/sbix/SVG).
@@ -438,8 +509,8 @@ impl FontSystem {
             .read()
             .unwrap()
             .get(font_index)
-            .unwrap_or(&self.final_font)
-            .is_color
+            .map(|font| font.is_color())
+            .unwrap_or(self.final_font.is_color)
     }
 
     /// Convert a pixel viewport into terminal grid dimensions.
@@ -495,9 +566,15 @@ impl FontSystem {
         cells: &[SmolStr],
         attrs: &[CellAttrs],
     ) -> Vec<ShapedGlyph> {
+        self.sync_font_generation();
+
         if cells.is_empty() {
             return vec![];
         }
+
+        let font_faces = FONTS.read().unwrap().clone();
+        let families = FAMILIES.read().unwrap().clone();
+        let final_font_index = font_faces.len();
 
         trace!(
             "shaping row: cells={:?}",
@@ -547,10 +624,9 @@ impl FontSystem {
                     None
                 } else {
                     let a = attrs[col];
-                    let families = FAMILIES.read().unwrap();
                     let (idx, _, _) = pick_variant(
                         &families,
-                        families.len(),
+                        final_font_index,
                         a.contains(CellAttrs::BOLD),
                         a.contains(CellAttrs::ITALIC),
                     );
@@ -606,13 +682,29 @@ impl FontSystem {
         // Two passes: first only accept a glyph from the cell's preferred
         // face (variant-matched, or colour-matched for emoji). Second pass
         // lets any remaining uncovered cell take whichever font has a glyph.
-        let loaded_fonts = FONTS.read().unwrap();
         for pass in 0..2 {
-            for (font_idx, loaded) in loaded_fonts
-                .iter()
-                .chain(std::iter::once(&self.final_font))
-                .enumerate()
-            {
+            for font_idx in 0..=final_font_index {
+                if pass == 0
+                    && !font_is_useful_for_preferred_pass(
+                        font_idx,
+                        &font_faces,
+                        &self.final_font,
+                        &preferred,
+                        &wants_color,
+                        &has_glyph,
+                        cells,
+                    )
+                {
+                    continue;
+                }
+
+                let Some(font_candidate) =
+                    load_font_candidate(font_idx, &font_faces, &self.final_font)
+                else {
+                    continue;
+                };
+                let loaded = font_candidate.as_loaded();
+
                 let font_ref = match loaded_font_ref(loaded) {
                     Ok(f) => f,
                     Err(_) => continue,
@@ -756,8 +848,12 @@ impl FontSystem {
             return drcs::rasterize(glyph_index, self.cell_width, self.cell_height);
         }
 
-        let fonts = FONTS.read().unwrap();
-        let loaded = fonts.get(font_index).unwrap_or(&self.final_font);
+        let font_faces = FONTS.read().unwrap().clone();
+        let Some(font_candidate) = load_font_candidate(font_index, &font_faces, &self.final_font)
+        else {
+            return empty_glyph();
+        };
+        let loaded = font_candidate.as_loaded();
         let scale = self.font_size / loaded.units_per_em;
 
         let Ok(font) = loaded_font_ref(loaded) else {
@@ -810,6 +906,65 @@ impl FontSystem {
             _ => empty_glyph(),
         }
     }
+}
+
+enum LoadedFontCandidate<'a> {
+    Lazy(Arc<LoadedFont>),
+    Final(&'a LoadedFont),
+}
+
+impl<'a> LoadedFontCandidate<'a> {
+    fn as_loaded(&'a self) -> &'a LoadedFont {
+        match self {
+            Self::Lazy(font) => font,
+            Self::Final(font) => font,
+        }
+    }
+}
+
+fn load_font_candidate<'a>(
+    font_idx: usize,
+    font_faces: &[Arc<LazyFontFace>],
+    final_font: &'a LoadedFont,
+) -> Option<LoadedFontCandidate<'a>> {
+    if let Some(font_face) = font_faces.get(font_idx) {
+        return font_face.load().map(LoadedFontCandidate::Lazy);
+    }
+
+    Some(LoadedFontCandidate::Final(final_font))
+}
+
+fn font_is_useful_for_preferred_pass(
+    font_idx: usize,
+    font_faces: &[Arc<LazyFontFace>],
+    final_font: &LoadedFont,
+    preferred: &[Option<usize>],
+    wants_color: &[bool],
+    has_glyph: &[bool],
+    cells: &[SmolStr],
+) -> bool {
+    preferred.iter().enumerate().any(|(col, preferred)| {
+        if has_glyph[col] || cells[col] == " " || cells[col].is_empty() {
+            return false;
+        }
+
+        match preferred {
+            Some(preferred_idx) => *preferred_idx == font_idx,
+            None if wants_color[col] => font_is_color_candidate(font_idx, font_faces, final_font),
+            None => false,
+        }
+    })
+}
+
+fn font_is_color_candidate(
+    font_idx: usize,
+    font_faces: &[Arc<LazyFontFace>],
+    final_font: &LoadedFont,
+) -> bool {
+    font_faces
+        .get(font_idx)
+        .map(|font| font.is_color_hint)
+        .unwrap_or(final_font.is_color)
 }
 
 fn glyph_cells_wide(
@@ -900,14 +1055,30 @@ fn load_font(
     })
 }
 
+fn shared_font_data_from_source(source: &fontdb::Source) -> Option<SharedFontData> {
+    match source {
+        fontdb::Source::Binary(data) => Some(data.clone()),
+        fontdb::Source::File(path) => {
+            let file = std::fs::File::open(path).ok()?;
+            // SAFETY: term41 only reads font files through the returned
+            // mapping. The usual mmap caveat applies: external mutation of
+            // installed font files while the terminal is running can expose
+            // changed bytes to this process.
+            let data = unsafe { memmap2::MmapOptions::new().map(&file).ok()? };
+            Some(Arc::new(data) as SharedFontData)
+        }
+        fontdb::Source::SharedFile(_, data) => Some(data.clone()),
+    }
+}
+
 /// Look up a face in `db` that matches `family` with *exactly* the requested
 /// weight and style. fontdb's `query()` will fuzzy-match (a BOLD query falls
 /// back to a NORMAL face when no bold is available); we reject those fuzzy
 /// hits so a missing variant stays missing and the caller can record it as
 /// `None` in the family table.
 fn load_family_variant(
-    db: &mut fontdb::Database,
-    fonts: &mut Vec<LoadedFont>,
+    db: &fontdb::Database,
+    fonts: &mut Vec<Arc<LazyFontFace>>,
     family: &fontdb::Family,
     weight: fontdb::Weight,
     style: fontdb::Style,
@@ -915,10 +1086,10 @@ fn load_family_variant(
     is_italic: bool,
 ) -> Option<usize> {
     if let fontdb::Family::Name(name) = family {
-        let id = pick_named_family_face(db, name, weight, style)?;
-        let loaded = load_font_from_database(db, id, is_bold, is_italic)?;
+        let (id, is_color_hint) = pick_named_family_face(db, name, weight, style)?;
+        let font_face = lazy_font_face(db, id, is_color_hint, is_bold, is_italic)?;
         let idx = fonts.len();
-        fonts.push(loaded);
+        fonts.push(font_face);
         return Some(idx);
     }
 
@@ -933,23 +1104,28 @@ fn load_family_variant(
     if face.weight != weight || face.style != style {
         return None;
     }
-    let loaded = load_font_from_database(db, id, is_bold, is_italic)?;
+    let is_color_hint = db.with_face_data(id, color_table_score).unwrap_or_default() > 0;
+    let font_face = lazy_font_face(db, id, is_color_hint, is_bold, is_italic)?;
     let idx = fonts.len();
-    fonts.push(loaded);
+    fonts.push(font_face);
     Some(idx)
 }
 
-fn load_font_from_database(
-    db: &mut fontdb::Database,
+fn lazy_font_face(
+    db: &fontdb::Database,
     id: fontdb::ID,
+    is_color_hint: bool,
     is_bold: bool,
     is_italic: bool,
-) -> Option<LoadedFont> {
-    // SAFETY: term41 only reads font files through the returned mapping. The
-    // usual mmap caveat applies: external mutation of installed font files
-    // while the terminal is running can expose changed bytes to this process.
-    let (data, face_index) = unsafe { db.make_shared_face_data(id)? };
-    load_font(data, face_index, is_bold, is_italic)
+) -> Option<Arc<LazyFontFace>> {
+    let (source, face_index) = db.face_source(id)?;
+    Some(Arc::new(LazyFontFace::new(
+        source,
+        face_index,
+        is_color_hint,
+        is_bold,
+        is_italic,
+    )))
 }
 
 fn pick_named_family_face(
@@ -957,7 +1133,7 @@ fn pick_named_family_face(
     name: &str,
     weight: fontdb::Weight,
     style: fontdb::Style,
-) -> Option<fontdb::ID> {
+) -> Option<(fontdb::ID, bool)> {
     db.faces()
         .filter(|face| {
             face.weight == weight
@@ -969,7 +1145,13 @@ fn pick_named_family_face(
             db.with_face_data(face.id, color_table_score)
                 .unwrap_or_default()
         })
-        .map(|face| face.id)
+        .map(|face| {
+            let is_color_hint = db
+                .with_face_data(face.id, color_table_score)
+                .unwrap_or_default()
+                > 0;
+            (face.id, is_color_hint)
+        })
 }
 
 #[derive(Clone, Copy, Default)]

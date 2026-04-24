@@ -9,6 +9,7 @@ flate2.workspace   = true
 fontdb             = "0.23.0"
 harfrust           = "0.6.0"
 log.workspace      = true
+memmap2            = "0.9.10"
 png.workspace      = true
 raqote             = { version = "0.8.5", default-features = false }
 read-fonts         = "0.39.1"
