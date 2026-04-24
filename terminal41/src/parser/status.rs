@@ -59,7 +59,7 @@ pub(crate) fn apply_status_line_csi(
     viewport: &Viewport,
     palette: &mut color::ColorPalette,
     insert_mode: bool,
-    action: StatusLineCsiAction,
+    action: StatusLineCsiAction<'_>,
 ) {
     let Some(status) = status_line_mut(screen) else {
         return;
@@ -77,7 +77,7 @@ pub(crate) fn apply_status_line_csi(
                 &mut status.bg,
                 &mut status.attrs,
                 &mut status.underline_color,
-                params.as_groups(),
+                params,
                 &palette,
             );
         }
@@ -151,9 +151,14 @@ mod tests {
         );
         screen.active_display = ActiveDisplay::Status;
         let modes = TerminalModes::new();
-        assert!(matches!(
-            parse_csi_action_with(b"\x1b[31m", &screen, &modes),
-            ParsedCsiAction::StatusLine(StatusLineCsiAction::SetGraphicsRendition { .. })
+        assert!(with_csi_action_and(
+            b"\x1b[31m",
+            &screen,
+            &modes,
+            |action| matches!(
+                action,
+                ParsedCsiAction::StatusLine(StatusLineCsiAction::SetGraphicsRendition { .. })
+            )
         ));
     }
 }

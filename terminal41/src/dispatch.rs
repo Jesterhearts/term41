@@ -70,7 +70,7 @@ pub(super) enum TerminalAction<'a> {
     Ignore,
     Basic(BasicAction<'a>),
     Vt52(Vt52Action<'a>),
-    Csi(CsiAction),
+    Csi(CsiAction<'a>),
     Esc(EscAction),
     Osc(OscAction),
     Apc(ApcAction),
@@ -96,10 +96,10 @@ pub(super) enum Vt52Action<'a> {
 }
 
 #[derive(Debug)]
-pub(super) enum CsiAction {
+pub(super) enum CsiAction<'a> {
     Ignore,
     Special(SpecialCsi),
-    Parsed(ParsedCsiAction),
+    Parsed(ParsedCsiAction<'a>),
 }
 
 #[derive(Debug)]
@@ -123,14 +123,17 @@ pub(crate) enum PendingApplication {
     Bytes(Vec<u8>),
 }
 
-pub(super) fn classify_action<'a>(
+pub(super) fn classify_action<'action, 'data>(
     screen: &Screen,
     modes: &TerminalModes,
     drcs: &crate::drcs::DrcsStore,
     vt52_cursor_addr: &mut Vt52CursorAddr,
-    action: Action<'a>,
-) -> TerminalAction<'a> {
-    if let Some(vt52_action) = classify_vt52_cursor_action(vt52_cursor_addr, &action) {
+    action: &'action Action<'data>,
+) -> TerminalAction<'action>
+where
+    'data: 'action,
+{
+    if let Some(vt52_action) = classify_vt52_cursor_action(vt52_cursor_addr, action) {
         return TerminalAction::Vt52(vt52_action);
     }
 
@@ -141,9 +144,9 @@ pub(super) fn classify_action<'a>(
     match action {
         Action::PrintAscii(run) => TerminalAction::Basic(BasicAction::PrintAscii(run)),
         Action::PrintText(run) => TerminalAction::Basic(BasicAction::PrintText(run)),
-        Action::Print(text) => TerminalAction::Basic(BasicAction::Print(text)),
-        Action::Print8Bit(byte) => TerminalAction::Basic(BasicAction::Print8Bit(byte)),
-        Action::Execute(byte) => TerminalAction::Basic(BasicAction::Execute(byte)),
+        Action::Print(text) => TerminalAction::Basic(BasicAction::Print(text.clone())),
+        Action::Print8Bit(byte) => TerminalAction::Basic(BasicAction::Print8Bit(*byte)),
+        Action::Execute(byte) => TerminalAction::Basic(BasicAction::Execute(*byte)),
         Action::CsiDispatch {
             params,
             intermediates,
@@ -153,7 +156,7 @@ pub(super) fn classify_action<'a>(
             modes,
             params,
             intermediates,
-            action,
+            *action,
         )),
         Action::EscDispatch {
             intermediates,
@@ -162,10 +165,10 @@ pub(super) fn classify_action<'a>(
             modes,
             drcs,
             intermediates.as_slice(),
-            byte,
+            *byte,
         ))),
-        Action::OscDispatch(data) => TerminalAction::Osc(classify_osc_action(data)),
-        Action::ApcDispatch(data) => TerminalAction::Apc(ApcAction::KittyGraphics(data)),
+        Action::OscDispatch(data) => TerminalAction::Osc(classify_osc_action(data.clone())),
+        Action::ApcDispatch(data) => TerminalAction::Apc(ApcAction::KittyGraphics(data.clone())),
         Action::Hook { .. } | Action::Put(_) | Action::Unhook => TerminalAction::Ignore,
     }
 }
@@ -248,7 +251,7 @@ pub(super) fn apply_vt52_action(
 }
 
 pub(super) fn apply_csi_action(
-    action: CsiAction,
+    action: CsiAction<'_>,
     active: &mut Screen,
     stash: &mut Screen,
     viewport: &mut Viewport,
@@ -784,13 +787,13 @@ fn classify_vt52_cursor_action<'a>(
     }
 }
 
-fn classify_csi_action(
+fn classify_csi_action<'a>(
     screen: &Screen,
     modes: &TerminalModes,
-    params: Params,
-    intermediates: Intermediates,
+    params: &'a Params,
+    intermediates: &Intermediates,
     action: char,
-) -> CsiAction {
+) -> CsiAction<'a> {
     let special = match (intermediates.as_slice(), action) {
         (b"*", 'z') => SpecialCsi::InvokeMacro(first_param(params)),
         (b",", '|') => {
@@ -914,7 +917,7 @@ fn invoke_macro(
     PendingApplication::Bytes(bytes)
 }
 
-fn first_param(params: Params) -> u16 {
+fn first_param(params: &Params) -> u16 {
     params
         .iter()
         .next()
@@ -922,7 +925,7 @@ fn first_param(params: Params) -> u16 {
         .unwrap_or(0)
 }
 
-fn first_triplet(params: Params) -> Option<(u16, u16, u16)> {
+fn first_triplet(params: &Params) -> Option<(u16, u16, u16)> {
     let mut groups = params.iter();
     let item = groups.next().and_then(|group| group.first().copied())?;
     let fg = groups.next().and_then(|group| group.first().copied())?;
@@ -956,7 +959,8 @@ mod tests {
         let modes = TerminalModes::new();
         let drcs = crate::drcs::DrcsStore::default();
         let screen = screen();
-        let classified = classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, action);
+        let classified =
+            classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, &action);
         assert!(matches!(
             classified,
             TerminalAction::Csi(CsiAction::Parsed(ParsedCsiAction::Main(
@@ -972,7 +976,8 @@ mod tests {
         let modes = TerminalModes::new();
         let drcs = crate::drcs::DrcsStore::default();
         let screen = screen();
-        let classified = classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, action);
+        let classified =
+            classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, &action);
         assert!(matches!(
             classified,
             TerminalAction::Csi(CsiAction::Special(SpecialCsi::ReportTerminalState))
@@ -989,7 +994,8 @@ mod tests {
         let modes = TerminalModes::new();
         let drcs = crate::drcs::DrcsStore::default();
         let screen = screen();
-        let classified = classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, action);
+        let classified =
+            classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, &action);
         assert!(matches!(
             classified,
             TerminalAction::Osc(OscAction::ItermGraphics(_))
@@ -1002,13 +1008,8 @@ mod tests {
         let modes = TerminalModes::new();
         let drcs = crate::drcs::DrcsStore::default();
         let screen = screen();
-        let classified = classify_action(
-            &screen,
-            &modes,
-            &drcs,
-            &mut state,
-            Action::PrintAscii(b"!\"rest"),
-        );
+        let action = Action::PrintAscii(b"!\"rest");
+        let classified = classify_action(&screen, &modes, &drcs, &mut state, &action);
         match classified {
             TerminalAction::Vt52(Vt52Action::CursorPosition {
                 row,
@@ -1031,7 +1032,8 @@ mod tests {
         let modes = TerminalModes::new();
         let drcs = crate::drcs::DrcsStore::default();
         let screen = screen();
-        let classified = classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, action);
+        let classified =
+            classify_action(&screen, &modes, &drcs, &mut Vt52CursorAddr::Idle, &action);
         assert!(matches!(
             classified,
             TerminalAction::Esc(EscAction::Parsed(ParsedEscAction::HardReset))

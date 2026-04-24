@@ -1,3 +1,5 @@
+use std::ops::Index;
+
 use font41::attrs::CellAttrs;
 use smol_str::SmolStr;
 use vtepp::Params;
@@ -135,42 +137,61 @@ fn clamp_cursor_to_row_width(
     }
 }
 
-#[derive(Debug, Clone)]
-pub(super) struct OwnedParams(Vec<Vec<u16>>);
+#[derive(Debug, Clone, Copy)]
+pub(super) struct BorrowedParams<'a> {
+    params: &'a Params,
+    len: usize,
+}
 
-impl OwnedParams {
-    fn from_vte(params: Params) -> Self {
-        Self(params.iter().map(|group| group.to_vec()).collect())
+impl<'a> BorrowedParams<'a> {
+    pub(crate) fn from_vte(params: &'a Params) -> Self {
+        let len = params.iter().count();
+        Self { params, len }
     }
 
-    fn as_groups(&self) -> &[Vec<u16>] {
-        &self.0
+    pub(crate) fn is_empty(&self) -> bool {
+        self.len == 0
     }
 
-    fn iter(&self) -> impl Iterator<Item = &[u16]> {
-        self.0.iter().map(Vec::as_slice)
+    pub(crate) fn iter(&self) -> impl Iterator<Item = &'a [u16]> + '_ {
+        self.params.iter()
     }
 
-    fn get(
+    pub(crate) fn get(
         &self,
         idx: usize,
-    ) -> Option<&[u16]> {
-        self.0.get(idx).map(Vec::as_slice)
+    ) -> Option<&'a [u16]> {
+        self.params.iter().nth(idx)
+    }
+
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+}
+
+impl Index<usize> for BorrowedParams<'_> {
+    type Output = [u16];
+
+    fn index(
+        &self,
+        index: usize,
+    ) -> &Self::Output {
+        self.get(index).expect("index in range")
     }
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum ParsedCsiAction {
+pub(super) enum ParsedCsiAction<'a> {
     Unsupported,
     SetPrivateModes {
         enable: bool,
-        modes: OwnedParams,
+        modes: BorrowedParams<'a>,
     },
     SavePrivateModes {
-        modes: OwnedParams,
+        modes: BorrowedParams<'a>,
     },
     RestorePrivateModes {
-        modes: OwnedParams,
+        modes: BorrowedParams<'a>,
     },
     SelectiveEraseDisplay {
         mode: u16,
@@ -180,7 +201,7 @@ pub(super) enum ParsedCsiAction {
     },
     KittyKeyboard {
         intermediate: u8,
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     PrivateDeviceStatusReport {
         selector: u16,
@@ -204,22 +225,22 @@ pub(super) enum ParsedCsiAction {
         cols: u16,
     },
     EraseRect {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     SelectiveEraseRect {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     FillRect {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     CopyRect {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     ChangeRectAttrs {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     ReverseRectAttrs {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     SetScreenLines {
         lines: u16,
@@ -264,23 +285,23 @@ pub(super) enum ParsedCsiAction {
         confirmation_param: Option<u16>,
     },
     SetLocalFunctions {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     SetLocalFunctionKeys {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     SetModifierKeyReporting {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     ReportXtVersion,
     ReportSecondaryDeviceAttrs,
     ReportTertiaryDeviceAttrs,
-    Main(MainCsiAction),
-    StatusLine(StatusLineCsiAction),
+    Main(MainCsiAction<'a>),
+    StatusLine(StatusLineCsiAction<'a>),
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum MainCsiAction {
+pub(super) enum MainCsiAction<'a> {
     SelfTest {
         requested_tests: Vec<u16>,
     },
@@ -328,7 +349,7 @@ pub(super) enum MainCsiAction {
         mode: u16,
     },
     SetGraphicsRendition {
-        params: OwnedParams,
+        params: BorrowedParams<'a>,
     },
     LinePositionAbsolute {
         row: u16,
@@ -395,8 +416,8 @@ pub(super) enum MainCsiAction {
 }
 
 #[derive(Debug, Clone)]
-pub(super) enum StatusLineCsiAction {
-    SetGraphicsRendition { params: OwnedParams },
+pub(super) enum StatusLineCsiAction<'a> {
+    SetGraphicsRendition { params: BorrowedParams<'a> },
     InsertChars { count: u16 },
     HomeRow,
     CursorForward { count: u16 },
@@ -752,17 +773,21 @@ pub(super) mod test_support {
         (screen, viewport)
     }
 
-    pub(super) fn parse_csi_action(input: &[u8]) -> ParsedCsiAction {
+    pub(super) fn with_csi_action<R>(
+        input: &[u8],
+        f: impl for<'a> FnOnce(ParsedCsiAction<'a>) -> R,
+    ) -> R {
         let (screen, _) = setup();
         let modes = TerminalModes::new();
-        parse_csi_action_with(input, &screen, &modes)
+        with_csi_action_and(input, &screen, &modes, f)
     }
 
-    pub(super) fn parse_csi_action_with(
+    pub(super) fn with_csi_action_and<R>(
         input: &[u8],
         screen: &Screen,
         modes: &TerminalModes,
-    ) -> ParsedCsiAction {
+        f: impl for<'a> FnOnce(ParsedCsiAction<'a>) -> R,
+    ) -> R {
         let mut parser = Parser::new();
         for action in parser.parse(input) {
             if let Action::CsiDispatch {
@@ -771,7 +796,13 @@ pub(super) mod test_support {
                 action,
             } = action
             {
-                return csi_parse(screen, modes, params, intermediates.as_slice(), action);
+                return f(csi_parse(
+                    screen,
+                    modes,
+                    &params,
+                    intermediates.as_slice(),
+                    action,
+                ));
             }
         }
         panic!("no CSI dispatch from input {input:?}");

@@ -27,9 +27,9 @@ use crate::drcs::DrcsStore;
 use crate::io::keyboard::handle_kitty_keyboard_groups;
 use crate::io::mouse::apply_mouse_mode;
 use crate::mode;
+use crate::parser::BorrowedParams;
 use crate::parser::DsrParameters;
 use crate::parser::MainCsiAction;
-use crate::parser::OwnedParams;
 use crate::parser::ParsedCsiAction;
 use crate::parser::StatusLineCsiAction;
 use crate::parser::TabClearMode;
@@ -50,7 +50,7 @@ use crate::screen::ActiveDisplay;
 use crate::screen::grid;
 
 fn first_group_param(
-    params: &OwnedParams,
+    params: &BorrowedParams<'_>,
     default: u16,
 ) -> u16 {
     params
@@ -60,7 +60,7 @@ fn first_group_param(
 }
 
 fn nth_group_param(
-    params: &OwnedParams,
+    params: &BorrowedParams<'_>,
     idx: usize,
     default: u16,
 ) -> u16 {
@@ -70,10 +70,10 @@ fn nth_group_param(
         .unwrap_or(default)
 }
 
-fn parse_status_line_plain_csi(
-    params: OwnedParams,
+fn parse_status_line_plain_csi<'a>(
+    params: BorrowedParams<'a>,
     action: char,
-) -> ParsedCsiAction {
+) -> ParsedCsiAction<'a> {
     match action {
         'm' => ParsedCsiAction::StatusLine(StatusLineCsiAction::SetGraphicsRendition { params }),
         '@' => ParsedCsiAction::StatusLine(StatusLineCsiAction::InsertChars {
@@ -109,11 +109,11 @@ fn parse_status_line_plain_csi(
     }
 }
 
-fn parse_main_plain_csi(
+fn parse_main_plain_csi<'a>(
     modes: &TerminalModes,
-    params: OwnedParams,
+    params: BorrowedParams<'a>,
     action: char,
-) -> ParsedCsiAction {
+) -> ParsedCsiAction<'a> {
     match action {
         'y' => {
             let mut groups = params.iter();
@@ -616,14 +616,14 @@ fn query_ansi_mode_by_id(
     query_ansi_mode(modes, mode)
 }
 
-pub(crate) fn csi_parse(
+pub(crate) fn csi_parse<'a>(
     screen: &Screen,
     modes: &TerminalModes,
-    params: Params,
+    params: &'a Params,
     intermediates: &[u8],
     action: char,
-) -> ParsedCsiAction {
-    let params = OwnedParams::from_vte(params);
+) -> ParsedCsiAction<'a> {
+    let params = BorrowedParams::from_vte(params);
     match intermediates {
         b"?" => match action {
             'h' => ParsedCsiAction::SetPrivateModes {
@@ -772,7 +772,7 @@ pub(crate) fn csi_parse(
 
 #[bon::builder]
 fn apply_main_csi(
-    action: MainCsiAction,
+    action: MainCsiAction<'_>,
     screen: &mut Screen,
     stash: &mut Screen,
     viewport: &mut Viewport,
@@ -1019,7 +1019,7 @@ fn apply_main_csi(
                 &mut screen.bg,
                 &mut screen.attrs,
                 &mut screen.underline_color,
-                params.as_groups(),
+                params,
                 palette,
             );
             sync_screen_erase_defaults(screen, dec_color);
@@ -1248,7 +1248,7 @@ fn apply_main_csi(
 
 #[bon::builder]
 pub(crate) fn csi_apply(
-    action: ParsedCsiAction,
+    action: ParsedCsiAction<'_>,
     screen: &mut Screen,
     stash: &mut Screen,
     viewport: &mut Viewport,
@@ -1965,7 +1965,7 @@ pub(crate) fn csi_dispatch(
     feature_permissions: &FeaturePermissions,
     drcs: &mut DrcsStore,
 ) {
-    let action = csi_parse(screen, modes, *params, intermediates, action);
+    let action = csi_parse(screen, modes, params, intermediates, action);
     let mut shell_integration_phase = ShellIntegrationPhase::None;
     csi_apply()
         .action(action)
@@ -2018,60 +2018,60 @@ mod tests {
 
     #[test]
     fn csi_parse_maps_private_mode_query_semantically() {
-        assert!(matches!(
-            parse_csi_action(b"\x1b[?7$p"),
+        assert!(with_csi_action(b"\x1b[?7$p", |action| matches!(
+            action,
             ParsedCsiAction::QueryPrivateMode { mode: 7 }
-        ));
+        )));
     }
 
     #[test]
     fn csi_parse_maps_ansi_mode_query_semantically() {
-        assert!(matches!(
-            parse_csi_action(b"\x1b[4$p"),
+        assert!(with_csi_action(b"\x1b[4$p", |action| matches!(
+            action,
             ParsedCsiAction::QueryAnsiMode { mode: 4 }
-        ));
+        )));
     }
 
     #[test]
     fn csi_parse_maps_status_display_semantically() {
-        assert!(matches!(
-            parse_csi_action(b"\x1b[2$~"),
+        assert!(with_csi_action(b"\x1b[2$~", |action| matches!(
+            action,
             ParsedCsiAction::SetStatusDisplay { mode: 2 }
-        ));
+        )));
     }
 
     #[test]
     fn csi_parse_maps_private_mode_set_semantically() {
-        assert!(matches!(
-            parse_csi_action(b"\x1b[?2004h"),
+        assert!(with_csi_action(b"\x1b[?2004h", |action| matches!(
+            action,
             ParsedCsiAction::SetPrivateModes { enable: true, .. }
-        ));
+        )));
     }
 
     #[test]
     fn csi_parse_maps_attr_change_extent_semantically() {
-        assert!(matches!(
-            parse_csi_action(b"\x1b[2*x"),
+        assert!(with_csi_action(b"\x1b[2*x", |action| matches!(
+            action,
             ParsedCsiAction::SetAttrChangeExtent {
                 extent: grid::AttrChangeExtent::Rectangle
             }
-        ));
+        )));
     }
 
     #[test]
     fn csi_parse_maps_cursor_style_semantically() {
-        assert!(matches!(
-            parse_csi_action(b"\x1b[5 q"),
+        assert!(with_csi_action(b"\x1b[5 q", |action| matches!(
+            action,
             ParsedCsiAction::SetCursorStyle { style: 5 }
-        ));
+        )));
     }
 
     #[test]
     fn csi_parse_maps_soft_reset_semantically() {
-        assert!(matches!(
-            parse_csi_action(b"\x1b[!p"),
+        assert!(with_csi_action(b"\x1b[!p", |action| matches!(
+            action,
             ParsedCsiAction::SoftReset
-        ));
+        )));
     }
 
     #[test]
@@ -2079,12 +2079,17 @@ mod tests {
         let (screen, _) = setup();
         let mut modes = TerminalModes::new();
         modes.declrmm = true;
-        assert!(matches!(
-            parse_csi_action_with(b"\x1b[2;8s", &screen, &modes),
-            ParsedCsiAction::Main(MainCsiAction::SetLeftRightMargins {
-                left: 2,
-                right: Some(8)
-            })
+        assert!(with_csi_action_and(
+            b"\x1b[2;8s",
+            &screen,
+            &modes,
+            |action| matches!(
+                action,
+                ParsedCsiAction::Main(MainCsiAction::SetLeftRightMargins {
+                    left: 2,
+                    right: Some(8)
+                })
+            )
         ));
     }
 

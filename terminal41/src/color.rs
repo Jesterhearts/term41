@@ -4,6 +4,8 @@ use utils41::blend_colors;
 #[cfg(test)]
 use vtepp::Params;
 
+use crate::parser::BorrowedParams;
+
 /// First palette index of the 6×6×6 RGB color cube in the 256-color palette.
 const CUBE_PALETTE_START: u8 = 16;
 /// Last palette index of the 6×6×6 RGB color cube.
@@ -265,8 +267,14 @@ pub(super) fn apply_sgr(
     params: &Params,
     palette: &ColorPalette,
 ) {
-    let groups: Vec<&[u16]> = params.iter().collect();
-    apply_sgr_group_refs(fg, bg, attrs, underline_color, &groups, palette);
+    apply_sgr_group_refs(
+        fg,
+        bg,
+        attrs,
+        underline_color,
+        BorrowedParams::from_vte(params),
+        palette,
+    );
 }
 
 pub(super) fn apply_sgr_groups(
@@ -274,11 +282,10 @@ pub(super) fn apply_sgr_groups(
     bg: &mut Srgb<u8>,
     attrs: &mut CellAttrs,
     underline_color: &mut Option<Srgb<u8>>,
-    params: &[Vec<u16>],
+    groups: BorrowedParams,
     palette: &ColorPalette,
 ) {
-    let groups: Vec<&[u16]> = params.iter().map(Vec::as_slice).collect();
-    apply_sgr_group_refs(fg, bg, attrs, underline_color, &groups, palette);
+    apply_sgr_group_refs(fg, bg, attrs, underline_color, groups, palette);
 }
 
 fn apply_sgr_group_refs(
@@ -286,7 +293,7 @@ fn apply_sgr_group_refs(
     bg: &mut Srgb<u8>,
     attrs: &mut CellAttrs,
     underline_color: &mut Option<Srgb<u8>>,
-    groups: &[&[u16]],
+    groups: BorrowedParams,
     palette: &ColorPalette,
 ) {
     if groups.is_empty() {
@@ -296,7 +303,7 @@ fn apply_sgr_group_refs(
 
     let mut i = 0;
     while i < groups.len() {
-        let g = groups[i];
+        let g = &groups[i];
         if let Ok(action) = SgrAction::try_from(g[0]) {
             match action {
                 SgrAction::Reset => reset_all(fg, bg, attrs, underline_color, palette),
@@ -332,20 +339,20 @@ fn apply_sgr_group_refs(
                 SgrAction::ResetOverline => attrs.remove(CellAttrs::OVERLINE),
                 SgrAction::FgRange(n) => *fg = palette_color(palette, (n - SGR_FG_START) as u8),
                 SgrAction::FgExtended => {
-                    if let Some(color) = parse_extended_color(groups, &mut i, palette) {
+                    if let Some(color) = parse_extended_color(groups, g, &mut i, palette) {
                         *fg = color;
                     }
                 }
                 SgrAction::FgDefault => *fg = palette.fg,
                 SgrAction::BgRange(n) => *bg = palette_color(palette, (n - SGR_BG_START) as u8),
                 SgrAction::BgExtended => {
-                    if let Some(color) = parse_extended_color(groups, &mut i, palette) {
+                    if let Some(color) = parse_extended_color(groups, g, &mut i, palette) {
                         *bg = color;
                     }
                 }
                 SgrAction::BgDefault => *bg = palette.bg,
                 SgrAction::UnderlineColor => {
-                    if let Some(color) = parse_extended_color(groups, &mut i, palette) {
+                    if let Some(color) = parse_extended_color(groups, g, &mut i, palette) {
                         *underline_color = Some(color);
                     }
                 }
@@ -381,12 +388,11 @@ fn reset_all(
 /// or `38;2;R;G;B`). In the colon form all values sit in one group; in
 /// the semicolon form subsequent groups are consumed and `i` is advanced.
 fn parse_extended_color(
-    groups: &[&[u16]],
+    groups: BorrowedParams,
+    group: &[u16],
     i: &mut usize,
     palette: &ColorPalette,
 ) -> Option<Srgb<u8>> {
-    let group = groups[*i];
-
     // Colon form: sub-parameters sit in the same group (e.g. [38, 5, 196]).
     if group.len() > 1 {
         return parse_color_subparams(&group[1..], palette);

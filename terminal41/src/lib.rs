@@ -803,7 +803,7 @@ impl Terminal {
             &self.modes,
             &self.protocol.drcs,
             &mut self.vt52_cursor_addr,
-            action,
+            &action,
         );
         debug!("Classified action: {:?}", action);
         let dirty_before = self.snapshot_dirty_baseline();
