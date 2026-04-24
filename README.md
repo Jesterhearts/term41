@@ -164,8 +164,8 @@ cargo run --release
 
 ### Installing
 
-The `0.1.0` release is source-only. To build and install it from the GitHub
-tag into your cargo bin dir:
+The `0.1.0` release is source-only. To build and install it from the GitHub tag
+into your cargo bin dir:
 
 ```sh
 cargo install --git https://github.com/Jesterhearts/term41.git --tag @0.1.0 --locked term41
@@ -173,7 +173,7 @@ cargo install --git https://github.com/Jesterhearts/term41.git --tag @0.1.0 --lo
 
 The default install enables FFmpeg-backed GIF/video decoding and Wayland
 data-control clipboard support. If you want the smallest dependency surface, or
-your system does not have the FFmpeg development libraries installed:
+the fastest build times:
 
 ```sh
 cargo install --git https://github.com/Jesterhearts/term41.git --tag @0.1.0 --locked --no-default-features term41
@@ -394,15 +394,15 @@ Notes:
   `"allow"`/`"all"`/`"*"` skips the prompt, while `"deny"`/`"no"`/`"none"`
   blocks OSC 52 access.
 - `security.kitty_graphics.files` defaults to `"ask"` for Kitty graphics
-  `t=f`/`t=t` local-file payload reads. Ask mode shows the requested path in
-  the trusted permission modal; deny mode rejects the image request.
+  `t=f`/`t=t` local-file payload reads. Ask mode shows the requested path in the
+  trusted permission modal; deny mode rejects the image request.
 - `[security.limits]` settings live-reload for new protocol actions. They
   control how much macro/UDK/DRCS/kitty graphics state term41 accepts or
   retains.
-- Lua scripts are discovered from `$XDG_CONFIG_HOME/term41/scripts/*.lua`.
-  Each script runs in its own Lua state on its own thread and can
-  `require("terminal")` to read the active tab title/cwd and set the current
-  tab title or indicator status text.
+- Lua scripts are discovered from `$XDG_CONFIG_HOME/term41/scripts/*.lua`. Each
+  script runs in its own Lua state on its own thread and can
+  `require("terminal")` to read the active tab title/cwd and set the current tab
+  title or indicator status text.
 - `[security.scripts.<script_name>]` controls which optional libraries a script
   receives. The default sandbox has only basic string/table/math/utf8 support
   plus `require("terminal")`.
