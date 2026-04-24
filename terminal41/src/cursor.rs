@@ -148,6 +148,50 @@ mod integration_tests {
             }
         );
     }
+
+    #[test]
+    fn decscusr_zero_resets_to_configured_default() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        let configured = CursorStyle {
+            shape: CursorShape::Underline,
+            blink: false,
+        };
+        term.set_default_cursor_style(configured);
+
+        term.process(b"\x1b[5 q");
+        assert_ne!(term.cursor_style, configured);
+        term.process(b"\x1b[ q");
+
+        assert_eq!(term.cursor_style, configured);
+    }
+
+    #[test]
+    fn soft_reset_restores_configured_cursor_default() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        let configured = CursorStyle {
+            shape: CursorShape::Underline,
+            blink: false,
+        };
+        term.set_default_cursor_style(configured);
+
+        term.process(b"\x1b[5 q");
+        assert_ne!(term.cursor_style, configured);
+        term.process(b"\x1b[!p");
+
+        assert_eq!(term.cursor_style, configured);
+    }
+
+    #[test]
+    fn alt_screen_1049_restores_cursor_style() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        let original = term.cursor_style;
+
+        term.process(b"\x1b[?1049h\x1b[?12l");
+        assert!(!term.cursor_style.blink);
+        term.process(b"\x1b[?1049l");
+
+        assert_eq!(term.cursor_style, original);
+    }
 }
 
 #[cfg(test)]

@@ -19,9 +19,11 @@ use crate::screen::palette_sync::sync_screen_erase_defaults;
 
 /// Replace the default cursor style.
 pub fn set_default_cursor_style(
+    default_cursor_style: &mut CursorStyle,
     cursor_style: &mut CursorStyle,
     style: CursorStyle,
 ) {
+    *default_cursor_style = style;
     *cursor_style = style;
 }
 
@@ -123,6 +125,8 @@ mod tests {
             shape: CursorShape::Underline,
             blink: false,
         });
+        assert_eq!(term.default_cursor_style.shape, CursorShape::Underline);
+        assert!(!term.default_cursor_style.blink);
         assert_eq!(term.cursor_style.shape, CursorShape::Underline);
         assert!(!term.cursor_style.blink);
     }

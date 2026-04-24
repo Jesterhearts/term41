@@ -257,7 +257,9 @@ pub(super) fn apply_csi_action(
     kitty_keyboard: &mut KittyKeyboardState,
     pending_output: &mut Vec<u8>,
     pending_resize: &mut Option<(u32, u32)>,
+    default_cursor_style: CursorStyle,
     cursor_style: &mut CursorStyle,
+    saved_alt_cursor_style: &mut Option<CursorStyle>,
     cell_width: u32,
     cell_height: u32,
     default_status_display: &mut StatusDisplayKind,
@@ -305,7 +307,9 @@ pub(super) fn apply_csi_action(
                 .kitty_keyboard(kitty_keyboard)
                 .pending_output(pending_output)
                 .pending_resize(pending_resize)
+                .default_cursor_style(default_cursor_style)
                 .cursor_style(cursor_style)
+                .saved_alt_cursor_style(saved_alt_cursor_style)
                 .cell_width(cell_width)
                 .cell_height(cell_height)
                 .default_status_display(default_status_display)
@@ -337,7 +341,9 @@ pub(super) fn apply_esc_action(
     on_alt_screen: &mut bool,
     modes: &mut TerminalModes,
     kitty_keyboard: &mut KittyKeyboardState,
+    default_cursor_style: CursorStyle,
     cursor_style: &mut CursorStyle,
+    saved_alt_cursor_style: &mut Option<CursorStyle>,
     current_title: &mut Option<String>,
     title_stack: &mut Vec<Option<String>>,
     saved_modes: &mut HashMap<crate::mode::PrivateMode, bool>,
@@ -364,7 +370,9 @@ pub(super) fn apply_esc_action(
                 .on_alt_screen(on_alt_screen)
                 .modes(modes)
                 .kitty_keyboard(kitty_keyboard)
+                .default_cursor_style(default_cursor_style)
                 .cursor_style(cursor_style)
+                .saved_alt_cursor_style(saved_alt_cursor_style)
                 .current_title(current_title)
                 .title_stack(title_stack)
                 .saved_modes(saved_modes)

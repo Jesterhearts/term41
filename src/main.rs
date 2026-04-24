@@ -2647,7 +2647,11 @@ fn main() {
         cell_width,
         config.palette.clone(),
     );
-    settings::set_default_cursor_style(&mut terminal.cursor_style, config.cursor_style);
+    settings::set_default_cursor_style(
+        &mut terminal.default_cursor_style,
+        &mut terminal.cursor_style,
+        config.cursor_style,
+    );
     settings::set_emoji_compatibility_mode(
         &mut terminal.emoji_compatibility_mode,
         config.compatibility.emoji,

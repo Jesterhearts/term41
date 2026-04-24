@@ -275,6 +275,7 @@ fn apply_private_mode(
     stash: &mut Screen,
     viewport: &mut Viewport,
     on_alt_screen: &mut bool,
+    saved_alt_cursor_style: &mut Option<CursorStyle>,
     cursor_style: &mut CursorStyle,
     dec_color: &mut DecColorState,
     mode: mode::PrivateMode,
@@ -328,7 +329,43 @@ fn apply_private_mode(
         &mut modes.mouse_tracking,
         &mut modes.mouse_encoding,
     ) {
+        apply_screen_private_mode(
+            mode,
+            enable,
+            screen,
+            stash,
+            viewport,
+            on_alt_screen,
+            saved_alt_cursor_style,
+            cursor_style,
+        );
+    }
+}
+
+fn apply_screen_private_mode(
+    mode: mode::PrivateMode,
+    enable: bool,
+    screen: &mut Screen,
+    stash: &mut Screen,
+    viewport: &mut Viewport,
+    on_alt_screen: &mut bool,
+    saved_alt_cursor_style: &mut Option<CursorStyle>,
+    cursor_style: &mut CursorStyle,
+) {
+    if mode != mode::PrivateMode::AltScreenSave {
         screen::set_private_mode(mode, enable, screen, stash, viewport, on_alt_screen);
+        return;
+    }
+
+    if enable && !*on_alt_screen {
+        *saved_alt_cursor_style = Some(*cursor_style);
+    }
+    let saved = (!enable && *on_alt_screen)
+        .then(|| saved_alt_cursor_style.take())
+        .flatten();
+    screen::set_private_mode(mode, enable, screen, stash, viewport, on_alt_screen);
+    if let Some(style) = saved {
+        *cursor_style = style;
     }
 }
 
@@ -744,7 +781,9 @@ fn apply_main_csi(
     kitty_keyboard: &mut KittyKeyboardState,
     pending_output: &mut Vec<u8>,
     pending_resize: &mut Option<(u32, u32)>,
+    default_cursor_style: CursorStyle,
     cursor_style: &mut CursorStyle,
+    saved_alt_cursor_style: &mut Option<CursorStyle>,
     cell_width: u32,
     cell_height: u32,
     palette: &mut ColorPalette,
@@ -783,7 +822,9 @@ fn apply_main_csi(
                     .modes(modes)
                     .viewport(&mut viewport)
                     .kitty_keyboard(kitty_keyboard)
+                    .default_cursor_style(default_cursor_style)
                     .cursor_style(cursor_style)
+                    .saved_alt_cursor_style(saved_alt_cursor_style)
                     .current_title(current_title)
                     .title_stack(title_stack)
                     .saved_modes(saved_modes)
@@ -1216,7 +1257,9 @@ pub(crate) fn csi_apply(
     kitty_keyboard: &mut KittyKeyboardState,
     pending_output: &mut Vec<u8>,
     pending_resize: &mut Option<(u32, u32)>,
+    default_cursor_style: CursorStyle,
     cursor_style: &mut CursorStyle,
+    saved_alt_cursor_style: &mut Option<CursorStyle>,
     cell_width: u32,
     cell_height: u32,
     palette: &mut ColorPalette,
@@ -1253,7 +1296,9 @@ pub(crate) fn csi_apply(
                 .kitty_keyboard(kitty_keyboard)
                 .pending_output(pending_output)
                 .pending_resize(pending_resize)
+                .default_cursor_style(default_cursor_style)
                 .cursor_style(cursor_style)
+                .saved_alt_cursor_style(saved_alt_cursor_style)
                 .cell_width(cell_width)
                 .cell_height(cell_height)
                 .palette(palette)
@@ -1314,6 +1359,7 @@ pub(crate) fn csi_apply(
                         stash,
                         viewport,
                         on_alt_screen,
+                        saved_alt_cursor_style,
                         cursor_style,
                         dec_color,
                         mode,
@@ -1350,6 +1396,7 @@ pub(crate) fn csi_apply(
                         stash,
                         viewport,
                         on_alt_screen,
+                        saved_alt_cursor_style,
                         cursor_style,
                         dec_color,
                         mode,
@@ -1688,7 +1735,11 @@ pub(crate) fn csi_apply(
             screen.attr_change_extent = extent;
         }
         ParsedCsiAction::SetCursorStyle { style } => {
-            cursor_style.apply_decscusr(style);
+            if style == 0 {
+                *cursor_style = default_cursor_style;
+            } else {
+                cursor_style.apply_decscusr(style);
+            }
         }
         ParsedCsiAction::ScrollLeft { count } => {
             let view = screen::screen_viewport(screen, viewport);
@@ -1800,7 +1851,8 @@ pub(crate) fn csi_apply(
             modes.conformance_level = conformance_level;
             modes.c1_mode = c1_mode;
             *kitty_keyboard = KittyKeyboardState::new();
-            *cursor_style = CursorStyle::default();
+            *cursor_style = default_cursor_style;
+            *saved_alt_cursor_style = None;
         }
         ParsedCsiAction::ReportUserPreferredSupplementalSet => {
             conformance::write_dcs(
@@ -1817,7 +1869,9 @@ pub(crate) fn csi_apply(
                 .on_alt_screen(on_alt_screen)
                 .modes(modes)
                 .kitty_keyboard(kitty_keyboard)
+                .default_cursor_style(default_cursor_style)
                 .cursor_style(cursor_style)
+                .saved_alt_cursor_style(saved_alt_cursor_style)
                 .current_title(current_title)
                 .title_stack(title_stack)
                 .saved_modes(saved_modes)
@@ -1891,7 +1945,9 @@ pub(crate) fn csi_dispatch(
     kitty_keyboard: &mut KittyKeyboardState,
     pending_output: &mut Vec<u8>,
     pending_resize: &mut Option<(u32, u32)>,
+    default_cursor_style: CursorStyle,
     cursor_style: &mut CursorStyle,
+    saved_alt_cursor_style: &mut Option<CursorStyle>,
     cell_width: u32,
     cell_height: u32,
     palette: &mut ColorPalette,
@@ -1921,7 +1977,9 @@ pub(crate) fn csi_dispatch(
         .kitty_keyboard(kitty_keyboard)
         .pending_output(pending_output)
         .pending_resize(pending_resize)
+        .default_cursor_style(default_cursor_style)
         .cursor_style(cursor_style)
+        .saved_alt_cursor_style(saved_alt_cursor_style)
         .cell_width(cell_width)
         .cell_height(cell_height)
         .palette(palette)

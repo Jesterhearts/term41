@@ -189,7 +189,11 @@ impl TestTerm {
         &mut self,
         style: CursorStyle,
     ) {
-        settings::set_default_cursor_style(&mut self.inner.cursor_style, style)
+        settings::set_default_cursor_style(
+            &mut self.inner.default_cursor_style,
+            &mut self.inner.cursor_style,
+            style,
+        )
     }
 
     pub fn set_palette(

@@ -395,7 +395,9 @@ pub(crate) fn esc_apply(
     on_alt_screen: &mut bool,
     modes: &mut TerminalModes,
     kitty_keyboard: &mut KittyKeyboardState,
+    default_cursor_style: CursorStyle,
     cursor_style: &mut CursorStyle,
+    saved_alt_cursor_style: &mut Option<CursorStyle>,
     current_title: &mut Option<String>,
     title_stack: &mut Vec<Option<String>>,
     saved_modes: &mut std::collections::HashMap<mode::PrivateMode, bool>,
@@ -464,7 +466,9 @@ pub(crate) fn esc_apply(
                 .modes(modes)
                 .viewport(viewport)
                 .kitty_keyboard(kitty_keyboard)
+                .default_cursor_style(default_cursor_style)
                 .cursor_style(cursor_style)
+                .saved_alt_cursor_style(saved_alt_cursor_style)
                 .current_title(current_title)
                 .title_stack(title_stack)
                 .saved_modes(saved_modes)
@@ -573,7 +577,9 @@ pub(crate) fn esc_dispatch(
     on_alt_screen: &mut bool,
     modes: &mut TerminalModes,
     kitty_keyboard: &mut KittyKeyboardState,
+    default_cursor_style: CursorStyle,
     cursor_style: &mut CursorStyle,
+    saved_alt_cursor_style: &mut Option<CursorStyle>,
     current_title: &mut Option<String>,
     title_stack: &mut Vec<Option<String>>,
     saved_modes: &mut std::collections::HashMap<mode::PrivateMode, bool>,
@@ -601,7 +607,9 @@ pub(crate) fn esc_dispatch(
         .on_alt_screen(on_alt_screen)
         .modes(modes)
         .kitty_keyboard(kitty_keyboard)
+        .default_cursor_style(default_cursor_style)
         .cursor_style(cursor_style)
+        .saved_alt_cursor_style(saved_alt_cursor_style)
         .current_title(current_title)
         .title_stack(title_stack)
         .saved_modes(saved_modes)
@@ -959,7 +967,9 @@ mod tests {
         let mut kitty_keyboard = KittyKeyboardState::new();
         let mut pending_output = Vec::new();
         let mut pending_resize = None;
+        let default_cursor_style = CursorStyle::default();
         let mut cursor_style = CursorStyle::default();
+        let mut saved_alt_cursor_style = None;
         let mut bell_pending = false;
         let mut current_title = None;
         let mut title_stack = Vec::new();
@@ -1007,7 +1017,9 @@ mod tests {
                             .kitty_keyboard(&mut kitty_keyboard)
                             .pending_output(&mut pending_output)
                             .pending_resize(&mut pending_resize)
+                            .default_cursor_style(default_cursor_style)
                             .cursor_style(&mut cursor_style)
+                            .saved_alt_cursor_style(&mut saved_alt_cursor_style)
                             .cell_width(8)
                             .cell_height(16)
                             .palette(&mut pal)
@@ -1040,7 +1052,9 @@ mod tests {
                             .on_alt_screen(&mut on_alt_screen)
                             .modes(&mut modes)
                             .kitty_keyboard(&mut kitty_keyboard)
+                            .default_cursor_style(default_cursor_style)
                             .cursor_style(&mut cursor_style)
+                            .saved_alt_cursor_style(&mut saved_alt_cursor_style)
                             .current_title(&mut current_title)
                             .title_stack(&mut title_stack)
                             .saved_modes(&mut saved_modes)

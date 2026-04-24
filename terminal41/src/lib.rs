@@ -456,10 +456,17 @@ pub struct Terminal {
     /// effective flags drive the input encoder in `main.rs`.
     pub kitty_keyboard: KittyKeyboardState,
 
-    /// Cursor shape and blink, settable both via config and at runtime via
-    /// DECSCUSR (`CSI Ps SP q`). The renderer reads this each frame; the
-    /// blink phase itself is owned by the renderer.
+    /// Configured cursor shape and blink used when an app asks for the
+    /// default cursor style.
+    pub default_cursor_style: CursorStyle,
+
+    /// Runtime cursor shape and blink, settable via DECSCUSR (`CSI Ps SP q`)
+    /// and cursor-blink private mode 12. The renderer reads this each frame;
+    /// the blink phase itself is owned by the renderer.
     pub cursor_style: CursorStyle,
+
+    /// Cursor style saved while an application owns the 1049 alternate screen.
+    saved_alt_cursor_style: Option<CursorStyle>,
 
     /// Saved private mode states for XTSAVE/XTRESTORE (CSI ? Ps s / r).
     saved_private_modes: HashMap<mode::PrivateMode, bool>,
@@ -570,7 +577,9 @@ impl Terminal {
             search: SearchState::new(),
             hyperlinks: HyperlinkRegistry::new(),
             kitty_keyboard: KittyKeyboardState::new(),
+            default_cursor_style: CursorStyle::default(),
             cursor_style: CursorStyle::default(),
+            saved_alt_cursor_style: None,
             saved_private_modes: HashMap::new(),
             metadata: TerminalMetadata::default(),
             images: TerminalImageState::default(),
@@ -833,7 +842,9 @@ impl Terminal {
                 &mut self.kitty_keyboard,
                 &mut effects.host_bytes,
                 &mut effects.resize_request,
+                self.default_cursor_style,
                 &mut self.cursor_style,
+                &mut self.saved_alt_cursor_style,
                 self.cell_width,
                 self.cell_height,
                 &mut self.default_status_display,
@@ -863,7 +874,9 @@ impl Terminal {
                     &mut self.on_alt_screen,
                     &mut self.modes,
                     &mut self.kitty_keyboard,
+                    self.default_cursor_style,
                     &mut self.cursor_style,
+                    &mut self.saved_alt_cursor_style,
                     &mut self.metadata.current_title,
                     &mut self.metadata.title_stack,
                     &mut self.saved_private_modes,

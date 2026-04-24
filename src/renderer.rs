@@ -1003,12 +1003,11 @@ impl RenderHost {
             &mut terminal.emoji_compatibility_mode,
             self.config.compatibility.emoji,
         );
-        if let Some(tab) = self.active_tab() {
-            settings::set_default_cursor_style(
-                &mut terminal.cursor_style,
-                tab.terminal.lock().cursor_style,
-            );
-        }
+        settings::set_default_cursor_style(
+            &mut terminal.default_cursor_style,
+            &mut terminal.cursor_style,
+            self.config.cursor_style,
+        );
 
         let terminal_thread = TerminalThread::new();
         let pty_rows = terminal.viewport.rows;
@@ -1142,6 +1141,7 @@ impl RenderHost {
                 stash,
                 viewport,
                 cursor_style,
+                default_cursor_style,
                 palette,
                 base_palette,
                 dec_color,
@@ -1150,7 +1150,11 @@ impl RenderHost {
                 protocol,
                 ..
             } = terminal;
-            settings::set_default_cursor_style(cursor_style, cfg.cursor_style);
+            settings::set_default_cursor_style(
+                default_cursor_style,
+                cursor_style,
+                cfg.cursor_style,
+            );
             settings::set_emoji_compatibility_mode(
                 emoji_compatibility_mode,
                 cfg.compatibility.emoji,
