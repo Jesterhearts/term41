@@ -319,6 +319,11 @@ vsync = "auto"
 # read = "ask"
 # write = "ask"
 
+[security.kitty_graphics]
+# files accepts "ask", "all", "*", "allow", "deny", "no", or "none".
+# It controls kitty graphics t=f/t=t file payload reads.
+# files = "ask"
+
 [security.limits]
 # Byte counts and nesting limits for terminal-owned protocol state.
 # macro_storage_bytes = 6144
@@ -373,6 +378,9 @@ Notes:
 - `security.clipboard.read` and `security.clipboard.write` default to `"ask"`;
   `"allow"`/`"all"`/`"*"` skips the prompt, while `"deny"`/`"no"`/`"none"`
   blocks OSC 52 access.
+- `security.kitty_graphics.files` defaults to `"ask"` for Kitty graphics
+  `t=f`/`t=t` local-file payload reads. Ask mode shows the requested path in
+  the trusted permission modal; deny mode rejects the image request.
 - `[security.limits]` settings live-reload for new protocol actions. They
   control how much macro/UDK/DRCS/kitty graphics state term41 accepts or
   retains.

@@ -35,6 +35,7 @@ use terminal41::ClipboardRequest;
 use terminal41::HostInput;
 use terminal41::HostInputEffects;
 use terminal41::HostMouse;
+use terminal41::KittyFileRequest;
 use terminal41::MouseButton as TermMouseButton;
 use terminal41::MouseEventKind;
 use terminal41::MouseModifiers;
@@ -147,6 +148,11 @@ enum AppEvent {
     ResolveClipboardRequest {
         tab_id: TabId,
         request: ClipboardRequest,
+        decision: PermissionDecision,
+    },
+    ResolveKittyFileRequest {
+        tab_id: TabId,
+        request: KittyFileRequest,
         decision: PermissionDecision,
     },
     DismissRecordingPopup(u64),
@@ -817,6 +823,7 @@ impl WindowHost {
             resize_request,
             bell,
             clipboard_requests,
+            kitty_file_requests,
         } = effects;
         Self::write_host_bytes(target, host_bytes, false);
         if let Some((cols, rows)) = resize_request
@@ -829,6 +836,9 @@ impl WindowHost {
         }
         for request in clipboard_requests {
             self.request_clipboard_permission(tab_id, request);
+        }
+        for request in kitty_file_requests {
+            self.request_kitty_file_permission(tab_id, request);
         }
     }
 
@@ -867,6 +877,43 @@ impl WindowHost {
             terminal41::io::clipboard::apply_clipboard_request(&mut terminal.clipboard, request)
         };
         Self::write_host_bytes(target, host_bytes, false);
+    }
+
+    fn request_kitty_file_permission(
+        &mut self,
+        tab_id: TabId,
+        request: KittyFileRequest,
+    ) {
+        let (response_tx, response_rx) = mpsc::channel();
+        self.request_permission(request.permission_feature(), response_tx);
+        let proxy = self.event_proxy.clone();
+        thread::spawn(move || {
+            let decision = response_rx.recv().unwrap_or(PermissionDecision::Deny);
+            let _ = proxy.send_event(AppEvent::ResolveKittyFileRequest {
+                tab_id,
+                request,
+                decision,
+            });
+        });
+    }
+
+    fn resolve_kitty_file_request(
+        &mut self,
+        tab_id: TabId,
+        request: KittyFileRequest,
+        decision: PermissionDecision,
+    ) {
+        let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+            return;
+        };
+        let effects = {
+            let mut terminal = target.terminal.lock();
+            match decision {
+                PermissionDecision::Allow => terminal.apply_kitty_file_request(request),
+                PermissionDecision::Deny => terminal.deny_kitty_file_request(request),
+            }
+        };
+        Self::write_host_bytes(target, effects.host_bytes, false);
     }
 
     fn handle_focus_event(
@@ -2244,6 +2291,13 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 decision,
             } => {
                 self.resolve_clipboard_request(tab_id, request, decision);
+            }
+            AppEvent::ResolveKittyFileRequest {
+                tab_id,
+                request,
+                decision,
+            } => {
+                self.resolve_kitty_file_request(tab_id, request, decision);
             }
             AppEvent::DismissRecordingPopup(token) => {
                 let dismiss = matches!(

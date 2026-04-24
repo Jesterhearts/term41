@@ -89,9 +89,11 @@ use crate::drcs::DrcsStore;
 pub use crate::feature::ClipboardPermission;
 pub use crate::feature::ClipboardPermissions;
 pub use crate::feature::FeaturePermissions;
+pub use crate::feature::PermissionPolicy;
 pub use crate::feature::ProgramAllowlist;
 pub use crate::feature::TerminalLimits;
 pub(crate) use crate::feature::apply_status_display_mode;
+pub use crate::graphics::KittyFileRequest;
 pub use crate::image::PlacedImage;
 pub use crate::image::VisibleImage;
 pub use crate::io::clipboard::ClipboardRequest;
@@ -228,6 +230,8 @@ pub struct TerminalEffects {
     pub bell: bool,
     /// Host-driven OSC 52 clipboard requests that need app-level approval.
     pub clipboard_requests: Vec<ClipboardRequest>,
+    /// Host-driven kitty graphics file reads that need app-level approval.
+    pub kitty_file_requests: Vec<KittyFileRequest>,
 }
 
 impl TerminalEffects {
@@ -237,6 +241,7 @@ impl TerminalEffects {
             && self.resize_request.is_none()
             && !self.bell
             && self.clipboard_requests.is_empty()
+            && self.kitty_file_requests.is_empty()
     }
 
     /// Merge another batch into this one, preserving the latest resize
@@ -251,6 +256,7 @@ impl TerminalEffects {
         }
         self.bell |= other.bell;
         self.clipboard_requests.extend(other.clipboard_requests);
+        self.kitty_file_requests.extend(other.kitty_file_requests);
     }
 }
 
@@ -924,6 +930,8 @@ impl Terminal {
                     action,
                     &mut self.images.kitty_images,
                     &mut self.images.kitty_chunked,
+                    &mut effects.kitty_file_requests,
+                    self.protocol.feature_permissions.kitty_graphics_files,
                     self.protocol.limits,
                     &mut self.active,
                     &self.viewport,
@@ -993,6 +1001,41 @@ impl Terminal {
 
         self.track_scroll(popped_before);
         self.mark_snapshot_dirty_after(dirty_before, SnapshotDirtyScope::CursorRows);
+    }
+
+    /// Apply one approved kitty graphics file request after the app-level
+    /// permission path has allowed reading the local file.
+    pub fn apply_kitty_file_request(
+        &mut self,
+        request: KittyFileRequest,
+    ) -> TerminalEffects {
+        let dirty_before = self.snapshot_dirty_baseline();
+        let popped_before = self.active.grid.total_popped;
+        let mut effects = TerminalEffects::default();
+        graphics::apply_kitty_file_request(
+            request,
+            &mut self.images.kitty_images,
+            &mut self.active,
+            &self.viewport,
+            &mut self.images.next_image_id,
+            self.cell_height,
+            self.cell_width,
+            &mut effects.host_bytes,
+        );
+        self.track_scroll(popped_before);
+        self.mark_snapshot_dirty_after(dirty_before, SnapshotDirtyScope::All);
+        effects
+    }
+
+    /// Reject one kitty graphics file request after the app-level permission
+    /// path has denied reading the local file.
+    pub fn deny_kitty_file_request(
+        &mut self,
+        request: KittyFileRequest,
+    ) -> TerminalEffects {
+        let mut effects = TerminalEffects::default();
+        graphics::deny_kitty_file_request(request, &mut effects.host_bytes);
+        effects
     }
 
     /// Mark every cached terminal row dirty. UI code should call this after

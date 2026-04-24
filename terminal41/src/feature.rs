@@ -29,6 +29,8 @@ pub struct FeaturePermissions {
     pub udks: ProgramAllowlist,
     /// Permission gates for host-driven OSC 52 clipboard access.
     pub clipboard: ClipboardPermissions,
+    /// Permission gate for host-driven kitty graphics file reads.
+    pub kitty_graphics_files: PermissionPolicy,
 }
 
 /// Runtime resource limits for terminal-owned protocol state.
@@ -105,10 +107,10 @@ pub struct ClipboardPermissions {
     pub write: ClipboardPermission,
 }
 
-/// Permission policy for one clipboard access direction.
+/// Permission policy for one host-mediated local resource access direction.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
 #[serde(rename_all = "lowercase")]
-pub enum ClipboardPermission {
+pub enum PermissionPolicy {
     /// Ask the user for this request.
     #[default]
     Ask,
@@ -119,6 +121,9 @@ pub enum ClipboardPermission {
     #[serde(alias = "no", alias = "none")]
     Deny,
 }
+
+/// Permission policy for one clipboard access direction.
+pub type ClipboardPermission = PermissionPolicy;
 
 pub(crate) fn macro_feature_enabled(permissions: &FeaturePermissions) -> bool {
     permissions.macros.allow()

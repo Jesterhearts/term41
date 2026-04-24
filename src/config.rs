@@ -13,6 +13,7 @@ use terminal41::CursorShape;
 use terminal41::CursorStyle;
 use terminal41::EmojiCompatibilityMode;
 use terminal41::FeaturePermissions;
+use terminal41::PermissionPolicy;
 use terminal41::ProgramAllowlist;
 use terminal41::StatusDisplayKind;
 use terminal41::TerminalLimits;
@@ -157,6 +158,8 @@ struct SecuritySettings {
     #[serde(default)]
     clipboard: Option<ClipboardPermissionsConfig>,
     #[serde(default)]
+    kitty_graphics: Option<KittyGraphicsPermissionsConfig>,
+    #[serde(default)]
     limits: Option<LimitSettings>,
     #[serde(default)]
     scripts: Option<BTreeMap<String, ScriptPermissions>>,
@@ -170,6 +173,13 @@ struct ClipboardPermissionsConfig {
     #[serde(deserialize_with = "clipboard_permission_opt")]
     #[serde(default)]
     write: Option<ClipboardPermission>,
+}
+
+#[derive(Deserialize, Default)]
+struct KittyGraphicsPermissionsConfig {
+    #[serde(deserialize_with = "permission_policy_opt")]
+    #[serde(default)]
+    files: Option<PermissionPolicy>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -566,11 +576,13 @@ fn parse_config(
     let SecuritySettings {
         features,
         clipboard,
+        kitty_graphics,
         limits,
         scripts,
     } = file.security.unwrap_or_default();
     let features = features.unwrap_or_default();
     let clipboard = clipboard.unwrap_or_default();
+    let kitty_graphics = kitty_graphics.unwrap_or_default();
     let limits = build_limits(limits);
     let compatibility = build_compatibility(file.compatibility);
     let new_tab_text = file.new_tab_text.unwrap_or('⮒'.to_smolstr());
@@ -599,6 +611,7 @@ fn parse_config(
                 read: clipboard.read.unwrap_or_default(),
                 write: clipboard.write.unwrap_or_default(),
             },
+            kitty_graphics_files: kitty_graphics.files.unwrap_or_default(),
         },
         limits,
         script_permissions: scripts.unwrap_or_default(),
@@ -921,6 +934,19 @@ where
     }
 }
 
+fn permission_policy_opt<'de, D>(deserializer: D) -> Result<Option<PermissionPolicy>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<PermissionPolicy>::deserialize(deserializer) {
+        Ok(opt) => Ok(opt),
+        Err(e) => {
+            warn!("failed to parse permission policy in config: {e}");
+            Ok(None)
+        }
+    }
+}
+
 fn power_preference_opt<'de, D>(deserializer: D) -> Result<Option<PowerPreference>, D::Error>
 where
     D: serde::Deserializer<'de>,
@@ -1098,6 +1124,36 @@ mod tests {
             .clipboard;
         assert_eq!(none.read, ClipboardPermission::Deny);
         assert_eq!(none.write, ClipboardPermission::Ask);
+    }
+
+    #[test]
+    fn kitty_graphics_file_permission_defaults_to_ask() {
+        assert_eq!(
+            parse("").feature_permissions.kitty_graphics_files,
+            PermissionPolicy::Ask
+        );
+    }
+
+    #[test]
+    fn kitty_graphics_file_permission_accepts_modes() {
+        assert_eq!(
+            parse("[security.kitty_graphics]\nfiles = \"allow\"\n")
+                .feature_permissions
+                .kitty_graphics_files,
+            PermissionPolicy::Allow
+        );
+        assert_eq!(
+            parse("[security.kitty_graphics]\nfiles = \"*\"\n")
+                .feature_permissions
+                .kitty_graphics_files,
+            PermissionPolicy::Allow
+        );
+        assert_eq!(
+            parse("[security.kitty_graphics]\nfiles = \"deny\"\n")
+                .feature_permissions
+                .kitty_graphics_files,
+            PermissionPolicy::Deny
+        );
     }
 
     #[test]

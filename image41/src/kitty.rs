@@ -5,8 +5,12 @@
 //! pixels or PNG), and produces a [`DecodedImage`] ready for the atlas.
 
 use std::collections::HashMap;
+use std::fs::File;
 use std::io::Read;
+use std::io::Seek;
+use std::io::SeekFrom;
 use std::path::Path;
+use std::path::PathBuf;
 
 use crate::DecodedImage;
 use crate::decode_png;
@@ -252,27 +256,49 @@ pub fn decode_file_payload(
     cmd: &KittyCommand,
     raw_b64: &[u8],
     delete: bool,
+    max_bytes: usize,
 ) -> Option<DecodedImage> {
+    let path = file_payload_path(raw_b64)?;
+    decode_file_payload_from_path(cmd, &path, delete, max_bytes)
+}
+
+pub fn file_payload_path(raw_b64: &[u8]) -> Option<PathBuf> {
     use base64::Engine;
     let engine = base64::engine::general_purpose::STANDARD;
 
     let path_bytes = engine.decode(raw_b64).ok()?;
     let path_str = std::str::from_utf8(&path_bytes).ok()?;
-    let path = Path::new(path_str);
+    Some(PathBuf::from(path_str))
+}
+
+pub fn file_payload_path_allowed(
+    path: &Path,
+    delete: bool,
+) -> bool {
+    if !delete {
+        return true;
+    }
 
     // Security: for temp files, only allow paths containing the marker and
     // residing under known temp directories.
-    if delete {
-        let canonical = path.to_str().unwrap_or("");
-        let is_temp = canonical.starts_with("/tmp/")
-            || canonical.starts_with("/dev/shm/")
-            || canonical.starts_with(std::env::temp_dir().to_str().unwrap_or("/tmp/"));
-        if !is_temp || !canonical.contains("tty-graphics-protocol") {
-            return None;
-        }
+    let canonical = path.to_str().unwrap_or("");
+    let is_temp = canonical.starts_with("/tmp/")
+        || canonical.starts_with("/dev/shm/")
+        || canonical.starts_with(std::env::temp_dir().to_str().unwrap_or("/tmp/"));
+    is_temp && canonical.contains("tty-graphics-protocol")
+}
+
+pub fn decode_file_payload_from_path(
+    cmd: &KittyCommand,
+    path: &Path,
+    delete: bool,
+    max_bytes: usize,
+) -> Option<DecodedImage> {
+    if !file_payload_path_allowed(path, delete) {
+        return None;
     }
 
-    let file_data = read_ranged_file(path, cmd)?;
+    let file_data = read_ranged_file(path, cmd, max_bytes)?;
 
     if delete {
         let _ = std::fs::remove_file(path);
@@ -305,18 +331,33 @@ fn decode_data(
 fn read_ranged_file(
     path: &Path,
     cmd: &KittyCommand,
+    max_bytes: usize,
 ) -> Option<Vec<u8>> {
-    let data = std::fs::read(path).ok()?;
-    let start = cmd.data_offset as usize;
-    if start > data.len() {
+    let mut file = File::open(path).ok()?;
+    let metadata = file.metadata().ok()?;
+    if !metadata.is_file() {
         return None;
     }
-    let end = if cmd.data_size == 0 {
-        data.len()
+
+    let data_len = metadata.len();
+    let start = cmd.data_offset as u64;
+    if start > data_len {
+        return None;
+    }
+
+    let requested_len = if cmd.data_size == 0 {
+        data_len - start
     } else {
-        start.saturating_add(cmd.data_size as usize).min(data.len())
+        u64::from(cmd.data_size).min(data_len - start)
     };
-    Some(data[start..end].to_vec())
+    if requested_len > max_bytes as u64 {
+        return None;
+    }
+
+    file.seek(SeekFrom::Start(start)).ok()?;
+    let mut data = Vec::with_capacity(requested_len as usize);
+    file.take(requested_len).read_to_end(&mut data).ok()?;
+    Some(data)
 }
 
 fn decode_rgb(

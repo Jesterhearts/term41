@@ -2,6 +2,7 @@ use std::time::Instant;
 
 use vte_mode41::C1Mode;
 
+use crate::PermissionPolicy;
 use crate::PlacedImage;
 use crate::Screen;
 use crate::TerminalLimits;
@@ -13,6 +14,8 @@ pub(crate) fn handle_kitty_graphics(
     data: &[u8],
     store: &mut image41::kitty::KittyImageStore,
     chunked: &mut image41::kitty::ChunkedTransmission,
+    file_requests: &mut Vec<KittyFileRequest>,
+    file_permission: PermissionPolicy,
     limits: TerminalLimits,
     screen: &mut Screen,
     viewport: &Viewport,
@@ -53,7 +56,20 @@ pub(crate) fn handle_kitty_graphics(
     };
 
     match cmd.action {
-        b'q' => handle_kitty_query(&cmd, c1_mode, pending_output),
+        b'q' => handle_kitty_query(
+            &cmd,
+            store,
+            screen,
+            viewport,
+            next_image_id,
+            cell_height,
+            cell_width,
+            c1_mode,
+            pending_output,
+            limits,
+            file_requests,
+            file_permission,
+        ),
         b'T' => handle_kitty_transmit_display(
             &cmd,
             store,
@@ -65,8 +81,23 @@ pub(crate) fn handle_kitty_graphics(
             c1_mode,
             pending_output,
             limits,
+            file_requests,
+            file_permission,
         ),
-        b't' => handle_kitty_transmit(&cmd, store, c1_mode, pending_output, limits),
+        b't' => handle_kitty_transmit(
+            &cmd,
+            store,
+            screen,
+            viewport,
+            next_image_id,
+            cell_height,
+            cell_width,
+            c1_mode,
+            pending_output,
+            limits,
+            file_requests,
+            file_permission,
+        ),
         b'p' => handle_kitty_place(
             &cmd,
             store,
@@ -99,11 +130,118 @@ pub(crate) fn handle_kitty_graphics(
     }
 }
 
-fn decode_kitty_image(cmd: &image41::kitty::KittyCommand) -> Option<image41::DecodedImage> {
+#[derive(Debug, Clone)]
+pub struct KittyFileRequest {
+    cmd: image41::kitty::KittyCommand,
+    path: std::path::PathBuf,
+    delete: bool,
+    action: KittyFileAction,
+    c1_mode: C1Mode,
+    limits: TerminalLimits,
+}
+
+impl KittyFileRequest {
+    pub fn permission_feature(&self) -> String {
+        let file_name = self
+            .path
+            .file_name()
+            .and_then(|name| name.to_str())
+            .unwrap_or("file");
+        format!("kitty file {file_name} ({})", self.path.display())
+    }
+}
+
+#[derive(Debug, Clone)]
+enum KittyFileAction {
+    Query,
+    Transmit,
+    TransmitDisplay {
+        row: usize,
+        col: u32,
+        move_cursor: bool,
+    },
+}
+
+fn decode_kitty_image(
+    cmd: &image41::kitty::KittyCommand,
+    limits: TerminalLimits,
+) -> Option<image41::DecodedImage> {
     match cmd.transmission {
-        b'f' => image41::kitty::decode_file_payload(cmd, &cmd.payload, false),
-        b't' => image41::kitty::decode_file_payload(cmd, &cmd.payload, true),
+        b'f' => image41::kitty::decode_file_payload(
+            cmd,
+            &cmd.payload,
+            false,
+            limits.kitty_graphics_storage_bytes,
+        ),
+        b't' => image41::kitty::decode_file_payload(
+            cmd,
+            &cmd.payload,
+            true,
+            limits.kitty_graphics_storage_bytes,
+        ),
         _ => image41::kitty::decode_payload(cmd, &cmd.payload),
+    }
+}
+
+fn make_file_request(
+    cmd: &image41::kitty::KittyCommand,
+    action: KittyFileAction,
+    c1_mode: C1Mode,
+    limits: TerminalLimits,
+) -> Result<Option<KittyFileRequest>, &'static str> {
+    let delete = match cmd.transmission {
+        b'f' => false,
+        b't' => true,
+        _ => return Ok(None),
+    };
+    let Some(path) = image41::kitty::file_payload_path(&cmd.payload) else {
+        return Err("EINVAL");
+    };
+    if !image41::kitty::file_payload_path_allowed(&path, delete) {
+        return Err("EINVAL");
+    }
+    Ok(Some(KittyFileRequest {
+        cmd: cmd.clone(),
+        path,
+        delete,
+        action,
+        c1_mode,
+        limits,
+    }))
+}
+
+fn handle_file_request(
+    request: KittyFileRequest,
+    permission: PermissionPolicy,
+    store: &mut image41::kitty::KittyImageStore,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
+    pending_output: &mut Vec<u8>,
+    file_requests: &mut Vec<KittyFileRequest>,
+) {
+    match permission {
+        PermissionPolicy::Allow => apply_kitty_file_request(
+            request,
+            store,
+            screen,
+            viewport,
+            next_image_id,
+            cell_height,
+            cell_width,
+            pending_output,
+        ),
+        PermissionPolicy::Ask => file_requests.push(request),
+        PermissionPolicy::Deny => send_kitty_response(
+            &request.cmd,
+            response_image_id(&request.cmd),
+            false,
+            "EPERM",
+            request.c1_mode,
+            pending_output,
+        ),
     }
 }
 
@@ -137,6 +275,110 @@ fn store_kitty_image(
         .map_err(|_| "ENOSPC")
 }
 
+pub(crate) fn apply_kitty_file_request(
+    request: KittyFileRequest,
+    store: &mut image41::kitty::KittyImageStore,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
+    pending_output: &mut Vec<u8>,
+) {
+    let cmd = request.cmd;
+    let decoded = image41::kitty::decode_file_payload_from_path(
+        &cmd,
+        &request.path,
+        request.delete,
+        request.limits.kitty_graphics_storage_bytes,
+    );
+    match (request.action, decoded) {
+        (KittyFileAction::Query, Some(_)) => {
+            send_kitty_response(
+                &cmd,
+                response_image_id(&cmd),
+                true,
+                "",
+                request.c1_mode,
+                pending_output,
+            );
+        }
+        (KittyFileAction::Query, None) => {
+            send_kitty_response(
+                &cmd,
+                response_image_id(&cmd),
+                false,
+                "EINVAL",
+                request.c1_mode,
+                pending_output,
+            );
+        }
+        (KittyFileAction::Transmit, Some(image)) => {
+            let id = store.resolve_transmission_id(&cmd);
+            match store_kitty_image(store, id, image, request.limits) {
+                Ok(()) => send_kitty_response(&cmd, id, true, "", request.c1_mode, pending_output),
+                Err(message) => {
+                    send_kitty_response(&cmd, id, false, message, request.c1_mode, pending_output)
+                }
+            }
+        }
+        (KittyFileAction::Transmit, None) => {
+            let id = store.resolve_transmission_id(&cmd);
+            send_kitty_response(&cmd, id, false, "EINVAL", request.c1_mode, pending_output);
+        }
+        (
+            KittyFileAction::TransmitDisplay {
+                row,
+                col,
+                move_cursor,
+            },
+            Some(image),
+        ) => {
+            let id = store.resolve_transmission_id(&cmd);
+            if let Err(message) = store_kitty_image(store, id, image.clone(), request.limits) {
+                send_kitty_response(&cmd, id, false, message, request.c1_mode, pending_output);
+                return;
+            }
+            match place_kitty_image_at(
+                image,
+                &cmd,
+                id,
+                screen,
+                viewport,
+                next_image_id,
+                cell_height,
+                cell_width,
+                row,
+                col,
+                move_cursor,
+            ) {
+                Ok(()) => send_kitty_response(&cmd, id, true, "", request.c1_mode, pending_output),
+                Err(message) => {
+                    send_kitty_response(&cmd, id, false, message, request.c1_mode, pending_output)
+                }
+            }
+        }
+        (KittyFileAction::TransmitDisplay { .. }, None) => {
+            let id = store.resolve_transmission_id(&cmd);
+            send_kitty_response(&cmd, id, false, "EINVAL", request.c1_mode, pending_output);
+        }
+    }
+}
+
+pub(crate) fn deny_kitty_file_request(
+    request: KittyFileRequest,
+    pending_output: &mut Vec<u8>,
+) {
+    send_kitty_response(
+        &request.cmd,
+        response_image_id(&request.cmd),
+        false,
+        "EPERM",
+        request.c1_mode,
+        pending_output,
+    );
+}
+
 fn place_kitty_image(
     image: image41::DecodedImage,
     cmd: &image41::kitty::KittyCommand,
@@ -147,6 +389,36 @@ fn place_kitty_image(
     cell_height: u32,
     cell_width: u32,
 ) -> Result<(), &'static str> {
+    let (row, col, move_cursor) = placement_anchor(cmd, screen, viewport)?;
+    place_kitty_image_at(
+        image,
+        cmd,
+        kitty_image_id,
+        screen,
+        viewport,
+        next_image_id,
+        cell_height,
+        cell_width,
+        row,
+        col,
+        move_cursor && !cmd.no_move_cursor,
+    )
+}
+
+#[allow(clippy::too_many_arguments)]
+fn place_kitty_image_at(
+    image: image41::DecodedImage,
+    cmd: &image41::kitty::KittyCommand,
+    kitty_image_id: u32,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
+    row: usize,
+    col: u32,
+    move_cursor: bool,
+) -> Result<(), &'static str> {
     if cmd.virtual_placement {
         return Err("ENOTSUP");
     }
@@ -156,7 +428,6 @@ fn place_kitty_image(
     let id = *next_image_id;
     *next_image_id += 1;
 
-    let (row, col, move_cursor) = placement_anchor(cmd, screen, viewport)?;
     let (display_width, display_height) = match (cmd.columns > 0, cmd.rows > 0) {
         (true, true) => (cmd.columns * cell_width, cmd.rows * cell_height),
         (true, false) => {
@@ -201,7 +472,8 @@ fn place_kitty_image(
         },
     );
 
-    if move_cursor && !cmd.no_move_cursor {
+    if move_cursor && screen::active_row_index(screen, viewport) == row && screen.cursor.col == col
+    {
         let advance_rows = image_rows;
         for _ in 0..advance_rows {
             screen.cursor.row += 1;
@@ -276,8 +548,17 @@ fn send_kitty_response(
 
 fn handle_kitty_query(
     cmd: &image41::kitty::KittyCommand,
+    store: &mut image41::kitty::KittyImageStore,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
+    limits: TerminalLimits,
+    file_requests: &mut Vec<KittyFileRequest>,
+    file_permission: PermissionPolicy,
 ) {
     if command_has_conflicting_ids(cmd) {
         send_kitty_response(
@@ -295,7 +576,29 @@ fn handle_kitty_query(
         send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
         return;
     }
-    match decode_kitty_image(cmd) {
+    match make_file_request(cmd, KittyFileAction::Query, c1_mode, limits) {
+        Ok(Some(request)) => {
+            handle_file_request(
+                request,
+                file_permission,
+                store,
+                screen,
+                viewport,
+                next_image_id,
+                cell_height,
+                cell_width,
+                pending_output,
+                file_requests,
+            );
+            return;
+        }
+        Ok(None) => {}
+        Err(message) => {
+            send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
+            return;
+        }
+    }
+    match decode_kitty_image(cmd, limits) {
         Some(_) => send_kitty_response(cmd, id, true, "", c1_mode, pending_output),
         None => send_kitty_response(cmd, id, false, "EINVAL", c1_mode, pending_output),
     }
@@ -304,9 +607,16 @@ fn handle_kitty_query(
 fn handle_kitty_transmit(
     cmd: &image41::kitty::KittyCommand,
     store: &mut image41::kitty::KittyImageStore,
+    screen: &mut Screen,
+    viewport: &Viewport,
+    next_image_id: &mut u64,
+    cell_height: u32,
+    cell_width: u32,
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
     limits: TerminalLimits,
+    file_requests: &mut Vec<KittyFileRequest>,
+    file_permission: PermissionPolicy,
 ) {
     if command_has_conflicting_ids(cmd) {
         send_kitty_response(
@@ -330,8 +640,37 @@ fn handle_kitty_transmit(
         );
         return;
     }
+    match make_file_request(cmd, KittyFileAction::Transmit, c1_mode, limits) {
+        Ok(Some(request)) => {
+            handle_file_request(
+                request,
+                file_permission,
+                store,
+                screen,
+                viewport,
+                next_image_id,
+                cell_height,
+                cell_width,
+                pending_output,
+                file_requests,
+            );
+            return;
+        }
+        Ok(None) => {}
+        Err(message) => {
+            send_kitty_response(
+                cmd,
+                response_image_id(cmd),
+                false,
+                message,
+                c1_mode,
+                pending_output,
+            );
+            return;
+        }
+    }
     let id = store.resolve_transmission_id(cmd);
-    match decode_kitty_image(cmd) {
+    match decode_kitty_image(cmd, limits) {
         Some(image) => {
             if let Err(message) = store_kitty_image(store, id, image, limits) {
                 send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
@@ -354,6 +693,8 @@ fn handle_kitty_transmit_display(
     c1_mode: C1Mode,
     pending_output: &mut Vec<u8>,
     limits: TerminalLimits,
+    file_requests: &mut Vec<KittyFileRequest>,
+    file_permission: PermissionPolicy,
 ) {
     if command_has_conflicting_ids(cmd) {
         send_kitty_response(
@@ -377,8 +718,48 @@ fn handle_kitty_transmit_display(
         );
         return;
     }
+    match placement_anchor(cmd, screen, viewport).and_then(|(row, col, move_cursor)| {
+        make_file_request(
+            cmd,
+            KittyFileAction::TransmitDisplay {
+                row,
+                col,
+                move_cursor: move_cursor && !cmd.no_move_cursor,
+            },
+            c1_mode,
+            limits,
+        )
+    }) {
+        Ok(Some(request)) => {
+            handle_file_request(
+                request,
+                file_permission,
+                store,
+                screen,
+                viewport,
+                next_image_id,
+                cell_height,
+                cell_width,
+                pending_output,
+                file_requests,
+            );
+            return;
+        }
+        Ok(None) => {}
+        Err(message) => {
+            send_kitty_response(
+                cmd,
+                response_image_id(cmd),
+                false,
+                message,
+                c1_mode,
+                pending_output,
+            );
+            return;
+        }
+    }
     let id = store.resolve_transmission_id(cmd);
-    match decode_kitty_image(cmd) {
+    match decode_kitty_image(cmd, limits) {
         Some(image) => {
             if let Err(message) = store_kitty_image(store, id, image.clone(), limits) {
                 send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
@@ -740,9 +1121,28 @@ fn place_iterm_image(
 
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
+    use crate::PermissionPolicy;
     use crate::TerminalLimits;
     use crate::settings;
     use crate::test_support::TestTerm;
+
+    fn write_temp_payload(
+        name: &str,
+        bytes: &[u8],
+    ) -> std::path::PathBuf {
+        let path =
+            std::env::temp_dir().join(format!("term41-kitty-test-{}-{name}", std::process::id()));
+        std::fs::write(&path, bytes).expect("write test payload");
+        path
+    }
+
+    fn kitty_file_query(path: &std::path::Path) -> Vec<u8> {
+        let encoded_path = BASE64.encode(path.to_string_lossy().as_bytes());
+        format!("\x1b_Ga=q,t=f,f=32,s=1,v=1,i=7;{encoded_path}\x1b\\").into_bytes()
+    }
 
     #[test]
     fn kitty_shared_memory_query_is_explicitly_unsupported() {
@@ -780,5 +1180,97 @@ mod tests {
         term.process(b"\x1b_Ga=t,i=7;AAAA\x1b\\");
 
         assert_eq!(term.take_pending_output(), b"\x1b_Gi=7;ENOSPC\x1b\\");
+    }
+
+    #[test]
+    fn kitty_file_payload_default_asks_for_permission() {
+        let path = write_temp_payload("ask.rgba", &[1, 2, 3, 4]);
+        let mut term = TestTerm::new_80x24();
+
+        term.process(&kitty_file_query(&path));
+
+        assert!(term.take_pending_output().is_empty());
+        assert_eq!(term.effects.kitty_file_requests.len(), 1);
+        assert!(
+            term.effects.kitty_file_requests[0]
+                .permission_feature()
+                .contains("ask.rgba")
+        );
+
+        let request = term.effects.kitty_file_requests.pop().expect("request");
+        let effects = term.inner.apply_kitty_file_request(request);
+        term.effects.extend(effects);
+        assert_eq!(term.take_pending_output(), b"\x1b_Gi=7;OK\x1b\\");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn kitty_file_payload_allow_reads_without_prompt() {
+        let path = write_temp_payload("allow.rgba", &[1, 2, 3, 4]);
+        let mut term = TestTerm::new_80x24();
+        let mut permissions = term.inner.protocol.feature_permissions.clone();
+        permissions.kitty_graphics_files = PermissionPolicy::Allow;
+        settings::set_feature_permissions(&mut term.inner.protocol, permissions);
+
+        term.process(&kitty_file_query(&path));
+
+        assert!(term.effects.kitty_file_requests.is_empty());
+        assert_eq!(term.take_pending_output(), b"\x1b_Gi=7;OK\x1b\\");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn kitty_file_payload_deny_replies_permission_error() {
+        let path = write_temp_payload("deny.rgba", &[1, 2, 3, 4]);
+        let mut term = TestTerm::new_80x24();
+        let mut permissions = term.inner.protocol.feature_permissions.clone();
+        permissions.kitty_graphics_files = PermissionPolicy::Deny;
+        settings::set_feature_permissions(&mut term.inner.protocol, permissions);
+
+        term.process(&kitty_file_query(&path));
+
+        assert!(term.effects.kitty_file_requests.is_empty());
+        assert_eq!(term.take_pending_output(), b"\x1b_Gi=7;EPERM\x1b\\");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn kitty_file_payload_prompt_denial_replies_permission_error() {
+        let path = write_temp_payload("modal-deny.rgba", &[1, 2, 3, 4]);
+        let mut term = TestTerm::new_80x24();
+
+        term.process(&kitty_file_query(&path));
+        let request = term.effects.kitty_file_requests.pop().expect("request");
+        let effects = term.inner.deny_kitty_file_request(request);
+        term.effects.extend(effects);
+
+        assert_eq!(term.take_pending_output(), b"\x1b_Gi=7;EPERM\x1b\\");
+
+        let _ = std::fs::remove_file(path);
+    }
+
+    #[test]
+    fn kitty_file_payload_obeys_payload_byte_limit_after_approval() {
+        let path = write_temp_payload("limit.rgba", &[1, 2, 3, 4]);
+        let mut term = TestTerm::new_80x24();
+        settings::set_terminal_limits(
+            &mut term.inner.protocol,
+            TerminalLimits {
+                kitty_graphics_storage_bytes: 3,
+                ..TerminalLimits::default()
+            },
+        );
+
+        term.process(&kitty_file_query(&path));
+        let request = term.effects.kitty_file_requests.pop().expect("request");
+        let effects = term.inner.apply_kitty_file_request(request);
+        term.effects.extend(effects);
+
+        assert_eq!(term.take_pending_output(), b"\x1b_Gi=7;EINVAL\x1b\\");
+
+        let _ = std::fs::remove_file(path);
     }
 }
