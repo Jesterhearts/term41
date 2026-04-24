@@ -164,7 +164,7 @@ impl GlyphAtlas {
             bind_group,
             bind_group_layout,
             cache: Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
-            packer: ShelfPacker::new(ATLAS_SIZE, 1),
+            packer: ShelfPacker::new(ATLAS_SIZE),
         }
     }
 
@@ -172,7 +172,7 @@ impl GlyphAtlas {
     /// so every glyph is re-rasterized at the new resolution.
     pub fn clear(&mut self) {
         self.cache = Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap());
-        self.packer = ShelfPacker::new(ATLAS_SIZE, 1);
+        self.packer = ShelfPacker::new(ATLAS_SIZE);
     }
 
     pub fn bind_group(&self) -> &wgpu::BindGroup {

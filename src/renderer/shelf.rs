@@ -5,22 +5,18 @@
 //! matches the first allocation on them; taller rectangles open new shelves.
 //! Freed sub-rectangles within a shelf go on a per-shelf free list so that
 //! space vacated by LRU eviction can be recycled.
-//!
-//! The packer supports multiple 2D layers (e.g. a texture array); a
-//! single-layer atlas just constructs it with `layers = 1`.
 
 /// A shelf-based rectangle packer.
 pub struct ShelfPacker {
     size: u32,
     shelves: Vec<Shelf>,
-    layers: Vec<Layer>,
+    next_shelf_y: u32,
 }
 
 /// The region granted for one allocation. Carries the shelf index so
 /// [`ShelfPacker::free`] can return the region to the shelf's free list.
 #[derive(Clone, Copy)]
 pub struct Allocation {
-    pub layer: u32,
     pub x: u32,
     pub y: u32,
     pub width: u32,
@@ -29,7 +25,6 @@ pub struct Allocation {
 }
 
 struct Shelf {
-    layer: u32,
     y: u32,
     height: u32,
     cursor_x: u32,
@@ -38,25 +33,17 @@ struct Shelf {
     free: Vec<(u32, u32)>,
 }
 
-struct Layer {
-    next_shelf_y: u32,
-}
-
 impl ShelfPacker {
-    pub fn new(
-        size: u32,
-        layers: u32,
-    ) -> Self {
+    pub fn new(size: u32) -> Self {
         Self {
             size,
             shelves: Vec::new(),
-            layers: (0..layers).map(|_| Layer { next_shelf_y: 0 }).collect(),
+            next_shelf_y: 0,
         }
     }
 
     /// Try to allocate a `width × height` rectangle. Returns `None` if the
-    /// rectangle is larger than a single layer, or if no layer has room for
-    /// a new shelf and no existing shelf can fit it.
+    /// rectangle is larger than the atlas, or if no shelf can fit it.
     pub fn allocate(
         &mut self,
         width: u32,
@@ -72,7 +59,7 @@ impl ShelfPacker {
 
         open_new_shelf(
             &mut self.shelves,
-            &mut self.layers,
+            &mut self.next_shelf_y,
             self.size,
             width,
             height,
@@ -108,7 +95,6 @@ fn pack_in_existing_shelf(
                 shelf.free.push((fx + width, fw - width));
             }
             return Some(Allocation {
-                layer: shelf.layer,
                 x: fx,
                 y: shelf.y,
                 width,
@@ -120,7 +106,6 @@ fn pack_in_existing_shelf(
             let x = shelf.cursor_x;
             shelf.cursor_x += width;
             return Some(Allocation {
-                layer: shelf.layer,
                 x,
                 y: shelf.y,
                 width,
@@ -134,35 +119,31 @@ fn pack_in_existing_shelf(
 
 fn open_new_shelf(
     shelves: &mut Vec<Shelf>,
-    layers: &mut [Layer],
+    next_shelf_y: &mut u32,
     size: u32,
     width: u32,
     height: u32,
 ) -> Option<Allocation> {
-    for (layer_idx, layer) in layers.iter_mut().enumerate() {
-        if layer.next_shelf_y + height > size {
-            continue;
-        }
-        let idx = shelves.len();
-        let y = layer.next_shelf_y;
-        shelves.push(Shelf {
-            layer: layer_idx as u32,
-            y,
-            height,
-            cursor_x: width,
-            free: Vec::new(),
-        });
-        layer.next_shelf_y += height;
-        return Some(Allocation {
-            layer: layer_idx as u32,
-            x: 0,
-            y,
-            width,
-            height,
-            shelf_idx: idx,
-        });
+    if *next_shelf_y + height > size {
+        return None;
     }
-    None
+
+    let idx = shelves.len();
+    let y = *next_shelf_y;
+    shelves.push(Shelf {
+        y,
+        height,
+        cursor_x: width,
+        free: Vec::new(),
+    });
+    *next_shelf_y += height;
+    Some(Allocation {
+        x: 0,
+        y,
+        width,
+        height,
+        shelf_idx: idx,
+    })
 }
 
 #[cfg(test)]
@@ -171,14 +152,14 @@ mod tests {
 
     #[test]
     fn first_shelf_opens_at_y_zero() {
-        let mut packer = ShelfPacker::new(1024, 1);
+        let mut packer = ShelfPacker::new(1024);
         let alloc = packer.allocate(10, 20).unwrap();
-        assert_eq!((alloc.layer, alloc.x, alloc.y), (0, 0, 0));
+        assert_eq!((alloc.x, alloc.y), (0, 0));
     }
 
     #[test]
     fn same_height_rects_share_shelf() {
-        let mut packer = ShelfPacker::new(1024, 1);
+        let mut packer = ShelfPacker::new(1024);
         let a = packer.allocate(10, 20).unwrap();
         let b = packer.allocate(15, 20).unwrap();
         assert_eq!(a.shelf_idx, b.shelf_idx);
@@ -187,7 +168,7 @@ mod tests {
 
     #[test]
     fn taller_rect_opens_new_shelf() {
-        let mut packer = ShelfPacker::new(1024, 1);
+        let mut packer = ShelfPacker::new(1024);
         let _ = packer.allocate(10, 20).unwrap();
         let tall = packer.allocate(10, 30).unwrap();
         assert_eq!(tall.y, 20);
@@ -195,40 +176,32 @@ mod tests {
 
     #[test]
     fn oversized_rect_returns_none() {
-        let mut packer = ShelfPacker::new(256, 1);
+        let mut packer = ShelfPacker::new(256);
         assert!(packer.allocate(300, 10).is_none());
         assert!(packer.allocate(10, 300).is_none());
     }
 
     #[test]
-    fn exhausted_single_layer_returns_none() {
-        let mut packer = ShelfPacker::new(256, 1);
+    fn exhausted_packer_returns_none() {
+        let mut packer = ShelfPacker::new(256);
         // Fill the whole atlas with one shelf that covers every pixel.
         let _ = packer.allocate(256, 256).unwrap();
         assert!(packer.allocate(1, 1).is_none());
     }
 
     #[test]
-    fn spills_to_next_layer() {
-        let mut packer = ShelfPacker::new(256, 2);
-        let _ = packer.allocate(256, 256).unwrap();
-        let next = packer.allocate(10, 10).unwrap();
-        assert_eq!(next.layer, 1);
-    }
-
-    #[test]
     fn free_region_is_reused() {
-        let mut packer = ShelfPacker::new(1024, 1);
+        let mut packer = ShelfPacker::new(1024);
         let a = packer.allocate(10, 20).unwrap();
         let _b = packer.allocate(10, 20).unwrap();
         packer.free(&a);
         let c = packer.allocate(10, 20).unwrap();
-        assert_eq!((c.layer, c.x, c.y), (a.layer, a.x, a.y));
+        assert_eq!((c.x, c.y), (a.x, a.y));
     }
 
     #[test]
     fn free_slot_wider_than_request_leaves_remainder() {
-        let mut packer = ShelfPacker::new(1024, 1);
+        let mut packer = ShelfPacker::new(1024);
         let a = packer.allocate(30, 20).unwrap();
         let _b = packer.allocate(10, 20).unwrap();
         packer.free(&a);

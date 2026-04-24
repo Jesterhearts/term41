@@ -77,13 +77,12 @@ struct LabelGlyph {
     y_offset: f32,
 }
 
-/// Packed vertex for image quads: position + UV + atlas layer.
+/// Packed vertex for image quads: position + UV.
 #[repr(C)]
 #[derive(Clone, Copy, bytemuck::Pod, bytemuck::Zeroable)]
 struct ImageVertex {
     pos: [f32; 2],
-    /// xy = normalized UV coords, z = atlas layer index.
-    uv_layer: [f32; 3],
+    uv: [f32; 2],
 }
 
 fn pack_color(
@@ -376,8 +375,34 @@ struct PopupClip {
 
 #[derive(Default)]
 struct ImageGeometry {
+    batches: Vec<ImageDrawBatch>,
+}
+
+#[derive(Default)]
+struct ImageDrawBatch {
+    page_index: usize,
     vertices: Vec<ImageVertex>,
     indices: Vec<u32>,
+}
+
+fn image_batch_for_page(
+    geometry: &mut ImageGeometry,
+    page_index: usize,
+) -> &mut ImageDrawBatch {
+    if geometry
+        .batches
+        .last()
+        .is_some_and(|batch| batch.page_index == page_index)
+    {
+        return geometry.batches.last_mut().unwrap();
+    }
+
+    geometry.batches.push(ImageDrawBatch {
+        page_index,
+        vertices: Vec::new(),
+        indices: Vec::new(),
+    });
+    geometry.batches.last_mut().unwrap()
 }
 
 struct RenderGeometry {
@@ -1056,6 +1081,7 @@ impl Renderer {
                 continue;
             }
             let entry = match self.image_atlas.ensure_cached(
+                &self.device,
                 &self.queue,
                 vis.id,
                 vis.frame_index,
@@ -1090,27 +1116,27 @@ impl Renderer {
                 let v0 = a.y as f32 / IMAGE_ATLAS_SIZE as f32;
                 let u1 = (a.x + a.width) as f32 / IMAGE_ATLAS_SIZE as f32;
                 let v1 = (a.y + a.height) as f32 / IMAGE_ATLAS_SIZE as f32;
-                let layer = a.layer as f32;
-                let ii = geometry.vertices.len() as u32;
-                geometry.vertices.extend_from_slice(&[
+                let batch = image_batch_for_page(&mut geometry, tile.page_index);
+                let ii = batch.vertices.len() as u32;
+                batch.vertices.extend_from_slice(&[
                     ImageVertex {
                         pos: [x, y],
-                        uv_layer: [u0, v0, layer],
+                        uv: [u0, v0],
                     },
                     ImageVertex {
                         pos: [x + w, y],
-                        uv_layer: [u1, v0, layer],
+                        uv: [u1, v0],
                     },
                     ImageVertex {
                         pos: [x, y + h],
-                        uv_layer: [u0, v1, layer],
+                        uv: [u0, v1],
                     },
                     ImageVertex {
                         pos: [x + w, y + h],
-                        uv_layer: [u1, v1, layer],
+                        uv: [u1, v1],
                     },
                 ]);
-                geometry
+                batch
                     .indices
                     .extend_from_slice(&[ii, ii + 1, ii + 2, ii + 2, ii + 1, ii + 3]);
             }
@@ -1877,45 +1903,50 @@ impl Renderer {
         view: &wgpu::TextureView,
         image_geometry: &ImageGeometry,
     ) {
-        if image_geometry.indices.is_empty() {
-            return;
+        for batch in &image_geometry.batches {
+            if batch.indices.is_empty() {
+                continue;
+            }
+            let Some(bind_group) = self.image_atlas.bind_group(batch.page_index) else {
+                continue;
+            };
+
+            let img_vbuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("img_verts"),
+                    contents: bytemuck::cast_slice(&batch.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let img_ibuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("img_idx"),
+                    contents: bytemuck::cast_slice(&batch.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
+
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("image_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.image_pipeline);
+            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+            pass.set_bind_group(1, bind_group, &[]);
+            pass.set_vertex_buffer(0, img_vbuf.slice(..));
+            pass.set_index_buffer(img_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..batch.indices.len() as u32, 0, 0..1);
         }
-
-        let img_vbuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("img_verts"),
-                contents: bytemuck::cast_slice(&image_geometry.vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let img_ibuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("img_idx"),
-                contents: bytemuck::cast_slice(&image_geometry.indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
-
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("image_pass"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            ..Default::default()
-        });
-
-        pass.set_pipeline(&self.image_pipeline);
-        pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-        pass.set_bind_group(1, self.image_atlas.bind_group(), &[]);
-        pass.set_vertex_buffer(0, img_vbuf.slice(..));
-        pass.set_index_buffer(img_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-        pass.draw_indexed(0..image_geometry.indices.len() as u32, 0, 0..1);
     }
 
     /// Clear all cached glyphs so they are re-rasterized at the current
@@ -3819,7 +3850,7 @@ fn build_pipeline_for_format(
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![
                     0 => Float32x2,
-                    1 => Float32x3,
+                    1 => Float32x2,
                 ],
             }],
             compilation_options: Default::default(),
@@ -3973,9 +4004,11 @@ mod tests {
     use terminal41::CursorStyle;
     use terminal41::LineAttr;
 
+    use super::ImageGeometry;
     use super::RowSnapshot;
     use super::TermSnapshot;
     use super::drcs_geometry_class;
+    use super::image_batch_for_page;
 
     fn blank_row(cols: usize) -> RowSnapshot {
         RowSnapshot {
@@ -4023,6 +4056,22 @@ mod tests {
             screen_reverse: false,
             reset_cached_rows: true,
         }
+    }
+
+    #[test]
+    fn image_batches_coalesce_adjacent_page_runs_only() {
+        let mut geometry = ImageGeometry::default();
+        image_batch_for_page(&mut geometry, 0);
+        image_batch_for_page(&mut geometry, 0);
+        image_batch_for_page(&mut geometry, 1);
+        image_batch_for_page(&mut geometry, 0);
+
+        let pages: Vec<usize> = geometry
+            .batches
+            .iter()
+            .map(|batch| batch.page_index)
+            .collect();
+        assert_eq!(pages, vec![0, 1, 0]);
     }
 
     #[test]
