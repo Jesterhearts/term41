@@ -84,6 +84,7 @@ pub struct GlyphAtlas {
     sampler: wgpu::Sampler,
     pages: Vec<GlyphAtlasPage>,
     cache: Lru<GlyphKey, GlyphSlot>,
+    generation: u64,
 }
 
 impl GlyphAtlas {
@@ -131,6 +132,7 @@ impl GlyphAtlas {
             sampler,
             pages: Vec::new(),
             cache: Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
+            generation: 0,
         }
     }
 
@@ -139,6 +141,11 @@ impl GlyphAtlas {
     pub fn clear(&mut self) {
         self.cache = Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap());
         self.pages.clear();
+        self.generation = self.generation.wrapping_add(1);
+    }
+
+    pub fn generation(&self) -> u64 {
+        self.generation
     }
 
     pub fn bind_group(
@@ -199,7 +206,9 @@ impl GlyphAtlas {
                 is_color: glyph.is_color,
                 alloc: None,
             };
-            release_evicted(&mut self.pages, self.cache.insert(key, slot));
+            if release_evicted(&mut self.pages, self.cache.insert(key, slot)) {
+                self.generation = self.generation.wrapping_add(1);
+            }
             return Some(slot);
         }
 
@@ -225,6 +234,7 @@ impl GlyphAtlas {
                 );
                 return None;
             }
+            self.generation = self.generation.wrapping_add(1);
         };
 
         upload_glyph(
@@ -241,7 +251,9 @@ impl GlyphAtlas {
             is_color: glyph.is_color,
             alloc: Some(tile.alloc),
         };
-        release_evicted(&mut self.pages, self.cache.insert(key, slot));
+        if release_evicted(&mut self.pages, self.cache.insert(key, slot)) {
+            self.generation = self.generation.wrapping_add(1);
+        }
         Some(slot)
     }
 }
@@ -372,9 +384,12 @@ fn evict_one(
 fn release_evicted(
     pages: &mut [GlyphAtlasPage],
     evicted: Option<GlyphSlot>,
-) {
+) -> bool {
     if let Some(slot) = evicted {
         free_slot(pages, &slot);
+        true
+    } else {
+        false
     }
 }
 

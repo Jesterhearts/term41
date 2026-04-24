@@ -20,7 +20,6 @@ use unicode_segmentation::UnicodeSegmentation;
 use utils41::lerp_u8;
 use wgpu::PowerPreference;
 use wgpu::TextureFormat;
-use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
@@ -405,12 +404,18 @@ fn image_batch_for_page(
     geometry.batches.last_mut().unwrap()
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
+struct BgGeometry {
+    vertices: Vec<BgVertex>,
+    indices: Vec<u32>,
+}
+
+#[derive(Clone, Default)]
 struct FgGeometry {
     batches: Vec<FgDrawBatch>,
 }
 
-#[derive(Default)]
+#[derive(Clone, Default)]
 struct FgDrawBatch {
     page_index: usize,
     vertices: Vec<FgVertex>,
@@ -448,6 +453,351 @@ fn push_fg_quad(
     batch
         .indices
         .extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+}
+
+#[derive(Clone, Default)]
+struct RowGeometry {
+    bg: BgGeometry,
+    fg: FgGeometry,
+}
+
+struct CachedRowGeometry {
+    key: RowRenderKey,
+    geometry: RowGeometry,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowRenderKey {
+    layout: RowLayoutKey,
+    cursor: RowCursorKey,
+    blink: RowBlinkKey,
+    popup_clip: Option<PopupClipKey>,
+    background_present: bool,
+    screen_reverse: bool,
+    bg_alpha: u8,
+    viewport_cols: u32,
+    total_rows: u32,
+    drcs_generation: usize,
+    glyph_atlas_generation: u64,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowLayoutKey {
+    cell_w: u32,
+    cell_h: u32,
+    baseline: u32,
+    gutter_px: u32,
+    tab_bar_h: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum RowCursorKey {
+    None,
+    Block { col: u32 },
+    Underline { col: u32 },
+    Beam { col: u32 },
+}
+
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+struct RowBlinkKey {
+    blink_off: bool,
+    rapid_blink_off: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PopupClipKey {
+    left: u32,
+    top: u32,
+    right: u32,
+    bottom: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct PageDrawRange {
+    page_index: usize,
+    index_start: u32,
+    index_count: u32,
+    vertex_base: i32,
+}
+
+#[derive(Default)]
+struct UploadBuffer {
+    buffer: Option<wgpu::Buffer>,
+    capacity: u64,
+}
+
+impl UploadBuffer {
+    fn write<T: bytemuck::Pod>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        label: &'static str,
+        usage: wgpu::BufferUsages,
+        data: &[T],
+    ) -> bool {
+        let bytes = bytemuck::cast_slice(data);
+        if bytes.is_empty() {
+            return false;
+        }
+
+        let needed = bytes.len() as u64;
+        if self.capacity < needed {
+            self.capacity = next_upload_buffer_size(needed);
+            self.buffer = Some(device.create_buffer(&wgpu::BufferDescriptor {
+                label: Some(label),
+                size: self.capacity,
+                usage: usage | wgpu::BufferUsages::COPY_DST,
+                mapped_at_creation: false,
+            }));
+        }
+
+        if let Some(buffer) = &self.buffer {
+            queue.write_buffer(buffer, 0, bytes);
+            true
+        } else {
+            false
+        }
+    }
+
+    fn buffer(&self) -> Option<&wgpu::Buffer> {
+        self.buffer.as_ref()
+    }
+}
+
+fn next_upload_buffer_size(needed: u64) -> u64 {
+    needed.next_power_of_two().max(4096)
+}
+
+#[derive(Default)]
+struct GeometryUpload {
+    vertex_buffer: UploadBuffer,
+    index_buffer: UploadBuffer,
+    has_indices: bool,
+}
+
+impl GeometryUpload {
+    fn upload<V: bytemuck::Pod>(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vertex_label: &'static str,
+        index_label: &'static str,
+        vertices: &[V],
+        indices: &[u32],
+    ) {
+        self.vertex_buffer.write(
+            device,
+            queue,
+            vertex_label,
+            wgpu::BufferUsages::VERTEX,
+            vertices,
+        );
+        self.has_indices = self.index_buffer.write(
+            device,
+            queue,
+            index_label,
+            wgpu::BufferUsages::INDEX,
+            indices,
+        );
+    }
+}
+
+struct PageGeometryUpload<V> {
+    vertices: Vec<V>,
+    indices: Vec<u32>,
+    ranges: Vec<PageDrawRange>,
+    vertex_buffer: UploadBuffer,
+    index_buffer: UploadBuffer,
+}
+
+impl<V> Default for PageGeometryUpload<V> {
+    fn default() -> Self {
+        Self {
+            vertices: Vec::new(),
+            indices: Vec::new(),
+            ranges: Vec::new(),
+            vertex_buffer: UploadBuffer::default(),
+            index_buffer: UploadBuffer::default(),
+        }
+    }
+}
+
+impl<V: bytemuck::Pod + Copy> PageGeometryUpload<V> {
+    fn clear(&mut self) {
+        self.vertices.clear();
+        self.indices.clear();
+        self.ranges.clear();
+    }
+
+    fn push_batch(
+        &mut self,
+        page_index: usize,
+        vertices: &[V],
+        indices: &[u32],
+    ) {
+        if indices.is_empty() {
+            return;
+        }
+
+        let vertex_base = self.vertices.len() as i32;
+        let index_start = self.indices.len() as u32;
+        self.vertices.extend_from_slice(vertices);
+        self.indices.extend_from_slice(indices);
+        self.ranges.push(PageDrawRange {
+            page_index,
+            index_start,
+            index_count: indices.len() as u32,
+            vertex_base,
+        });
+    }
+
+    fn upload(
+        &mut self,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        vertex_label: &'static str,
+        index_label: &'static str,
+    ) {
+        self.vertex_buffer.write(
+            device,
+            queue,
+            vertex_label,
+            wgpu::BufferUsages::VERTEX,
+            &self.vertices,
+        );
+        self.index_buffer.write(
+            device,
+            queue,
+            index_label,
+            wgpu::BufferUsages::INDEX,
+            &self.indices,
+        );
+    }
+}
+
+fn upload_fg_geometry(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    upload: &mut PageGeometryUpload<FgVertex>,
+    geometry: &FgGeometry,
+) {
+    upload.clear();
+    for batch in &geometry.batches {
+        upload.push_batch(batch.page_index, &batch.vertices, &batch.indices);
+    }
+    upload.upload(device, queue, "fg_verts", "fg_idx");
+}
+
+fn upload_image_geometry(
+    device: &wgpu::Device,
+    queue: &wgpu::Queue,
+    upload: &mut PageGeometryUpload<ImageVertex>,
+    geometry: &ImageGeometry,
+) {
+    upload.clear();
+    for batch in &geometry.batches {
+        upload.push_batch(batch.page_index, &batch.vertices, &batch.indices);
+    }
+    upload.upload(device, queue, "img_verts", "img_idx");
+}
+
+#[derive(Default)]
+struct RendererUploads {
+    bg: GeometryUpload,
+    overlay_bg: GeometryUpload,
+    fg: PageGeometryUpload<FgVertex>,
+    overlay_fg: PageGeometryUpload<FgVertex>,
+    under_image: PageGeometryUpload<ImageVertex>,
+    over_image: PageGeometryUpload<ImageVertex>,
+}
+
+fn append_bg_geometry(
+    target_vertices: &mut Vec<BgVertex>,
+    target_indices: &mut Vec<u32>,
+    source: &BgGeometry,
+) {
+    let base = target_vertices.len() as u32;
+    target_vertices.extend_from_slice(&source.vertices);
+    target_indices.extend(source.indices.iter().map(|index| base + *index));
+}
+
+fn append_fg_geometry(
+    target: &mut FgGeometry,
+    source: &FgGeometry,
+) {
+    for source_batch in &source.batches {
+        let target_batch = fg_batch_for_page(target, source_batch.page_index);
+        let base = target_batch.vertices.len() as u32;
+        target_batch
+            .vertices
+            .extend_from_slice(&source_batch.vertices);
+        target_batch
+            .indices
+            .extend(source_batch.indices.iter().map(|index| base + *index));
+    }
+}
+
+fn append_cached_row_geometry(
+    target: &mut RenderGeometry,
+    row: &RowGeometry,
+) {
+    append_bg_geometry(&mut target.bg_vertices, &mut target.bg_indices, &row.bg);
+    append_fg_geometry(&mut target.fg, &row.fg);
+}
+
+fn row_cursor_key(
+    cursor_state: CursorRenderState,
+    row: u32,
+) -> RowCursorKey {
+    match cursor_state {
+        CursorRenderState::Hidden => RowCursorKey::None,
+        CursorRenderState::Visible { row: r, col, shape } if r == row => match shape {
+            CursorShape::Block => RowCursorKey::Block { col },
+            CursorShape::Underline => RowCursorKey::Underline { col },
+            CursorShape::Beam => RowCursorKey::Beam { col },
+        },
+        CursorRenderState::Visible { .. } => RowCursorKey::None,
+    }
+}
+
+fn row_blink_key(
+    snap: &TermSnapshot,
+    snap_row: &RowSnapshot,
+    blink_off: bool,
+    rapid_blink_off: bool,
+) -> RowBlinkKey {
+    let mut key = RowBlinkKey::default();
+    for attrs in &snap_row.attrs {
+        if blink_animation_enabled(snap, *attrs) && attrs.contains(CellAttrs::BLINK) {
+            key.blink_off = blink_off;
+        }
+        if blink_animation_enabled(snap, *attrs) && attrs.contains(CellAttrs::RAPID_BLINK) {
+            key.rapid_blink_off = rapid_blink_off;
+        }
+        if key.blink_off && key.rapid_blink_off {
+            break;
+        }
+    }
+    key
+}
+
+fn row_popup_clip_key(
+    row: u32,
+    layout: &FrameLayout,
+    popup_clip: Option<&PopupClip>,
+) -> Option<PopupClipKey> {
+    let clip = popup_clip?;
+    let row_top = row as f32 * layout.cell_h + layout.tab_bar_h;
+    let row_bottom = row_top + layout.cell_h;
+    if row_bottom <= clip.top || row_top >= clip.bottom {
+        return None;
+    }
+    Some(PopupClipKey {
+        left: clip.left.to_bits(),
+        top: clip.top.to_bits(),
+        right: clip.right.to_bits(),
+        bottom: clip.bottom.to_bits(),
+    })
 }
 
 struct RenderGeometry {
@@ -545,6 +895,8 @@ pub struct Renderer {
 
     /// Materialized terminal rows reconstructed from dirty row snapshots.
     terminal_rows: Vec<RowSnapshot>,
+    row_geometry_cache: Vec<Option<CachedRowGeometry>>,
+    uploads: RendererUploads,
 }
 
 pub struct PreparedRenderer {
@@ -882,6 +1234,8 @@ impl Renderer {
             bell_started: None,
             gutter_enabled,
             terminal_rows: Vec::new(),
+            row_geometry_cache: Vec::new(),
+            uploads: RendererUploads::default(),
         };
 
         renderer.update_screen_size(size);
@@ -1080,6 +1434,11 @@ impl Renderer {
             self.terminal_rows = (0..total_rows)
                 .map(|row| blank_cached_row(row as u32, snap.viewport_cols, &snap.palette))
                 .collect();
+            self.row_geometry_cache.clear();
+            self.row_geometry_cache.resize_with(total_rows, || None);
+        } else if self.row_geometry_cache.len() != total_rows {
+            self.row_geometry_cache.clear();
+            self.row_geometry_cache.resize_with(total_rows, || None);
         }
 
         for row in &snap.rows {
@@ -1089,8 +1448,12 @@ impl Renderer {
                     blank_cached_row(0, snap.viewport_cols, &snap.palette)
                 });
                 self.terminal_rows[idx].screen_row = idx as u32;
+                self.row_geometry_cache.resize_with(idx + 1, || None);
             }
             self.terminal_rows[idx] = row.clone();
+            if let Some(cache) = self.row_geometry_cache.get_mut(idx) {
+                *cache = None;
+            }
         }
     }
 
@@ -1199,6 +1562,59 @@ impl Renderer {
         preedit: Option<&crate::renderer::PreeditState>,
         layout: &FrameLayout,
     ) -> RenderGeometry {
+        for attempt in 0..2 {
+            let glyph_generation = self.glyph_atlas.generation();
+            let geometry = self.build_render_geometry_once(
+                font_system,
+                snap,
+                rows,
+                tabs,
+                controls,
+                gutter_popup,
+                recording_popup,
+                permission_modal,
+                toast,
+                preedit,
+                layout,
+            );
+            if self.glyph_atlas.generation() == glyph_generation {
+                return geometry;
+            }
+            self.row_geometry_cache.clear();
+            debug!(
+                "glyph atlas changed while building frame geometry; rebuilding attempt={attempt}"
+            );
+        }
+
+        self.build_render_geometry_once(
+            font_system,
+            snap,
+            rows,
+            tabs,
+            controls,
+            gutter_popup,
+            recording_popup,
+            permission_modal,
+            toast,
+            preedit,
+            layout,
+        )
+    }
+
+    fn build_render_geometry_once(
+        &mut self,
+        font_system: &mut FontSystem,
+        snap: &TermSnapshot,
+        rows: &[RowSnapshot],
+        tabs: &[TabInfo],
+        controls: &WindowControls,
+        gutter_popup: Option<&GutterPopup>,
+        recording_popup: Option<&crate::renderer::RecordingPopup>,
+        permission_modal: Option<&crate::renderer::PermissionModal>,
+        toast: Option<&crate::renderer::Toast>,
+        preedit: Option<&crate::renderer::PreeditState>,
+        layout: &FrameLayout,
+    ) -> RenderGeometry {
         let mut geometry = RenderGeometry {
             clear_bg: snap.palette.bg,
             ..RenderGeometry::default()
@@ -1213,6 +1629,27 @@ impl Renderer {
             if snap.search_active && row == snap.viewport_rows - 1 {
                 continue;
             }
+            let cache_key = self.row_render_key(
+                snap,
+                snap_row,
+                row,
+                cursor_state,
+                popup_clip.as_ref(),
+                blink_off,
+                rapid_blink_off,
+                layout,
+            );
+            if let Some(cached) = self
+                .row_geometry_cache
+                .get(row as usize)
+                .and_then(Option::as_ref)
+                && cached.key == cache_key
+            {
+                append_cached_row_geometry(&mut geometry, &cached.geometry);
+                continue;
+            }
+
+            let mut row_geometry = RowGeometry::default();
             self.append_row_geometry(
                 font_system,
                 snap,
@@ -1223,8 +1660,27 @@ impl Renderer {
                 blink_off,
                 rapid_blink_off,
                 layout,
-                &mut geometry,
+                &mut row_geometry,
             );
+            let cache_key = self.row_render_key(
+                snap,
+                snap_row,
+                row,
+                cursor_state,
+                popup_clip.as_ref(),
+                blink_off,
+                rapid_blink_off,
+                layout,
+            );
+            append_cached_row_geometry(&mut geometry, &row_geometry);
+            if row as usize >= self.row_geometry_cache.len() {
+                self.row_geometry_cache
+                    .resize_with(row as usize + 1, || None);
+            }
+            self.row_geometry_cache[row as usize] = Some(CachedRowGeometry {
+                key: cache_key,
+                geometry: row_geometry,
+            });
         }
 
         self.append_visual_bell_overlay(&mut geometry, snap, layout);
@@ -1338,6 +1794,39 @@ impl Renderer {
         geometry
     }
 
+    #[allow(clippy::too_many_arguments)]
+    fn row_render_key(
+        &self,
+        snap: &TermSnapshot,
+        snap_row: &RowSnapshot,
+        row: u32,
+        cursor_state: CursorRenderState,
+        popup_clip: Option<&PopupClip>,
+        blink_off: bool,
+        rapid_blink_off: bool,
+        layout: &FrameLayout,
+    ) -> RowRenderKey {
+        RowRenderKey {
+            layout: RowLayoutKey {
+                cell_w: layout.cell_w.to_bits(),
+                cell_h: layout.cell_h.to_bits(),
+                baseline: layout.baseline.to_bits(),
+                gutter_px: layout.gutter_px.to_bits(),
+                tab_bar_h: layout.tab_bar_h.to_bits(),
+            },
+            cursor: row_cursor_key(cursor_state, row),
+            blink: row_blink_key(snap, snap_row, blink_off, rapid_blink_off),
+            popup_clip: row_popup_clip_key(row, layout, popup_clip),
+            background_present: self.background.is_some(),
+            screen_reverse: snap.screen_reverse,
+            bg_alpha: self.bg_alpha,
+            viewport_cols: snap.viewport_cols,
+            total_rows: snap.total_rows,
+            drcs_generation: Arc::as_ptr(&snap.drcs_glyphs) as usize,
+            glyph_atlas_generation: self.glyph_atlas.generation(),
+        }
+    }
+
     fn popup_clip(
         &self,
         gutter_popup: Option<&GutterPopup>,
@@ -1373,7 +1862,7 @@ impl Renderer {
         blink_off: bool,
         rapid_blink_off: bool,
         layout: &FrameLayout,
-        geometry: &mut RenderGeometry,
+        geometry: &mut RowGeometry,
     ) {
         let y = row as f32 * layout.cell_h + layout.tab_bar_h;
         let line_attr = snap_row.line_attr;
@@ -1403,8 +1892,8 @@ impl Renderer {
             let cell_attrs = snap_row.attrs[col as usize];
             if let Some(fill_bg) = painted.fill_bg {
                 let bg_color = pack_color(&fill_bg, self.bg_alpha);
-                let bi = geometry.bg_vertices.len() as u32;
-                geometry.bg_vertices.extend_from_slice(&[
+                let bi = geometry.bg.vertices.len() as u32;
+                geometry.bg.vertices.extend_from_slice(&[
                     BgVertex {
                         pos: [x, y],
                         color: bg_color,
@@ -1422,7 +1911,7 @@ impl Renderer {
                         color: bg_color,
                     },
                 ]);
-                geometry.bg_indices.extend_from_slice(&[
+                geometry.bg.indices.extend_from_slice(&[
                     bi,
                     bi + 1,
                     bi + 2,
@@ -1452,8 +1941,8 @@ impl Renderer {
                     thickness,
                     layout.cell_h,
                     ul_packed,
-                    &mut geometry.bg_vertices,
-                    &mut geometry.bg_indices,
+                    &mut geometry.bg.vertices,
+                    &mut geometry.bg.indices,
                 );
             }
 
@@ -1466,8 +1955,8 @@ impl Renderer {
                     effective_cell_w,
                     thickness,
                     ol_color,
-                    &mut geometry.bg_vertices,
-                    &mut geometry.bg_indices,
+                    &mut geometry.bg.vertices,
+                    &mut geometry.bg.indices,
                 );
             }
 
@@ -1475,8 +1964,8 @@ impl Renderer {
                 let st_color = pack_color(&painted.base_fg, 255);
                 let thickness = (layout.cell_h * 0.06).max(1.0);
                 let sy = y + (layout.cell_h - thickness) * 0.5;
-                let bi = geometry.bg_vertices.len() as u32;
-                geometry.bg_vertices.extend_from_slice(&[
+                let bi = geometry.bg.vertices.len() as u32;
+                geometry.bg.vertices.extend_from_slice(&[
                     BgVertex {
                         pos: [x, sy],
                         color: st_color,
@@ -1494,7 +1983,7 @@ impl Renderer {
                         color: st_color,
                     },
                 ]);
-                geometry.bg_indices.extend_from_slice(&[
+                geometry.bg.indices.extend_from_slice(&[
                     bi,
                     bi + 1,
                     bi + 2,
@@ -1510,8 +1999,8 @@ impl Renderer {
         {
             let ox = overlay.x + layout.gutter_px;
             let oy = overlay.y + layout.tab_bar_h;
-            let bi = geometry.bg_vertices.len() as u32;
-            geometry.bg_vertices.extend_from_slice(&[
+            let bi = geometry.bg.vertices.len() as u32;
+            geometry.bg.vertices.extend_from_slice(&[
                 BgVertex {
                     pos: [ox, oy],
                     color: overlay.color,
@@ -1530,7 +2019,8 @@ impl Renderer {
                 },
             ]);
             geometry
-                .bg_indices
+                .bg
+                .indices
                 .extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
         }
 
@@ -1568,7 +2058,7 @@ impl Renderer {
         blink_off: bool,
         rapid_blink_off: bool,
         layout: &FrameLayout,
-        geometry: &mut RenderGeometry,
+        geometry: &mut RowGeometry,
     ) {
         let is_double_wide = !matches!(line_attr, LineAttr::Normal);
         let block_cursor = match cursor_state {
@@ -1744,6 +2234,52 @@ impl Renderer {
         }
     }
 
+    fn upload_render_geometry(
+        &mut self,
+        geometry: &RenderGeometry,
+        under_text_image_geometry: &ImageGeometry,
+        over_text_image_geometry: &ImageGeometry,
+    ) {
+        let device = &self.device;
+        let queue = &self.queue;
+
+        self.uploads.bg.upload(
+            device,
+            queue,
+            "bg_verts",
+            "bg_idx",
+            &geometry.bg_vertices,
+            &geometry.bg_indices,
+        );
+        self.uploads.overlay_bg.upload(
+            device,
+            queue,
+            "overlay_bg_verts",
+            "overlay_bg_idx",
+            &geometry.overlay_bg_vertices,
+            &geometry.overlay_bg_indices,
+        );
+        upload_fg_geometry(device, queue, &mut self.uploads.fg, &geometry.fg);
+        upload_fg_geometry(
+            device,
+            queue,
+            &mut self.uploads.overlay_fg,
+            &geometry.overlay_fg,
+        );
+        upload_image_geometry(
+            device,
+            queue,
+            &mut self.uploads.under_image,
+            under_text_image_geometry,
+        );
+        upload_image_geometry(
+            device,
+            queue,
+            &mut self.uploads.over_image,
+            over_text_image_geometry,
+        );
+    }
+
     fn submit_render_passes(
         &mut self,
         acquired: (wgpu::SurfaceTexture, wgpu::TextureView),
@@ -1751,25 +2287,15 @@ impl Renderer {
         under_text_image_geometry: ImageGeometry,
         over_text_image_geometry: ImageGeometry,
     ) {
+        self.upload_render_geometry(
+            &geometry,
+            &under_text_image_geometry,
+            &over_text_image_geometry,
+        );
         let (frame, view) = acquired;
         let mut encoder = self
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
-
-        let bg_vbuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("bg_verts"),
-                contents: bytemuck::cast_slice(&geometry.bg_vertices),
-                usage: wgpu::BufferUsages::VERTEX,
-            });
-        let bg_ibuf = self
-            .device
-            .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                label: Some("bg_idx"),
-                contents: bytemuck::cast_slice(&geometry.bg_indices),
-                usage: wgpu::BufferUsages::INDEX,
-            });
 
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
@@ -1800,37 +2326,28 @@ impl Renderer {
                 pass.draw_indexed(0..6, 0, 0..1);
             }
 
-            if bg_ibuf.size() > 0 {
+            if self.uploads.bg.has_indices {
                 pass.set_pipeline(&self.bg_pipeline);
                 pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-                pass.set_vertex_buffer(0, bg_vbuf.slice(..));
-                pass.set_index_buffer(bg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+                pass.set_vertex_buffer(
+                    0,
+                    self.uploads.bg.vertex_buffer.buffer().unwrap().slice(..),
+                );
+                pass.set_index_buffer(
+                    self.uploads.bg.index_buffer.buffer().unwrap().slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
                 pass.draw_indexed(0..geometry.bg_indices.len() as u32, 0, 0..1);
             }
         }
 
-        self.submit_image_pass(&mut encoder, &view, &under_text_image_geometry);
+        self.submit_image_pass(&mut encoder, &view, &self.uploads.under_image);
 
-        self.submit_fg_pass(&mut encoder, &view, &geometry.fg, "fg_pass");
+        self.submit_fg_pass(&mut encoder, &view, &self.uploads.fg, "fg_pass");
 
-        self.submit_image_pass(&mut encoder, &view, &over_text_image_geometry);
+        self.submit_image_pass(&mut encoder, &view, &self.uploads.over_image);
 
-        if !geometry.overlay_bg_indices.is_empty() {
-            let overlay_bg_vbuf =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("overlay_bg_verts"),
-                        contents: bytemuck::cast_slice(&geometry.overlay_bg_vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-            let overlay_bg_ibuf =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("overlay_bg_idx"),
-                        contents: bytemuck::cast_slice(&geometry.overlay_bg_indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
-
+        if self.uploads.overlay_bg.has_indices {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("overlay_bg_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
@@ -1847,12 +2364,33 @@ impl Renderer {
 
             pass.set_pipeline(&self.bg_pipeline);
             pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_vertex_buffer(0, overlay_bg_vbuf.slice(..));
-            pass.set_index_buffer(overlay_bg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.set_vertex_buffer(
+                0,
+                self.uploads
+                    .overlay_bg
+                    .vertex_buffer
+                    .buffer()
+                    .unwrap()
+                    .slice(..),
+            );
+            pass.set_index_buffer(
+                self.uploads
+                    .overlay_bg
+                    .index_buffer
+                    .buffer()
+                    .unwrap()
+                    .slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
             pass.draw_indexed(0..geometry.overlay_bg_indices.len() as u32, 0, 0..1);
         }
 
-        self.submit_fg_pass(&mut encoder, &view, &geometry.overlay_fg, "overlay_fg_pass");
+        self.submit_fg_pass(
+            &mut encoder,
+            &view,
+            &self.uploads.overlay_fg,
+            "overlay_fg_pass",
+        );
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -1862,31 +2400,20 @@ impl Renderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        fg_geometry: &FgGeometry,
+        fg_upload: &PageGeometryUpload<FgVertex>,
         label: &'static str,
     ) {
-        for batch in &fg_geometry.batches {
-            if batch.indices.is_empty() {
-                continue;
-            }
-            let Some(bind_group) = self.glyph_atlas.bind_group(batch.page_index) else {
+        let Some(vertex_buffer) = fg_upload.vertex_buffer.buffer() else {
+            return;
+        };
+        let Some(index_buffer) = fg_upload.index_buffer.buffer() else {
+            return;
+        };
+
+        for range in &fg_upload.ranges {
+            let Some(bind_group) = self.glyph_atlas.bind_group(range.page_index) else {
                 continue;
             };
-
-            let fg_vbuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("fg_verts"),
-                    contents: bytemuck::cast_slice(&batch.vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let fg_ibuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("fg_idx"),
-                    contents: bytemuck::cast_slice(&batch.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
 
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some(label),
@@ -1905,9 +2432,13 @@ impl Renderer {
             pass.set_pipeline(&self.fg_pipeline);
             pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
             pass.set_bind_group(1, bind_group, &[]);
-            pass.set_vertex_buffer(0, fg_vbuf.slice(..));
-            pass.set_index_buffer(fg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..batch.indices.len() as u32, 0, 0..1);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(
+                range.index_start..range.index_start + range.index_count,
+                range.vertex_base,
+                0..1,
+            );
         }
     }
 
@@ -1915,30 +2446,19 @@ impl Renderer {
         &self,
         encoder: &mut wgpu::CommandEncoder,
         view: &wgpu::TextureView,
-        image_geometry: &ImageGeometry,
+        image_upload: &PageGeometryUpload<ImageVertex>,
     ) {
-        for batch in &image_geometry.batches {
-            if batch.indices.is_empty() {
-                continue;
-            }
-            let Some(bind_group) = self.image_atlas.bind_group(batch.page_index) else {
+        let Some(vertex_buffer) = image_upload.vertex_buffer.buffer() else {
+            return;
+        };
+        let Some(index_buffer) = image_upload.index_buffer.buffer() else {
+            return;
+        };
+
+        for range in &image_upload.ranges {
+            let Some(bind_group) = self.image_atlas.bind_group(range.page_index) else {
                 continue;
             };
-
-            let img_vbuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("img_verts"),
-                    contents: bytemuck::cast_slice(&batch.vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let img_ibuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("img_idx"),
-                    contents: bytemuck::cast_slice(&batch.indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
 
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("image_pass"),
@@ -1957,9 +2477,13 @@ impl Renderer {
             pass.set_pipeline(&self.image_pipeline);
             pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
             pass.set_bind_group(1, bind_group, &[]);
-            pass.set_vertex_buffer(0, img_vbuf.slice(..));
-            pass.set_index_buffer(img_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..batch.indices.len() as u32, 0, 0..1);
+            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(
+                range.index_start..range.index_start + range.index_count,
+                range.vertex_base,
+                0..1,
+            );
         }
     }
 
@@ -1967,6 +2491,7 @@ impl Renderer {
     /// font size. Called when the DPI scale factor changes.
     pub fn reset_glyph_atlas(&mut self) {
         self.glyph_atlas.clear();
+        self.row_geometry_cache.clear();
     }
 
     /// Trigger a visual bell flash. Idempotent within the flash window:
@@ -3999,7 +4524,10 @@ mod tests {
     use terminal41::LineAttr;
 
     use super::FgGeometry;
+    use super::FgVertex;
     use super::ImageGeometry;
+    use super::PageDrawRange;
+    use super::PageGeometryUpload;
     use super::RowSnapshot;
     use super::TermSnapshot;
     use super::drcs_geometry_class;
@@ -4084,6 +4612,39 @@ mod tests {
             .map(|batch| batch.page_index)
             .collect();
         assert_eq!(pages, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn page_geometry_upload_records_draw_ranges_without_rewriting_indices() {
+        let vertex = FgVertex {
+            pos: [0.0, 0.0],
+            uv: [0.0, 0.0],
+            color: 0,
+            flags: 0,
+        };
+        let mut upload = PageGeometryUpload::default();
+
+        upload.push_batch(2, &[vertex; 4], &[0, 1, 2, 2, 1, 3]);
+        upload.push_batch(3, &[vertex; 4], &[0, 1, 2, 2, 1, 3]);
+
+        assert_eq!(
+            upload.ranges,
+            vec![
+                PageDrawRange {
+                    page_index: 2,
+                    index_start: 0,
+                    index_count: 6,
+                    vertex_base: 0,
+                },
+                PageDrawRange {
+                    page_index: 3,
+                    index_start: 6,
+                    index_count: 6,
+                    vertex_base: 4,
+                },
+            ]
+        );
+        assert_eq!(upload.indices, vec![0, 1, 2, 2, 1, 3, 0, 1, 2, 2, 1, 3]);
     }
 
     #[test]
