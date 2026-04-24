@@ -128,28 +128,28 @@ Legend:
 
 ### Other Modern Extensions
 
-| Area                                           | Status                        | Notes                                                                              |
-| ---------------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------- |
-| OSC 0 / OSC 2 titles                           | ✅ Supported                  | Common xterm-compatible title updates.                                             |
-| OSC 4 / OSC 10 / OSC 11 colors                 | ✅ Supported                  | Palette/default foreground/background queries and updates.                         |
-| OSC 7 current directory                        | ✅ Supported                  | Stored as untrusted metadata.                                                      |
-| OSC 8 hyperlinks                               | ✅ Supported                  | Hyperlinks attach to terminal cells.                                               |
-| OSC 52 clipboard                               | ✅ Supported                  | Read/write requests are policy-gated and default to asking.                        |
-| Bracketed paste                                | ✅ Supported                  | xterm-compatible paste wrapping.                                                   |
-| Focus reporting                                | ✅ Supported                  | Standard focus in/out reporting.                                                   |
-| xterm mouse protocols                          | ✅ Supported                  | Legacy, UTF-8, SGR, and URXVT-style encodings.                                     |
-| Window and cell size reports                   | ✅ Supported                  | Includes common size-query responses.                                              |
-| XTVERSION-style reports                        | ✅ Supported                  | Coarse terminal version reporting.                                                 |
-| Synchronized output (`DECSET 2026`)            | ✅ Supported                  | Buffered painting during synchronized update windows.                              |
-| OSC 133 shell integration                      | ✅ Supported                  | Prompt, command, output, and exit-status marks.                                    |
-| OSC 633 shell integration                      | ✅ Supported                  | VS Code-compatible safe subset mapped into the prompt model.                       |
-| Policy-filtered capability reporting           | 🟨 Planned, not supported yet | Useful for modern apps, but should avoid detailed fingerprinting.                  |
-| Glyph Protocol                                 | 🟦 Watching                   | Interesting fit for session-local PUA glyphs once adoption stabilizes.             |
-| Light/dark mode notifications                  | 🟦 Watching                   | Useful but fingerprinting-adjacent; would need coarse, configurable reporting.     |
-| Host-triggered desktop notifications           | ❌ Unplanned                  | Local attention and desktop integration should stay user-controlled.               |
-| Host-driven tabs/windows/panes/session routing | ❌ Unplanned                  | Local UI and input routing are not controlled by escape sequences.                 |
-| Arbitrary region styling extensions            | ❌ Unplanned                  | Retroactive host styling makes spoofing and text ownership harder to reason about. |
-| Rich non-text clipboard data                   | ❌ Unplanned                  | Non-text clipboard formats expand local-integration and parser surface.            |
+| Area                                           | Status       | Notes                                                                                             |
+| ---------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------- |
+| OSC 0 / OSC 2 titles                           | ✅ Supported | Common xterm-compatible title updates.                                                            |
+| OSC 4 / OSC 10 / OSC 11 colors                 | ✅ Supported | Palette/default foreground/background queries and updates.                                        |
+| OSC 7 current directory                        | ✅ Supported | Stored as untrusted metadata.                                                                     |
+| OSC 8 hyperlinks                               | ✅ Supported | Hyperlinks attach to terminal cells.                                                              |
+| OSC 52 clipboard                               | ✅ Supported | Read/write requests are policy-gated and default to asking.                                       |
+| Bracketed paste                                | ✅ Supported | xterm-compatible paste wrapping.                                                                  |
+| Focus reporting                                | ✅ Supported | Standard focus in/out reporting.                                                                  |
+| xterm mouse protocols                          | ✅ Supported | Legacy, UTF-8, SGR, and URXVT-style encodings.                                                    |
+| Window and cell size reports                   | ✅ Supported | Includes common size-query responses.                                                             |
+| XTVERSION-style reports                        | ✅ Supported | Coarse terminal version reporting.                                                                |
+| Synchronized output (`DECSET 2026`)            | ✅ Supported | Buffered painting during synchronized update windows.                                             |
+| OSC 133 shell integration                      | ✅ Supported | Prompt, command, output, and exit-status marks.                                                   |
+| OSC 633 shell integration                      | ✅ Supported | VS Code-compatible safe subset mapped into the prompt model.                                      |
+| Policy-filtered capability reporting           | ✅ Supported | XTGETTCAP reports implemented special-key, color, styling, and coarse terminal-name capabilities. |
+| Glyph Protocol                                 | 🟦 Watching  | Interesting fit for session-local PUA glyphs once adoption stabilizes.                            |
+| Light/dark mode notifications                  | 🟦 Watching  | Useful but fingerprinting-adjacent; would need coarse, configurable reporting.                    |
+| Host-triggered desktop notifications           | ❌ Unplanned | Local attention and desktop integration should stay user-controlled.                              |
+| Host-driven tabs/windows/panes/session routing | ❌ Unplanned | Local UI and input routing are not controlled by escape sequences.                                |
+| Arbitrary region styling extensions            | ❌ Unplanned | Retroactive host styling makes spoofing and text ownership harder to reason about.                |
+| Rich non-text clipboard data                   | ❌ Unplanned | Non-text clipboard formats expand local-integration and parser surface.                           |
 
 </details>
 
@@ -326,6 +326,7 @@ vsync = "auto"
 # udk_storage_bytes = 256
 # decudk_payload_bytes = 2048
 # drcs_payload_bytes = 65536
+# xtgettcap_payload_bytes = 4096
 # drcs_storage_bytes = 262144
 # kitty_graphics_payload_bytes = 33554432
 # kitty_graphics_storage_bytes = 134217728

@@ -49,6 +49,7 @@ Implemented:
 - xterm mouse tracking modes and encodings
 - window and cell size reports
 - XTVERSION-style version reporting
+- XTGETTCAP policy-filtered capability reporting
 - synchronized output mode (`DECSET 2026`)
 
 Maintenance direction:
@@ -61,12 +62,17 @@ Maintenance direction:
 - Revisit OSC 52 policy. Clipboard writes are common and useful; clipboard reads
   are more sensitive and should move toward local configuration with clear
   defaults.
+- Keep XTGETTCAP reporting coarse and policy-filtered. It should report
+  implemented special-key sequences and useful terminal facts, not detailed host
+  configuration.
 
 Security:
 
 - `LOW` to `HIGH`
 - Clipboard readback is the major high-risk subcase because it can exfiltrate
   local data to a remote process.
+- Capability reporting is a fingerprinting surface, so reported facts stay
+  intentionally coarse.
 
 ### Images And Media
 
@@ -194,33 +200,6 @@ Security:
 - Animation support needs explicit quotas for frame storage and mutation.
 - Shared-memory transport is a local cross-process attack surface and remains
   out of scope.
-
-### Capability Reporting
-
-Status:
-
-- `Planned`
-
-Why:
-
-- Modern apps increasingly probe terminal capabilities instead of relying only
-  on `$TERM`.
-- iTerm2 has feature reporting, kitty has protocol-specific queries, and many
-  terminals expose some form of version/capability response.
-
-Scope:
-
-- Continue XTVERSION support.
-- Add policy-filtered responses for implemented protocols where there is a
-  documented query.
-- Avoid inventing a large `term41`-specific feature namespace until there is a
-  concrete application need.
-
-Security:
-
-- `LOW` to `MEDIUM`
-- Capability reporting is fingerprinting surface. Report coarse, useful facts,
-  not detailed host configuration.
 
 ## Watch
 

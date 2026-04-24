@@ -48,6 +48,8 @@ pub struct TerminalLimits {
     pub decudk_payload_bytes: usize,
     /// Maximum bytes accumulated for one DRCS DCS payload.
     pub drcs_payload_bytes: usize,
+    /// Maximum bytes accumulated for one XTGETTCAP capability query payload.
+    pub xtgettcap_payload_bytes: usize,
     /// Maximum decoded DRCS glyph storage retained by the terminal.
     pub drcs_storage_bytes: usize,
     /// Maximum base64 payload bytes accepted for one kitty graphics command.
@@ -64,6 +66,7 @@ impl Default for TerminalLimits {
             udk_storage_bytes: MAX_UDK_BYTES,
             decudk_payload_bytes: MAX_DECUDK_PAYLOAD_BYTES,
             drcs_payload_bytes: MAX_DRCS_PAYLOAD_BYTES,
+            xtgettcap_payload_bytes: 4096,
             drcs_storage_bytes: MAX_DRCS_TOTAL_STORAGE_BYTES,
             kitty_graphics_payload_bytes: 32 * 1024 * 1024,
             kitty_graphics_storage_bytes: 128 * 1024 * 1024,

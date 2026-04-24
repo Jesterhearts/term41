@@ -210,6 +210,9 @@ struct LimitSettings {
     drcs_payload_bytes: Option<usize>,
     #[serde(deserialize_with = "usize_opt")]
     #[serde(default)]
+    xtgettcap_payload_bytes: Option<usize>,
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
     drcs_storage_bytes: Option<usize>,
     #[serde(deserialize_with = "usize_opt")]
     #[serde(default)]
@@ -613,6 +616,9 @@ fn build_limits(raw: Option<LimitSettings>) -> TerminalLimits {
         drcs_payload_bytes: settings
             .drcs_payload_bytes
             .unwrap_or(defaults.drcs_payload_bytes),
+        xtgettcap_payload_bytes: settings
+            .xtgettcap_payload_bytes
+            .unwrap_or(defaults.xtgettcap_payload_bytes),
         drcs_storage_bytes: settings
             .drcs_storage_bytes
             .unwrap_or(defaults.drcs_storage_bytes),
@@ -1081,6 +1087,7 @@ macro_invocation_depth = 12
 udk_storage_bytes = 1024
 decudk_payload_bytes = 4096
 drcs_payload_bytes = 131072
+xtgettcap_payload_bytes = 2048
 drcs_storage_bytes = 524288
 kitty_graphics_payload_bytes = 65536
 kitty_graphics_storage_bytes = 1048576
@@ -1091,6 +1098,7 @@ kitty_graphics_storage_bytes = 1048576
         assert_eq!(cfg.limits.udk_storage_bytes, 1024);
         assert_eq!(cfg.limits.decudk_payload_bytes, 4096);
         assert_eq!(cfg.limits.drcs_payload_bytes, 131072);
+        assert_eq!(cfg.limits.xtgettcap_payload_bytes, 2048);
         assert_eq!(cfg.limits.drcs_storage_bytes, 524288);
         assert_eq!(cfg.limits.kitty_graphics_payload_bytes, 65536);
         assert_eq!(cfg.limits.kitty_graphics_storage_bytes, 1048576);

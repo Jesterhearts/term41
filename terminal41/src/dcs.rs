@@ -152,6 +152,7 @@ fn hook_payload_limit(
     match (action, intermediates) {
         ('{', []) => Some(limits.drcs_payload_bytes),
         ('|', []) => Some(limits.decudk_payload_bytes),
+        ('q', b"+") => Some(limits.xtgettcap_payload_bytes),
         _ => None,
     }
 }
@@ -236,7 +237,12 @@ fn apply_dcs_action(
         ParsedDcsAction::Ignore => {}
         ParsedDcsAction::XtGetTCaps { payload } => {
             let c1_mode = terminal.modes.c1_mode;
-            report::handle_xtgettcap(&payload, c1_mode, &mut effects.host_bytes);
+            report::handle_xtgettcap(
+                &payload,
+                c1_mode,
+                &terminal.protocol.feature_permissions,
+                &mut effects.host_bytes,
+            );
         }
         ParsedDcsAction::RequestStatusString { payload } => {
             report::handle_decrqss(&payload, terminal, &mut effects.host_bytes);

@@ -962,7 +962,7 @@ mod tests {
             parse_osc(b"633;P;Cwd=/tmp"),
             ParsedOscAction::VscodeShellIntegration(VscodeShellIntegrationAction::SetDirectory(
                 DirectoryAction::Set(path),
-            )) if path == PathBuf::from("/tmp")
+            )) if path.as_path() == Path::new("/tmp")
         ));
     }
 

@@ -12,6 +12,8 @@ use crate::dec::color::report_alternate_text_color;
 use crate::dec::color::report_color_assignment;
 use crate::drcs;
 use crate::drcs::DrcsStore;
+use crate::feature::ClipboardPermission;
+use crate::feature::FeaturePermissions;
 use crate::screen;
 use crate::screen::grid::AttrChangeExtent;
 
@@ -579,56 +581,145 @@ pub(crate) fn restore_dectabsr(
 pub(crate) fn handle_xtgettcap(
     payload: &[u8],
     c1_mode: C1Mode,
+    feature_permissions: &FeaturePermissions,
     output: &mut Vec<u8>,
 ) {
-    for cap_hex in payload.split(|&b| b == b';') {
-        if cap_hex.is_empty() {
-            continue;
-        }
-        let cap_name = hex_decode(cap_hex);
-        let cap_str = std::str::from_utf8(&cap_name).unwrap_or("");
-        if let Some(value) = xtgettcap_value(cap_str) {
-            let value_hex = hex_encode(value.as_bytes());
-            conformance::push_dcs_prefix(output, c1_mode);
-            output.extend_from_slice(b"1+r");
-            output.extend_from_slice(cap_hex);
-            output.push(b'=');
-            output.extend_from_slice(value_hex.as_bytes());
-            conformance::push_st(output, c1_mode);
-        } else {
-            conformance::push_dcs_prefix(output, c1_mode);
-            output.extend_from_slice(b"0+r");
-            output.extend_from_slice(cap_hex);
-            conformance::push_st(output, c1_mode);
-        }
+    let queries = parse_xtgettcap_payload(payload);
+    if queries.is_empty() {
+        return;
     }
+
+    let mut report = Vec::new();
+    for query in queries {
+        let XtGetTCapQuery::Capability { encoded_name, name } = query else {
+            write_xtgettcap_failure(output, c1_mode);
+            return;
+        };
+        let Some(value) = xtgettcap_value(&name, feature_permissions) else {
+            write_xtgettcap_failure(output, c1_mode);
+            return;
+        };
+
+        if !report.is_empty() {
+            report.push(b';');
+        }
+        report.extend_from_slice(encoded_name);
+        report.push(b'=');
+        report.extend_from_slice(hex_encode(value).as_bytes());
+    }
+
+    conformance::push_dcs_prefix(output, c1_mode);
+    output.extend_from_slice(b"1+r");
+    output.extend_from_slice(&report);
+    conformance::push_st(output, c1_mode);
 }
 
-fn xtgettcap_value(name: &str) -> Option<&'static str> {
+#[derive(Debug, Clone, PartialEq, Eq)]
+enum XtGetTCapQuery<'a> {
+    Capability {
+        encoded_name: &'a [u8],
+        name: String,
+    },
+    Invalid,
+}
+
+fn parse_xtgettcap_payload(payload: &[u8]) -> Vec<XtGetTCapQuery<'_>> {
+    payload
+        .split(|&b| b == b';')
+        .filter(|part| !part.is_empty())
+        .map(parse_xtgettcap_query)
+        .collect()
+}
+
+fn parse_xtgettcap_query(encoded_name: &[u8]) -> XtGetTCapQuery<'_> {
+    let Some(decoded) = hex_decode(encoded_name) else {
+        return XtGetTCapQuery::Invalid;
+    };
+    let Ok(name) = String::from_utf8(decoded) else {
+        return XtGetTCapQuery::Invalid;
+    };
+    XtGetTCapQuery::Capability { encoded_name, name }
+}
+
+fn xtgettcap_value(
+    name: &str,
+    feature_permissions: &FeaturePermissions,
+) -> Option<&'static [u8]> {
+    if name == "Ms" {
+        return (feature_permissions.clipboard.write != ClipboardPermission::Deny)
+            .then_some(b"\x1b]52;%p1%s;%p2%s\x07" as &[u8]);
+    }
+
     match name {
-        "RGB" => Some(""),
-        "colors" => Some("256"),
-        "Ss" => Some("\x1b[%p1%d q"),
-        "Se" => Some("\x1b[2 q"),
-        "Smulx" => Some("\x1b[4:%p1%dm"),
-        "Setulc" => Some("\x1b[58:2::%p1%{65536}%*%p2%{256}%*%+%p3%+m"),
-        "setrgbf" => Some("\x1b[38:2:%p1%d:%p2%d:%p3%dm"),
-        "setrgbb" => Some("\x1b[48:2:%p1%d:%p2%d:%p3%dm"),
-        "TN" => Some("xterm-256color"),
+        "Co" | "colors" => Some(b"256"),
+        "TN" | "name" => Some(b"xterm-256color"),
+        "RGB" => Some(b""),
+        "Ss" => Some(b"\x1b[%p1%d q"),
+        "Se" => Some(b"\x1b[ q"),
+        "Smulx" => Some(b"\x1b[4:%p1%dm"),
+        "Setulc" => Some(b"\x1b[58:2::%p1%{65536}%*%p2%{256}%*%+%p3%+m"),
+        "setrgbf" => Some(b"\x1b[38:2:%p1%d:%p2%d:%p3%dm"),
+        "setrgbb" => Some(b"\x1b[48:2:%p1%d:%p2%d:%p3%dm"),
+        "kcuu1" | "ku" => Some(b"\x1b[A"),
+        "kcud1" | "kd" => Some(b"\x1b[B"),
+        "kcuf1" | "kr" => Some(b"\x1b[C"),
+        "kcub1" | "kl" => Some(b"\x1b[D"),
+        "khome" | "kh" => Some(b"\x1b[H"),
+        "kend" | "@7" => Some(b"\x1b[F"),
+        "kich1" | "kI" => Some(b"\x1b[2~"),
+        "kdch1" | "kD" => Some(b"\x1b[3~"),
+        "kpp" | "kP" => Some(b"\x1b[5~"),
+        "knp" | "kN" => Some(b"\x1b[6~"),
+        "kcbt" | "kB" => Some(b"\x1b[Z"),
+        "kf1" | "k1" => Some(b"\x1bOP"),
+        "kf2" | "k2" => Some(b"\x1bOQ"),
+        "kf3" | "k3" => Some(b"\x1bOR"),
+        "kf4" | "k4" => Some(b"\x1bOS"),
+        "kf5" | "k5" => Some(b"\x1b[15~"),
+        "kf6" | "k6" => Some(b"\x1b[17~"),
+        "kf7" | "k7" => Some(b"\x1b[18~"),
+        "kf8" | "k8" => Some(b"\x1b[19~"),
+        "kf9" | "k9" => Some(b"\x1b[20~"),
+        "kf10" | "k;" => Some(b"\x1b[21~"),
+        "kf11" => Some(b"\x1b[23~"),
+        "kf12" => Some(b"\x1b[24~"),
+        "kf13" => Some(b"\x1b[25~"),
+        "kf14" => Some(b"\x1b[26~"),
+        "kf15" => Some(b"\x1b[28~"),
+        "kf16" => Some(b"\x1b[29~"),
+        "kf17" => Some(b"\x1b[31~"),
+        "kf18" => Some(b"\x1b[32~"),
+        "kf19" => Some(b"\x1b[33~"),
+        "kf20" => Some(b"\x1b[34~"),
         _ => None,
     }
 }
 
-fn hex_decode(hex: &[u8]) -> Vec<u8> {
-    hex.chunks(2)
-        .filter_map(|pair| {
-            if pair.len() == 2 {
-                u8::from_str_radix(std::str::from_utf8(pair).ok()?, 16).ok()
-            } else {
-                None
-            }
-        })
+fn write_xtgettcap_failure(
+    output: &mut Vec<u8>,
+    c1_mode: C1Mode,
+) {
+    conformance::push_dcs_prefix(output, c1_mode);
+    output.extend_from_slice(b"0+r");
+    conformance::push_st(output, c1_mode);
+}
+
+fn hex_decode(hex: &[u8]) -> Option<Vec<u8>> {
+    if !hex.len().is_multiple_of(2) {
+        return None;
+    }
+    hex.chunks_exact(2)
+        .map(|pair| Some((hex_nibble(pair[0])? << 4) | hex_nibble(pair[1])?))
         .collect()
+}
+
+fn hex_nibble(byte: u8) -> Option<u8> {
+    match byte {
+        b'0'..=b'9' => Some(byte - b'0'),
+        b'a'..=b'f' => Some(byte - b'a' + 10),
+        b'A'..=b'F' => Some(byte - b'A' + 10),
+        _ => None,
+    }
 }
 
 fn hex_encode(bytes: &[u8]) -> String {
@@ -639,8 +730,13 @@ fn hex_encode(bytes: &[u8]) -> String {
 mod integration_tests {
     use palette::Srgb;
 
+    use crate::ClipboardPermission;
+    use crate::ClipboardPermissions;
     use crate::DecColorSpace;
+    use crate::FeaturePermissions;
+    use crate::TerminalLimits;
     use crate::dec::color::report_color_table;
+    use crate::settings;
     use crate::test_support::TestTerm;
 
     #[test]
@@ -649,6 +745,63 @@ mod integration_tests {
         term.process(b"\x1b[>0q");
         let expected = format!("\x1bP>|term41 {}\x1b\\", env!("CARGO_PKG_VERSION"));
         assert_eq!(term.take_pending_output(), expected.as_bytes());
+    }
+
+    #[test]
+    fn xtgettcap_reports_policy_filtered_capabilities() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP+q544E;636F6C6F7273;6B6631\x1b\\");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1bP1+r544E=787465726D2D323536636F6C6F72;636F6C6F7273=323536;6B6631=1B4F50\x1b\\"
+        );
+    }
+
+    #[test]
+    fn xtgettcap_rejects_unknown_or_malformed_capability_names() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP+q544E;6E6F7065\x1b\\");
+        assert_eq!(term.take_pending_output(), b"\x1bP0+r\x1b\\");
+
+        term.process(b"\x1bP+q5\x1b\\");
+        assert_eq!(term.take_pending_output(), b"\x1bP0+r\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_clipboard_capability_follows_write_policy() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1bP+q4D73\x1b\\");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1bP1+r4D73=1B5D35323B25703125733B257032257307\x1b\\"
+        );
+
+        settings::set_feature_permissions(
+            &mut term.inner.protocol,
+            FeaturePermissions {
+                clipboard: ClipboardPermissions {
+                    write: ClipboardPermission::Deny,
+                    ..ClipboardPermissions::default()
+                },
+                ..FeaturePermissions::default()
+            },
+        );
+        term.process(b"\x1bP+q4D73\x1b\\");
+        assert_eq!(term.take_pending_output(), b"\x1bP0+r\x1b\\");
+    }
+
+    #[test]
+    fn xtgettcap_payload_limit_drops_oversized_queries() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        settings::set_terminal_limits(
+            &mut term.inner.protocol,
+            TerminalLimits {
+                xtgettcap_payload_bytes: 3,
+                ..TerminalLimits::default()
+            },
+        );
+        term.process(b"\x1bP+q544E\x1b\\");
+        assert!(term.take_pending_output().is_empty());
     }
 
     #[test]
