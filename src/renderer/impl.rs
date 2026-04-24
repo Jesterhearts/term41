@@ -2409,31 +2409,32 @@ impl Renderer {
         let Some(index_buffer) = fg_upload.index_buffer.buffer() else {
             return;
         };
+        if fg_upload.ranges.is_empty() {
+            return;
+        }
 
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some(label),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.fg_pipeline);
+        pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         for range in &fg_upload.ranges {
             let Some(bind_group) = self.glyph_atlas.bind_group(range.page_index) else {
                 continue;
             };
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some(label),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                ..Default::default()
-            });
-
-            pass.set_pipeline(&self.fg_pipeline);
-            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
             pass.set_bind_group(1, bind_group, &[]);
-            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(
                 range.index_start..range.index_start + range.index_count,
                 range.vertex_base,
@@ -2454,31 +2455,32 @@ impl Renderer {
         let Some(index_buffer) = image_upload.index_buffer.buffer() else {
             return;
         };
+        if image_upload.ranges.is_empty() {
+            return;
+        }
 
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("image_pass"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.image_pipeline);
+        pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+        pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
         for range in &image_upload.ranges {
             let Some(bind_group) = self.image_atlas.bind_group(range.page_index) else {
                 continue;
             };
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("image_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                ..Default::default()
-            });
-
-            pass.set_pipeline(&self.image_pipeline);
-            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
             pass.set_bind_group(1, bind_group, &[]);
-            pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-            pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
             pass.draw_indexed(
                 range.index_start..range.index_start + range.index_count,
                 range.vertex_base,
