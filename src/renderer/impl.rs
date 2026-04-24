@@ -21,6 +21,7 @@ use unicode_segmentation::UnicodeSegmentation;
 use utils41::lerp_u8;
 use wgpu::PowerPreference;
 use wgpu::TextureFormat;
+use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
@@ -467,9 +468,15 @@ struct RowGeometry {
     fg: FgGeometry,
 }
 
-struct CachedRowGeometry {
+struct CachedRowKey {
     key: RowRenderKey,
-    geometry: RowGeometry,
+}
+
+struct DirtyLayerRect {
+    x: f32,
+    y: f32,
+    w: f32,
+    h: f32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -580,6 +587,7 @@ struct GeometryUpload {
     vertex_buffer: UploadBuffer,
     index_buffer: UploadBuffer,
     has_indices: bool,
+    index_count: u32,
 }
 
 impl GeometryUpload {
@@ -606,6 +614,7 @@ impl GeometryUpload {
             wgpu::BufferUsages::INDEX,
             indices,
         );
+        self.index_count = indices.len() as u32;
     }
 }
 
@@ -708,10 +717,144 @@ fn upload_image_geometry(
     upload.upload(device, queue, "img_verts", "img_idx");
 }
 
+struct TerminalLayer {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    bind_group: wgpu::BindGroup,
+    vertex_buffer: wgpu::Buffer,
+    index_buffer: wgpu::Buffer,
+    width: u32,
+    height: u32,
+    format: TextureFormat,
+    needs_full_repaint: bool,
+}
+
+impl TerminalLayer {
+    fn new(
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        format: TextureFormat,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
+            mag_filter: wgpu::FilterMode::Nearest,
+            min_filter: wgpu::FilterMode::Nearest,
+            ..Default::default()
+        });
+        let texture = create_terminal_layer_texture(device, format, width, height);
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+            label: Some("terminal_layer_bg"),
+            layout,
+            entries: &[
+                wgpu::BindGroupEntry {
+                    binding: 0,
+                    resource: wgpu::BindingResource::TextureView(&view),
+                },
+                wgpu::BindGroupEntry {
+                    binding: 1,
+                    resource: wgpu::BindingResource::Sampler(&sampler),
+                },
+            ],
+        });
+        let (vertex_buffer, index_buffer) = create_terminal_layer_quad(device, width, height);
+
+        Self {
+            _texture: texture,
+            view,
+            bind_group,
+            vertex_buffer,
+            index_buffer,
+            width,
+            height,
+            format,
+            needs_full_repaint: true,
+        }
+    }
+
+    fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        layout: &wgpu::BindGroupLayout,
+        width: u32,
+        height: u32,
+    ) {
+        if self.width == width && self.height == height {
+            return;
+        }
+        *self = Self::new(device, layout, self.format, width, height);
+    }
+}
+
+fn create_terminal_layer_texture(
+    device: &wgpu::Device,
+    format: TextureFormat,
+    width: u32,
+    height: u32,
+) -> wgpu::Texture {
+    device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("terminal_layer"),
+        size: wgpu::Extent3d {
+            width: width.max(1),
+            height: height.max(1),
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format,
+        usage: wgpu::TextureUsages::RENDER_ATTACHMENT | wgpu::TextureUsages::TEXTURE_BINDING,
+        view_formats: &[],
+    })
+}
+
+fn create_terminal_layer_quad(
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> (wgpu::Buffer, wgpu::Buffer) {
+    let w = width.max(1) as f32;
+    let h = height.max(1) as f32;
+    let vertices = [
+        ImageVertex {
+            pos: [0.0, 0.0],
+            uv: [0.0, 0.0],
+        },
+        ImageVertex {
+            pos: [w, 0.0],
+            uv: [1.0, 0.0],
+        },
+        ImageVertex {
+            pos: [0.0, h],
+            uv: [0.0, 1.0],
+        },
+        ImageVertex {
+            pos: [w, h],
+            uv: [1.0, 1.0],
+        },
+    ];
+    let indices = [0_u32, 1, 2, 2, 1, 3];
+    let vertex_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("terminal_layer_quad_verts"),
+        contents: bytemuck::cast_slice(&vertices),
+        usage: wgpu::BufferUsages::VERTEX,
+    });
+    let index_buffer = device.create_buffer_init(&wgpu::util::BufferInitDescriptor {
+        label: Some("terminal_layer_quad_idx"),
+        contents: bytemuck::cast_slice(&indices),
+        usage: wgpu::BufferUsages::INDEX,
+    });
+    (vertex_buffer, index_buffer)
+}
+
 #[derive(Default)]
 struct RendererUploads {
+    terminal_clear: GeometryUpload,
+    terminal_bg: GeometryUpload,
     bg: GeometryUpload,
     overlay_bg: GeometryUpload,
+    terminal_fg: PageGeometryUpload<FgVertex>,
     fg: PageGeometryUpload<FgVertex>,
     overlay_fg: PageGeometryUpload<FgVertex>,
     under_image: PageGeometryUpload<ImageVertex>,
@@ -748,8 +891,75 @@ fn append_cached_row_geometry(
     target: &mut RenderGeometry,
     row: &RowGeometry,
 ) {
-    append_bg_geometry(&mut target.bg_vertices, &mut target.bg_indices, &row.bg);
-    append_fg_geometry(&mut target.fg, &row.fg);
+    append_bg_geometry(
+        &mut target.terminal_bg_vertices,
+        &mut target.terminal_bg_indices,
+        &row.bg,
+    );
+    append_fg_geometry(&mut target.terminal_fg, &row.fg);
+}
+
+fn push_terminal_dirty_rect(
+    geometry: &mut RenderGeometry,
+    row: u32,
+    layout: &FrameLayout,
+    surface_width: u32,
+    surface_height: u32,
+) {
+    let y = row as f32 * layout.cell_h + layout.tab_bar_h;
+    let h = layout.cell_h.min(surface_height as f32 - y).max(0.0);
+    if h <= 0.0 {
+        return;
+    }
+    geometry.terminal_dirty_rects.push(DirtyLayerRect {
+        x: 0.0,
+        y,
+        w: surface_width as f32,
+        h,
+    });
+}
+
+fn dirty_rect_clear_geometry(rects: &[DirtyLayerRect]) -> (Vec<BgVertex>, Vec<u32>) {
+    let mut vertices = Vec::with_capacity(rects.len() * 4);
+    let mut indices = Vec::with_capacity(rects.len() * 6);
+    let transparent = 0_u32;
+    for rect in rects {
+        let base = vertices.len() as u32;
+        vertices.extend_from_slice(&[
+            BgVertex {
+                pos: [rect.x, rect.y],
+                color: transparent,
+            },
+            BgVertex {
+                pos: [rect.x + rect.w, rect.y],
+                color: transparent,
+            },
+            BgVertex {
+                pos: [rect.x, rect.y + rect.h],
+                color: transparent,
+            },
+            BgVertex {
+                pos: [rect.x + rect.w, rect.y + rect.h],
+                color: transparent,
+            },
+        ]);
+        indices.extend_from_slice(&[base, base + 1, base + 2, base + 2, base + 1, base + 3]);
+    }
+    (vertices, indices)
+}
+
+fn invalidate_row_cache_with_neighbors(
+    row_geometry_cache: &mut [Option<CachedRowKey>],
+    row: usize,
+) {
+    if row_geometry_cache.is_empty() {
+        return;
+    }
+    let start = row.saturating_sub(1);
+    let end = (row + 1).min(row_geometry_cache.len().saturating_sub(1));
+    for cache in &mut row_geometry_cache[start..=end] {
+        *cache = None;
+    }
 }
 
 fn row_cursor_key(
@@ -807,28 +1017,18 @@ fn row_popup_clip_key(
     })
 }
 
+#[derive(Default)]
 struct RenderGeometry {
-    clear_bg: Srgb<u8>,
+    terminal_dirty_rects: Vec<DirtyLayerRect>,
+    terminal_bg_vertices: Vec<BgVertex>,
+    terminal_bg_indices: Vec<u32>,
+    terminal_fg: FgGeometry,
     bg_vertices: Vec<BgVertex>,
     bg_indices: Vec<u32>,
     fg: FgGeometry,
     overlay_bg_vertices: Vec<BgVertex>,
     overlay_bg_indices: Vec<u32>,
     overlay_fg: FgGeometry,
-}
-
-impl Default for RenderGeometry {
-    fn default() -> Self {
-        Self {
-            clear_bg: Srgb::new(0, 0, 0),
-            bg_vertices: Vec::new(),
-            bg_indices: Vec::new(),
-            fg: FgGeometry::default(),
-            overlay_bg_vertices: Vec::new(),
-            overlay_bg_indices: Vec::new(),
-            overlay_fg: FgGeometry::default(),
-        }
-    }
 }
 
 fn blank_cached_row(
@@ -864,6 +1064,7 @@ pub struct Renderer {
     bg_image_pipeline: wgpu::RenderPipeline,
     fg_pipeline: wgpu::RenderPipeline,
     image_pipeline: wgpu::RenderPipeline,
+    layer_pipeline: wgpu::RenderPipeline,
 
     screen_size_buffer: wgpu::Buffer,
     screen_size_bind_group: wgpu::BindGroup,
@@ -896,7 +1097,8 @@ pub struct Renderer {
 
     /// Materialized terminal rows reconstructed from dirty row snapshots.
     terminal_rows: Vec<RowSnapshot>,
-    row_geometry_cache: Vec<Option<CachedRowGeometry>>,
+    row_geometry_cache: Vec<Option<CachedRowKey>>,
+    terminal_layer: TerminalLayer,
     uploads: RendererUploads,
 }
 
@@ -912,7 +1114,16 @@ pub struct PreparedRenderer {
     background: Option<Background>,
     glyph_atlas: GlyphAtlas,
     image_atlas: ImageAtlas,
-    pipelines: HashMap<TextureFormat, (FgPipeline, BgPipeline, ImagePipeline, BgImagePipeline)>,
+    pipelines: HashMap<
+        TextureFormat,
+        (
+            FgPipeline,
+            BgPipeline,
+            ImagePipeline,
+            BgImagePipeline,
+            LayerPipeline,
+        ),
+    >,
 }
 
 /// Half-period of the cursor blink. xterm uses 530ms by default; 500 lands
@@ -1190,6 +1401,7 @@ impl Renderer {
             BgPipeline(bg_pipeline),
             ImagePipeline(image_pipeline),
             BgImagePipeline(bg_image_pipeline),
+            LayerPipeline(layer_pipeline),
         ) = if let Some(pipelines) = pipelines.remove(&surface_format) {
             pipelines
         } else {
@@ -1214,6 +1426,13 @@ impl Renderer {
                 &image_atlas,
             )
         };
+        let terminal_layer = TerminalLayer::new(
+            &device,
+            image_atlas.bind_group_layout(),
+            surface_format,
+            surface_config.width,
+            surface_config.height,
+        );
 
         let mut renderer = Self {
             device,
@@ -1224,6 +1443,7 @@ impl Renderer {
             bg_image_pipeline,
             fg_pipeline,
             image_pipeline,
+            layer_pipeline,
             screen_size_buffer,
             screen_size_bind_group,
             glyph_atlas,
@@ -1235,6 +1455,7 @@ impl Renderer {
             gutter_enabled,
             terminal_rows: Vec::new(),
             row_geometry_cache: Vec::new(),
+            terminal_layer,
             uploads: RendererUploads::default(),
         };
 
@@ -1257,6 +1478,13 @@ impl Renderer {
         self.surface_config.height = size.height;
         self.surface.configure(&self.device, &self.surface_config);
         self.update_screen_size(size);
+        self.terminal_layer.resize(
+            &self.device,
+            self.image_atlas.bind_group_layout(),
+            size.width,
+            size.height,
+        );
+        self.row_geometry_cache.clear();
         if let Some(background) = self.background.as_mut() {
             background.resize(&self.queue, (size.width, size.height));
         }
@@ -1438,9 +1666,11 @@ impl Renderer {
                 .collect();
             self.row_geometry_cache.clear();
             self.row_geometry_cache.resize_with(total_rows, || None);
+            self.terminal_layer.needs_full_repaint = true;
         } else if self.row_geometry_cache.len() != total_rows {
             self.row_geometry_cache.clear();
             self.row_geometry_cache.resize_with(total_rows, || None);
+            self.terminal_layer.needs_full_repaint = true;
         }
 
         for row in &snap.rows {
@@ -1453,9 +1683,7 @@ impl Renderer {
                 self.row_geometry_cache.resize_with(idx + 1, || None);
             }
             self.terminal_rows[idx] = row.clone();
-            if let Some(cache) = self.row_geometry_cache.get_mut(idx) {
-                *cache = None;
-            }
+            invalidate_row_cache_with_neighbors(&mut self.row_geometry_cache, idx);
         }
     }
 
@@ -1625,10 +1853,7 @@ impl Renderer {
         preedit: Option<&crate::renderer::PreeditState>,
         layout: &FrameLayout,
     ) -> RenderGeometry {
-        let mut geometry = RenderGeometry {
-            clear_bg: snap.palette.bg,
-            ..RenderGeometry::default()
-        };
+        let mut geometry = RenderGeometry::default();
         let cursor_state = self.cursor_state_from_snapshot(snap);
         let popup_clip = self.popup_clip(gutter_popup, layout);
         let blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 500) & 1 == 1;
@@ -1638,6 +1863,16 @@ impl Renderer {
         for snap_row in rows {
             let row = snap_row.screen_row;
             if snap.search_active && row == snap.viewport_rows - 1 {
+                push_terminal_dirty_rect(
+                    &mut geometry,
+                    row,
+                    layout,
+                    self.surface_config.width,
+                    self.surface_config.height,
+                );
+                if let Some(cache) = self.row_geometry_cache.get_mut(row as usize) {
+                    *cache = None;
+                }
                 continue;
             }
             let cache_key = self.row_render_key(
@@ -1657,10 +1892,16 @@ impl Renderer {
                 .and_then(Option::as_ref)
                 && cached.key == cache_key
             {
-                append_cached_row_geometry(&mut geometry, &cached.geometry);
                 continue;
             }
 
+            push_terminal_dirty_rect(
+                &mut geometry,
+                row,
+                layout,
+                self.surface_config.width,
+                self.surface_config.height,
+            );
             let mut row_geometry = RowGeometry::default();
             self.append_row_geometry(
                 font_system,
@@ -1690,10 +1931,7 @@ impl Renderer {
                 self.row_geometry_cache
                     .resize_with(row as usize + 1, || None);
             }
-            self.row_geometry_cache[row as usize] = Some(CachedRowGeometry {
-                key: cache_key,
-                geometry: row_geometry,
-            });
+            self.row_geometry_cache[row as usize] = Some(CachedRowKey { key: cache_key });
         }
 
         self.append_visual_bell_overlay(&mut geometry, snap, layout);
@@ -2260,6 +2498,24 @@ impl Renderer {
         let device = &self.device;
         let queue = &self.queue;
 
+        let (terminal_clear_vertices, terminal_clear_indices) =
+            dirty_rect_clear_geometry(&geometry.terminal_dirty_rects);
+        self.uploads.terminal_clear.upload(
+            device,
+            queue,
+            "terminal_clear_verts",
+            "terminal_clear_idx",
+            &terminal_clear_vertices,
+            &terminal_clear_indices,
+        );
+        self.uploads.terminal_bg.upload(
+            device,
+            queue,
+            "terminal_bg_verts",
+            "terminal_bg_idx",
+            &geometry.terminal_bg_vertices,
+            &geometry.terminal_bg_indices,
+        );
         self.uploads.bg.upload(
             device,
             queue,
@@ -2275,6 +2531,12 @@ impl Renderer {
             "overlay_bg_idx",
             &geometry.overlay_bg_vertices,
             &geometry.overlay_bg_indices,
+        );
+        upload_fg_geometry(
+            device,
+            queue,
+            &mut self.uploads.terminal_fg,
+            &geometry.terminal_fg,
         );
         upload_fg_geometry(device, queue, &mut self.uploads.fg, &geometry.fg);
         upload_fg_geometry(
@@ -2314,6 +2576,8 @@ impl Renderer {
             .device
             .create_command_encoder(&wgpu::CommandEncoderDescriptor::default());
 
+        self.update_terminal_layer(&mut encoder);
+
         {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
                 label: Some("bg_pass"),
@@ -2321,12 +2585,7 @@ impl Renderer {
                     view: &view,
                     resolve_target: None,
                     ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Clear(wgpu::Color {
-                            r: geometry.clear_bg.red as f64 / 255.0,
-                            g: geometry.clear_bg.green as f64 / 255.0,
-                            b: geometry.clear_bg.blue as f64 / 255.0,
-                            a: self.bg_alpha as f64 / 255.0,
-                        }),
+                        load: wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT),
                         store: wgpu::StoreOp::Store,
                     },
                     depth_slice: None,
@@ -2342,23 +2601,36 @@ impl Renderer {
                 pass.set_index_buffer(background.ibuf().slice(..), wgpu::IndexFormat::Uint32);
                 pass.draw_indexed(0..6, 0, 0..1);
             }
-
-            if self.uploads.bg.has_indices {
-                pass.set_pipeline(&self.bg_pipeline);
-                pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-                pass.set_vertex_buffer(
-                    0,
-                    self.uploads.bg.vertex_buffer.buffer().unwrap().slice(..),
-                );
-                pass.set_index_buffer(
-                    self.uploads.bg.index_buffer.buffer().unwrap().slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(0..geometry.bg_indices.len() as u32, 0, 0..1);
-            }
         }
 
         self.submit_image_pass(&mut encoder, &view, &self.uploads.under_image);
+
+        self.submit_terminal_layer_pass(&mut encoder, &view);
+
+        if self.uploads.bg.has_indices {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("dynamic_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.bg_pipeline);
+            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+            pass.set_vertex_buffer(0, self.uploads.bg.vertex_buffer.buffer().unwrap().slice(..));
+            pass.set_index_buffer(
+                self.uploads.bg.index_buffer.buffer().unwrap().slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            pass.draw_indexed(0..geometry.bg_indices.len() as u32, 0, 0..1);
+        }
 
         self.submit_fg_pass(&mut encoder, &view, &self.uploads.fg, "fg_pass");
 
@@ -2411,6 +2683,125 @@ impl Renderer {
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
+    }
+
+    fn update_terminal_layer(
+        &mut self,
+        encoder: &mut wgpu::CommandEncoder,
+    ) {
+        if !self.terminal_layer.needs_full_repaint
+            && !self.uploads.terminal_clear.has_indices
+            && !self.uploads.terminal_bg.has_indices
+            && self.uploads.terminal_fg.ranges.is_empty()
+        {
+            return;
+        }
+
+        {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("terminal_layer_update"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &self.terminal_layer.view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: if self.terminal_layer.needs_full_repaint {
+                            wgpu::LoadOp::Clear(wgpu::Color::TRANSPARENT)
+                        } else {
+                            wgpu::LoadOp::Load
+                        },
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+
+            if self.uploads.terminal_clear.has_indices {
+                pass.set_pipeline(&self.bg_pipeline);
+                pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+                pass.set_vertex_buffer(
+                    0,
+                    self.uploads
+                        .terminal_clear
+                        .vertex_buffer
+                        .buffer()
+                        .unwrap()
+                        .slice(..),
+                );
+                pass.set_index_buffer(
+                    self.uploads
+                        .terminal_clear
+                        .index_buffer
+                        .buffer()
+                        .unwrap()
+                        .slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..self.uploads.terminal_clear.index_count, 0, 0..1);
+            }
+
+            if self.uploads.terminal_bg.has_indices {
+                pass.set_pipeline(&self.bg_pipeline);
+                pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+                pass.set_vertex_buffer(
+                    0,
+                    self.uploads
+                        .terminal_bg
+                        .vertex_buffer
+                        .buffer()
+                        .unwrap()
+                        .slice(..),
+                );
+                pass.set_index_buffer(
+                    self.uploads
+                        .terminal_bg
+                        .index_buffer
+                        .buffer()
+                        .unwrap()
+                        .slice(..),
+                    wgpu::IndexFormat::Uint32,
+                );
+                pass.draw_indexed(0..self.uploads.terminal_bg.index_count, 0, 0..1);
+            }
+        }
+
+        self.submit_fg_pass(
+            encoder,
+            &self.terminal_layer.view,
+            &self.uploads.terminal_fg,
+            "terminal_layer_fg",
+        );
+
+        self.terminal_layer.needs_full_repaint = false;
+    }
+
+    fn submit_terminal_layer_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+    ) {
+        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+            label: Some("terminal_layer_composite"),
+            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                view,
+                resolve_target: None,
+                ops: wgpu::Operations {
+                    load: wgpu::LoadOp::Load,
+                    store: wgpu::StoreOp::Store,
+                },
+                depth_slice: None,
+            })],
+            ..Default::default()
+        });
+        pass.set_pipeline(&self.layer_pipeline);
+        pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+        pass.set_bind_group(1, &self.terminal_layer.bind_group, &[]);
+        pass.set_vertex_buffer(0, self.terminal_layer.vertex_buffer.slice(..));
+        pass.set_index_buffer(
+            self.terminal_layer.index_buffer.slice(..),
+            wgpu::IndexFormat::Uint32,
+        );
+        pass.draw_indexed(0..6, 0, 0..1);
     }
 
     fn submit_fg_pass(
@@ -4252,6 +4643,7 @@ struct FgPipeline(wgpu::RenderPipeline);
 struct BgPipeline(wgpu::RenderPipeline);
 struct ImagePipeline(wgpu::RenderPipeline);
 struct BgImagePipeline(wgpu::RenderPipeline);
+struct LayerPipeline(wgpu::RenderPipeline);
 
 fn build_pipeline_for_format(
     format: TextureFormat,
@@ -4261,7 +4653,13 @@ fn build_pipeline_for_format(
     bg_image_layout: &wgpu::BindGroupLayout,
     glyph_atlas: &GlyphAtlas,
     image_atlas: &ImageAtlas,
-) -> (FgPipeline, BgPipeline, ImagePipeline, BgImagePipeline) {
+) -> (
+    FgPipeline,
+    BgPipeline,
+    ImagePipeline,
+    BgImagePipeline,
+    LayerPipeline,
+) {
     // ---- Shaders ----
     let create_pipelines = tracing::debug_span!("create_pipelines").entered();
     let bg_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
@@ -4275,6 +4673,10 @@ fn build_pipeline_for_format(
     let image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("image_shader"),
         source: wgpu::ShaderSource::Wgsl(include_str!("shaders/image.wgsl").into()),
+    });
+    let layer_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
+        label: Some("layer_shader"),
+        source: wgpu::ShaderSource::Wgsl(include_str!("shaders/layer.wgsl").into()),
     });
     let bg_image_shader = device.create_shader_module(wgpu::ShaderModuleDescriptor {
         label: Some("bg_image_shader"),
@@ -4415,6 +4817,52 @@ fn build_pipeline_for_format(
         cache: pipeline_cache.as_ref(),
     });
 
+    // ---- Layer composite pipeline ----
+    let layer_pipeline_layout = device.create_pipeline_layout(&wgpu::PipelineLayoutDescriptor {
+        label: Some("layer_pipeline_layout"),
+        bind_group_layouts: &[
+            Some(screen_size_layout),
+            Some(image_atlas.bind_group_layout()),
+        ],
+        immediate_size: 0,
+    });
+
+    let layer_pipeline = device.create_render_pipeline(&wgpu::RenderPipelineDescriptor {
+        label: Some("layer_pipeline"),
+        layout: Some(&layer_pipeline_layout),
+        vertex: wgpu::VertexState {
+            module: &layer_shader,
+            entry_point: Some("vs_main"),
+            buffers: &[wgpu::VertexBufferLayout {
+                array_stride: std::mem::size_of::<ImageVertex>() as u64,
+                step_mode: wgpu::VertexStepMode::Vertex,
+                attributes: &wgpu::vertex_attr_array![
+                    0 => Float32x2,
+                    1 => Float32x2,
+                ],
+            }],
+            compilation_options: Default::default(),
+        },
+        fragment: Some(wgpu::FragmentState {
+            module: &layer_shader,
+            entry_point: Some("fs_main"),
+            targets: &[Some(wgpu::ColorTargetState {
+                format,
+                blend: Some(wgpu::BlendState::PREMULTIPLIED_ALPHA_BLENDING),
+                write_mask: wgpu::ColorWrites::ALL,
+            })],
+            compilation_options: Default::default(),
+        }),
+        primitive: wgpu::PrimitiveState {
+            topology: wgpu::PrimitiveTopology::TriangleList,
+            ..Default::default()
+        },
+        depth_stencil: None,
+        multisample: wgpu::MultisampleState::default(),
+        multiview_mask: None,
+        cache: pipeline_cache.as_ref(),
+    });
+
     // ---- Background image pipeline ----
     // Drawn as the very first thing in the bg pass, before cell quads,
     // so that cells skipping their bg quad (default-bg cells) reveal
@@ -4500,6 +4948,7 @@ fn build_pipeline_for_format(
         BgPipeline(bg_pipeline),
         ImagePipeline(image_pipeline),
         BgImagePipeline(bg_image_pipeline),
+        LayerPipeline(layer_pipeline),
     )
 }
 
