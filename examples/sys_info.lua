@@ -126,7 +126,7 @@ local function render_status()
     )
   end
 
-  terminal.set_status_text(cpu_text .. "  " .. memory_text)
+  terminal.set_status_text(" ⟫ " .. cpu_text .. "  " .. memory_text)
 end
 
 function sleep(seconds)
