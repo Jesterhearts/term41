@@ -1,11 +1,12 @@
-//! Glyph atlas: a single 2D texture packed with rasterized glyphs, backed by
-//! a [`ShelfPacker`] and an LRU cache (`evictor::Lru`).
+//! Glyph atlas: lazily-created 512² texture pages packed with rasterized
+//! glyphs, each backed by a [`ShelfPacker`] and a shared LRU cache
+//! (`evictor::Lru`).
 //!
-//! Two separate resources constrain the atlas: the 1024² packer (which can
-//! fill up even with the cache well under capacity) and the cache's own
-//! entry limit. On packer exhaustion we explicitly `pop()` the LRU and
-//! free its region in a retry loop. On cache overflow we let `insert()`
-//! handle eviction and free the returned entry's packer region inline.
+//! Two separate resources constrain the atlas: currently-created pages (which
+//! can fill up even with the cache well under capacity) and the cache's own
+//! entry limit. On page exhaustion we explicitly `pop()` the LRU and free its
+//! region in a retry loop. On cache overflow we let `insert()` handle eviction
+//! and free the returned entry's packer region inline.
 
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
@@ -17,7 +18,10 @@ use font41::RasterizedGlyph;
 use crate::renderer::shelf::Allocation;
 use crate::renderer::shelf::ShelfPacker;
 
-pub const ATLAS_SIZE: u32 = 2048;
+pub const ATLAS_SIZE: u32 = 512;
+// Keep worst-case glyph texture memory equal to the old eager 2048² atlas
+// while letting the common ASCII path start at a single 512² page.
+const MAX_ATLAS_PAGES: usize = 16;
 const CACHE_CAPACITY: usize = 16384;
 const PADDING: u32 = 4;
 const X_OFFSET: u32 = PADDING / 2;
@@ -36,6 +40,7 @@ pub type GlyphKey = (usize, u16, u8, bool, Option<font41::DrcsGeometryClass>);
 /// the quad. Empty glyphs (zero-size whitespace) carry no allocation.
 #[derive(Clone, Copy)]
 pub struct GlyphSlot {
+    pub page_index: usize,
     pub bearing_x: i32,
     pub bearing_y: i32,
     /// True for color glyphs (COLR, emoji bitmaps, …) — the shader samples
@@ -67,32 +72,22 @@ impl GlyphSlot {
     }
 }
 
-pub struct GlyphAtlas {
+struct GlyphAtlasPage {
     texture: wgpu::Texture,
     bind_group: wgpu::BindGroup,
-    bind_group_layout: wgpu::BindGroupLayout,
-    cache: Lru<GlyphKey, GlyphSlot>,
+    _size_buffer: wgpu::Buffer,
     packer: ShelfPacker,
+}
+
+pub struct GlyphAtlas {
+    bind_group_layout: wgpu::BindGroupLayout,
+    sampler: wgpu::Sampler,
+    pages: Vec<GlyphAtlasPage>,
+    cache: Lru<GlyphKey, GlyphSlot>,
 }
 
 impl GlyphAtlas {
     pub fn new(device: &wgpu::Device) -> Self {
-        let texture = device.create_texture(&wgpu::TextureDescriptor {
-            label: Some("glyph_atlas"),
-            size: wgpu::Extent3d {
-                width: ATLAS_SIZE,
-                height: ATLAS_SIZE,
-                depth_or_array_layers: 1,
-            },
-            mip_level_count: 1,
-            sample_count: 1,
-            dimension: wgpu::TextureDimension::D2,
-            format: wgpu::TextureFormat::Rgba8Unorm,
-            usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
-            view_formats: &[],
-        });
-
-        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
         let sampler = device.create_sampler(&wgpu::SamplerDescriptor {
             mag_filter: wgpu::FilterMode::Nearest,
             min_filter: wgpu::FilterMode::Nearest,
@@ -131,40 +126,11 @@ impl GlyphAtlas {
             ],
         });
 
-        let size_buffer = wgpu::util::DeviceExt::create_buffer_init(
-            device,
-            &wgpu::util::BufferInitDescriptor {
-                label: Some("glyph_atlas_size"),
-                contents: bytemuck::cast_slice(&[ATLAS_SIZE as f32, ATLAS_SIZE as f32]),
-                usage: wgpu::BufferUsages::UNIFORM,
-            },
-        );
-
-        let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
-            label: Some("glyph_atlas_bg"),
-            layout: &bind_group_layout,
-            entries: &[
-                wgpu::BindGroupEntry {
-                    binding: 0,
-                    resource: wgpu::BindingResource::TextureView(&view),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 1,
-                    resource: wgpu::BindingResource::Sampler(&sampler),
-                },
-                wgpu::BindGroupEntry {
-                    binding: 2,
-                    resource: size_buffer.as_entire_binding(),
-                },
-            ],
-        });
-
         Self {
-            texture,
-            bind_group,
             bind_group_layout,
+            sampler,
+            pages: Vec::new(),
             cache: Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
-            packer: ShelfPacker::new(ATLAS_SIZE),
         }
     }
 
@@ -172,11 +138,14 @@ impl GlyphAtlas {
     /// so every glyph is re-rasterized at the new resolution.
     pub fn clear(&mut self) {
         self.cache = Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap());
-        self.packer = ShelfPacker::new(ATLAS_SIZE);
+        self.pages.clear();
     }
 
-    pub fn bind_group(&self) -> &wgpu::BindGroup {
-        &self.bind_group
+    pub fn bind_group(
+        &self,
+        page_index: usize,
+    ) -> Option<&wgpu::BindGroup> {
+        self.pages.get(page_index).map(|page| &page.bind_group)
     }
 
     pub fn bind_group_layout(&self) -> &wgpu::BindGroupLayout {
@@ -191,6 +160,7 @@ impl GlyphAtlas {
     /// bitmap dilation, so the caller's request is silently dropped there.
     pub fn ensure_cached(
         &mut self,
+        device: &wgpu::Device,
         queue: &wgpu::Queue,
         font_system: &FontSystem,
         font_index: usize,
@@ -223,55 +193,174 @@ impl GlyphAtlas {
 
         if glyph.width == 0 || glyph.height == 0 {
             let slot = GlyphSlot {
+                page_index: 0,
                 bearing_x: glyph.bearing_x,
                 bearing_y: glyph.bearing_y,
                 is_color: glyph.is_color,
                 alloc: None,
             };
-            release_evicted(&mut self.packer, self.cache.insert(key, slot));
+            release_evicted(&mut self.pages, self.cache.insert(key, slot));
             return Some(slot);
         }
 
-        let alloc = loop {
-            if let Some(a) = self
-                .packer
-                .allocate(glyph.width + PADDING, glyph.height + PADDING)
-            {
-                break a;
+        if glyph.width + PADDING > ATLAS_SIZE || glyph.height + PADDING > ATLAS_SIZE {
+            warn!(
+                "glyph {glyph_id} too large for atlas page ({}x{})",
+                glyph.width, glyph.height
+            );
+            return None;
+        }
+
+        let tile = loop {
+            if let Some(tile) = allocate_glyph(self, device, glyph.width, glyph.height) {
+                break tile;
             }
-            // Atlas is full; free the LRU entry and retry. Give up if the
-            // cache is empty — the glyph simply cannot fit.
-            if !evict_one(&mut self.cache, &mut self.packer) {
+            // Allocated pages are full; free the LRU entry and retry. Give up
+            // if the cache is empty, the page cap has been reached, and the
+            // glyph still does not fit.
+            if !evict_one(&mut self.cache, &mut self.pages) {
                 warn!(
-                    "glyph {glyph_id} too large for atlas ({}x{})",
+                    "glyph atlas exhausted before allocating glyph {glyph_id} ({}x{})",
                     glyph.width, glyph.height
                 );
                 return None;
             }
         };
 
-        upload_glyph(queue, &self.texture, &alloc, &glyph);
+        upload_glyph(
+            queue,
+            &self.pages[tile.page_index].texture,
+            &tile.alloc,
+            &glyph,
+        );
 
         let slot = GlyphSlot {
+            page_index: tile.page_index,
             bearing_x: glyph.bearing_x,
             bearing_y: glyph.bearing_y,
             is_color: glyph.is_color,
-            alloc: Some(alloc),
+            alloc: Some(tile.alloc),
         };
-        release_evicted(&mut self.packer, self.cache.insert(key, slot));
+        release_evicted(&mut self.pages, self.cache.insert(key, slot));
         Some(slot)
+    }
+}
+
+#[derive(Clone, Copy)]
+struct GlyphTile {
+    page_index: usize,
+    alloc: Allocation,
+}
+
+fn allocate_glyph(
+    atlas: &mut GlyphAtlas,
+    device: &wgpu::Device,
+    width: u32,
+    height: u32,
+) -> Option<GlyphTile> {
+    let width = width + PADDING;
+    let height = height + PADDING;
+
+    if let Some(tile) = allocate_in_existing_pages(atlas, width, height) {
+        return Some(tile);
+    }
+    if width > ATLAS_SIZE || height > ATLAS_SIZE || atlas.pages.len() >= MAX_ATLAS_PAGES {
+        return None;
+    }
+
+    let page_index = atlas.pages.len();
+    atlas.pages.push(create_page(
+        device,
+        &atlas.bind_group_layout,
+        &atlas.sampler,
+        page_index,
+    ));
+    atlas.pages[page_index]
+        .packer
+        .allocate(width, height)
+        .map(|alloc| GlyphTile { page_index, alloc })
+}
+
+fn allocate_in_existing_pages(
+    atlas: &mut GlyphAtlas,
+    width: u32,
+    height: u32,
+) -> Option<GlyphTile> {
+    for (page_index, page) in atlas.pages.iter_mut().enumerate() {
+        if let Some(alloc) = page.packer.allocate(width, height) {
+            return Some(GlyphTile { page_index, alloc });
+        }
+    }
+    None
+}
+
+fn create_page(
+    device: &wgpu::Device,
+    bind_group_layout: &wgpu::BindGroupLayout,
+    sampler: &wgpu::Sampler,
+    page_index: usize,
+) -> GlyphAtlasPage {
+    let texture = device.create_texture(&wgpu::TextureDescriptor {
+        label: Some("glyph_atlas_page"),
+        size: wgpu::Extent3d {
+            width: ATLAS_SIZE,
+            height: ATLAS_SIZE,
+            depth_or_array_layers: 1,
+        },
+        mip_level_count: 1,
+        sample_count: 1,
+        dimension: wgpu::TextureDimension::D2,
+        format: wgpu::TextureFormat::Rgba8Unorm,
+        usage: wgpu::TextureUsages::TEXTURE_BINDING | wgpu::TextureUsages::COPY_DST,
+        view_formats: &[],
+    });
+
+    let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+    let size_buffer = wgpu::util::DeviceExt::create_buffer_init(
+        device,
+        &wgpu::util::BufferInitDescriptor {
+            label: Some("glyph_atlas_size"),
+            contents: bytemuck::cast_slice(&[ATLAS_SIZE as f32, ATLAS_SIZE as f32]),
+            usage: wgpu::BufferUsages::UNIFORM,
+        },
+    );
+
+    let bind_group = device.create_bind_group(&wgpu::BindGroupDescriptor {
+        label: Some("glyph_atlas_page_bg"),
+        layout: bind_group_layout,
+        entries: &[
+            wgpu::BindGroupEntry {
+                binding: 0,
+                resource: wgpu::BindingResource::TextureView(&view),
+            },
+            wgpu::BindGroupEntry {
+                binding: 1,
+                resource: wgpu::BindingResource::Sampler(sampler),
+            },
+            wgpu::BindGroupEntry {
+                binding: 2,
+                resource: size_buffer.as_entire_binding(),
+            },
+        ],
+    });
+
+    tracing::debug!(page_index, "created glyph atlas page");
+
+    GlyphAtlasPage {
+        texture,
+        bind_group,
+        _size_buffer: size_buffer,
+        packer: ShelfPacker::new(ATLAS_SIZE),
     }
 }
 
 fn evict_one(
     cache: &mut Lru<GlyphKey, GlyphSlot>,
-    packer: &mut ShelfPacker,
+    pages: &mut [GlyphAtlasPage],
 ) -> bool {
     match cache.pop() {
         Some((_, slot)) => {
-            if let Some(alloc) = slot.alloc {
-                packer.free(&alloc);
-            }
+            free_slot(pages, &slot);
             true
         }
         None => false,
@@ -281,13 +370,22 @@ fn evict_one(
 /// Return the packer region owned by a cache entry that `insert()` just
 /// evicted, if any. Empty-glyph slots carry no allocation.
 fn release_evicted(
-    packer: &mut ShelfPacker,
+    pages: &mut [GlyphAtlasPage],
     evicted: Option<GlyphSlot>,
 ) {
-    if let Some(slot) = evicted
-        && let Some(alloc) = slot.alloc
+    if let Some(slot) = evicted {
+        free_slot(pages, &slot);
+    }
+}
+
+fn free_slot(
+    pages: &mut [GlyphAtlasPage],
+    slot: &GlyphSlot,
+) {
+    if let Some(alloc) = slot.alloc
+        && let Some(page) = pages.get_mut(slot.page_index)
     {
-        packer.free(&alloc);
+        page.packer.free(&alloc);
     }
 }
 

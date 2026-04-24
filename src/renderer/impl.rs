@@ -405,16 +405,59 @@ fn image_batch_for_page(
     geometry.batches.last_mut().unwrap()
 }
 
+#[derive(Default)]
+struct FgGeometry {
+    batches: Vec<FgDrawBatch>,
+}
+
+#[derive(Default)]
+struct FgDrawBatch {
+    page_index: usize,
+    vertices: Vec<FgVertex>,
+    indices: Vec<u32>,
+}
+
+fn fg_batch_for_page(
+    geometry: &mut FgGeometry,
+    page_index: usize,
+) -> &mut FgDrawBatch {
+    if geometry
+        .batches
+        .last()
+        .is_some_and(|batch| batch.page_index == page_index)
+    {
+        return geometry.batches.last_mut().unwrap();
+    }
+
+    geometry.batches.push(FgDrawBatch {
+        page_index,
+        vertices: Vec::new(),
+        indices: Vec::new(),
+    });
+    geometry.batches.last_mut().unwrap()
+}
+
+fn push_fg_quad(
+    geometry: &mut FgGeometry,
+    page_index: usize,
+    vertices: [FgVertex; 4],
+) {
+    let batch = fg_batch_for_page(geometry, page_index);
+    let fi = batch.vertices.len() as u32;
+    batch.vertices.extend_from_slice(&vertices);
+    batch
+        .indices
+        .extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+}
+
 struct RenderGeometry {
     clear_bg: Srgb<u8>,
     bg_vertices: Vec<BgVertex>,
     bg_indices: Vec<u32>,
-    fg_vertices: Vec<FgVertex>,
-    fg_indices: Vec<u32>,
+    fg: FgGeometry,
     overlay_bg_vertices: Vec<BgVertex>,
     overlay_bg_indices: Vec<u32>,
-    overlay_fg_vertices: Vec<FgVertex>,
-    overlay_fg_indices: Vec<u32>,
+    overlay_fg: FgGeometry,
 }
 
 impl Default for RenderGeometry {
@@ -423,12 +466,10 @@ impl Default for RenderGeometry {
             clear_bg: Srgb::new(0, 0, 0),
             bg_vertices: Vec::new(),
             bg_indices: Vec::new(),
-            fg_vertices: Vec::new(),
-            fg_indices: Vec::new(),
+            fg: FgGeometry::default(),
             overlay_bg_vertices: Vec::new(),
             overlay_bg_indices: Vec::new(),
-            overlay_fg_vertices: Vec::new(),
-            overlay_fg_indices: Vec::new(),
+            overlay_fg: FgGeometry::default(),
         }
     }
 }
@@ -1205,8 +1246,7 @@ impl Renderer {
             layout,
             &mut geometry.bg_vertices,
             &mut geometry.bg_indices,
-            &mut geometry.fg_vertices,
-            &mut geometry.fg_indices,
+            &mut geometry.fg,
         );
 
         self.render_tab_bar(
@@ -1216,12 +1256,10 @@ impl Renderer {
             controls,
             &mut geometry.bg_vertices,
             &mut geometry.bg_indices,
-            &mut geometry.fg_vertices,
-            &mut geometry.fg_indices,
+            &mut geometry.fg,
             &mut geometry.overlay_bg_vertices,
             &mut geometry.overlay_bg_indices,
-            &mut geometry.overlay_fg_vertices,
-            &mut geometry.overlay_fg_indices,
+            &mut geometry.overlay_fg,
         );
         self.render_search_bar(
             font_system,
@@ -1229,8 +1267,7 @@ impl Renderer {
             layout.tab_bar_h,
             &mut geometry.bg_vertices,
             &mut geometry.bg_indices,
-            &mut geometry.fg_vertices,
-            &mut geometry.fg_indices,
+            &mut geometry.fg,
         );
 
         if let Some(popup) = gutter_popup {
@@ -1243,8 +1280,7 @@ impl Renderer {
                 layout.tab_bar_h,
                 &mut geometry.bg_vertices,
                 &mut geometry.bg_indices,
-                &mut geometry.fg_vertices,
-                &mut geometry.fg_indices,
+                &mut geometry.fg,
             );
         }
 
@@ -1255,8 +1291,7 @@ impl Renderer {
                 layout,
                 &mut geometry.overlay_bg_vertices,
                 &mut geometry.overlay_bg_indices,
-                &mut geometry.overlay_fg_vertices,
-                &mut geometry.overlay_fg_indices,
+                &mut geometry.overlay_fg,
             );
         }
 
@@ -1267,8 +1302,7 @@ impl Renderer {
                 layout,
                 &mut geometry.overlay_bg_vertices,
                 &mut geometry.overlay_bg_indices,
-                &mut geometry.overlay_fg_vertices,
-                &mut geometry.overlay_fg_indices,
+                &mut geometry.overlay_fg,
             );
         }
 
@@ -1279,8 +1313,7 @@ impl Renderer {
                 layout,
                 &mut geometry.overlay_bg_vertices,
                 &mut geometry.overlay_bg_indices,
-                &mut geometry.overlay_fg_vertices,
-                &mut geometry.overlay_fg_indices,
+                &mut geometry.overlay_fg,
             );
         }
 
@@ -1298,8 +1331,7 @@ impl Renderer {
                 layout.tab_bar_h,
                 &mut geometry.bg_vertices,
                 &mut geometry.bg_indices,
-                &mut geometry.fg_vertices,
-                &mut geometry.fg_indices,
+                &mut geometry.fg,
             );
         }
 
@@ -1571,6 +1603,7 @@ impl Renderer {
             }
 
             let slot = match self.glyph_atlas.ensure_cached(
+                &self.device,
                 &self.queue,
                 font_system,
                 glyph.font_index,
@@ -1631,36 +1664,36 @@ impl Renderer {
             let shear_at = |vy: f32| -> f32 { shear * (baseline_y - vy) };
             let fg_color = pack_color(&glyph.fg, 255);
             let flags: u32 = if slot.is_color { 1 } else { 0 };
-            let fi = geometry.fg_vertices.len() as u32;
-            geometry.fg_vertices.extend_from_slice(&[
-                FgVertex {
-                    pos: [gx + shear_at(gy), gy],
-                    uv: [sx as f32, uv_y_top],
-                    color: fg_color,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw + shear_at(gy), gy],
-                    uv: [(sx + sw) as f32, uv_y_top],
-                    color: fg_color,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + shear_at(gy + gh), gy + gh],
-                    uv: [sx as f32, uv_y_bot],
-                    color: fg_color,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw + shear_at(gy + gh), gy + gh],
-                    uv: [(sx + sw) as f32, uv_y_bot],
-                    color: fg_color,
-                    flags,
-                },
-            ]);
-            geometry
-                .fg_indices
-                .extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+            push_fg_quad(
+                &mut geometry.fg,
+                slot.page_index,
+                [
+                    FgVertex {
+                        pos: [gx + shear_at(gy), gy],
+                        uv: [sx as f32, uv_y_top],
+                        color: fg_color,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw + shear_at(gy), gy],
+                        uv: [(sx + sw) as f32, uv_y_top],
+                        color: fg_color,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + shear_at(gy + gh), gy + gh],
+                        uv: [sx as f32, uv_y_bot],
+                        color: fg_color,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw + shear_at(gy + gh), gy + gh],
+                        uv: [(sx + sw) as f32, uv_y_bot],
+                        color: fg_color,
+                        flags,
+                    },
+                ],
+            );
         }
     }
 
@@ -1778,43 +1811,7 @@ impl Renderer {
 
         self.submit_image_pass(&mut encoder, &view, &under_text_image_geometry);
 
-        if !geometry.fg_indices.is_empty() {
-            let fg_vbuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("fg_verts"),
-                    contents: bytemuck::cast_slice(&geometry.fg_vertices),
-                    usage: wgpu::BufferUsages::VERTEX,
-                });
-            let fg_ibuf = self
-                .device
-                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                    label: Some("fg_idx"),
-                    contents: bytemuck::cast_slice(&geometry.fg_indices),
-                    usage: wgpu::BufferUsages::INDEX,
-                });
-
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("fg_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                ..Default::default()
-            });
-
-            pass.set_pipeline(&self.fg_pipeline);
-            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_bind_group(1, self.glyph_atlas.bind_group(), &[]);
-            pass.set_vertex_buffer(0, fg_vbuf.slice(..));
-            pass.set_index_buffer(fg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..geometry.fg_indices.len() as u32, 0, 0..1);
-        }
+        self.submit_fg_pass(&mut encoder, &view, &geometry.fg, "fg_pass");
 
         self.submit_image_pass(&mut encoder, &view, &over_text_image_geometry);
 
@@ -1855,26 +1852,46 @@ impl Renderer {
             pass.draw_indexed(0..geometry.overlay_bg_indices.len() as u32, 0, 0..1);
         }
 
-        if !geometry.overlay_fg_indices.is_empty() {
-            let overlay_fg_vbuf =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("overlay_fg_verts"),
-                        contents: bytemuck::cast_slice(&geometry.overlay_fg_vertices),
-                        usage: wgpu::BufferUsages::VERTEX,
-                    });
-            let overlay_fg_ibuf =
-                self.device
-                    .create_buffer_init(&wgpu::util::BufferInitDescriptor {
-                        label: Some("overlay_fg_idx"),
-                        contents: bytemuck::cast_slice(&geometry.overlay_fg_indices),
-                        usage: wgpu::BufferUsages::INDEX,
-                    });
+        self.submit_fg_pass(&mut encoder, &view, &geometry.overlay_fg, "overlay_fg_pass");
+
+        self.queue.submit(Some(encoder.finish()));
+        frame.present();
+    }
+
+    fn submit_fg_pass(
+        &self,
+        encoder: &mut wgpu::CommandEncoder,
+        view: &wgpu::TextureView,
+        fg_geometry: &FgGeometry,
+        label: &'static str,
+    ) {
+        for batch in &fg_geometry.batches {
+            if batch.indices.is_empty() {
+                continue;
+            }
+            let Some(bind_group) = self.glyph_atlas.bind_group(batch.page_index) else {
+                continue;
+            };
+
+            let fg_vbuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fg_verts"),
+                    contents: bytemuck::cast_slice(&batch.vertices),
+                    usage: wgpu::BufferUsages::VERTEX,
+                });
+            let fg_ibuf = self
+                .device
+                .create_buffer_init(&wgpu::util::BufferInitDescriptor {
+                    label: Some("fg_idx"),
+                    contents: bytemuck::cast_slice(&batch.indices),
+                    usage: wgpu::BufferUsages::INDEX,
+                });
 
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("overlay_fg_pass"),
+                label: Some(label),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
+                    view,
                     resolve_target: None,
                     ops: wgpu::Operations {
                         load: wgpu::LoadOp::Load,
@@ -1887,14 +1904,11 @@ impl Renderer {
 
             pass.set_pipeline(&self.fg_pipeline);
             pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_bind_group(1, self.glyph_atlas.bind_group(), &[]);
-            pass.set_vertex_buffer(0, overlay_fg_vbuf.slice(..));
-            pass.set_index_buffer(overlay_fg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
-            pass.draw_indexed(0..geometry.overlay_fg_indices.len() as u32, 0, 0..1);
+            pass.set_bind_group(1, bind_group, &[]);
+            pass.set_vertex_buffer(0, fg_vbuf.slice(..));
+            pass.set_index_buffer(fg_ibuf.slice(..), wgpu::IndexFormat::Uint32);
+            pass.draw_indexed(0..batch.indices.len() as u32, 0, 0..1);
         }
-
-        self.queue.submit(Some(encoder.finish()));
-        frame.present();
     }
 
     fn submit_image_pass(
@@ -1976,12 +1990,10 @@ impl Renderer {
         controls: &WindowControls,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
         overlay_bg_vertices: &mut Vec<BgVertex>,
         overlay_bg_indices: &mut Vec<u32>,
-        overlay_fg_vertices: &mut Vec<FgVertex>,
-        overlay_fg_indices: &mut Vec<u32>,
+        overlay_fg: &mut FgGeometry,
     ) {
         let cell_w = font_system.cell_width as f32;
         let cell_h = font_system.cell_height as f32;
@@ -2055,8 +2067,7 @@ impl Renderer {
                 cell_w,
                 None,
                 label_fg,
-                fg_vertices,
-                fg_indices,
+                fg,
             );
         }
 
@@ -2080,8 +2091,7 @@ impl Renderer {
             cell_w,
             Some(plan.new_tab_button.width),
             label_fg,
-            fg_vertices,
-            fg_indices,
+            fg,
         );
 
         for button in &plan.buttons {
@@ -2105,8 +2115,7 @@ impl Renderer {
                 cell_w,
                 Some(button.width),
                 label_fg,
-                fg_vertices,
-                fg_indices,
+                fg,
             );
         }
 
@@ -2179,8 +2188,7 @@ impl Renderer {
                     cell_w,
                     None,
                     normal_fg,
-                    overlay_fg_vertices,
-                    overlay_fg_indices,
+                    overlay_fg,
                 );
             }
         }
@@ -2226,8 +2234,7 @@ impl Renderer {
         cell_w: f32,
         centered_width: Option<f32>,
         color: u32,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         let cells: Vec<smol_str::SmolStr> = text
             .graphemes(true)
@@ -2243,6 +2250,7 @@ impl Renderer {
 
         for sg in &shaped {
             let slot = match self.glyph_atlas.ensure_cached(
+                &self.device,
                 &self.queue,
                 font_system,
                 sg.font_index,
@@ -2288,34 +2296,36 @@ impl Renderer {
 
             let flags: u32 = if glyph.slot.is_color { 1 } else { 0 };
 
-            let fi = fg_vertices.len() as u32;
-            fg_vertices.extend_from_slice(&[
-                FgVertex {
-                    pos: [gx, gy],
-                    uv: [sx as f32, sy as f32],
-                    color,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw, gy],
-                    uv: [(sx + sw) as f32, sy as f32],
-                    color,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx, gy + gh],
-                    uv: [sx as f32, (sy + sh) as f32],
-                    color,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw, gy + gh],
-                    uv: [(sx + sw) as f32, (sy + sh) as f32],
-                    color,
-                    flags,
-                },
-            ]);
-            fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+            push_fg_quad(
+                fg,
+                glyph.slot.page_index,
+                [
+                    FgVertex {
+                        pos: [gx, gy],
+                        uv: [sx as f32, sy as f32],
+                        color,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy],
+                        uv: [(sx + sw) as f32, sy as f32],
+                        color,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx, gy + gh],
+                        uv: [sx as f32, (sy + sh) as f32],
+                        color,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy + gh],
+                        uv: [(sx + sw) as f32, (sy + sh) as f32],
+                        color,
+                        flags,
+                    },
+                ],
+            );
         }
     }
 
@@ -2331,8 +2341,7 @@ impl Renderer {
         y_offset: f32,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         let Some(search) = &snap.search else {
             return;
@@ -2441,6 +2450,7 @@ impl Renderer {
         let label_fg = pack_color(&palette::Srgb::new(220, 220, 220), 255);
         for sg in &shaped {
             let slot = match self.glyph_atlas.ensure_cached(
+                &self.device,
                 &self.queue,
                 font_system,
                 sg.font_index,
@@ -2472,34 +2482,36 @@ impl Renderer {
 
             let flags: u32 = if slot.is_color { 1 } else { 0 };
 
-            let fi = fg_vertices.len() as u32;
-            fg_vertices.extend_from_slice(&[
-                FgVertex {
-                    pos: [gx, gy],
-                    uv: [sx as f32, sy as f32],
-                    color: label_fg,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw, gy],
-                    uv: [(sx + sw) as f32, sy as f32],
-                    color: label_fg,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx, gy + gh],
-                    uv: [sx as f32, (sy + sh) as f32],
-                    color: label_fg,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw, gy + gh],
-                    uv: [(sx + sw) as f32, (sy + sh) as f32],
-                    color: label_fg,
-                    flags,
-                },
-            ]);
-            fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+            push_fg_quad(
+                fg,
+                slot.page_index,
+                [
+                    FgVertex {
+                        pos: [gx, gy],
+                        uv: [sx as f32, sy as f32],
+                        color: label_fg,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy],
+                        uv: [(sx + sw) as f32, sy as f32],
+                        color: label_fg,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx, gy + gh],
+                        uv: [sx as f32, (sy + sh) as f32],
+                        color: label_fg,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy + gh],
+                        uv: [(sx + sw) as f32, (sy + sh) as f32],
+                        color: label_fg,
+                        flags,
+                    },
+                ],
+            );
         }
     }
 
@@ -2510,8 +2522,7 @@ impl Renderer {
         layout: &FrameLayout,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         let Some(row) = snap.status_line_row else {
             return;
@@ -2562,6 +2573,7 @@ impl Renderer {
 
         for sg in &shaped {
             let slot = match self.glyph_atlas.ensure_cached(
+                &self.device,
                 &self.queue,
                 font_system,
                 sg.font_index,
@@ -2583,34 +2595,36 @@ impl Renderer {
             let gx = marker_x + sg.col as f32 * cell_w + slot.bearing_x as f32 + sg.x_offset;
             let gy = y + baseline - slot.bearing_y as f32 - sg.y_offset;
             let flags: u32 = if slot.is_color { 1 } else { 0 };
-            let fi = fg_vertices.len() as u32;
-            fg_vertices.extend_from_slice(&[
-                FgVertex {
-                    pos: [gx.floor(), gy.floor()],
-                    uv: [sx as f32, sy as f32],
-                    color: border,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx.floor() + sw as f32, gy.floor()],
-                    uv: [(sx + sw) as f32, sy as f32],
-                    color: border,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx.floor(), gy.floor() + sh as f32],
-                    uv: [sx as f32, (sy + sh) as f32],
-                    color: border,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx.floor() + sw as f32, gy.floor() + sh as f32],
-                    uv: [(sx + sw) as f32, (sy + sh) as f32],
-                    color: border,
-                    flags,
-                },
-            ]);
-            fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+            push_fg_quad(
+                fg,
+                slot.page_index,
+                [
+                    FgVertex {
+                        pos: [gx.floor(), gy.floor()],
+                        uv: [sx as f32, sy as f32],
+                        color: border,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx.floor() + sw as f32, gy.floor()],
+                        uv: [(sx + sw) as f32, sy as f32],
+                        color: border,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx.floor(), gy.floor() + sh as f32],
+                        uv: [sx as f32, (sy + sh) as f32],
+                        color: border,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx.floor() + sw as f32, gy.floor() + sh as f32],
+                        uv: [(sx + sw) as f32, (sy + sh) as f32],
+                        color: border,
+                        flags,
+                    },
+                ],
+            );
         }
     }
 
@@ -2627,8 +2641,7 @@ impl Renderer {
         tab_bar_h: f32,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         let baseline = font_system.baseline_offset();
         let surface_h = self.surface_config.height as f32;
@@ -2707,8 +2720,7 @@ impl Renderer {
                 cell_w,
                 cell_h,
                 dim_fg,
-                fg_vertices,
-                fg_indices,
+                fg,
             );
         }
 
@@ -2753,8 +2765,7 @@ impl Renderer {
                 cell_w,
                 cell_h,
                 normal_fg,
-                fg_vertices,
-                fg_indices,
+                fg,
             );
         }
     }
@@ -2766,8 +2777,7 @@ impl Renderer {
         layout: &FrameLayout,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         if popup.lines.is_empty() {
             return;
@@ -2871,8 +2881,7 @@ impl Renderer {
                 layout.cell_w,
                 layout.cell_h,
                 text_fg,
-                fg_vertices,
-                fg_indices,
+                fg,
             );
         }
     }
@@ -2884,8 +2893,7 @@ impl Renderer {
         layout: &FrameLayout,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         let surface_w = self.surface_config.width as f32;
         let surface_h = self.surface_config.height as f32;
@@ -3002,8 +3010,7 @@ impl Renderer {
             baseline,
             layout.cell_w,
             text_fg,
-            fg_vertices,
-            fg_indices,
+            fg,
         );
         self.shape_centered_popup_line(
             font_system,
@@ -3013,8 +3020,7 @@ impl Renderer {
             baseline,
             layout.cell_w,
             text_fg,
-            fg_vertices,
-            fg_indices,
+            fg,
         );
         self.shape_popup_line(
             font_system,
@@ -3025,8 +3031,7 @@ impl Renderer {
             layout.cell_w,
             layout.cell_h,
             hint_fg,
-            fg_vertices,
-            fg_indices,
+            fg,
         );
         self.shape_popup_line(
             font_system,
@@ -3037,8 +3042,7 @@ impl Renderer {
             layout.cell_w,
             layout.cell_h,
             hint_fg,
-            fg_vertices,
-            fg_indices,
+            fg,
         );
     }
 
@@ -3051,23 +3055,11 @@ impl Renderer {
         baseline: f32,
         cell_w: f32,
         color: u32,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         let width = text.chars().count() as f32 * cell_w;
         let x = panel.0 + (panel.2 - width) * 0.5;
-        self.shape_popup_line(
-            font_system,
-            text,
-            x,
-            y,
-            baseline,
-            cell_w,
-            0.0,
-            color,
-            fg_vertices,
-            fg_indices,
-        );
+        self.shape_popup_line(font_system, text, x, y, baseline, cell_w, 0.0, color, fg);
     }
 
     fn render_toast(
@@ -3077,8 +3069,7 @@ impl Renderer {
         layout: &FrameLayout,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         let text_chars = toast.text.chars().count();
         if text_chars == 0 {
@@ -3177,8 +3168,7 @@ impl Renderer {
             layout.cell_w,
             layout.cell_h,
             text_fg,
-            fg_vertices,
-            fg_indices,
+            fg,
         );
     }
 
@@ -3193,8 +3183,7 @@ impl Renderer {
         cell_w: f32,
         _cell_h: f32,
         color: u32,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         let cells: Vec<smol_str::SmolStr> = text
             .chars()
@@ -3208,6 +3197,7 @@ impl Renderer {
 
         for sg in &shaped {
             let slot = match self.glyph_atlas.ensure_cached(
+                &self.device,
                 &self.queue,
                 font_system,
                 sg.font_index,
@@ -3238,34 +3228,36 @@ impl Renderer {
             let gh = sh as f32;
             let flags: u32 = if slot.is_color { 1 } else { 0 };
 
-            let fi = fg_vertices.len() as u32;
-            fg_vertices.extend_from_slice(&[
-                FgVertex {
-                    pos: [gx, gy],
-                    uv: [sx as f32, sy as f32],
-                    color,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw, gy],
-                    uv: [(sx + sw) as f32, sy as f32],
-                    color,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx, gy + gh],
-                    uv: [sx as f32, (sy + sh) as f32],
-                    color,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw, gy + gh],
-                    uv: [(sx + sw) as f32, (sy + sh) as f32],
-                    color,
-                    flags,
-                },
-            ]);
-            fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+            push_fg_quad(
+                fg,
+                slot.page_index,
+                [
+                    FgVertex {
+                        pos: [gx, gy],
+                        uv: [sx as f32, sy as f32],
+                        color,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy],
+                        uv: [(sx + sw) as f32, sy as f32],
+                        color,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx, gy + gh],
+                        uv: [sx as f32, (sy + sh) as f32],
+                        color,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy + gh],
+                        uv: [(sx + sw) as f32, (sy + sh) as f32],
+                        color,
+                        flags,
+                    },
+                ],
+            );
         }
     }
 
@@ -3291,8 +3283,7 @@ impl Renderer {
         tab_bar_h: f32,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
-        fg_vertices: &mut Vec<FgVertex>,
-        fg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
     ) {
         let Some((cursor_row, cursor_col)) = snap.cursor else {
             return;
@@ -3428,6 +3419,7 @@ impl Renderer {
         let glyph_fg = pack_color(&palette::Srgb::new(235, 235, 245), 255);
         for sg in &shaped {
             let slot = match self.glyph_atlas.ensure_cached(
+                &self.device,
                 &self.queue,
                 font_system,
                 sg.font_index,
@@ -3458,34 +3450,36 @@ impl Renderer {
             let gh = sh as f32;
             let flags: u32 = if slot.is_color { 1 } else { 0 };
 
-            let fi = fg_vertices.len() as u32;
-            fg_vertices.extend_from_slice(&[
-                FgVertex {
-                    pos: [gx, gy],
-                    uv: [sx as f32, sy as f32],
-                    color: glyph_fg,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw, gy],
-                    uv: [(sx + sw) as f32, sy as f32],
-                    color: glyph_fg,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx, gy + gh],
-                    uv: [sx as f32, (sy + sh) as f32],
-                    color: glyph_fg,
-                    flags,
-                },
-                FgVertex {
-                    pos: [gx + gw, gy + gh],
-                    uv: [(sx + sw) as f32, (sy + sh) as f32],
-                    color: glyph_fg,
-                    flags,
-                },
-            ]);
-            fg_indices.extend_from_slice(&[fi, fi + 1, fi + 2, fi + 2, fi + 1, fi + 3]);
+            push_fg_quad(
+                fg,
+                slot.page_index,
+                [
+                    FgVertex {
+                        pos: [gx, gy],
+                        uv: [sx as f32, sy as f32],
+                        color: glyph_fg,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy],
+                        uv: [(sx + sw) as f32, sy as f32],
+                        color: glyph_fg,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx, gy + gh],
+                        uv: [sx as f32, (sy + sh) as f32],
+                        color: glyph_fg,
+                        flags,
+                    },
+                    FgVertex {
+                        pos: [gx + gw, gy + gh],
+                        uv: [(sx + sw) as f32, (sy + sh) as f32],
+                        color: glyph_fg,
+                        flags,
+                    },
+                ],
+            );
         }
     }
 
@@ -4004,10 +3998,12 @@ mod tests {
     use terminal41::CursorStyle;
     use terminal41::LineAttr;
 
+    use super::FgGeometry;
     use super::ImageGeometry;
     use super::RowSnapshot;
     use super::TermSnapshot;
     use super::drcs_geometry_class;
+    use super::fg_batch_for_page;
     use super::image_batch_for_page;
 
     fn blank_row(cols: usize) -> RowSnapshot {
@@ -4065,6 +4061,22 @@ mod tests {
         image_batch_for_page(&mut geometry, 0);
         image_batch_for_page(&mut geometry, 1);
         image_batch_for_page(&mut geometry, 0);
+
+        let pages: Vec<usize> = geometry
+            .batches
+            .iter()
+            .map(|batch| batch.page_index)
+            .collect();
+        assert_eq!(pages, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn fg_batches_coalesce_adjacent_page_runs_only() {
+        let mut geometry = FgGeometry::default();
+        fg_batch_for_page(&mut geometry, 0);
+        fg_batch_for_page(&mut geometry, 0);
+        fg_batch_for_page(&mut geometry, 1);
+        fg_batch_for_page(&mut geometry, 0);
 
         let pages: Vec<usize> = geometry
             .batches
