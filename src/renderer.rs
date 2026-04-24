@@ -326,6 +326,7 @@ pub struct RenderHost {
     scripts: ScriptRuntime,
     last_script_status_text: Option<String>,
     last_script_error: Option<String>,
+    last_rendered_tab_id: Option<TabId>,
 
     /// Last known window size in physical pixels. Updated on Resized events.
     window_size: (u32, u32),
@@ -402,6 +403,7 @@ impl RenderHost {
             scripts,
             last_script_status_text: None,
             last_script_error: None,
+            last_rendered_tab_id: None,
             window_size: (0, 0),
             window_resize_epoch: 0,
             window: None,
@@ -1190,6 +1192,7 @@ impl RenderHost {
         );
         self.last_script_status_text = None;
         self.last_script_error = None;
+        self.last_rendered_tab_id = None;
         self.applied_title = None;
         self.config.script_permissions = cfg.script_permissions.clone();
         self.config.compatibility = cfg.compatibility;
@@ -1293,6 +1296,7 @@ impl RenderHost {
             .iter()
             .position(|t| t.id == self.active_tab_id)
             .expect("active tab must exist");
+        let active_tab_id = self.tabs[active_idx].id;
         self.scripts.send_input(self.script_input(active_idx));
         let script_output = self.scripts.output();
         self.report_script_error(&script_output);
@@ -1385,11 +1389,13 @@ impl RenderHost {
         let (snap, visible_images) = {
             let mut terminal = self.tabs[active_idx].terminal.lock();
             let force_status_line = self.last_script_status_text != script_output.status_text;
+            let force_all_rows = self.last_rendered_tab_id != Some(active_tab_id);
             let snap = terminal41::snapshot_terminal_with_options(
                 &mut terminal,
                 terminal41::SnapshotOptions {
                     indicator_status_text: script_output.status_text.as_deref(),
                     force_status_line,
+                    force_all_rows,
                 },
             );
             let visible_images = terminal41::view::visible_images(
@@ -1402,6 +1408,7 @@ impl RenderHost {
             (snap, visible_images)
         };
         self.last_script_status_text = script_output.status_text.clone();
+        self.last_rendered_tab_id = Some(active_tab_id);
         renderer.render(
             acquired,
             &mut self.font_system,
@@ -1571,6 +1578,7 @@ impl RenderHost {
         };
 
         self.tabs.retain(|t| t.id == keep);
+        self.active_tab_id = keep;
         self.recalculate_grid_size();
         self.sync_input_state();
         self.sync_active_input_tab();

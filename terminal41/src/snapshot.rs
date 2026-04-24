@@ -77,6 +77,7 @@ pub struct TermSnapshot {
 pub struct SnapshotOptions<'a> {
     pub indicator_status_text: Option<&'a str>,
     pub force_status_line: bool,
+    pub force_all_rows: bool,
 }
 
 /// Dirty-row state for terminal snapshots.
@@ -149,7 +150,7 @@ pub fn snapshot_terminal_with_options(
         viewport_cols: vp_cols,
         status_line_row,
     };
-    let reset_cached_rows = terminal.snapshot.shape != Some(shape);
+    let reset_cached_rows = options.force_all_rows || terminal.snapshot.shape != Some(shape);
     if reset_cached_rows {
         terminal.snapshot.dirty_rows = vec![true; total_rows as usize];
         terminal.snapshot.shape = Some(shape);
@@ -542,6 +543,30 @@ mod tests {
     }
 
     #[test]
+    fn forced_all_rows_resets_cached_rows_and_snapshots_every_row() {
+        let mut terminal = terminal();
+        let _ = snapshot_terminal(&mut terminal);
+
+        let snap = snapshot_terminal_with_options(
+            &mut terminal,
+            SnapshotOptions {
+                force_all_rows: true,
+                ..SnapshotOptions::default()
+            },
+        );
+
+        assert!(snap.reset_cached_rows);
+        assert_eq!(snap.rows.len(), snap.total_rows as usize);
+        assert_eq!(
+            snap.rows
+                .iter()
+                .map(|row| row.screen_row)
+                .collect::<Vec<_>>(),
+            (0..snap.total_rows).collect::<Vec<_>>()
+        );
+    }
+
+    #[test]
     fn text_write_snapshots_only_dirty_cursor_row() {
         let mut terminal = terminal();
         let _ = snapshot_terminal(&mut terminal);
@@ -583,6 +608,7 @@ mod tests {
             SnapshotOptions {
                 indicator_status_text: Some("lua status"),
                 force_status_line: true,
+                force_all_rows: false,
             },
         );
 
