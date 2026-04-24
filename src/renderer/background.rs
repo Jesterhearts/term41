@@ -38,6 +38,7 @@ use wgpu::util::DeviceExt;
 /// buffer just pins more RAM for no visual gain. Four frames at 1080p
 /// RGBA is ~32 MB always-resident — cheap compared to loading a whole
 /// GIF/video into RAM, the failure mode this module exists to avoid.
+#[cfg(feature = "ffmpeg")]
 const FRAME_BUFFER_CAPACITY: usize = 4;
 const STARTUP_SNAPSHOT_PREFIX: &str = "startup_background_";
 
@@ -93,6 +94,7 @@ enum BackgroundSource {
     /// Multi-frame, decoded off-thread. `frame_advance` drains the
     /// receiver each render cycle, discarding all but the newest frame
     /// so a lagging render doesn't pile up a backlog.
+    #[cfg_attr(not(feature = "ffmpeg"), allow(dead_code))]
     Streaming {
         rx: mpsc::Receiver<Frame>,
         last_frame_at: Instant,
