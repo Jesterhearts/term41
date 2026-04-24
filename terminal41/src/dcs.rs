@@ -5,12 +5,91 @@ use crate::dec::udk;
 use crate::drcs;
 use crate::report;
 
+#[derive(Default)]
+pub(crate) struct HookAccumulator {
+    hooks: Vec<HookState>,
+}
+
+pub(crate) enum HookAccumulation<'a> {
+    NotDcs(vtepp::Action<'a>),
+    Pending,
+    Complete(HookState),
+}
+
 pub(crate) struct HookState {
     pub(crate) bytes: Vec<u8>,
     pub(crate) params: vtepp::Params,
     pub(crate) intermediates: vtepp::Intermediates,
     pub(crate) action: char,
     pub(crate) truncated: bool,
+}
+
+impl HookAccumulator {
+    pub(crate) fn consume<'a>(
+        &mut self,
+        action: vtepp::Action<'a>,
+    ) -> HookAccumulation<'a> {
+        match action {
+            vtepp::Action::Hook {
+                params,
+                intermediates,
+                action,
+            } => {
+                self.push(params, intermediates, action);
+                HookAccumulation::Pending
+            }
+            vtepp::Action::Put(bytes) => {
+                self.append(bytes);
+                HookAccumulation::Pending
+            }
+            vtepp::Action::Unhook => self
+                .complete()
+                .map(HookAccumulation::Complete)
+                .unwrap_or(HookAccumulation::Pending),
+            action => HookAccumulation::NotDcs(action),
+        }
+    }
+
+    fn push(
+        &mut self,
+        params: vtepp::Params,
+        intermediates: vtepp::Intermediates,
+        action: char,
+    ) {
+        self.hooks.push(HookState {
+            bytes: vec![],
+            params,
+            intermediates,
+            action,
+            truncated: false,
+        });
+    }
+
+    fn append(
+        &mut self,
+        chunk: &[u8],
+    ) {
+        let Some(last) = self.hooks.last_mut() else {
+            return;
+        };
+        if last.truncated {
+            return;
+        }
+        if let Some(limit) = hook_payload_limit(last.action, last.intermediates.as_slice()) {
+            let remaining = limit.saturating_sub(last.bytes.len());
+            let take = remaining.min(chunk.len());
+            last.bytes.extend_from_slice(&chunk[..take]);
+            if take < chunk.len() {
+                last.truncated = true;
+            }
+        } else {
+            last.bytes.extend_from_slice(chunk);
+        }
+    }
+
+    fn complete(&mut self) -> Option<HookState> {
+        self.hooks.pop()
+    }
 }
 
 #[derive(Debug)]
@@ -64,43 +143,6 @@ fn hook_payload_limit(
         ('{', []) => Some(drcs::MAX_DRCS_PAYLOAD_BYTES),
         ('|', []) => Some(udk::MAX_DECUDK_PAYLOAD_BYTES),
         _ => None,
-    }
-}
-
-pub(crate) fn push_hook_state(
-    hooks: &mut Vec<HookState>,
-    params: vtepp::Params,
-    intermediates: vtepp::Intermediates,
-    action: char,
-) {
-    hooks.push(HookState {
-        bytes: vec![],
-        params,
-        intermediates,
-        action,
-        truncated: false,
-    });
-}
-
-pub(crate) fn append_hook_bytes(
-    hooks: &mut [HookState],
-    chunk: &[u8],
-) {
-    let Some(last) = hooks.last_mut() else {
-        return;
-    };
-    if last.truncated {
-        return;
-    }
-    if let Some(limit) = hook_payload_limit(last.action, last.intermediates.as_slice()) {
-        let remaining = limit.saturating_sub(last.bytes.len());
-        let take = remaining.min(chunk.len());
-        last.bytes.extend_from_slice(&chunk[..take]);
-        if take < chunk.len() {
-            last.truncated = true;
-        }
-    } else {
-        last.bytes.extend_from_slice(chunk);
     }
 }
 
@@ -227,5 +269,60 @@ fn apply_dcs_action(
         ParsedDcsAction::DefineMacro { params, payload } => {
             terminal.define_macro(params, &payload);
         }
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn accumulator_returns_non_dcs_actions_to_caller() {
+        let mut accumulator = HookAccumulator::default();
+        let mut parser = vtepp::Parser::new();
+        let action = parser.parse(b"text").next().expect("print action");
+        assert!(matches!(
+            accumulator.consume(action),
+            HookAccumulation::NotDcs(vtepp::Action::PrintAscii(b"text"))
+        ));
+    }
+
+    #[test]
+    fn accumulator_collects_completed_hook_payload() {
+        let mut accumulator = HookAccumulator::default();
+        let mut parser = vtepp::Parser::new();
+        let mut completed = None;
+
+        for action in parser.parse(b"\x1bP$qpayload\x1b\\") {
+            if let HookAccumulation::Complete(hook) = accumulator.consume(action) {
+                completed = Some(hook);
+            }
+        }
+
+        let hook = completed.expect("completed DCS hook");
+        assert_eq!(hook.action, 'q');
+        assert_eq!(hook.intermediates.as_slice(), b"$");
+        assert_eq!(hook.bytes, b"payload");
+        assert!(!hook.truncated);
+    }
+
+    #[test]
+    fn accumulator_truncates_limited_payloads() {
+        let mut accumulator = HookAccumulator::default();
+        let mut parser = vtepp::Parser::new();
+        let payload = vec![b'0'; drcs::MAX_DRCS_PAYLOAD_BYTES + 1];
+        let input = [b"\x1bP{" as &[u8], payload.as_slice(), b"\x1b\\"].concat();
+        let mut completed = None;
+
+        for action in parser.parse(&input) {
+            if let HookAccumulation::Complete(hook) = accumulator.consume(action) {
+                completed = Some(hook);
+            }
+        }
+
+        let hook = completed.expect("completed DCS hook");
+        assert_eq!(hook.action, '{');
+        assert_eq!(hook.bytes.len(), drcs::MAX_DRCS_PAYLOAD_BYTES);
+        assert!(hook.truncated);
     }
 }

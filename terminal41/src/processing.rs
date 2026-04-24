@@ -114,14 +114,14 @@ pub fn apply_host_input(
 
 struct ParserFrame {
     parser: vtepp::Parser,
-    hooks: Vec<dcs::HookState>,
+    dcs: dcs::HookAccumulator,
 }
 
 impl Default for ParserFrame {
     fn default() -> Self {
         Self {
             parser: vtepp::Parser::new(),
-            hooks: vec![],
+            dcs: dcs::HookAccumulator::default(),
         }
     }
 }
@@ -189,30 +189,24 @@ impl TerminalProcessor {
             let mut pushed_frame = false;
 
             for action in &mut parser {
-                match action {
-                    vtepp::Action::Hook {
-                        params,
-                        intermediates,
-                        action,
-                    } => dcs::push_hook_state(&mut frame.hooks, params, intermediates, action),
-                    vtepp::Action::Put(bytes) => dcs::append_hook_bytes(&mut frame.hooks, bytes),
-                    vtepp::Action::Unhook => {
-                        let Some(hook) = frame.hooks.pop() else {
-                            continue;
-                        };
+                match frame.dcs.consume(action) {
+                    dcs::HookAccumulation::Pending => {}
+                    dcs::HookAccumulation::Complete(hook) => {
                         dcs::dispatch_hook(hook, terminal, &mut effects);
                     }
-                    action => match terminal.apply(action, &mut effects) {
-                        dispatch::PendingApplication::None => {}
-                        dispatch::PendingApplication::Bytes(bytes) => {
-                            input.advance(parser.tell());
-                            terminal.protocol.macro_invocation_depth += 1;
-                            self.frames.push(ParserFrame::default());
-                            inputs.push(FrameInput::Owned { bytes, offset: 0 });
-                            pushed_frame = true;
-                            break;
+                    dcs::HookAccumulation::NotDcs(action) => {
+                        match terminal.apply(action, &mut effects) {
+                            dispatch::PendingApplication::None => {}
+                            dispatch::PendingApplication::Bytes(bytes) => {
+                                input.advance(parser.tell());
+                                terminal.protocol.macro_invocation_depth += 1;
+                                self.frames.push(ParserFrame::default());
+                                inputs.push(FrameInput::Owned { bytes, offset: 0 });
+                                pushed_frame = true;
+                                break;
+                            }
                         }
-                    },
+                    }
                 }
             }
 
