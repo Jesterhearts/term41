@@ -1,5 +1,4 @@
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use smol_str::SmolStr;
 use vtepp::Params;
 
@@ -626,7 +625,6 @@ fn apply_hard_reset_state(
         s.fg = palette.fg;
         s.bg = palette.bg;
         s.attrs = CellAttrs::default();
-        s.underline = UnderlineStyle::None;
         s.underline_color = None;
         s.scroll_top = 0;
         s.scroll_bottom = viewport.rows.saturating_sub(1);

@@ -7,7 +7,6 @@ use std::collections::BTreeMap;
 use std::collections::VecDeque;
 
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
@@ -34,7 +33,6 @@ pub struct SavedCursor {
     pub fg: Srgb<u8>,
     pub bg: Srgb<u8>,
     pub attrs: CellAttrs,
-    pub underline: UnderlineStyle,
     pub underline_color: Option<Srgb<u8>>,
     pub origin_mode: bool,
     pub charset: CharsetState,
@@ -89,7 +87,6 @@ pub struct StatusLine {
     pub fg: Srgb<u8>,
     pub bg: Srgb<u8>,
     pub attrs: CellAttrs,
-    pub underline: UnderlineStyle,
     pub underline_color: Option<Srgb<u8>>,
     pub current_hyperlink: Option<HyperlinkId>,
     pub last_char: Option<SmolStr>,
@@ -107,7 +104,6 @@ impl StatusLine {
             fg,
             bg,
             attrs: CellAttrs::default(),
-            underline: UnderlineStyle::None,
             underline_color: None,
             current_hyperlink: None,
             last_char: None,
@@ -132,8 +128,6 @@ pub struct Screen {
     /// writes. Managed via SGR — updated by `apply_sgr`, snapshotted into
     /// `SavedCursor` on DECSC.
     pub attrs: CellAttrs,
-    /// Current underline style applied to new cell writes.
-    pub underline: UnderlineStyle,
     /// Current underline color override. `None` = use foreground color.
     pub underline_color: Option<Srgb<u8>>,
     /// Top row of the scroll region (0-indexed, inclusive).
@@ -238,7 +232,6 @@ impl Screen {
             fg,
             bg,
             attrs: CellAttrs::default(),
-            underline: UnderlineStyle::None,
             underline_color: None,
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
@@ -525,7 +518,6 @@ pub(super) fn save_cursor_slot(screen: &mut Screen) {
         fg: screen.fg,
         bg: screen.bg,
         attrs: screen.attrs,
-        underline: screen.underline,
         underline_color: screen.underline_color,
         origin_mode: screen.origin_mode,
         charset: screen.charset,
@@ -546,7 +538,6 @@ pub(super) fn restore_cursor_slot(
             screen.fg = saved.fg;
             screen.bg = saved.bg;
             screen.attrs = saved.attrs;
-            screen.underline = saved.underline;
             screen.underline_color = saved.underline_color;
             screen.origin_mode = saved.origin_mode;
             screen.charset = saved.charset;
@@ -592,7 +583,6 @@ fn reset_alt_entry_state(screen: &mut Screen) {
     screen.fg = screen.grid.default_fg;
     screen.bg = screen.grid.default_bg;
     screen.attrs = CellAttrs::default();
-    screen.underline = UnderlineStyle::None;
     screen.underline_color = None;
     screen.current_hyperlink = None;
     screen.cursor_visible = true;
@@ -1066,7 +1056,6 @@ mod integration_tests {
         assert_eq!(term.active.fg, term.active.grid.default_fg);
         assert_eq!(term.active.bg, term.active.grid.default_bg);
         assert_eq!(term.active.attrs, font41::attrs::CellAttrs::default());
-        assert_eq!(term.active.underline, font41::attrs::UnderlineStyle::None);
         assert_eq!(term.active.underline_color, None);
         assert!(term.active.cursor_visible);
     }

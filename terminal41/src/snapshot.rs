@@ -1,5 +1,4 @@
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStrBuilder;
 use unicode_segmentation::UnicodeSegmentation;
@@ -27,7 +26,6 @@ pub struct RowSnapshot {
     pub attrs: Vec<CellAttrs>,
     pub fg: Vec<Srgb<u8>>,
     pub bg: Vec<Srgb<u8>>,
-    pub underline: Vec<UnderlineStyle>,
     pub underline_color: Vec<Option<Srgb<u8>>>,
     pub has_link: Vec<bool>,
     pub line_attr: LineAttr,
@@ -236,7 +234,6 @@ fn snapshot_visible_row(
         attrs: grid_row.attrs.clone(),
         fg: grid_row.fg.clone(),
         bg: grid_row.bg.clone(),
-        underline: grid_row.underline.clone(),
         underline_color: grid_row.underline_color.clone(),
         has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
         line_attr: grid_row.line_attr,
@@ -309,7 +306,6 @@ fn snapshot_status_line_row(
         attrs: grid_row.attrs.clone(),
         fg: grid_row.fg.clone(),
         bg: grid_row.bg.clone(),
-        underline: grid_row.underline.clone(),
         underline_color: grid_row.underline_color.clone(),
         has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
         line_attr: grid_row.line_attr,
@@ -386,7 +382,6 @@ fn blank_status_line_row(
         cells: vec![smol_str::SmolStr::new_inline(" "); cols],
         exit_status: None,
         has_link: vec![false; cols],
-        underline: vec![UnderlineStyle::None; cols],
         underline_color: vec![None; cols],
         prompt_start: false,
     }

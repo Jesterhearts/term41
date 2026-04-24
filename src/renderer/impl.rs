@@ -7,7 +7,6 @@ use std::time::Instant;
 
 use font41::FontSystem;
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStrBuilder;
 use terminal41::ColorPalette;
@@ -238,7 +237,7 @@ pub(crate) fn drcs_geometry_class(snap: &TermSnapshot) -> Option<font41::DrcsGeo
 /// the horizontal span and vertical budget for multi-line / patterned
 /// styles.
 fn push_underline_quads(
-    style: UnderlineStyle,
+    style: CellAttrs,
     x: f32,
     uy: f32,
     cell_w: f32,
@@ -248,63 +247,67 @@ fn push_underline_quads(
     verts: &mut Vec<BgVertex>,
     idxs: &mut Vec<u32>,
 ) {
-    match style {
-        UnderlineStyle::None => {}
-        UnderlineStyle::Single => {
-            push_rect(x, uy, cell_w, thickness, color, verts, idxs);
-        }
-        UnderlineStyle::Double => {
-            let gap = thickness;
-            push_rect(
-                x,
-                uy - gap - thickness,
-                cell_w,
-                thickness,
-                color,
-                verts,
-                idxs,
-            );
-            push_rect(x, uy, cell_w, thickness, color, verts, idxs);
-        }
-        UnderlineStyle::Curly => {
-            // Approximate a sine wave with short line-segment quads. Four
-            // segments per cell gives a recognisable wave without bloating the
-            // vertex count.
-            let segments = 4u32;
-            let seg_w = cell_w / segments as f32;
-            let amplitude = (cell_h * 0.08).max(1.5);
-            for s in 0..segments {
-                let t0 = s as f32 / segments as f32;
-                let t1 = (s + 1) as f32 / segments as f32;
-                let y0 = uy - amplitude * (t0 * std::f32::consts::TAU).sin();
-                let y1 = uy - amplitude * (t1 * std::f32::consts::TAU).sin();
-                let sx = x + s as f32 * seg_w;
-                let (top, bot) = if y0 < y1 {
-                    (y0, y1 + thickness)
-                } else {
-                    (y1, y0 + thickness)
-                };
-                push_rect(sx, top, seg_w, bot - top, color, verts, idxs);
+    for style in style & CellAttrs::UNDERLINE_MASK {
+        match style {
+            CellAttrs::SINGLE_UNDERLINE => {
+                push_rect(x, uy, cell_w, thickness, color, verts, idxs);
             }
-        }
-        UnderlineStyle::Dotted => {
-            // Dots spaced at roughly 2× thickness apart.
-            let dot_size = thickness.max(1.0);
-            let gap = dot_size * 2.0;
-            let mut dx = x;
-            while dx + dot_size <= x + cell_w {
-                push_rect(dx, uy, dot_size, thickness, color, verts, idxs);
-                dx += gap;
+            CellAttrs::DOUBLE_UNDERLINE => {
+                let gap = thickness;
+                push_rect(
+                    x,
+                    uy - gap - thickness,
+                    cell_w,
+                    thickness,
+                    color,
+                    verts,
+                    idxs,
+                );
+                push_rect(x, uy, cell_w, thickness, color, verts, idxs);
             }
-        }
-        UnderlineStyle::Dashed => {
-            // Three dashes per cell.
-            let dash_w = cell_w / 5.0;
-            let gap = dash_w;
-            let mut dx = x;
-            while dx + dash_w <= x + cell_w {
-                push_rect(dx, uy, dash_w, thickness, color, verts, idxs);
-                dx += dash_w + gap;
+            CellAttrs::CURLY_UNDERLINE => {
+                // Approximate a sine wave with short line-segment quads. Four
+                // segments per cell gives a recognisable wave without bloating the
+                // vertex count.
+                let segments = 4u32;
+                let seg_w = cell_w / segments as f32;
+                let amplitude = (cell_h * 0.08).max(1.5);
+                for s in 0..segments {
+                    let t0 = s as f32 / segments as f32;
+                    let t1 = (s + 1) as f32 / segments as f32;
+                    let y0 = uy - amplitude * (t0 * std::f32::consts::TAU).sin();
+                    let y1 = uy - amplitude * (t1 * std::f32::consts::TAU).sin();
+                    let sx = x + s as f32 * seg_w;
+                    let (top, bot) = if y0 < y1 {
+                        (y0, y1 + thickness)
+                    } else {
+                        (y1, y0 + thickness)
+                    };
+                    push_rect(sx, top, seg_w, bot - top, color, verts, idxs);
+                }
+            }
+            CellAttrs::DOTTED_UNDERLINE => {
+                // Dots spaced at roughly 2× thickness apart.
+                let dot_size = thickness.max(1.0);
+                let gap = dot_size * 2.0;
+                let mut dx = x;
+                while dx + dot_size <= x + cell_w {
+                    push_rect(dx, uy, dot_size, thickness, color, verts, idxs);
+                    dx += gap;
+                }
+            }
+            CellAttrs::DASHED_UNDERLINE => {
+                // Three dashes per cell.
+                let dash_w = cell_w / 5.0;
+                let gap = dash_w;
+                let mut dx = x;
+                while dx + dash_w <= x + cell_w {
+                    push_rect(dx, uy, dash_w, thickness, color, verts, idxs);
+                    dx += dash_w + gap;
+                }
+            }
+            _ => {
+                unreachable!("unexpected underline style bit set: {style:?}");
             }
         }
     }
@@ -836,7 +839,6 @@ fn blank_cached_row(
         attrs: vec![CellAttrs::default(); cols],
         fg: vec![palette.fg; cols],
         bg: vec![palette.bg; cols],
-        underline: vec![UnderlineStyle::None; cols],
         underline_color: vec![None; cols],
         has_link: vec![false; cols],
         line_attr: LineAttr::Normal,
@@ -1921,14 +1923,15 @@ impl Renderer {
                 ]);
             }
 
-            let ul_style = underline_style_for_render(snap, snap_row.underline[col as usize]);
+            let ul_style = underline_style_for_render(snap, snap_row.attrs[col as usize]);
             let has_link = snap_row.has_link[col as usize];
-            let effective_ul = if has_link && ul_style == UnderlineStyle::None {
-                UnderlineStyle::Single
-            } else {
-                ul_style
-            };
-            if effective_ul != UnderlineStyle::None {
+            let effective_ul =
+                if has_link && ul_style & CellAttrs::UNDERLINE_MASK == CellAttrs::empty() {
+                    CellAttrs::SINGLE_UNDERLINE
+                } else {
+                    ul_style
+                };
+            if effective_ul & CellAttrs::UNDERLINE_MASK != CellAttrs::empty() {
                 let ul_rgb = snap_row.underline_color[col as usize].unwrap_or(painted.base_fg);
                 let ul_packed = pack_color(&ul_rgb, 255);
                 let thickness = (layout.cell_h * 0.06).max(1.0);
@@ -4519,7 +4522,6 @@ mod tests {
 
     use font41::DrcsGeometryClass;
     use font41::attrs::CellAttrs;
-    use font41::attrs::UnderlineStyle;
     use palette::Srgb;
     use terminal41::ColorPalette;
     use terminal41::CursorStyle;
@@ -4543,7 +4545,6 @@ mod tests {
             attrs: vec![CellAttrs::default(); cols],
             fg: vec![Srgb::new(255, 255, 255); cols],
             bg: vec![Srgb::new(0, 0, 0); cols],
-            underline: vec![UnderlineStyle::None; cols],
             underline_color: vec![None; cols],
             has_link: vec![false; cols],
             line_attr: LineAttr::Normal,

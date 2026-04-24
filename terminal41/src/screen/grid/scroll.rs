@@ -119,19 +119,17 @@ pub(crate) fn scroll_up_in_rect(
 
     for row in abs_top..=(abs_bottom - n) {
         let src = row + n;
-        let cells: Vec<_> = grid.rows[src].cells[l..r].to_vec();
-        let fg: Vec<_> = grid.rows[src].fg[l..r].to_vec();
-        let bg: Vec<_> = grid.rows[src].bg[l..r].to_vec();
-        let attrs: Vec<_> = grid.rows[src].attrs[l..r].to_vec();
-        let ul: Vec<_> = grid.rows[src].underline[l..r].to_vec();
-        let ul_color: Vec<_> = grid.rows[src].underline_color[l..r].to_vec();
-        let links: Vec<_> = grid.rows[src].links[l..r].to_vec();
+        let cells = grid.rows[src].cells[l..r].to_vec();
+        let fg = grid.rows[src].fg[l..r].to_vec();
+        let bg = grid.rows[src].bg[l..r].to_vec();
+        let attrs = grid.rows[src].attrs[l..r].to_vec();
+        let ul_color = grid.rows[src].underline_color[l..r].to_vec();
+        let links = grid.rows[src].links[l..r].to_vec();
 
         grid.rows[row].cells[l..r].clone_from_slice(&cells);
         grid.rows[row].fg[l..r].copy_from_slice(&fg);
         grid.rows[row].bg[l..r].copy_from_slice(&bg);
         grid.rows[row].attrs[l..r].copy_from_slice(&attrs);
-        grid.rows[row].underline[l..r].copy_from_slice(&ul);
         grid.rows[row].underline_color[l..r].copy_from_slice(&ul_color);
         grid.rows[row].links[l..r].clone_from_slice(&links);
     }
@@ -159,19 +157,17 @@ pub(crate) fn scroll_down_in_rect(
 
     for row in ((abs_top + n)..=abs_bottom).rev() {
         let src = row - n;
-        let cells: Vec<_> = grid.rows[src].cells[l..r].to_vec();
-        let fg: Vec<_> = grid.rows[src].fg[l..r].to_vec();
-        let bg: Vec<_> = grid.rows[src].bg[l..r].to_vec();
-        let attrs: Vec<_> = grid.rows[src].attrs[l..r].to_vec();
-        let ul: Vec<_> = grid.rows[src].underline[l..r].to_vec();
-        let ul_color: Vec<_> = grid.rows[src].underline_color[l..r].to_vec();
-        let links: Vec<_> = grid.rows[src].links[l..r].to_vec();
+        let cells = grid.rows[src].cells[l..r].to_vec();
+        let fg = grid.rows[src].fg[l..r].to_vec();
+        let bg = grid.rows[src].bg[l..r].to_vec();
+        let attrs = grid.rows[src].attrs[l..r].to_vec();
+        let ul_color = grid.rows[src].underline_color[l..r].to_vec();
+        let links = grid.rows[src].links[l..r].to_vec();
 
         grid.rows[row].cells[l..r].clone_from_slice(&cells);
         grid.rows[row].fg[l..r].copy_from_slice(&fg);
         grid.rows[row].bg[l..r].copy_from_slice(&bg);
         grid.rows[row].attrs[l..r].copy_from_slice(&attrs);
-        grid.rows[row].underline[l..r].copy_from_slice(&ul);
         grid.rows[row].underline_color[l..r].copy_from_slice(&ul_color);
         grid.rows[row].links[l..r].clone_from_slice(&links);
     }

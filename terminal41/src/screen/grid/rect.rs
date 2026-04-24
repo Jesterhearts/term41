@@ -1,5 +1,4 @@
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
@@ -19,7 +18,6 @@ pub(crate) fn fill_rect(
     fg: Srgb<u8>,
     bg: Srgb<u8>,
     attrs: CellAttrs,
-    underline: UnderlineStyle,
     underline_color: Option<Srgb<u8>>,
 ) {
     let first_visible = viewport.top_index(grid.rows.len());
@@ -33,7 +31,6 @@ pub(crate) fn fill_rect(
             row.fg[c] = fg;
             row.bg[c] = bg;
             row.attrs[c] = attrs;
-            row.underline[c] = underline;
             row.underline_color[c] = underline_color;
             row.links[c] = None;
         }

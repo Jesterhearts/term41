@@ -1,5 +1,4 @@
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
 use unicode_segmentation::UnicodeSegmentation;
@@ -30,7 +29,6 @@ struct CellStyle {
     fg: palette::Srgb<u8>,
     bg: palette::Srgb<u8>,
     attrs: CellAttrs,
-    underline: UnderlineStyle,
     underline_color: Option<palette::Srgb<u8>>,
     link: Option<screen::hyperlink::HyperlinkId>,
 }
@@ -747,7 +745,6 @@ fn fill_row_style(
     row.fg[col..col + width].fill(style.fg);
     row.bg[col..col + width].fill(style.bg);
     row.attrs[col..col + width].fill(style.attrs);
-    row.underline[col..col + width].fill(style.underline);
     row.underline_color[col..col + width].fill(style.underline_color);
     row.links[col..col + width].fill(style.link);
 }
@@ -758,7 +755,6 @@ fn screen_style(screen: &Screen) -> CellStyle {
         fg: screen.fg,
         bg: screen.bg,
         attrs: screen.attrs,
-        underline: screen.underline,
         underline_color: screen.underline_color,
         link: screen.current_hyperlink,
     }
@@ -770,7 +766,6 @@ fn status_style(status: &StatusLine) -> CellStyle {
         fg: status.fg,
         bg: status.bg,
         attrs: status.attrs,
-        underline: status.underline,
         underline_color: status.underline_color,
         link: status.current_hyperlink,
     }

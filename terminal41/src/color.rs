@@ -1,5 +1,4 @@
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use utils41::blend_colors;
 #[cfg(test)]
@@ -262,39 +261,36 @@ pub(super) fn apply_sgr(
     fg: &mut Srgb<u8>,
     bg: &mut Srgb<u8>,
     attrs: &mut CellAttrs,
-    underline: &mut UnderlineStyle,
     underline_color: &mut Option<Srgb<u8>>,
     params: &Params,
     palette: &ColorPalette,
 ) {
     let groups: Vec<&[u16]> = params.iter().collect();
-    apply_sgr_group_refs(fg, bg, attrs, underline, underline_color, &groups, palette);
+    apply_sgr_group_refs(fg, bg, attrs, underline_color, &groups, palette);
 }
 
 pub(super) fn apply_sgr_groups(
     fg: &mut Srgb<u8>,
     bg: &mut Srgb<u8>,
     attrs: &mut CellAttrs,
-    underline: &mut UnderlineStyle,
     underline_color: &mut Option<Srgb<u8>>,
     params: &[Vec<u16>],
     palette: &ColorPalette,
 ) {
     let groups: Vec<&[u16]> = params.iter().map(Vec::as_slice).collect();
-    apply_sgr_group_refs(fg, bg, attrs, underline, underline_color, &groups, palette);
+    apply_sgr_group_refs(fg, bg, attrs, underline_color, &groups, palette);
 }
 
 fn apply_sgr_group_refs(
     fg: &mut Srgb<u8>,
     bg: &mut Srgb<u8>,
     attrs: &mut CellAttrs,
-    underline: &mut UnderlineStyle,
     underline_color: &mut Option<Srgb<u8>>,
     groups: &[&[u16]],
     palette: &ColorPalette,
 ) {
     if groups.is_empty() {
-        reset_all(fg, bg, attrs, underline, underline_color, palette);
+        reset_all(fg, bg, attrs, underline_color, palette);
         return;
     }
 
@@ -303,7 +299,7 @@ fn apply_sgr_group_refs(
         let g = groups[i];
         if let Ok(action) = SgrAction::try_from(g[0]) {
             match action {
-                SgrAction::Reset => reset_all(fg, bg, attrs, underline, underline_color, palette),
+                SgrAction::Reset => reset_all(fg, bg, attrs, underline_color, palette),
                 SgrAction::Bold => attrs.insert(CellAttrs::BOLD),
                 SgrAction::Dim => attrs.insert(CellAttrs::DIM),
                 SgrAction::Italic => attrs.insert(CellAttrs::ITALIC),
@@ -311,17 +307,23 @@ fn apply_sgr_group_refs(
                     // Sub-parameter determines style: bare `4` or `4:1` = single,
                     // `4:0` = none, `4:2` = double, `4:3` = curly, etc.
                     let sub = g.get(1).copied().unwrap_or(1);
-                    *underline = UnderlineStyle::from_sgr(sub);
+                    *attrs &= !CellAttrs::UNDERLINE_MASK;
+                    attrs.insert(CellAttrs::underline_from_sgr(sub));
                 }
                 SgrAction::Blink => attrs.insert(CellAttrs::BLINK),
                 SgrAction::RapidBlink => attrs.insert(CellAttrs::RAPID_BLINK),
                 SgrAction::Reverse => attrs.insert(CellAttrs::REVERSE),
                 SgrAction::Hidden => attrs.insert(CellAttrs::HIDDEN),
                 SgrAction::Strikethrough => attrs.insert(CellAttrs::STRIKETHROUGH),
-                SgrAction::DoubleUnderline => *underline = UnderlineStyle::Double,
+                SgrAction::DoubleUnderline => {
+                    *attrs &= !CellAttrs::UNDERLINE_MASK;
+                    attrs.insert(CellAttrs::DOUBLE_UNDERLINE);
+                }
                 SgrAction::ResetIntensity => attrs.remove(CellAttrs::BOLD | CellAttrs::DIM),
                 SgrAction::ResetItalic => attrs.remove(CellAttrs::ITALIC),
-                SgrAction::ResetUnderline => *underline = UnderlineStyle::None,
+                SgrAction::ResetUnderline => {
+                    *attrs &= !CellAttrs::UNDERLINE_MASK;
+                }
                 SgrAction::ResetBlink => attrs.remove(CellAttrs::BLINK | CellAttrs::RAPID_BLINK),
                 SgrAction::ResetReverse => attrs.remove(CellAttrs::REVERSE),
                 SgrAction::ResetHidden => attrs.remove(CellAttrs::HIDDEN),
@@ -364,7 +366,6 @@ fn reset_all(
     fg: &mut Srgb<u8>,
     bg: &mut Srgb<u8>,
     attrs: &mut CellAttrs,
-    underline: &mut UnderlineStyle,
     underline_color: &mut Option<Srgb<u8>>,
     palette: &ColorPalette,
 ) {
@@ -372,7 +373,6 @@ fn reset_all(
     *bg = palette.bg;
     let protected = *attrs & CellAttrs::PROTECTED;
     *attrs = protected;
-    *underline = UnderlineStyle::None;
     *underline_color = None;
 }
 
@@ -484,13 +484,11 @@ mod tests {
         let mut fg = default_fg();
         let mut bg = default_bg();
         let mut attrs = CellAttrs::default();
-        let mut ul = UnderlineStyle::None;
         let mut ul_color = None;
         apply_sgr(
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(input),
             &pal,
@@ -505,13 +503,11 @@ mod tests {
         let pal = ColorPalette::default();
         let mut fg = default_fg();
         let mut bg = default_bg();
-        let mut ul = UnderlineStyle::None;
         let mut ul_color = None;
         apply_sgr(
             &mut fg,
             &mut bg,
             attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(input),
             &pal,
@@ -520,23 +516,21 @@ mod tests {
     }
 
     /// Like `apply_with_attrs` but also returns underline state.
-    fn apply_full(input: &[u8]) -> (CellAttrs, UnderlineStyle, Option<Srgb<u8>>) {
+    fn apply_full(input: &[u8]) -> (CellAttrs, Option<Srgb<u8>>) {
         let pal = ColorPalette::default();
         let mut fg = default_fg();
         let mut bg = default_bg();
         let mut attrs = CellAttrs::default();
-        let mut ul = UnderlineStyle::None;
         let mut ul_color = None;
         apply_sgr(
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(input),
             &pal,
         );
-        (attrs, ul, ul_color)
+        (attrs, ul_color)
     }
 
     #[test]
@@ -550,14 +544,12 @@ mod tests {
         let pal = ColorPalette::default();
         let mut fg = Srgb::new(1, 2, 3);
         let mut bg = Srgb::new(4, 5, 6);
-        let mut attrs = CellAttrs::BOLD;
-        let mut ul = UnderlineStyle::Single;
+        let mut attrs = CellAttrs::BOLD | CellAttrs::SINGLE_UNDERLINE;
         let mut ul_color = Some(Srgb::new(255, 0, 0));
         apply_sgr(
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[m"),
             &pal,
@@ -565,7 +557,6 @@ mod tests {
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
         assert_eq!(attrs, CellAttrs::default());
-        assert_eq!(ul, UnderlineStyle::None);
         assert_eq!(ul_color, None);
     }
 
@@ -574,14 +565,12 @@ mod tests {
         let pal = ColorPalette::default();
         let mut fg = Srgb::new(1, 2, 3);
         let mut bg = Srgb::new(4, 5, 6);
-        let mut attrs = CellAttrs::BOLD;
-        let mut ul = UnderlineStyle::Curly;
+        let mut attrs = CellAttrs::BOLD | CellAttrs::CURLY_UNDERLINE;
         let mut ul_color = None;
         apply_sgr(
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[0m"),
             &pal,
@@ -589,7 +578,6 @@ mod tests {
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
         assert_eq!(attrs, CellAttrs::default());
-        assert_eq!(ul, UnderlineStyle::None);
     }
 
     #[test]
@@ -686,57 +674,54 @@ mod tests {
 
     #[test]
     fn sgr_3_sets_italic_and_4_sets_underline() {
-        let (attrs, ul, _) = apply_full(b"\x1b[3;4m");
-        assert!(attrs.contains(CellAttrs::ITALIC));
-        assert_eq!(ul, UnderlineStyle::Single);
+        let (attrs, _) = apply_full(b"\x1b[3;4m");
+        assert!(attrs.contains(CellAttrs::ITALIC | CellAttrs::SINGLE_UNDERLINE));
     }
 
     #[test]
     fn sgr_22_23_24_clear_individual_attrs() {
         let pal = ColorPalette::default();
-        let (attrs, ul, _) = apply_full(b"\x1b[1;3;4m");
+        let (attrs, _) = apply_full(b"\x1b[1;3;4m");
         assert!(attrs.contains(CellAttrs::BOLD));
         assert!(attrs.contains(CellAttrs::ITALIC));
-        assert_eq!(ul, UnderlineStyle::Single);
+        assert!(attrs.contains(CellAttrs::SINGLE_UNDERLINE));
 
         let mut fg = default_fg();
         let mut bg = default_bg();
         let mut attrs = attrs;
-        let mut ul = ul;
         let mut ul_color = None;
         apply_sgr(
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[22m"),
             &pal,
         );
         assert!(!attrs.contains(CellAttrs::BOLD));
         assert!(attrs.contains(CellAttrs::ITALIC));
-        assert_eq!(ul, UnderlineStyle::Single);
+        assert!(attrs.contains(CellAttrs::SINGLE_UNDERLINE));
 
         apply_sgr(
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[23;24m"),
             &pal,
         );
         assert_eq!(attrs, CellAttrs::default());
-        assert_eq!(ul, UnderlineStyle::None);
     }
 
     #[test]
     fn sgr_0_clears_attrs() {
-        let (_, ul, _) = apply_full(b"\x1b[1;3;4m");
-        assert_eq!(ul, UnderlineStyle::Single);
-        let (attrs, ul, _) = apply_full(b"\x1b[0m");
+        let (attrs, _) = apply_full(b"\x1b[1;3;4m");
+        assert_eq!(
+            attrs,
+            CellAttrs::BOLD | CellAttrs::ITALIC | CellAttrs::SINGLE_UNDERLINE
+        );
+        let (attrs, _) = apply_full(b"\x1b[0m");
         assert_eq!(attrs, CellAttrs::default());
-        assert_eq!(ul, UnderlineStyle::None);
     }
 
     #[test]
@@ -821,7 +806,7 @@ mod tests {
 
     #[test]
     fn sgr_9_sets_strikethrough() {
-        let (attrs, _, _) = apply_full(b"\x1b[9m");
+        let (attrs, _) = apply_full(b"\x1b[9m");
         assert!(attrs.contains(CellAttrs::STRIKETHROUGH));
     }
 
@@ -831,13 +816,11 @@ mod tests {
         let mut fg = default_fg();
         let mut bg = default_bg();
         let mut attrs = CellAttrs::default();
-        let mut ul = UnderlineStyle::None;
         let mut ul_color = None;
         apply_sgr(
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[9m"),
             &pal,
@@ -847,7 +830,6 @@ mod tests {
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[29m"),
             &pal,
@@ -859,50 +841,71 @@ mod tests {
 
     #[test]
     fn sgr_4_bare_sets_single_underline() {
-        let (_, ul, _) = apply_full(b"\x1b[4m");
-        assert_eq!(ul, UnderlineStyle::Single);
+        let (attrs, _) = apply_full(b"\x1b[4m");
+        assert_eq!(
+            attrs & CellAttrs::UNDERLINE_MASK,
+            CellAttrs::SINGLE_UNDERLINE
+        );
     }
 
     #[test]
     fn sgr_4_colon_0_clears_underline() {
-        let (_, ul, _) = apply_full(b"\x1b[4:0m");
-        assert_eq!(ul, UnderlineStyle::None);
+        let (attrs, _) = apply_full(b"\x1b[4:0m");
+        assert_eq!(attrs & CellAttrs::UNDERLINE_MASK, CellAttrs::empty());
     }
 
     #[test]
     fn sgr_4_colon_1_sets_single() {
-        let (_, ul, _) = apply_full(b"\x1b[4:1m");
-        assert_eq!(ul, UnderlineStyle::Single);
+        let (attrs, _) = apply_full(b"\x1b[4:1m");
+        assert_eq!(
+            attrs & CellAttrs::UNDERLINE_MASK,
+            CellAttrs::SINGLE_UNDERLINE
+        );
     }
 
     #[test]
     fn sgr_4_colon_2_sets_double() {
-        let (_, ul, _) = apply_full(b"\x1b[4:2m");
-        assert_eq!(ul, UnderlineStyle::Double);
+        let (attrs, _) = apply_full(b"\x1b[4:2m");
+        assert_eq!(
+            attrs & CellAttrs::UNDERLINE_MASK,
+            CellAttrs::DOUBLE_UNDERLINE
+        );
     }
 
     #[test]
     fn sgr_4_colon_3_sets_curly() {
-        let (_, ul, _) = apply_full(b"\x1b[4:3m");
-        assert_eq!(ul, UnderlineStyle::Curly);
+        let (attrs, _) = apply_full(b"\x1b[4:3m");
+        assert_eq!(
+            attrs & CellAttrs::UNDERLINE_MASK,
+            CellAttrs::CURLY_UNDERLINE
+        );
     }
 
     #[test]
     fn sgr_4_colon_4_sets_dotted() {
-        let (_, ul, _) = apply_full(b"\x1b[4:4m");
-        assert_eq!(ul, UnderlineStyle::Dotted);
+        let (attrs, _) = apply_full(b"\x1b[4:4m");
+        assert_eq!(
+            attrs & CellAttrs::UNDERLINE_MASK,
+            CellAttrs::DOTTED_UNDERLINE
+        );
     }
 
     #[test]
     fn sgr_4_colon_5_sets_dashed() {
-        let (_, ul, _) = apply_full(b"\x1b[4:5m");
-        assert_eq!(ul, UnderlineStyle::Dashed);
+        let (attrs, _) = apply_full(b"\x1b[4:5m");
+        assert_eq!(
+            attrs & CellAttrs::UNDERLINE_MASK,
+            CellAttrs::DASHED_UNDERLINE
+        );
     }
 
     #[test]
     fn sgr_21_sets_double_underline() {
-        let (_, ul, _) = apply_full(b"\x1b[21m");
-        assert_eq!(ul, UnderlineStyle::Double);
+        let (attrs, _) = apply_full(b"\x1b[21m");
+        assert_eq!(
+            attrs & CellAttrs::UNDERLINE_MASK,
+            CellAttrs::DOUBLE_UNDERLINE
+        );
     }
 
     #[test]
@@ -910,44 +913,42 @@ mod tests {
         let pal = ColorPalette::default();
         let mut fg = default_fg();
         let mut bg = default_bg();
-        let mut attrs = CellAttrs::default();
-        let mut ul = UnderlineStyle::Curly;
+        let mut attrs = CellAttrs::CURLY_UNDERLINE;
         let mut ul_color = None;
         apply_sgr(
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[24m"),
             &pal,
         );
-        assert_eq!(ul, UnderlineStyle::None);
+        assert_eq!(attrs & CellAttrs::UNDERLINE_MASK, CellAttrs::empty());
     }
 
     // -- underline color (SGR 58 / 59) ---------------------------------------
 
     #[test]
     fn sgr_58_5_sets_indexed_underline_color() {
-        let (_, _, ul_color) = apply_full(b"\x1b[58;5;196m");
+        let (_, ul_color) = apply_full(b"\x1b[58;5;196m");
         assert_eq!(ul_color, Some(computed_color(196)));
     }
 
     #[test]
     fn sgr_58_2_sets_truecolor_underline_color() {
-        let (_, _, ul_color) = apply_full(b"\x1b[58;2;10;20;30m");
+        let (_, ul_color) = apply_full(b"\x1b[58;2;10;20;30m");
         assert_eq!(ul_color, Some(Srgb::new(10, 20, 30)));
     }
 
     #[test]
     fn sgr_58_colon_5_sets_indexed_underline_color() {
-        let (_, _, ul_color) = apply_full(b"\x1b[58:5:196m");
+        let (_, ul_color) = apply_full(b"\x1b[58:5:196m");
         assert_eq!(ul_color, Some(computed_color(196)));
     }
 
     #[test]
     fn sgr_58_colon_2_sets_truecolor_underline_color() {
-        let (_, _, ul_color) = apply_full(b"\x1b[58:2:10:20:30m");
+        let (_, ul_color) = apply_full(b"\x1b[58:2:10:20:30m");
         assert_eq!(ul_color, Some(Srgb::new(10, 20, 30)));
     }
 
@@ -957,13 +958,11 @@ mod tests {
         let mut fg = default_fg();
         let mut bg = default_bg();
         let mut attrs = CellAttrs::default();
-        let mut ul = UnderlineStyle::None;
         let mut ul_color = None;
         apply_sgr(
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[58;5;196m"),
             &pal,
@@ -973,7 +972,6 @@ mod tests {
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[59m"),
             &pal,
@@ -1006,7 +1004,7 @@ mod tests {
 
     #[test]
     fn sgr_53_sets_overline() {
-        let (attrs, _, _) = apply_full(b"\x1b[53m");
+        let (attrs, _) = apply_full(b"\x1b[53m");
         assert!(attrs.contains(CellAttrs::OVERLINE));
     }
 
@@ -1014,7 +1012,6 @@ mod tests {
     fn sgr_55_clears_overline() {
         let pal = ColorPalette::default();
         let mut attrs = CellAttrs::default();
-        let mut ul = UnderlineStyle::None;
         let mut ul_color = None;
         let mut fg = default_fg();
         let mut bg = default_bg();
@@ -1022,7 +1019,6 @@ mod tests {
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[53m"),
             &pal,
@@ -1032,7 +1028,6 @@ mod tests {
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[55m"),
             &pal,
@@ -1044,7 +1039,7 @@ mod tests {
 
     #[test]
     fn sgr_8_sets_hidden() {
-        let (attrs, _, _) = apply_full(b"\x1b[8m");
+        let (attrs, _) = apply_full(b"\x1b[8m");
         assert!(attrs.contains(CellAttrs::HIDDEN));
     }
 
@@ -1052,7 +1047,6 @@ mod tests {
     fn sgr_28_clears_hidden() {
         let pal = ColorPalette::default();
         let mut attrs = CellAttrs::default();
-        let mut ul = UnderlineStyle::None;
         let mut ul_color = None;
         let mut fg = default_fg();
         let mut bg = default_bg();
@@ -1060,7 +1054,6 @@ mod tests {
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[8m"),
             &pal,
@@ -1070,7 +1063,6 @@ mod tests {
             &mut fg,
             &mut bg,
             &mut attrs,
-            &mut ul,
             &mut ul_color,
             &parse_sgr(b"\x1b[28m"),
             &pal,

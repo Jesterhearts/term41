@@ -76,7 +76,6 @@ pub(crate) fn apply_status_line_csi(
                 &mut status.fg,
                 &mut status.bg,
                 &mut status.attrs,
-                &mut status.underline,
                 &mut status.underline_color,
                 params.as_groups(),
                 &palette,

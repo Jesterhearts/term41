@@ -1,5 +1,4 @@
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStrBuilder;
 use terminal41::ColorPalette;
@@ -82,16 +81,16 @@ pub(crate) fn blink_animation_enabled(
 
 pub(crate) fn underline_style_for_render(
     snap: &TermSnapshot,
-    underline: UnderlineStyle,
-) -> UnderlineStyle {
+    underline: CellAttrs,
+) -> CellAttrs {
     match snap.dec_color.lookup_table {
         DecColorLookupTable::AlternateWithAttrs if snap.dec_color.alternate_underline_text => {
-            underline
+            underline & CellAttrs::UNDERLINE_MASK
         }
         DecColorLookupTable::AlternateWithAttrs | DecColorLookupTable::Alternate => {
-            UnderlineStyle::None
+            CellAttrs::empty()
         }
-        _ => underline,
+        _ => underline & CellAttrs::UNDERLINE_MASK,
     }
 }
 
@@ -123,7 +122,6 @@ pub(crate) fn status_line_label_row(
             .collect(),
         exit_status: None,
         has_link: vec![false; len],
-        underline: vec![UnderlineStyle::None; len],
         underline_color: vec![None; len],
         prompt_start: false,
     }
@@ -195,7 +193,6 @@ fn blank_status_line_row(
         cells: vec![smol_str::SmolStr::new_inline(" "); cols],
         exit_status: None,
         has_link: vec![false; cols],
-        underline: vec![UnderlineStyle::None; cols],
         underline_color: vec![None; cols],
         prompt_start: false,
     }
@@ -415,7 +412,6 @@ pub(crate) fn resolve_painted_cell(
         &snap_row.fg[col as usize],
         &snap_row.bg[col as usize],
         cell_attrs,
-        snap_row.underline[col as usize],
     );
     let fg = if active_match {
         base_fg
@@ -454,7 +450,6 @@ fn resolve_dec_color_cell(
     raw_fg: &Srgb<u8>,
     raw_bg: &Srgb<u8>,
     attrs: CellAttrs,
-    underline: UnderlineStyle,
 ) -> (Srgb<u8>, Srgb<u8>) {
     let mut color_attrs = attrs;
     let mut fg = *raw_fg;
@@ -466,8 +461,7 @@ fn resolve_dec_color_cell(
         DecColorLookupTable::AlternateWithAttrs | DecColorLookupTable::Alternate
             if default_colored =>
         {
-            let assignment =
-                terminal41::dec_alternate_assignment_for_style(&snap.dec_color, attrs, underline);
+            let assignment = terminal41::dec_alternate_assignment_for_style(&snap.dec_color, attrs);
             fg = terminal41::dec_table_color(&snap.dec_color, assignment.fg);
             bg = terminal41::dec_table_color(&snap.dec_color, assignment.bg);
             color_attrs.remove(CellAttrs::REVERSE);
@@ -565,7 +559,6 @@ mod tests {
             attrs: vec![CellAttrs::BOLD],
             fg: vec![palette.fg],
             bg: vec![palette.bg],
-            underline: vec![UnderlineStyle::None],
             underline_color: vec![None],
             has_link: vec![false],
             line_attr: LineAttr::Normal,

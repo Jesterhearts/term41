@@ -97,7 +97,6 @@ fn shrink(
                     fg: grid.rows[row].fg.split_off(new_width as usize),
                     bg: grid.rows[row].bg.split_off(new_width as usize),
                     attrs: grid.rows[row].attrs.split_off(new_width as usize),
-                    underline: grid.rows[row].underline.split_off(new_width as usize),
                     underline_color: grid.rows[row].underline_color.split_off(new_width as usize),
                     links: grid.rows[row].links.split_off(new_width as usize),
                     wrapped: grid.rows[row].wrapped,

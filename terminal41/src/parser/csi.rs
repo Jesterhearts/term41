@@ -2,7 +2,6 @@ use std::collections::HashMap;
 use std::time::Instant;
 
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use smol_str::SmolStr;
 use vte_mode41::C1Mode;
 use vte_mode41::ConformanceLevel;
@@ -978,7 +977,6 @@ fn apply_main_csi(
                 &mut screen.fg,
                 &mut screen.bg,
                 &mut screen.attrs,
-                &mut screen.underline,
                 &mut screen.underline_color,
                 params.as_groups(),
                 palette,
@@ -1598,7 +1596,6 @@ pub(crate) fn csi_apply(
                             screen.fg,
                             screen.bg,
                             screen.attrs,
-                            screen.underline,
                             screen.underline_color,
                         );
                     }
@@ -1779,7 +1776,6 @@ pub(crate) fn csi_apply(
             screen.fg = palette.fg;
             screen.bg = palette.bg;
             screen.attrs = CellAttrs::default();
-            screen.underline = UnderlineStyle::None;
             screen.underline_color = None;
             screen.scroll_top = 0;
             screen.scroll_bottom = viewport.rows.saturating_sub(1);

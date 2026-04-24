@@ -1,7 +1,6 @@
 use std::ops::RangeBounds;
 
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use palette::Srgb;
 use smol_str::SmolStr;
 
@@ -46,9 +45,6 @@ pub struct Row {
     /// Per-cell text attributes (bold/italic/strikethrough). Set from
     /// `screen.attrs` at write time alongside `fg`/`bg`.
     pub attrs: Vec<CellAttrs>,
-    /// Per-cell underline rendering style. Separated from `attrs` because
-    /// the styles are mutually exclusive (an enum, not a flag set).
-    pub underline: Vec<UnderlineStyle>,
     /// Per-cell underline color override. `None` means "use the cell's
     /// foreground color" (the default). Set via SGR 58, cleared by SGR 59.
     pub underline_color: Vec<Option<Srgb<u8>>>,
@@ -92,7 +88,6 @@ impl Row {
             fg: vec![fg; n],
             bg: vec![bg; n],
             attrs: vec![CellAttrs::default(); n],
-            underline: vec![UnderlineStyle::None; n],
             underline_color: vec![None; n],
             links: vec![None; n],
             wrapped: false,
@@ -129,7 +124,6 @@ impl Row {
         self.fg.resize(new_len, fg);
         self.bg.resize(new_len, bg);
         self.attrs.resize(new_len, CellAttrs::default());
-        self.underline.resize(new_len, UnderlineStyle::None);
         self.underline_color.resize(new_len, None);
         self.links.resize(new_len, None);
     }
@@ -143,7 +137,6 @@ impl Row {
         self.fg.truncate(new_len);
         self.bg.truncate(new_len);
         self.attrs.truncate(new_len);
-        self.underline.truncate(new_len);
         self.underline_color.truncate(new_len);
         self.links.truncate(new_len);
     }
@@ -195,7 +188,6 @@ impl Row {
         self.fg[range.clone()].fill(fg);
         self.bg[range.clone()].fill(bg);
         self.attrs[range.clone()].fill(CellAttrs::default());
-        self.underline[range.clone()].fill(UnderlineStyle::None);
         self.underline_color[range.clone()].fill(None);
         self.links[range].fill(None);
     }
@@ -215,7 +207,6 @@ impl Row {
                 self.fg[i] = fg;
                 self.bg[i] = bg;
                 self.attrs[i] = CellAttrs::default();
-                self.underline[i] = UnderlineStyle::None;
                 self.underline_color[i] = None;
                 self.links[i] = None;
             }
@@ -315,7 +306,6 @@ impl Row {
         self.fg.copy_within(src.clone(), dest);
         self.bg.copy_within(src.clone(), dest);
         self.attrs.copy_within(src.clone(), dest);
-        self.underline.copy_within(src.clone(), dest);
         self.underline_color.copy_within(src.clone(), dest);
         self.links.copy_within(src, dest);
     }
@@ -337,8 +327,6 @@ impl Row {
             .copy_from_slice(&other.bg[src.start..src.start + copy_len]);
         self.attrs[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.attrs[src.start..src.start + copy_len]);
-        self.underline[dest_offset..dest_offset + copy_len]
-            .copy_from_slice(&other.underline[src.start..src.start + copy_len]);
         self.underline_color[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.underline_color[src.start..src.start + copy_len]);
         self.links[dest_offset..dest_offset + copy_len]
@@ -361,7 +349,6 @@ impl Row {
             fg: self.fg[left..right_excl].to_vec(),
             bg: self.bg[left..right_excl].to_vec(),
             attrs: self.attrs[left..right_excl].to_vec(),
-            underline: self.underline[left..right_excl].to_vec(),
             underline_color: self.underline_color[left..right_excl].to_vec(),
             links: self.links[left..right_excl].to_vec(),
             wrapped: false,
@@ -389,8 +376,6 @@ impl Row {
         self.fg[dst_start..dst_start + copy_len].copy_from_slice(&snap.fg[..copy_len]);
         self.bg[dst_start..dst_start + copy_len].copy_from_slice(&snap.bg[..copy_len]);
         self.attrs[dst_start..dst_start + copy_len].copy_from_slice(&snap.attrs[..copy_len]);
-        self.underline[dst_start..dst_start + copy_len]
-            .copy_from_slice(&snap.underline[..copy_len]);
         self.underline_color[dst_start..dst_start + copy_len]
             .copy_from_slice(&snap.underline_color[..copy_len]);
         self.links[dst_start..dst_start + copy_len].copy_from_slice(&snap.links[..copy_len]);
@@ -430,14 +415,13 @@ impl Row {
             match p {
                 0 => {
                     self.attrs[col].remove(CellAttrs::BOLD | CellAttrs::BLINK | CellAttrs::REVERSE);
-                    self.underline[col] = UnderlineStyle::None;
                 }
                 1 => self.attrs[col].insert(CellAttrs::BOLD),
-                4 => self.underline[col] = UnderlineStyle::Single,
+                4 => self.attrs[col].insert(CellAttrs::SINGLE_UNDERLINE),
                 5 => self.attrs[col].insert(CellAttrs::BLINK),
                 7 => self.attrs[col].insert(CellAttrs::REVERSE),
                 22 => self.attrs[col].remove(CellAttrs::BOLD),
-                24 => self.underline[col] = UnderlineStyle::None,
+                24 => self.attrs[col].remove(CellAttrs::SINGLE_UNDERLINE),
                 25 => self.attrs[col].remove(CellAttrs::BLINK),
                 27 => self.attrs[col].remove(CellAttrs::REVERSE),
                 _ => {}
@@ -488,10 +472,12 @@ impl Row {
         }
         self.attrs[col] ^= flags;
         if toggle_ul {
-            self.underline[col] = if self.underline[col] != UnderlineStyle::None {
-                UnderlineStyle::None
+            let sel = self.attrs[col] & CellAttrs::UNDERLINE_MASK;
+            self.attrs[col] &= !CellAttrs::UNDERLINE_MASK;
+            self.attrs[col] |= if sel.is_empty() {
+                CellAttrs::SINGLE_UNDERLINE
             } else {
-                UnderlineStyle::Single
+                CellAttrs::empty()
             };
         }
     }

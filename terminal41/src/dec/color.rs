@@ -1,5 +1,4 @@
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use palette::FromColor;
 use palette::Hsl;
 use palette::RgbHue;
@@ -292,15 +291,11 @@ pub fn erase_background_color(
 pub fn alternate_assignment_for_style(
     state: &DecColorState,
     attrs: CellAttrs,
-    underline: UnderlineStyle,
 ) -> ColorAssignment {
-    state.alternate_text[alternate_text_index(attrs, underline) as usize]
+    state.alternate_text[alternate_text_index(attrs) as usize]
 }
 
-pub fn alternate_text_index(
-    attrs: CellAttrs,
-    underline: UnderlineStyle,
-) -> u8 {
+pub fn alternate_text_index(attrs: CellAttrs) -> u8 {
     let mut index = 0u8;
     if attrs.contains(CellAttrs::BOLD) {
         index |= 1;
@@ -308,7 +303,7 @@ pub fn alternate_text_index(
     if attrs.contains(CellAttrs::REVERSE) {
         index |= 2;
     }
-    if underline != UnderlineStyle::None {
+    if attrs.intersects(CellAttrs::UNDERLINE_MASK) {
         index |= 4;
     }
     if attrs.intersects(CellAttrs::BLINK | CellAttrs::RAPID_BLINK) {

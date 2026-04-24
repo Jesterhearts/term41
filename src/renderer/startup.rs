@@ -8,7 +8,6 @@ use std::time::Instant;
 use font41::FontSystem;
 use font41::RasterizedGlyph;
 use font41::attrs::CellAttrs;
-use font41::attrs::UnderlineStyle;
 use image41::decode_image;
 use palette::Srgb;
 use smol_str::SmolStrBuilder;
@@ -393,7 +392,6 @@ fn blank_startup_row(
         attrs: vec![CellAttrs::default(); cols],
         fg: vec![palette.fg; cols],
         bg: vec![palette.bg; cols],
-        underline: vec![UnderlineStyle::None; cols],
         underline_color: vec![None; cols],
         has_link: vec![false; cols],
         line_attr: LineAttr::Normal,
@@ -850,7 +848,6 @@ fn label_row(
             .collect(),
         exit_status: None,
         has_link: vec![false; len],
-        underline: vec![UnderlineStyle::None; len],
         underline_color: vec![None; len],
         prompt_start,
     }

@@ -202,7 +202,8 @@ fn encode_srend(screen: &Screen) -> String {
     if screen.attrs.contains(font41::attrs::CellAttrs::BOLD) {
         bits |= 1;
     }
-    if screen.underline != font41::attrs::UnderlineStyle::None {
+    if screen.attrs & font41::attrs::CellAttrs::UNDERLINE_MASK != font41::attrs::CellAttrs::empty()
+    {
         bits |= 2;
     }
     if screen
@@ -481,9 +482,11 @@ pub(crate) fn restore_deccir(
         screen.attrs.insert(font41::attrs::CellAttrs::BOLD);
     }
     if srend_bits & 2 != 0 {
-        screen.underline = font41::attrs::UnderlineStyle::Single;
+        screen
+            .attrs
+            .insert(font41::attrs::CellAttrs::SINGLE_UNDERLINE);
     } else {
-        screen.underline = font41::attrs::UnderlineStyle::None;
+        screen.attrs &= !font41::attrs::CellAttrs::UNDERLINE_MASK;
     }
     if srend_bits & 4 != 0 {
         screen.attrs.insert(font41::attrs::CellAttrs::BLINK);
@@ -816,7 +819,11 @@ mod integration_tests {
         assert_eq!(term.active.cursor.row, 1);
         assert_eq!(term.active.cursor.col, 2);
         assert!(term.active.attrs.contains(font41::attrs::CellAttrs::BOLD));
-        assert_eq!(term.active.underline, font41::attrs::UnderlineStyle::Single);
+        assert!(
+            term.active
+                .attrs
+                .contains(font41::attrs::CellAttrs::SINGLE_UNDERLINE)
+        );
         assert!(
             term.active
                 .attrs
