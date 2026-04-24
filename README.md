@@ -164,10 +164,25 @@ cargo run --release
 
 ### Installing
 
-If you'd rather install it into your cargo bin dir:
+The `0.1.0` release is source-only. To build and install it from the GitHub
+tag into your cargo bin dir:
 
 ```sh
-cargo install --path .
+cargo install --git https://github.com/Jesterhearts/term41.git --tag @0.1.0 --locked term41
+```
+
+The default install enables FFmpeg-backed GIF/video decoding and Wayland
+data-control clipboard support. If you want the smallest dependency surface, or
+your system does not have the FFmpeg development libraries installed:
+
+```sh
+cargo install --git https://github.com/Jesterhearts/term41.git --tag @0.1.0 --locked --no-default-features term41
+```
+
+From a local checkout, use:
+
+```sh
+cargo install --path . --locked
 ```
 
 ### Cargo Features
