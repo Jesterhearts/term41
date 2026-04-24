@@ -1,5 +1,6 @@
 use font41::attrs::CellAttrs;
 use palette::Srgb;
+use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
 use terminal41::ColorPalette;
 use terminal41::DecColorLookupTable;
@@ -49,7 +50,7 @@ pub(crate) struct TabBarButtonVisual {
     pub x: f32,
     pub width: f32,
     pub bg: Option<Srgb<u8>>,
-    pub label: &'static str,
+    pub label: SmolStr,
 }
 
 pub(crate) struct WindowButtonVisual {
@@ -260,6 +261,7 @@ fn clip_status_line_tail<'a>(
 pub(crate) fn build_tab_bar_plan(
     tabs: &[TabInfo<'_>],
     palette: &ColorPalette,
+    new_tab_text: SmolStr,
     hovered_button: Option<TabBarHover>,
     maximized: bool,
     surface_w: f32,
@@ -294,7 +296,7 @@ pub(crate) fn build_tab_bar_plan(
             Some(TabBarHover::NewTab) => blend(inactive_bg, palette.fg, 0.3),
             _ => blend(inactive_bg, palette.fg, 0.15),
         }),
-        label: "⮒",
+        label: new_tab_text,
     };
 
     let button_labels = [
@@ -523,6 +525,7 @@ fn truncate_label(
 
 #[cfg(test)]
 mod tests {
+    use smol_str::ToSmolStr;
     use terminal41::CursorStyle;
 
     use super::*;
@@ -673,9 +676,16 @@ mod tests {
     #[test]
     fn new_tab_button_hover_uses_window_button_hover_strength() {
         let palette = ColorPalette::default();
-        let normal = build_tab_bar_plan(&[], &palette, None, false, 200.0, 10.0);
-        let hovered =
-            build_tab_bar_plan(&[], &palette, Some(TabBarHover::NewTab), false, 200.0, 10.0);
+        let normal = build_tab_bar_plan(&[], &palette, '🞦'.to_smolstr(), None, false, 200.0, 10.0);
+        let hovered = build_tab_bar_plan(
+            &[],
+            &palette,
+            '🞦'.to_smolstr(),
+            Some(TabBarHover::NewTab),
+            false,
+            200.0,
+            10.0,
+        );
 
         assert_ne!(normal.new_tab_button.bg, hovered.new_tab_button.bg);
         assert_eq!(

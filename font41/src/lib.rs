@@ -898,9 +898,11 @@ impl FontSystem {
         let gid = GlyphId::new(glyph_index as u32);
         match loca.get_glyf(gid, &glyf) {
             Ok(Some(Glyph::Simple(simple))) => {
+                debug!("rasterizing outline glyph {glyph_index} for cell span {cells_wide}");
                 rasterize_simple_glyph(&simple, scale, self.supersample)
             }
             Ok(Some(Glyph::Composite(composite))) => {
+                debug!("rasterizing composite glyph {glyph_index} for cell span {cells_wide}");
                 rasterize_composite_glyph(&composite, &loca, &glyf, scale, self.supersample)
             }
             _ => empty_glyph(),

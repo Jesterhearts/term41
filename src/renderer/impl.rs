@@ -8,7 +8,9 @@ use std::time::Instant;
 use font41::FontSystem;
 use font41::attrs::CellAttrs;
 use palette::Srgb;
+use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
+use smol_str::ToSmolStr;
 use terminal41::ColorPalette;
 use terminal41::CursorShape;
 use terminal41::LineAttr;
@@ -1389,6 +1391,7 @@ impl Renderer {
         visible_images: &[VisibleImage],
         snap: &TermSnapshot,
         tabs: &[TabInfo],
+        new_tab_text: SmolStr,
         controls: &WindowControls,
         gutter_popup: Option<&GutterPopup>,
         recording_popup: Option<&crate::renderer::RecordingPopup>,
@@ -1406,6 +1409,7 @@ impl Renderer {
             snap,
             &terminal_rows,
             tabs,
+            new_tab_text,
             controls,
             gutter_popup,
             recording_popup,
@@ -1552,6 +1556,7 @@ impl Renderer {
         snap: &TermSnapshot,
         rows: &[RowSnapshot],
         tabs: &[TabInfo],
+        new_tab_text: SmolStr,
         controls: &WindowControls,
         gutter_popup: Option<&GutterPopup>,
         recording_popup: Option<&crate::renderer::RecordingPopup>,
@@ -1568,6 +1573,7 @@ impl Renderer {
                 snap,
                 rows,
                 tabs,
+                new_tab_text.clone(),
                 controls,
                 gutter_popup,
                 recording_popup,
@@ -1593,6 +1599,7 @@ impl Renderer {
             snap,
             rows,
             tabs,
+            new_tab_text,
             controls,
             gutter_popup,
             recording_popup,
@@ -1609,6 +1616,7 @@ impl Renderer {
         snap: &TermSnapshot,
         rows: &[RowSnapshot],
         tabs: &[TabInfo],
+        new_tab_text: SmolStr,
         controls: &WindowControls,
         gutter_popup: Option<&GutterPopup>,
         recording_popup: Option<&crate::renderer::RecordingPopup>,
@@ -1714,6 +1722,7 @@ impl Renderer {
             font_system,
             tabs,
             &snap.palette,
+            new_tab_text,
             controls,
             &mut geometry.bg_vertices,
             &mut geometry.bg_indices,
@@ -2522,6 +2531,7 @@ impl Renderer {
         font_system: &mut FontSystem,
         tabs: &[TabInfo],
         palette: &ColorPalette,
+        new_tab_text: SmolStr,
         controls: &WindowControls,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
@@ -2537,6 +2547,7 @@ impl Renderer {
         let plan = build_tab_bar_plan(
             tabs,
             palette,
+            new_tab_text,
             controls.hovered,
             controls.maximized,
             surface_w,
@@ -2619,7 +2630,7 @@ impl Renderer {
         }
         self.shape_and_render_label(
             font_system,
-            plan.new_tab_button.label,
+            &plan.new_tab_button.label.to_smolstr(),
             plan.new_tab_button.x,
             0.0,
             baseline,

@@ -10,7 +10,9 @@ use font41::RasterizedGlyph;
 use font41::attrs::CellAttrs;
 use image41::decode_image;
 use palette::Srgb;
+use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
+use smol_str::ToSmolStr;
 use softbuffer::Context;
 use softbuffer::Surface;
 use terminal41::CursorShape;
@@ -121,6 +123,7 @@ impl StartupPresenter {
         window: &Arc<Window>,
         terminal: &Arc<parking_lot::Mutex<terminal41::Terminal>>,
         tabs: &[StartupTab<'_>],
+        new_tab_text: SmolStr,
         hovered_button: Option<crate::renderer::TabBarHover>,
         tab_context_menu: Option<&TabContextMenu>,
         gutter_popup: Option<&GutterPopup>,
@@ -179,6 +182,7 @@ impl StartupPresenter {
             &frame.snap,
             buffer.as_mut(),
             tabs,
+            new_tab_text,
             cell_w,
             width,
             height,
@@ -514,6 +518,7 @@ fn paint_tab_bar(
     snap: &TermSnapshot,
     buffer: &mut [u32],
     tabs: &[StartupTab<'_>],
+    new_tab_text: SmolStr,
     cell_w: i32,
     width: usize,
     height: usize,
@@ -533,6 +538,7 @@ fn paint_tab_bar(
     let plan = build_tab_bar_plan(
         &tab_infos,
         &snap.palette,
+        new_tab_text,
         hovered_button,
         maximized,
         width as f32,
@@ -588,7 +594,12 @@ fn paint_tab_bar(
             pack_rgb(button_bg),
         );
     }
-    let row = label_row(plan.new_tab_button.label, fg, plan.base_bg, false);
+    let row = label_row(
+        &plan.new_tab_button.label.to_smolstr(),
+        fg,
+        plan.base_bg,
+        false,
+    );
     let x = centered_label_x(
         font_system,
         snap,

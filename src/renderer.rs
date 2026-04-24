@@ -1220,7 +1220,8 @@ impl RenderHost {
         let fonts_changed = cfg.fonts != self.config.fonts;
         let size_changed = (cfg.font_size - self.config.font_size).abs() > f32::EPSILON;
         let ss_changed = cfg.font_supersampling != self.config.font_supersampling;
-        if fonts_changed || size_changed || ss_changed {
+        let new_tab_text_changed = cfg.new_tab_text != self.config.new_tab_text;
+        if fonts_changed || size_changed || ss_changed || new_tab_text_changed {
             self.font_system
                 .reload(cfg.fonts.clone(), cfg.font_size, cfg.font_supersampling);
             if let Some(renderer) = self.renderer.as_mut() {
@@ -1245,6 +1246,7 @@ impl RenderHost {
             self.config.fonts = cfg.fonts.clone();
             self.config.font_size = cfg.font_size;
             self.config.font_supersampling = cfg.font_supersampling;
+            self.config.new_tab_text = cfg.new_tab_text;
             self.sync_input_state();
         }
         if status_line_changed {
@@ -1419,6 +1421,7 @@ impl RenderHost {
             &visible_images,
             &snap,
             &tab_infos,
+            self.config.new_tab_text.clone(),
             &controls,
             gutter_popup.as_ref(),
             recording_popup.as_ref(),

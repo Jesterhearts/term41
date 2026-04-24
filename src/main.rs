@@ -30,6 +30,7 @@ use pty_pipe41::PtyWriter;
 use renderer::RenderHost;
 use renderer::startup::StartupPresenter;
 use renderer::startup::StartupTab;
+use smol_str::SmolStr;
 use terminal41::ClipboardRequest;
 use terminal41::HostInput;
 use terminal41::HostInputEffects;
@@ -323,6 +324,7 @@ struct WindowHost {
     click_count: u32,
     left_drag_active: bool,
     window_size: (u32, u32),
+    new_tab_text: SmolStr,
     opacity: f32,
     cell_width: u32,
     cell_height: u32,
@@ -439,6 +441,7 @@ impl WindowHost {
             window,
             &terminal,
             &tabs,
+            self.new_tab_text.clone(),
             hovered_button,
             tab_context_menu.as_ref(),
             gutter_popup.as_ref(),
@@ -2720,6 +2723,7 @@ fn main() {
     let input_state_for_render = input_state.clone();
     let render_thread_handle_for_render = render_thread_handle.clone();
     let render_proxy = proxy.clone();
+    let new_tab_text = config.new_tab_text.clone();
     thread::Builder::new()
         .name("renderer".into())
         .spawn(move || {
@@ -2790,6 +2794,7 @@ fn main() {
         queued_permission_requests: VecDeque::new(),
         next_recording_popup_token: 1,
         next_toast_token: 1,
+        new_tab_text,
     };
     event_loop.run_app(&mut host).expect("run event loop");
 }

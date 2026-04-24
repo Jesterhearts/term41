@@ -4,6 +4,8 @@ use std::str::FromStr;
 
 use palette::Srgb;
 use serde::Deserialize;
+use smol_str::SmolStr;
+use smol_str::ToSmolStr;
 use terminal41::ClipboardPermission;
 use terminal41::ClipboardPermissions;
 use terminal41::ColorPalette;
@@ -447,6 +449,10 @@ struct ConfigFile {
     #[serde(default)]
     background_opacity: Option<f32>,
 
+    #[serde(deserialize_with = "smolstr_opt")]
+    #[serde(default)]
+    new_tab_text: Option<SmolStr>,
+
     /// Supersampling factor for font rasterization. Higher values produce
     /// smoother results at the cost of increased CPU usage and memory
     /// consumption. Default is 4.
@@ -488,6 +494,7 @@ pub struct Config {
     /// smoother results at the cost of increased CPU usage and memory
     /// consumption. Default is 4.
     pub font_supersampling: u32,
+    pub new_tab_text: SmolStr,
     /// Color palette (ANSI 16 colors, default fg/bg, cursor, selection).
     pub palette: ColorPalette,
     pub feature_permissions: FeaturePermissions,
@@ -516,6 +523,7 @@ impl Default for Config {
             font_supersampling: 4,
             palette: ColorPalette::default(),
             feature_permissions: FeaturePermissions::default(),
+            new_tab_text: '⮒'.to_smolstr(),
             limits: TerminalLimits::default(),
             script_permissions: BTreeMap::new(),
             compatibility: CompatibilityConfig::default(),
@@ -565,6 +573,7 @@ fn parse_config(
     let clipboard = clipboard.unwrap_or_default();
     let limits = build_limits(limits);
     let compatibility = build_compatibility(file.compatibility);
+    let new_tab_text = file.new_tab_text.unwrap_or('⮒'.to_smolstr());
 
     Config {
         opacity: file.opacity.unwrap_or(1.0),
@@ -594,6 +603,7 @@ fn parse_config(
         limits,
         script_permissions: scripts.unwrap_or_default(),
         compatibility,
+        new_tab_text,
     }
 }
 
@@ -724,6 +734,24 @@ fn build_cursor_style(
 
 fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("term41").join("config.toml"))
+}
+
+fn smolstr_opt<'de, D>(deserializer: D) -> Result<Option<SmolStr>, D::Error>
+where
+    D: serde::Deserializer<'de>,
+{
+    match Option::<SmolStr>::deserialize(deserializer) {
+        Ok(opt) => {
+            if let Some(s) = opt {
+                return Ok(Some(s));
+            }
+            Ok(None)
+        }
+        Err(e) => {
+            warn!("failed to parse char in config: {e}");
+            Ok(None)
+        }
+    }
 }
 
 fn float_opt_clamp_0_1<'de, D>(deserializer: D) -> Result<Option<f32>, D::Error>
