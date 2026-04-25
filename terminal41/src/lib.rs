@@ -1110,9 +1110,10 @@ impl Terminal {
                 }
             }
             dispatch::BasicAction::PrintText(run) => {
-                if before.cursor_col.saturating_add(run.chars().count() as u32)
-                    > self.viewport.cols.max(1)
-                {
+                // UTF-8 byte length is a cheap conservative upper bound for
+                // terminal column width, so it can detect possible wrapping
+                // without recounting chars on every mixed text run.
+                if before.cursor_col.saturating_add(run.len() as u32) > self.viewport.cols.max(1) {
                     SnapshotDirtyScope::All
                 } else {
                     SnapshotDirtyScope::CursorRows

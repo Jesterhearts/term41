@@ -12,11 +12,18 @@
 
 use std::hint::black_box;
 
+use criterion::BatchSize;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
+use terminal41::ColorPalette;
+use terminal41::FeaturePermissions;
+use terminal41::StatusDisplayKind;
+use terminal41::Terminal;
+use terminal41::TerminalLimits;
+use terminal41::TerminalProcessor;
 use vtepp::Parser;
 
 fn ascii_heavy_corpus() -> Vec<u8> {
@@ -72,12 +79,47 @@ fn bench_corpus(
     group.finish();
 }
 
+fn new_terminal() -> Terminal {
+    Terminal::new(
+        120,
+        40,
+        1000,
+        StatusDisplayKind::None,
+        FeaturePermissions::default(),
+        TerminalLimits::default(),
+        16,
+        8,
+        ColorPalette::default(),
+    )
+}
+
+fn bench_terminal_corpus(
+    c: &mut Criterion,
+    name: &str,
+    data: &[u8],
+) {
+    let mut group = c.benchmark_group("terminal_process");
+    group.throughput(Throughput::Bytes(data.len() as u64));
+    group.bench_with_input(BenchmarkId::new(name, data.len()), data, |b, data| {
+        b.iter_batched(
+            || (TerminalProcessor::new(), new_terminal()),
+            |(mut processor, mut terminal)| {
+                black_box(processor.process_bytes(&mut terminal, black_box(data)));
+            },
+            BatchSize::SmallInput,
+        );
+    });
+    group.finish();
+}
+
 fn bench_all(c: &mut Criterion) {
     let ascii = ascii_heavy_corpus();
     bench_corpus(c, "ascii_heavy", &ascii);
+    bench_terminal_corpus(c, "ascii_heavy", &ascii);
 
     let mixed = mixed_corpus();
     bench_corpus(c, "mixed", &mixed);
+    bench_terminal_corpus(c, "mixed", &mixed);
 
     if let Some((path, bytes)) = load_external_corpus() {
         eprintln!(
@@ -86,6 +128,7 @@ fn bench_all(c: &mut Criterion) {
             bytes.len()
         );
         bench_corpus(c, "external", &bytes);
+        bench_terminal_corpus(c, "external", &bytes);
     }
 }
 

@@ -2,6 +2,7 @@ use font41::attrs::CellAttrs;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
 use unicode_segmentation::UnicodeSegmentation;
+use unicode_width::UnicodeWidthChar;
 use unicode_width::UnicodeWidthStr;
 
 use crate::Row;
@@ -430,8 +431,9 @@ fn put_char_impl(
         return;
     }
 
-    if let Some(combined) =
-        try_extend_prev_cell(screen, viewport, target, &s, legacy_emoji_compatibility)
+    if should_try_extend_prev_cell(&s)
+        && let Some(combined) =
+            try_extend_prev_cell(screen, viewport, target, &s, legacy_emoji_compatibility)
     {
         trace!("Combining with previous cell to form {:?}", combined);
         set_target_last_char(screen, target, combined);
@@ -565,6 +567,7 @@ fn put_text_run_impl(
         if i >= bytes.len() {
             break;
         }
+
         let len = utf8_char_len(bytes[i]);
         put_char_impl(
             screen,
@@ -677,9 +680,12 @@ fn write_ascii_chunk(
     while idx < end {
         if row.cells[idx].is_empty() {
             row.cells[idx - 1] = blank_cell();
-        } else if row.cells[idx].width() > 1 {
-            for i in idx..idx + row.cells[idx].width() {
-                row.cells[i] = blank_cell();
+        } else {
+            let width = stored_cell_width(&row.cells[idx]);
+            if width > 1 {
+                for i in idx..idx + width {
+                    row.cells[i] = blank_cell();
+                }
             }
         }
         idx += 1;
@@ -689,6 +695,44 @@ fn write_ascii_chunk(
         *cell = ascii_cell(b);
     }
     fill_row_style(row, col, chunk.len(), style);
+}
+
+#[inline(always)]
+fn stored_cell_width(cell: &SmolStr) -> usize {
+    let text = cell.as_str();
+    if text.is_empty() {
+        0
+    } else if text.len() == 1 {
+        1
+    } else {
+        text.width()
+    }
+}
+
+#[inline(always)]
+fn should_try_extend_prev_cell(s: &str) -> bool {
+    let mut chars = s.chars();
+    let Some(ch) = chars.next() else {
+        return false;
+    };
+    if chars.next().is_some() {
+        return true;
+    }
+
+    is_grapheme_extension_candidate(ch)
+}
+
+#[inline(always)]
+fn is_grapheme_extension_candidate(ch: char) -> bool {
+    ch.width() == Some(0)
+        || is_emoji_modifier(ch)
+        || is_emoji_presentation_scalar(ch)
+        || is_regional_indicator(ch)
+}
+
+#[inline(always)]
+fn is_regional_indicator(ch: char) -> bool {
+    ('\u{1F1E6}'..='\u{1F1FF}').contains(&ch)
 }
 
 #[inline(always)]
@@ -707,9 +751,9 @@ fn write_styled_glyph(
     style: CellStyle,
     s: &SmolStr,
 ) {
-    let old_w = row.cells[col].width();
+    let old_w = stored_cell_width(&row.cells[col]);
     let jbc_offset = if col > 0 {
-        usize::from(row.cells[col - 1].width() > 1)
+        usize::from(stored_cell_width(&row.cells[col - 1]) > 1)
     } else {
         0
     };
@@ -723,8 +767,9 @@ fn write_styled_glyph(
 
     let mut idx = col + 1;
     while idx < col + width {
-        if row.cells[idx].width() > 1 {
-            for i in idx..idx + row.cells[idx].width() {
+        let old_w = stored_cell_width(&row.cells[idx]);
+        if old_w > 1 {
+            for i in idx..idx + old_w {
                 row.cells[i] = blank_cell();
             }
         }
@@ -1214,6 +1259,18 @@ mod tests {
         assert_eq!(screen.cursor.col, 1);
     }
 
+    #[test]
+    fn put_text_run_writes_narrow_utf8_scalars() {
+        let (mut screen, mut viewport) = setup();
+        feed("éøλ".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "é");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "ø");
+        assert_eq!(screen.grid.rows[r].cells[2].as_str(), "λ");
+        assert_eq!(screen.cursor.col, 3);
+    }
+
     // -- wide (2-column) glyph handling ------------------------------------
 
     #[test]
@@ -1309,6 +1366,17 @@ mod tests {
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👩\u{200D}💻");
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "");
         assert_eq!(screen.grid.rows[r].cells[2].as_str(), " ");
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn put_char_emoji_modifier_merges_into_previous_wide_cell() {
+        let (mut screen, mut viewport) = setup();
+        feed("👍🏽".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👍🏽");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "");
         assert_eq!(screen.cursor.col, 2);
     }
 

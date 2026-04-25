@@ -146,7 +146,7 @@ impl Row {
         fg: Srgb<u8>,
         bg: Srgb<u8>,
     ) {
-        self.clear_range(0..self.cells.len(), fg, bg);
+        self.clear_expanded_range(0..self.cells.len(), fg, bg);
         // A full-row wipe drops the row's semantic (OSC 133) marks. Partial
         // clears via `clear_range` leave them alone, so apps that use SGR to
         // redraw a prompt line in place don't lose the mark mid-update.
@@ -184,6 +184,15 @@ impl Row {
         if range.is_empty() {
             return;
         }
+        self.clear_expanded_range(range, fg, bg);
+    }
+
+    fn clear_expanded_range(
+        &mut self,
+        range: std::ops::Range<usize>,
+        fg: Srgb<u8>,
+        bg: Srgb<u8>,
+    ) {
         self.cells[range.clone()].fill(blank_cell());
         self.fg[range.clone()].fill(fg);
         self.bg[range.clone()].fill(bg);
