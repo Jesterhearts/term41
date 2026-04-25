@@ -759,32 +759,23 @@ fn write_styled_glyph(
         jbc_offset += 1;
     }
 
-    let mut idx = col - jbc_offset;
-    while idx < col + old_w {
-        row.cells[idx] = blank_cell();
-        idx += 1;
-    }
-
-    row.cells[col] = s.clone();
-
-    let mut idx = col + 1;
-    while idx < col + width {
-        if row.has_wide_cells {
+    let mut end_w = old_w.max(width);
+    if row.has_wide_cells {
+        let mut idx = col;
+        while idx < col + end_w && idx < row.cells.len() {
             let old_w = stored_cell_width(&row.cells[idx]);
-            if old_w > 1 {
-                for i in idx..idx + old_w {
-                    row.cells[i] = blank_cell();
-                }
-            }
+            end_w += old_w.saturating_sub(1);
+            idx += 1;
         }
-        row.cells[idx] = continuation_cell();
-        idx += 1;
+    }
+    row.cells[col - jbc_offset..col + end_w].fill(blank_cell());
+    row.cells[col] = s.clone();
+    if width > 1 {
+        row.cells[col + 1..col + width].fill(continuation_cell());
+        row.has_wide_cells = true;
     }
 
     fill_row_style(row, col, width, style);
-    if width > 1 {
-        row.has_wide_cells = true;
-    }
 }
 
 #[inline(always)]
