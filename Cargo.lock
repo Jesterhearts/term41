@@ -4097,6 +4097,7 @@ dependencies = [
  "pty-pipe41",
  "serde",
  "smol_str 0.3.6",
+ "tracing",
  "unicode-segmentation",
  "unicode-width",
  "utils41",

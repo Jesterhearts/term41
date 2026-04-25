@@ -807,7 +807,7 @@ fn apply_main_csi(
     let mut viewport = screen::screen_viewport(screen, viewport);
     let preserve_top_origin_scrollback = !*on_alt_screen && !screen::page_memory_active(screen);
 
-    debug!("Applying main CSI action: {action:?}");
+    trace!("Applying main CSI action: {action:?}");
 
     match action {
         MainCsiAction::SelfTest { requested_tests } => {

@@ -27,6 +27,7 @@ use terminal41::Terminal;
 use terminal41::TerminalThread;
 use terminal41::host;
 use terminal41::settings;
+use tracing::debug_span;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
@@ -1393,25 +1394,32 @@ impl RenderHost {
         // the terminal thread can continue processing PTY data while the
         // renderer does shaping, glyph caching, and image-atlas work.
         let (snap, visible_images) = {
-            let mut terminal = self.tabs[active_idx].terminal.lock();
-            let force_status_line = self.last_script_status_text != script_output.status_text;
-            let force_all_rows = self.last_rendered_tab_id != Some(active_tab_id);
-            let snap = terminal41::snapshot_terminal_with_options(
-                &mut terminal,
-                terminal41::SnapshotOptions {
-                    indicator_status_text: script_output.status_text.as_deref(),
-                    force_status_line,
-                    force_all_rows,
-                },
-            );
-            let visible_images = terminal41::view::visible_images(
-                &terminal.active,
-                &terminal.viewport,
-                terminal.cell_height(),
-                Instant::now(),
-            )
-            .collect::<Vec<_>>();
-            (snap, visible_images)
+            debug_span!("reading terminal state").in_scope(|| {
+                let mut terminal = self.tabs[active_idx].terminal.lock();
+                let force_status_line = self.last_script_status_text != script_output.status_text;
+                let force_all_rows = self.last_rendered_tab_id != Some(active_tab_id);
+
+                let snap = debug_span!("taking snapshot").in_scope(|| {
+                    terminal41::snapshot_terminal_with_options(
+                        &mut terminal,
+                        terminal41::SnapshotOptions {
+                            indicator_status_text: script_output.status_text.as_deref(),
+                            force_status_line,
+                            force_all_rows,
+                        },
+                    )
+                });
+                let visible_images = debug_span!("recording visible images").in_scope(|| {
+                    terminal41::view::visible_images(
+                        &terminal.active,
+                        &terminal.viewport,
+                        terminal.cell_height(),
+                        Instant::now(),
+                    )
+                    .collect::<Vec<_>>()
+                });
+                (snap, visible_images)
+            })
         };
         self.last_script_status_text = script_output.status_text.clone();
         self.last_rendered_tab_id = Some(active_tab_id);

@@ -1,6 +1,7 @@
 use font41::attrs::CellAttrs;
 use palette::Srgb;
 use smol_str::SmolStrBuilder;
+use tracing::debug_span;
 use unicode_segmentation::UnicodeSegmentation;
 use utils41::blend_colors;
 
@@ -173,9 +174,13 @@ pub fn snapshot_terminal_with_options(
         })
         .filter(|(_, dirty)| *dirty)
         .map(|(row, _)| row);
-    for row in dirty_visible_rows {
-        rows.push(snapshot_visible_row(terminal, row));
-    }
+
+    debug_span!("copying dirty rows").in_scope(|| {
+        for row in dirty_visible_rows {
+            rows.push(snapshot_visible_row(terminal, row));
+        }
+    });
+
     if dirty_status_row.is_some()
         && let Some(status_row) =
             snapshot_status_line_row(terminal, vp_cols, options.indicator_status_text)
@@ -231,7 +236,6 @@ fn take_dirty_row(
     screen_row: u32,
 ) -> bool {
     let idx = screen_row as usize;
-    ensure_snapshot_len(snapshot, idx + 1);
     let dirty = snapshot.dirty_rows[idx];
     snapshot.dirty_rows[idx] = false;
     dirty

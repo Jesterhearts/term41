@@ -805,7 +805,7 @@ impl Terminal {
             &mut self.vt52_cursor_addr,
             &action,
         );
-        debug!("Classified action: {:?}", action);
+        trace!("Classified action: {:?}", action);
         let dirty_before = self.snapshot_dirty_baseline();
         let dirty_scope = self.snapshot_dirty_scope(&action, dirty_before);
         let pending = match action {

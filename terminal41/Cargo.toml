@@ -19,6 +19,7 @@ percent-encoding        = "2.3.2"
 pty-pipe41.workspace    = true
 serde.workspace         = true
 smol_str.workspace      = true
+tracing.workspace       = true
 unicode-segmentation    = "1.13.2"
 unicode-width.workspace = true
 utils41.workspace       = true

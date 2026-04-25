@@ -433,12 +433,12 @@ fn put_char_impl(
     if let Some(combined) =
         try_extend_prev_cell(screen, viewport, target, &s, legacy_emoji_compatibility)
     {
-        debug!("Combining with previous cell to form {:?}", combined);
+        trace!("Combining with previous cell to form {:?}", combined);
         set_target_last_char(screen, target, combined);
         return;
     }
 
-    debug!("Not combining with previous cell");
+    trace!("Not combining with previous cell");
     screen.charset.single_shift = None;
 
     let width_override = legacy_emoji_scalar_width_override(&s);
@@ -989,7 +989,7 @@ fn try_extend_prev_main_cell(
     }
 
     let row = &mut screen.grid.rows[prev_row];
-    debug!(
+    trace!(
         "Trying to extend previous cell at row {}, col {} with {:?} in {:?}",
         prev_row, prev_col, s, row.cells
     );
@@ -1018,7 +1018,7 @@ fn try_extend_row_cell(
 ) -> Option<SmolStr> {
     let prev = row.cells.get(col)?;
     if prev.as_str() == " " || prev.is_empty() {
-        debug!(
+        trace!(
             "Previous cell is {}, cannot combine",
             if prev.is_empty() { "empty" } else { "a space" }
         );
@@ -1031,7 +1031,7 @@ fn try_extend_row_cell(
     let combined = combined.finish();
 
     if combined.graphemes(true).count() > 1 {
-        debug!(
+        trace!(
             "Combined string {:?} is not a single grapheme, cannot combine",
             combined
         );
@@ -1039,7 +1039,7 @@ fn try_extend_row_cell(
     }
 
     if legacy_emoji_compatibility && is_legacy_emoji_cluster(&combined) {
-        debug!("Legacy emoji compatibility blocks combining {:?}", combined);
+        trace!("Legacy emoji compatibility blocks combining {:?}", combined);
         return None;
     }
 
