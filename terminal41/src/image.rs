@@ -51,8 +51,8 @@ pub struct VisibleImage {
     pub kitty_image_id: Option<u32>,
     /// Row of the image's top edge relative to the top of the viewport.
     /// Negative when the image's top is scrolled above the viewport; the
-    /// renderer emits a quad extending above the screen, which the GPU clips
-    /// so only the visible portion is drawn.
+    /// renderer clips the image to the terminal content rectangle so only the
+    /// visible terminal portion is drawn.
     pub screen_row: i32,
     /// Column position.
     pub screen_col: u32,

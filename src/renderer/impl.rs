@@ -372,7 +372,8 @@ struct FrameLayout {
     tab_bar_h: f32,
 }
 
-struct PopupClip {
+#[derive(Clone, Copy)]
+struct ClipRect {
     left: f32,
     top: f32,
     right: f32,
@@ -389,6 +390,18 @@ struct ImageDrawBatch {
     page_index: usize,
     vertices: Vec<ImageVertex>,
     indices: Vec<u32>,
+}
+
+#[derive(Clone, Copy)]
+struct ImageQuad {
+    left: f32,
+    top: f32,
+    right: f32,
+    bottom: f32,
+    u0: f32,
+    v0: f32,
+    u1: f32,
+    v1: f32,
 }
 
 fn image_batch_for_page(
@@ -409,6 +422,45 @@ fn image_batch_for_page(
         indices: Vec::new(),
     });
     geometry.batches.last_mut().unwrap()
+}
+
+fn clip_image_quad(
+    quad: ImageQuad,
+    clip: ClipRect,
+) -> Option<[ImageVertex; 4]> {
+    let left = quad.left.max(clip.left);
+    let top = quad.top.max(clip.top);
+    let right = quad.right.min(clip.right);
+    let bottom = quad.bottom.min(clip.bottom);
+    if left >= right || top >= bottom || quad.left >= quad.right || quad.top >= quad.bottom {
+        return None;
+    }
+
+    let u_per_px = (quad.u1 - quad.u0) / (quad.right - quad.left);
+    let v_per_px = (quad.v1 - quad.v0) / (quad.bottom - quad.top);
+    let u0 = quad.u0 + (left - quad.left) * u_per_px;
+    let u1 = quad.u1 - (quad.right - right) * u_per_px;
+    let v0 = quad.v0 + (top - quad.top) * v_per_px;
+    let v1 = quad.v1 - (quad.bottom - bottom) * v_per_px;
+
+    Some([
+        ImageVertex {
+            pos: [left, top],
+            uv: [u0, v0],
+        },
+        ImageVertex {
+            pos: [right, top],
+            uv: [u1, v0],
+        },
+        ImageVertex {
+            pos: [left, bottom],
+            uv: [u0, v1],
+        },
+        ImageVertex {
+            pos: [right, bottom],
+            uv: [u1, v1],
+        },
+    ])
 }
 
 #[derive(Clone, Default)]
@@ -484,7 +536,7 @@ struct RowRenderKey {
     layout: RowLayoutKey,
     cursor: RowCursorKey,
     blink: RowBlinkKey,
-    popup_clip: Option<PopupClipKey>,
+    popup_clip: Option<ClipRectKey>,
     background_present: bool,
     screen_reverse: bool,
     bg_alpha: u8,
@@ -519,7 +571,7 @@ struct RowBlinkKey {
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-struct PopupClipKey {
+struct ClipRectKey {
     left: u32,
     top: u32,
     right: u32,
@@ -1001,15 +1053,15 @@ fn row_blink_key(
 fn row_popup_clip_key(
     row: u32,
     layout: &FrameLayout,
-    popup_clip: Option<&PopupClip>,
-) -> Option<PopupClipKey> {
+    popup_clip: Option<&ClipRect>,
+) -> Option<ClipRectKey> {
     let clip = popup_clip?;
     let row_top = row as f32 * layout.cell_h + layout.tab_bar_h;
     let row_bottom = row_top + layout.cell_h;
     if row_bottom <= clip.top || row_top >= clip.bottom {
         return None;
     }
-    Some(PopupClipKey {
+    Some(ClipRectKey {
         left: clip.left.to_bits(),
         top: clip.top.to_bits(),
         right: clip.right.to_bits(),
@@ -1724,6 +1776,12 @@ impl Renderer {
         under_text: bool,
     ) -> ImageGeometry {
         let mut geometry = ImageGeometry::default();
+        let content_clip = ClipRect {
+            left: layout.gutter_px,
+            top: layout.tab_bar_h,
+            right: self.surface_config.width as f32,
+            bottom: self.surface_config.height as f32,
+        };
         for vis in visible_images {
             if (vis.z_index < 0) != under_text {
                 continue;
@@ -1764,26 +1822,24 @@ impl Renderer {
                 let v0 = a.y as f32 / IMAGE_ATLAS_SIZE as f32;
                 let u1 = (a.x + a.width) as f32 / IMAGE_ATLAS_SIZE as f32;
                 let v1 = (a.y + a.height) as f32 / IMAGE_ATLAS_SIZE as f32;
+                let Some(vertices) = clip_image_quad(
+                    ImageQuad {
+                        left: x,
+                        top: y,
+                        right: x + w,
+                        bottom: y + h,
+                        u0,
+                        v0,
+                        u1,
+                        v1,
+                    },
+                    content_clip,
+                ) else {
+                    continue;
+                };
                 let batch = image_batch_for_page(&mut geometry, tile.page_index);
                 let ii = batch.vertices.len() as u32;
-                batch.vertices.extend_from_slice(&[
-                    ImageVertex {
-                        pos: [x, y],
-                        uv: [u0, v0],
-                    },
-                    ImageVertex {
-                        pos: [x + w, y],
-                        uv: [u1, v0],
-                    },
-                    ImageVertex {
-                        pos: [x, y + h],
-                        uv: [u0, v1],
-                    },
-                    ImageVertex {
-                        pos: [x + w, y + h],
-                        uv: [u1, v1],
-                    },
-                ]);
+                batch.vertices.extend_from_slice(&vertices);
                 batch
                     .indices
                     .extend_from_slice(&[ii, ii + 1, ii + 2, ii + 2, ii + 1, ii + 3]);
@@ -2067,7 +2123,7 @@ impl Renderer {
         snap_row: &RowSnapshot,
         row: u32,
         cursor_state: CursorRenderState,
-        popup_clip: Option<&PopupClip>,
+        popup_clip: Option<&ClipRect>,
         blink_off: bool,
         rapid_blink_off: bool,
         font_generation: u64,
@@ -2099,7 +2155,7 @@ impl Renderer {
         &self,
         gutter_popup: Option<&GutterPopup>,
         layout: &FrameLayout,
-    ) -> Option<PopupClip> {
+    ) -> Option<ClipRect> {
         gutter_popup.map(|popup| {
             let header = if popup.duration_text.is_some() { 1 } else { 0 };
             let total = (header + GUTTER_MENU_ITEMS.len()) as f32;
@@ -2110,7 +2166,7 @@ impl Renderer {
             let top = (popup.screen_row as f32 * layout.cell_h + layout.tab_bar_h)
                 .min(surface_h - height)
                 .max(layout.tab_bar_h);
-            PopupClip {
+            ClipRect {
                 left,
                 top,
                 right: left + width,
@@ -2126,7 +2182,7 @@ impl Renderer {
         snap_row: &RowSnapshot,
         row: u32,
         cursor_state: CursorRenderState,
-        popup_clip: Option<&PopupClip>,
+        popup_clip: Option<&ClipRect>,
         blink_off: bool,
         rapid_blink_off: bool,
         layout: &FrameLayout,
@@ -2323,7 +2379,7 @@ impl Renderer {
         effective_cell_w: f32,
         visible_cols: u32,
         cursor_state: CursorRenderState,
-        popup_clip: Option<&PopupClip>,
+        popup_clip: Option<&ClipRect>,
         blink_off: bool,
         rapid_blink_off: bool,
         layout: &FrameLayout,
@@ -5006,13 +5062,16 @@ mod tests {
     use terminal41::CursorStyle;
     use terminal41::LineAttr;
 
+    use super::ClipRect;
     use super::FgGeometry;
     use super::FgVertex;
     use super::ImageGeometry;
+    use super::ImageQuad;
     use super::PageDrawRange;
     use super::PageGeometryUpload;
     use super::RowSnapshot;
     use super::TermSnapshot;
+    use super::clip_image_quad;
     use super::drcs_geometry_class;
     use super::fg_batch_for_page;
     use super::image_batch_for_page;
@@ -5082,6 +5141,68 @@ mod tests {
             .map(|batch| batch.page_index)
             .collect();
         assert_eq!(pages, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn image_quad_clip_trims_position_and_uvs_to_terminal_content() {
+        let vertices = clip_image_quad(
+            ImageQuad {
+                left: 10.0,
+                top: -20.0,
+                right: 110.0,
+                bottom: 80.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+            },
+            ClipRect {
+                left: 20.0,
+                top: 10.0,
+                right: 90.0,
+                bottom: 70.0,
+            },
+        )
+        .expect("quad overlaps clip rect");
+
+        assert_eq!(vertices[0].pos, [20.0, 10.0]);
+        assert_eq!(vertices[1].pos, [90.0, 10.0]);
+        assert_eq!(vertices[2].pos, [20.0, 70.0]);
+        assert_eq!(vertices[3].pos, [90.0, 70.0]);
+        assert_close(vertices[0].uv, [0.1, 0.3]);
+        assert_close(vertices[3].uv, [0.8, 0.9]);
+    }
+
+    #[test]
+    fn image_quad_clip_drops_chrome_only_quad() {
+        let vertices = clip_image_quad(
+            ImageQuad {
+                left: 10.0,
+                top: 0.0,
+                right: 110.0,
+                bottom: 9.0,
+                u0: 0.0,
+                v0: 0.0,
+                u1: 1.0,
+                v1: 1.0,
+            },
+            ClipRect {
+                left: 0.0,
+                top: 10.0,
+                right: 120.0,
+                bottom: 100.0,
+            },
+        );
+
+        assert!(vertices.is_none());
+    }
+
+    fn assert_close(
+        actual: [f32; 2],
+        expected: [f32; 2],
+    ) {
+        assert!((actual[0] - expected[0]).abs() < f32::EPSILON * 8.0);
+        assert!((actual[1] - expected[1]).abs() < f32::EPSILON * 8.0);
     }
 
     #[test]

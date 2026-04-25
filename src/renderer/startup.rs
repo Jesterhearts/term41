@@ -1070,6 +1070,8 @@ fn paint_cached_background(
         buffer,
         width,
         height,
+        0,
+        0,
         dst_x,
         dst_y,
         dst_w,
@@ -1108,6 +1110,8 @@ fn paint_visible_images(
             buffer,
             width,
             height,
+            gutter_w,
+            tab_bar_h,
             dst_x,
             dst_y,
             image.display_width as i32,
@@ -1123,6 +1127,8 @@ fn blit_scaled_rgba(
     buffer: &mut [u32],
     width: usize,
     height: usize,
+    clip_left: i32,
+    clip_top: i32,
     dst_x: i32,
     dst_y: i32,
     dst_w: i32,
@@ -1139,8 +1145,8 @@ fn blit_scaled_rgba(
         return;
     }
 
-    let min_x = dst_x.max(0) as usize;
-    let min_y = dst_y.max(0) as usize;
+    let min_x = dst_x.max(clip_left).max(0) as usize;
+    let min_y = dst_y.max(clip_top).max(0) as usize;
     let max_x = (dst_x + dst_w).min(width as i32).max(0) as usize;
     let max_y = (dst_y + dst_h).min(height as i32).max(0) as usize;
     if min_x >= max_x || min_y >= max_y {
@@ -1463,7 +1469,7 @@ mod tests {
     fn scaled_rgba_blit_clips_negative_destination() {
         let mut buffer = vec![0x000000; 4];
         let pixels = vec![255, 0, 0, 255];
-        blit_scaled_rgba(&mut buffer, 2, 2, -1, -1, 2, 2, 1, 1, &pixels);
+        blit_scaled_rgba(&mut buffer, 2, 2, 0, 0, -1, -1, 2, 2, 1, 1, &pixels);
 
         assert_eq!(buffer[0], 0xff0000);
         assert_eq!(buffer[1], 0x000000);
@@ -1472,10 +1478,22 @@ mod tests {
     }
 
     #[test]
+    fn scaled_rgba_blit_respects_content_clip() {
+        let mut buffer = vec![0x000000; 4];
+        let pixels = vec![255, 0, 0, 255];
+        blit_scaled_rgba(&mut buffer, 2, 2, 0, 1, 0, 0, 2, 2, 1, 1, &pixels);
+
+        assert_eq!(buffer[0], 0x000000);
+        assert_eq!(buffer[1], 0x000000);
+        assert_eq!(buffer[2], 0xff0000);
+        assert_eq!(buffer[3], 0xff0000);
+    }
+
+    #[test]
     fn scaled_rgba_blit_alpha_blends_over_existing_pixel() {
         let mut buffer = vec![0x0000ff];
         let pixels = vec![255, 0, 0, 128];
-        blit_scaled_rgba(&mut buffer, 1, 1, 0, 0, 1, 1, 1, 1, &pixels);
+        blit_scaled_rgba(&mut buffer, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, &pixels);
 
         assert_eq!(buffer[0], 0x80007f);
     }
