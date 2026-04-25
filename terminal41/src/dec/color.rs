@@ -1,3 +1,4 @@
+use config41::ColorPalette;
 use font41::attrs::CellAttrs;
 use palette::FromColor;
 use palette::Hsl;
@@ -5,7 +6,6 @@ use palette::RgbHue;
 use palette::Srgb;
 
 use crate::color;
-use crate::color::ColorPalette;
 
 /// DECRQCRA/DECATC assignment class for normal text colors.
 pub const TEXT_COLOR_ASSIGNMENT_CLASS: u16 = 1;

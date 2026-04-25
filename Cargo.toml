@@ -8,6 +8,7 @@ license      = "Unlicense"
 [workspace]
 members = [
   "clip41",
+  "config41",
   "font41",
   "image41",
   "pty-pipe41",
@@ -22,7 +23,9 @@ members = [
 base64               = "0.22.1"
 bitflags             = "2.11.1"
 clip41               = { path = "clip41" }
+config41             = { path = "config41" }
 cueue                = "0.6.0"
+dirs                 = "6.0.0"
 flate2               = "1.1.9"
 font41               = { path = "font41" }
 image41              = { path = "image41" }
@@ -45,6 +48,7 @@ unicode-width        = "0.2.2"
 utils41              = { path = "utils41" }
 vte-mode41           = { path = "vte-mode41" }
 vtepp                = { path = "vtepp" }
+winit                = "0.30.13"
 
 [[bench]]
 harness = false
@@ -59,8 +63,9 @@ bytemuck                       = { version = "1.25.0", features = [
   "extern_crate_alloc"
 ] }
 clip41.workspace               = true
+config41.workspace             = true
 cueue.workspace                = true
-dirs                           = "6.0.0"
+dirs.workspace                 = true
 evictor                        = "0.7.2"
 flate2.workspace               = true
 font41.workspace               = true
@@ -73,7 +78,6 @@ mlua                           = { version = "0.11.6", default-features = false,
   "lua54",
   "vendored"
 ] }
-notify                         = "8.2.0"
 open                           = "5.3.4"
 palette.workspace              = true
 parking_lot.workspace          = true
@@ -81,8 +85,6 @@ png.workspace                  = true
 pollster                       = "0.4.0"
 pty-pipe41.workspace           = true
 serde.workspace                = true
-serde_ignored                  = "0.1.14"
-shellexpand                    = "3.1.2"
 smol_str.workspace             = true
 softbuffer                     = "0.4.8"
 terminal41                     = { path = "terminal41" }
@@ -91,7 +93,6 @@ time                           = { version = "0.3.47", features = [
   "local-offset",
   "macros"
 ] }
-toml                           = "1.1.2"
 tracing.workspace              = true
 tracing-subscriber             = { version = "0.3.23", features = ["env-filter"] }
 unicode-segmentation.workspace = true
@@ -103,7 +104,7 @@ wgpu                           = { version = "29.0.1", default-features = false,
   "serde",
   "wgsl"
 ] }
-winit                          = "0.30.13"
+winit.workspace                = true
 
 [dev-dependencies]
 criterion = { version = "0.8.2", default-features = false, features = [

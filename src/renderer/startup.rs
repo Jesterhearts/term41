@@ -5,6 +5,8 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use config41::ColorPalette;
+use config41::CursorShape;
 use font41::FontSystem;
 use font41::RasterizedGlyph;
 use font41::attrs::CellAttrs;
@@ -15,7 +17,6 @@ use smol_str::SmolStrBuilder;
 use smol_str::ToSmolStr;
 use softbuffer::Context;
 use softbuffer::Surface;
-use terminal41::CursorShape;
 use terminal41::LineAttr;
 use terminal41::RowSnapshot;
 use terminal41::TermSnapshot;
@@ -382,7 +383,7 @@ impl StartupPresenter {
 fn blank_startup_row(
     screen_row: u32,
     cols: u32,
-    palette: &terminal41::ColorPalette,
+    palette: &ColorPalette,
 ) -> RowSnapshot {
     let cols = cols as usize;
     RowSnapshot {

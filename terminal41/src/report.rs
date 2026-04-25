@@ -1,3 +1,6 @@
+use config41::CursorShape;
+use config41::FeaturePermissions;
+use config41::PermissionPolicy;
 use vte_mode41::C1Mode;
 use vte_mode41::ConformanceLevel;
 
@@ -7,13 +10,10 @@ use crate::TerminalModes;
 use crate::Viewport;
 use crate::charset;
 use crate::conformance;
-use crate::cursor;
 use crate::dec::color::report_alternate_text_color;
 use crate::dec::color::report_color_assignment;
 use crate::drcs;
 use crate::drcs::DrcsStore;
-use crate::feature::ClipboardPermission;
-use crate::feature::FeaturePermissions;
 use crate::screen;
 use crate::screen::grid::AttrChangeExtent;
 
@@ -106,12 +106,12 @@ pub(crate) fn handle_decrqss(
         }
         b" q" => {
             let ps = match (terminal.cursor_style.shape, terminal.cursor_style.blink) {
-                (cursor::CursorShape::Block, true) => 1,
-                (cursor::CursorShape::Block, false) => 2,
-                (cursor::CursorShape::Underline, true) => 3,
-                (cursor::CursorShape::Underline, false) => 4,
-                (cursor::CursorShape::Beam, true) => 5,
-                (cursor::CursorShape::Beam, false) => 6,
+                (CursorShape::Block, true) => 1,
+                (CursorShape::Block, false) => 2,
+                (CursorShape::Underline, true) => 3,
+                (CursorShape::Underline, false) => 4,
+                (CursorShape::Beam, true) => 5,
+                (CursorShape::Beam, false) => 6,
             };
             conformance::write_dcs(out, c1_mode, format_args!("1$r{ps} q"));
         }
@@ -646,7 +646,7 @@ fn xtgettcap_value(
     feature_permissions: &FeaturePermissions,
 ) -> Option<&'static [u8]> {
     if name == "Ms" {
-        return (feature_permissions.clipboard.write != ClipboardPermission::Deny)
+        return (feature_permissions.clipboard.write != PermissionPolicy::Deny)
             .then_some(b"\x1b]52;%p1%s;%p2%s\x07" as &[u8]);
     }
 
@@ -728,13 +728,13 @@ fn hex_encode(bytes: &[u8]) -> String {
 
 #[cfg(test)]
 mod integration_tests {
+    use config41::ClipboardPermissions;
+    use config41::FeaturePermissions;
+    use config41::PermissionPolicy;
+    use config41::TerminalLimits;
     use palette::Srgb;
 
-    use crate::ClipboardPermission;
-    use crate::ClipboardPermissions;
     use crate::DecColorSpace;
-    use crate::FeaturePermissions;
-    use crate::TerminalLimits;
     use crate::dec::color::report_color_table;
     use crate::settings;
     use crate::test_support::TestTerm;
@@ -780,7 +780,7 @@ mod integration_tests {
             &mut term.inner.protocol,
             FeaturePermissions {
                 clipboard: ClipboardPermissions {
-                    write: ClipboardPermission::Deny,
+                    write: PermissionPolicy::Deny,
                     ..ClipboardPermissions::default()
                 },
                 ..FeaturePermissions::default()

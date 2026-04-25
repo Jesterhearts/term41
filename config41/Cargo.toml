@@ -1,0 +1,18 @@
+[package]
+name    = "config41"
+version = "0.1.1"
+edition = "2024"
+
+[dependencies]
+dirs.workspace        = true
+log.workspace         = true
+notify                = "8.2.0"
+palette.workspace     = true
+parking_lot.workspace = true
+serde.workspace       = true
+serde_ignored         = "0.1.14"
+shellexpand           = "3.1.2"
+smol_str.workspace    = true
+toml                  = "1.1.2+spec-1.1.0"
+utils41.workspace     = true
+winit.workspace       = true

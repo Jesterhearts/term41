@@ -2,6 +2,8 @@ use std::collections::HashMap;
 use std::path::PathBuf;
 
 use clip41::Clipboard;
+use config41::ColorPalette;
+use config41::PermissionPolicy;
 use smol_str::SmolStr;
 use vtepp::Action;
 use vtepp::Intermediates;
@@ -18,7 +20,6 @@ use crate::ShellIntegrationPhase;
 use crate::TerminalLimits;
 use crate::TerminalModes;
 use crate::Vt52CursorAddr;
-use crate::color::ColorPalette;
 use crate::conformance;
 use crate::dec::color::TEXT_COLOR_ASSIGNMENT_CLASS;
 use crate::dec::color::assign_color;
@@ -459,7 +460,7 @@ pub(super) fn apply_apc_action(
     kitty_images: &mut image41::kitty::KittyImageStore,
     kitty_chunked: &mut image41::kitty::ChunkedTransmission,
     kitty_file_requests: &mut Vec<crate::KittyFileRequest>,
-    kitty_file_permission: crate::PermissionPolicy,
+    kitty_file_permission: PermissionPolicy,
     limits: TerminalLimits,
     active: &mut Screen,
     viewport: &Viewport,
@@ -711,7 +712,7 @@ pub(super) fn apply_kitty_graphics(
     kitty_images: &mut image41::kitty::KittyImageStore,
     kitty_chunked: &mut image41::kitty::ChunkedTransmission,
     kitty_file_requests: &mut Vec<crate::KittyFileRequest>,
-    kitty_file_permission: crate::PermissionPolicy,
+    kitty_file_permission: PermissionPolicy,
     limits: TerminalLimits,
     active: &mut Screen,
     viewport: &Viewport,
@@ -935,8 +936,10 @@ fn first_triplet(params: &Params) -> Option<(u16, u16, u16)> {
 
 #[cfg(test)]
 mod tests {
+    use config41::default_bg;
+    use config41::default_fg;
+
     use super::*;
-    use crate::color;
     use crate::parser::MainCsiAction;
     use crate::screen::Screen;
 
@@ -945,10 +948,10 @@ mod tests {
             10,
             4,
             100,
-            color::default_fg(),
-            color::default_bg(),
-            color::default_fg(),
-            color::default_bg(),
+            default_fg(),
+            default_bg(),
+            default_fg(),
+            default_bg(),
         )
     }
 

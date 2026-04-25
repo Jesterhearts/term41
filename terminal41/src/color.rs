@@ -1,6 +1,6 @@
+use config41::ColorPalette;
 use font41::attrs::CellAttrs;
 use palette::Srgb;
-use utils41::blend_colors;
 #[cfg(test)]
 use vtepp::Params;
 
@@ -135,80 +135,6 @@ impl TryFrom<u16> for SgrAction {
         }
     }
 }
-
-pub const fn default_fg() -> Srgb<u8> {
-    Srgb::new(204, 204, 204)
-}
-
-pub const fn default_bg() -> Srgb<u8> {
-    Srgb::new(0, 0, 0)
-}
-
-/// Runtime color palette. Stores the 16 ANSI colors, default fg/bg,
-/// cursor colors, and selection colors. Built from the `[colors]` config
-/// section (Rio palette format), falling back to the hardcoded defaults
-/// for any value not overridden.
-#[derive(Debug, Clone)]
-pub struct ColorPalette {
-    /// Default foreground (SGR 39 / row clear).
-    pub fg: Srgb<u8>,
-    /// Default background (SGR 49 / row clear / wallpaper transparency).
-    pub bg: Srgb<u8>,
-    /// Default foreground for the DEC status line.
-    pub status_line_fg: Srgb<u8>,
-    /// Default background for the DEC status line.
-    pub status_line_bg: Srgb<u8>,
-    /// Cursor color. `None` = use cell foreground (current behavior).
-    pub cursor: Option<Srgb<u8>>,
-    /// Text color used under a block cursor. `None` = invert against the
-    /// cell background (current behavior).
-    pub cursor_text: Option<Srgb<u8>>,
-    /// Selection background. `None` = invert (current behavior).
-    pub selection_bg: Option<Srgb<u8>>,
-    /// Selection text color. `None` = invert (current behavior).
-    pub selection_fg: Option<Srgb<u8>>,
-    /// The 16 ANSI colors: indices 0–7 are normal, 8–15 are bright.
-    pub ansi: [Srgb<u8>; 16],
-}
-
-impl Default for ColorPalette {
-    fn default() -> Self {
-        let fg = default_fg();
-        let bg = default_bg();
-        Self {
-            fg,
-            bg,
-            status_line_fg: fg,
-            status_line_bg: blend_colors(bg, fg, 0.25),
-            cursor: None,
-            cursor_text: None,
-            selection_bg: None,
-            selection_fg: None,
-            ansi: DEFAULT_ANSI_COLORS,
-        }
-    }
-}
-
-/// The hardcoded 16-color ANSI palette, matching the values in
-/// [`ansi_color`] for indices 0–15.
-const DEFAULT_ANSI_COLORS: [Srgb<u8>; 16] = [
-    Srgb::new(0, 0, 0),       // 0  black           rgb(0, 0, 0)
-    Srgb::new(205, 0, 0),     // 1  red             rgb(205, 0, 0)
-    Srgb::new(0, 205, 0),     // 2  green           rgb(0, 205, 0)
-    Srgb::new(205, 205, 0),   // 3  yellow          rgb(205, 205, 0)
-    Srgb::new(0, 0, 238),     // 4  blue            rgb(0, 0, 238)
-    Srgb::new(205, 0, 205),   // 5  magenta         rgb(205, 0, 205)
-    Srgb::new(0, 205, 205),   // 6  cyan            rgb(0, 205, 205)
-    Srgb::new(229, 229, 229), // 7  white           rgb(229, 229, 229)
-    Srgb::new(127, 127, 127), // 8  bright black    rgb(127, 127, 127)
-    Srgb::new(255, 0, 0),     // 9  bright red      rgb(255, 0, 0)
-    Srgb::new(0, 255, 0),     // 10 bright green    rgb(0, 255, 0)
-    Srgb::new(255, 255, 0),   // 11 bright yellow   rgb(255, 255, 0)
-    Srgb::new(92, 92, 255),   // 12 bright blue     rgb(92, 92, 255)
-    Srgb::new(255, 0, 255),   // 13 bright magenta  rgb(255, 0, 255)
-    Srgb::new(0, 255, 255),   // 14 bright cyan     rgb(0, 255, 255)
-    Srgb::new(255, 255, 255), // 15 bright white    rgb(255, 255, 255)
-];
 
 /// Look up a 256-color palette index using the given [`ColorPalette`] for
 /// indices 0–15 and the computed cube/grayscale ramp for 16–255.
@@ -463,6 +389,8 @@ fn parse_color_subparams(
 
 #[cfg(test)]
 mod tests {
+    use config41::default_bg;
+    use config41::default_fg;
     use vtepp::Action;
     use vtepp::Parser;
 
@@ -589,9 +517,9 @@ mod tests {
     #[test]
     fn sgr_30_through_37_sets_foreground() {
         let (fg, _) = apply(b"\x1b[31m");
-        assert_eq!(fg, DEFAULT_ANSI_COLORS[1]);
+        assert_eq!(fg, ColorPalette::default().ansi[1]);
         let (fg, _) = apply(b"\x1b[37m");
-        assert_eq!(fg, DEFAULT_ANSI_COLORS[7]);
+        assert_eq!(fg, ColorPalette::default().ansi[7]);
     }
 
     #[test]
@@ -604,9 +532,9 @@ mod tests {
     #[test]
     fn sgr_40_through_47_sets_background() {
         let (_, bg) = apply(b"\x1b[42m");
-        assert_eq!(bg, DEFAULT_ANSI_COLORS[2]);
+        assert_eq!(bg, ColorPalette::default().ansi[2]);
         let (_, bg) = apply(b"\x1b[47m");
-        assert_eq!(bg, DEFAULT_ANSI_COLORS[7]);
+        assert_eq!(bg, ColorPalette::default().ansi[7]);
     }
 
     #[test]
@@ -619,17 +547,17 @@ mod tests {
     #[test]
     fn sgr_90_through_97_sets_bright_foreground() {
         let (fg, _) = apply(b"\x1b[90m");
-        assert_eq!(fg, DEFAULT_ANSI_COLORS[8]);
+        assert_eq!(fg, ColorPalette::default().ansi[8]);
         let (fg, _) = apply(b"\x1b[97m");
-        assert_eq!(fg, DEFAULT_ANSI_COLORS[15]);
+        assert_eq!(fg, ColorPalette::default().ansi[15]);
     }
 
     #[test]
     fn sgr_100_through_107_sets_bright_background() {
         let (_, bg) = apply(b"\x1b[100m");
-        assert_eq!(bg, DEFAULT_ANSI_COLORS[8]);
+        assert_eq!(bg, ColorPalette::default().ansi[8]);
         let (_, bg) = apply(b"\x1b[107m");
-        assert_eq!(bg, DEFAULT_ANSI_COLORS[15]);
+        assert_eq!(bg, ColorPalette::default().ansi[15]);
     }
 
     #[test]
@@ -659,15 +587,15 @@ mod tests {
     #[test]
     fn sgr_chained_parameters_apply_in_order() {
         let (fg, bg) = apply(b"\x1b[31;42m");
-        assert_eq!(fg, DEFAULT_ANSI_COLORS[1]);
-        assert_eq!(bg, DEFAULT_ANSI_COLORS[2]);
+        assert_eq!(fg, ColorPalette::default().ansi[1]);
+        assert_eq!(bg, ColorPalette::default().ansi[2]);
     }
 
     #[test]
     fn sgr_reset_then_colors_applies_colors_after_reset() {
         let (fg, bg) = apply(b"\x1b[0;36;44m");
-        assert_eq!(fg, DEFAULT_ANSI_COLORS[6]);
-        assert_eq!(bg, DEFAULT_ANSI_COLORS[4]);
+        assert_eq!(fg, ColorPalette::default().ansi[6]);
+        assert_eq!(bg, ColorPalette::default().ansi[4]);
     }
 
     #[test]

@@ -520,6 +520,8 @@ fn udk_selector_label(selector: u16) -> Option<&'static str> {
 
 #[cfg(test)]
 mod tests {
+    use config41::StatusLineMode;
+
     use super::*;
     use crate::FeaturePermissions;
     use crate::TerminalLimits;
@@ -530,7 +532,7 @@ mod tests {
             5,
             3,
             10,
-            StatusDisplayKind::None,
+            StatusLineMode::Off,
             FeaturePermissions::default(),
             TerminalLimits::default(),
             16,
@@ -602,7 +604,7 @@ mod tests {
             20,
             3,
             10,
-            StatusDisplayKind::None,
+            StatusLineMode::Off,
             FeaturePermissions::default(),
             TerminalLimits::default(),
             16,

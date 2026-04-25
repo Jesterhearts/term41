@@ -1,8 +1,6 @@
 use std::collections::BTreeMap;
 
 pub const MAX_MACRO_ID: u16 = 63;
-pub const MAX_MACRO_BYTES: usize = 6 * 1024;
-pub const MAX_MACRO_INVOCATION_DEPTH: usize = 32;
 
 #[derive(Debug, Default)]
 pub struct MacroStore {

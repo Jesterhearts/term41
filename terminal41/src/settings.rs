@@ -112,10 +112,10 @@ pub fn set_default_status_display(
 
 #[cfg(test)]
 mod tests {
+    use config41::CursorShape;
     use palette::Srgb;
 
     use super::*;
-    use crate::CursorShape;
     use crate::test_support::TestTerm;
 
     #[test]

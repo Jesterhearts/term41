@@ -643,6 +643,24 @@ dependencies = [
 ]
 
 [[package]]
+name = "config41"
+version = "0.1.1"
+dependencies = [
+ "dirs",
+ "log",
+ "notify",
+ "palette",
+ "parking_lot",
+ "serde",
+ "serde_ignored",
+ "shellexpand",
+ "smol_str 0.3.6",
+ "toml 1.1.2+spec-1.1.0",
+ "utils41",
+ "winit",
+]
+
+[[package]]
 name = "const-random"
 version = "0.1.18"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4041,6 +4059,7 @@ dependencies = [
  "bitflags 2.11.1",
  "bytemuck",
  "clip41",
+ "config41",
  "criterion",
  "cueue",
  "dirs",
@@ -4055,7 +4074,6 @@ dependencies = [
  "infer",
  "log",
  "mlua",
- "notify",
  "open",
  "palette",
  "parking_lot",
@@ -4063,13 +4081,10 @@ dependencies = [
  "pollster",
  "pty-pipe41",
  "serde",
- "serde_ignored",
- "shellexpand",
  "smol_str 0.3.6",
  "softbuffer",
  "terminal41",
  "time",
- "toml 1.1.2+spec-1.1.0",
  "tracing",
  "tracing-subscriber",
  "unicode-segmentation",
@@ -4088,6 +4103,7 @@ dependencies = [
  "bitflags 2.11.1",
  "bon",
  "clip41",
+ "config41",
  "font41",
  "image41",
  "log",

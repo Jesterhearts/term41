@@ -1,129 +1,18 @@
-use serde::Deserialize;
+use config41::FeaturePermissions;
+use config41::TerminalLimits;
 
 use crate::ColorPalette;
 use crate::DrcsStore;
 use crate::Screen;
 use crate::StatusDisplayKind;
 use crate::Viewport;
-use crate::dec::r#macro::MAX_MACRO_BYTES;
-use crate::dec::r#macro::MAX_MACRO_INVOCATION_DEPTH;
 use crate::dec::r#macro::MacroEncoding;
 use crate::dec::r#macro::MacroStore;
 use crate::dec::udk::DecModifierKey;
 use crate::dec::udk::LocalFunctionKeyControl;
-use crate::dec::udk::MAX_DECUDK_PAYLOAD_BYTES;
-use crate::dec::udk::MAX_UDK_BYTES;
 use crate::dec::udk::ModifierKeyControl;
 use crate::dec::udk::UdkState;
-use crate::drcs::MAX_DRCS_PAYLOAD_BYTES;
-use crate::drcs::MAX_DRCS_TOTAL_STORAGE_BYTES;
 use crate::screen;
-
-/// Permission gates for terminal features that can execute stored data or
-/// otherwise need explicit host approval.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct FeaturePermissions {
-    /// Permission gate for VT420 programmable macros.
-    pub macros: ProgramAllowlist,
-    /// Permission gate for DEC user-defined keys and related keyboard controls.
-    pub udks: ProgramAllowlist,
-    /// Permission gates for host-driven OSC 52 clipboard access.
-    pub clipboard: ClipboardPermissions,
-    /// Permission gate for host-driven kitty graphics file reads.
-    pub kitty_graphics_files: PermissionPolicy,
-}
-
-/// Runtime resource limits for terminal-owned protocol state.
-///
-/// These are deliberately grouped separately from feature permissions:
-/// permissions answer "may this feature run?", while limits answer "how much
-/// state may this terminal retain or process for enabled features?".
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct TerminalLimits {
-    /// Maximum decoded bytes retained across all VT macro definitions.
-    pub macro_storage_bytes: usize,
-    /// Maximum nested macro expansion depth.
-    pub macro_invocation_depth: usize,
-    /// Maximum decoded bytes retained across all DEC user-defined keys.
-    pub udk_storage_bytes: usize,
-    /// Maximum bytes accumulated for one DECUDK DCS payload.
-    pub decudk_payload_bytes: usize,
-    /// Maximum bytes accumulated for one DRCS DCS payload.
-    pub drcs_payload_bytes: usize,
-    /// Maximum bytes accumulated for one XTGETTCAP capability query payload.
-    pub xtgettcap_payload_bytes: usize,
-    /// Maximum decoded DRCS glyph storage retained by the terminal.
-    pub drcs_storage_bytes: usize,
-    /// Maximum base64 payload bytes accepted for one kitty graphics command.
-    pub kitty_graphics_payload_bytes: usize,
-    /// Maximum decoded kitty image bytes retained for reusable images.
-    pub kitty_graphics_storage_bytes: usize,
-}
-
-impl Default for TerminalLimits {
-    fn default() -> Self {
-        Self {
-            macro_storage_bytes: MAX_MACRO_BYTES,
-            macro_invocation_depth: MAX_MACRO_INVOCATION_DEPTH,
-            udk_storage_bytes: MAX_UDK_BYTES,
-            decudk_payload_bytes: MAX_DECUDK_PAYLOAD_BYTES,
-            drcs_payload_bytes: MAX_DRCS_PAYLOAD_BYTES,
-            xtgettcap_payload_bytes: 4096,
-            drcs_storage_bytes: MAX_DRCS_TOTAL_STORAGE_BYTES,
-            kitty_graphics_payload_bytes: 32 * 1024 * 1024,
-            kitty_graphics_storage_bytes: 128 * 1024 * 1024,
-        }
-    }
-}
-
-/// Coarse allow/deny gate for a protocol feature.
-#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
-pub enum ProgramAllowlist {
-    /// Deny all requests for this feature.
-    #[default]
-    #[serde(alias = "none", alias = "deny")]
-    DenyAll,
-    /// Allow all requests for this feature.
-    #[serde(alias = "*", alias = "all")]
-    AllowAll,
-}
-
-impl ProgramAllowlist {
-    /// Whether this gate allows the protected feature.
-    pub fn allow(&self) -> bool {
-        match self {
-            Self::DenyAll => false,
-            Self::AllowAll => true,
-        }
-    }
-}
-
-/// Read/write permission gates for host-driven clipboard access.
-#[derive(Debug, Clone, PartialEq, Eq, Default)]
-pub struct ClipboardPermissions {
-    /// Whether host programs may read local clipboard contents.
-    pub read: ClipboardPermission,
-    /// Whether host programs may write local clipboard contents.
-    pub write: ClipboardPermission,
-}
-
-/// Permission policy for one host-mediated local resource access direction.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum PermissionPolicy {
-    /// Ask the user for this request.
-    #[default]
-    Ask,
-    /// Allow every request without prompting.
-    #[serde(alias = "*", alias = "all")]
-    Allow,
-    /// Deny every request without prompting.
-    #[serde(alias = "no", alias = "none")]
-    Deny,
-}
-
-/// Permission policy for one clipboard access direction.
-pub type ClipboardPermission = PermissionPolicy;
 
 pub(crate) fn macro_feature_enabled(permissions: &FeaturePermissions) -> bool {
     permissions.macros.allow()

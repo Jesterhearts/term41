@@ -3,9 +3,6 @@ use std::collections::BTreeMap;
 use crate::C1Mode;
 use crate::conformance;
 
-pub const MAX_UDK_BYTES: usize = 256;
-pub const MAX_DECUDK_PAYLOAD_BYTES: usize = 2048;
-
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum LocalFunctionKeyControl {
     Local,
@@ -411,15 +408,15 @@ mod tests {
     #[test]
     fn decudk_defines_hex_payload() {
         let mut state = UdkState::default();
-        state.define(params(&[&[0], &[1]]), b"17/414243", MAX_UDK_BYTES);
+        state.define(params(&[&[0], &[1]]), b"17/414243", 1024);
         assert_eq!(state.definition(17), Some(&b"ABC"[..]));
     }
 
     #[test]
     fn decudk_clear_one_replaces_only_target_key() {
         let mut state = UdkState::default();
-        state.define(params(&[&[0], &[1]]), b"17/41;18/42", MAX_UDK_BYTES);
-        state.define(params(&[&[1], &[1]]), b"17/43", MAX_UDK_BYTES);
+        state.define(params(&[&[0], &[1]]), b"17/41;18/42", 1024);
+        state.define(params(&[&[1], &[1]]), b"17/43", 1024);
         assert_eq!(state.definition(17), Some(&b"C"[..]));
         assert_eq!(state.definition(18), Some(&b"B"[..]));
     }
@@ -427,8 +424,8 @@ mod tests {
     #[test]
     fn locked_decudk_rejects_future_definitions() {
         let mut state = UdkState::default();
-        state.define(params(&[&[0], &[0]]), b"17/41", MAX_UDK_BYTES);
-        state.define(params(&[&[1], &[1]]), b"17/42", MAX_UDK_BYTES);
+        state.define(params(&[&[0], &[0]]), b"17/41", 1024);
+        state.define(params(&[&[1], &[1]]), b"17/42", 1024);
         assert_eq!(state.definition(17), Some(&b"A"[..]));
     }
 

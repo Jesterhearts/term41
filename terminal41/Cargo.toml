@@ -10,6 +10,7 @@ bon                     = { version = "3.9.1", default-features = false, feature
   "std"
 ] }
 clip41.workspace        = true
+config41.workspace      = true
 font41.workspace        = true
 image41.workspace       = true
 log.workspace           = true

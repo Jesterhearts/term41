@@ -135,11 +135,11 @@ impl Grid {
 mod tests {
     use std::collections::BTreeMap;
 
+    use config41::default_bg;
+    use config41::default_fg;
     use palette::Srgb;
 
     use super::*;
-    use crate::color::default_bg;
-    use crate::color::default_fg;
 
     trait GridTestOps {
         fn reflow(

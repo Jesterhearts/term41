@@ -1,6 +1,7 @@
 use std::collections::HashMap;
 use std::sync::Arc;
 
+use config41::TerminalLimits;
 use font41::DRCS_GLYPHS_PER_SET;
 use font41::DrcsGeometryClass;
 use font41::DrcsGlyphDef;
@@ -9,11 +10,8 @@ use font41::encode_drcs_char;
 use smol_str::SmolStr;
 
 use crate::charset::CharacterSet;
-use crate::feature::TerminalLimits;
 
-pub const MAX_DRCS_PAYLOAD_BYTES: usize = 64 * 1024;
-pub const MAX_DRCS_TOTAL_STORAGE_BYTES: usize = 256 * 1024;
-pub const MAX_DRCS_GLYPHS_PER_LOAD: usize = 96;
+const MAX_DRCS_GLYPHS_PER_LOAD: usize = 96;
 const MAX_DRCS_BUFFERS: usize = 256;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -506,7 +504,8 @@ fn glyph_storage_bytes(glyph: &GlyphPattern) -> usize {
 
 #[cfg(test)]
 mod integration_tests {
-    use super::MAX_DRCS_PAYLOAD_BYTES;
+    use config41::TerminalLimits;
+
     use crate::test_support::TestTerm;
 
     #[test]
@@ -747,7 +746,10 @@ mod integration_tests {
     fn oversized_drcs_payload_is_discarded() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         let mut seq = b"\x1bP1;1;1;6;0;2;16;0{ @".to_vec();
-        seq.extend(std::iter::repeat_n(b'~', MAX_DRCS_PAYLOAD_BYTES + 32));
+        seq.extend(std::iter::repeat_n(
+            b'~',
+            TerminalLimits::default().drcs_payload_bytes + 32,
+        ));
         seq.extend_from_slice(b"\x1b\\");
         term.process(&seq);
         term.process(b"\x1b( @!");

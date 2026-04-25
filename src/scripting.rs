@@ -9,6 +9,7 @@ use std::thread;
 use std::thread::Thread;
 
 use arc_swap::ArcSwap;
+use config41::ScriptPermissions;
 use mlua::Function;
 use mlua::Lua;
 use mlua::LuaOptions;
@@ -16,8 +17,6 @@ use mlua::StdLib;
 use mlua::Table;
 use mlua::Value;
 use parking_lot::Mutex;
-
-use crate::config::ScriptPermissions;
 
 const MAX_SCRIPT_TEXT_BYTES: usize = 4096;
 

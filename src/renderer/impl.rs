@@ -5,21 +5,22 @@ use std::sync::Arc;
 use std::time::Duration;
 use std::time::Instant;
 
+use config41::ColorPalette;
+use config41::CursorShape;
+use config41::PowerPreference;
+use config41::VSync;
 use font41::FontSystem;
 use font41::attrs::CellAttrs;
 use palette::Srgb;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
 use smol_str::ToSmolStr;
-use terminal41::ColorPalette;
-use terminal41::CursorShape;
 use terminal41::LineAttr;
 use terminal41::RowSnapshot;
 use terminal41::TermSnapshot;
 use terminal41::VisibleImage;
 use unicode_segmentation::UnicodeSegmentation;
 use utils41::lerp_u8;
-use wgpu::PowerPreference;
 use wgpu::TextureFormat;
 use wgpu::util::DeviceExt;
 use winit::dpi::PhysicalSize;
@@ -27,7 +28,6 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
-use crate::config::VSync;
 use crate::renderer::GUTTER_MENU_ITEMS;
 use crate::renderer::GutterPopup;
 use crate::renderer::POPUP_WIDTH_CELLS;
@@ -1264,7 +1264,11 @@ impl Renderer {
             instance
                 .request_adapter(&wgpu::RequestAdapterOptions {
                     compatible_surface: None,
-                    power_preference,
+                    power_preference: match power_preference {
+                        PowerPreference::Auto => wgpu::PowerPreference::None,
+                        PowerPreference::LowPower => wgpu::PowerPreference::LowPower,
+                        PowerPreference::HighPerformance => wgpu::PowerPreference::HighPerformance,
+                    },
                     ..Default::default()
                 })
                 .await
@@ -5055,11 +5059,11 @@ mod preedit_tests {
 mod tests {
     use std::sync::Arc;
 
+    use config41::ColorPalette;
+    use config41::CursorStyle;
     use font41::DrcsGeometryClass;
     use font41::attrs::CellAttrs;
     use palette::Srgb;
-    use terminal41::ColorPalette;
-    use terminal41::CursorStyle;
     use terminal41::LineAttr;
 
     use super::ClipRect;

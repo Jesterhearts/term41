@@ -1,7 +1,8 @@
+use config41::TerminalLimits;
+
 use crate::Terminal;
 use crate::TerminalEffects;
 use crate::charset;
-use crate::feature::TerminalLimits;
 use crate::report;
 
 #[derive(Default)]
@@ -294,7 +295,6 @@ fn apply_dcs_action(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::drcs;
 
     #[test]
     fn accumulator_returns_non_dcs_actions_to_caller() {
@@ -330,7 +330,7 @@ mod tests {
     fn accumulator_truncates_limited_payloads() {
         let mut accumulator = HookAccumulator::default();
         let mut parser = vtepp::Parser::new();
-        let payload = vec![b'0'; drcs::MAX_DRCS_PAYLOAD_BYTES + 1];
+        let payload = vec![b'0'; TerminalLimits::default().drcs_payload_bytes + 1];
         let input = [b"\x1bP{" as &[u8], payload.as_slice(), b"\x1b\\"].concat();
         let mut completed = None;
 
@@ -342,7 +342,10 @@ mod tests {
 
         let hook = completed.expect("completed DCS hook");
         assert_eq!(hook.action, '{');
-        assert_eq!(hook.bytes.len(), drcs::MAX_DRCS_PAYLOAD_BYTES);
+        assert_eq!(
+            hook.bytes.len(),
+            TerminalLimits::default().drcs_payload_bytes
+        );
         assert!(hook.truncated);
     }
 }

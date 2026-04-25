@@ -1,5 +1,7 @@
 use std::ops::Index;
 
+use config41::ColorPalette;
+use config41::CursorStyle;
 use font41::attrs::CellAttrs;
 use smol_str::SmolStr;
 use vtepp::Params;
@@ -11,8 +13,6 @@ use crate::TerminalModes;
 use crate::charset;
 use crate::charset::CharacterSet;
 use crate::charset::GraphicSetSlot;
-use crate::color;
-use crate::cursor::CursorStyle;
 use crate::dec::color::DecColorState;
 use crate::dec::color::effective_palette;
 use crate::dec::color::erase_background_color;
@@ -624,8 +624,8 @@ fn apply_hard_reset_state(
     shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
-    palette: &mut color::ColorPalette,
-    base_palette: &color::ColorPalette,
+    palette: &mut ColorPalette,
+    base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
     default_status_display: &StatusDisplayKind,
     macros: &mut MacroStore,
@@ -743,12 +743,13 @@ fn prev_tab_stop(
 /// anchors they held are destroyed outright).
 #[cfg(test)]
 pub(super) mod test_support {
+    use config41::default_bg;
+    use config41::default_fg;
     use vtepp::Action;
     use vtepp::Parser;
 
     use super::*;
     use crate::FeaturePermissions;
-    use crate::cursor::CursorStyle;
     use crate::io::keyboard::KittyKeyboardState;
     use crate::screen::Screen;
 
@@ -760,10 +761,10 @@ pub(super) mod test_support {
             TEST_COLS,
             TEST_ROWS,
             100,
-            color::default_fg(),
-            color::default_bg(),
-            color::default_fg(),
-            color::default_bg(),
+            default_fg(),
+            default_bg(),
+            default_fg(),
+            default_bg(),
         );
         let viewport = Viewport {
             rows: TEST_ROWS,
@@ -842,7 +843,7 @@ pub(super) mod test_support {
         screen: &mut Screen,
         viewport: &mut Viewport,
     ) {
-        let base_pal = color::ColorPalette::default();
+        let base_pal = ColorPalette::default();
         let mut dec_color = dec_color_state_from_palette(&base_pal);
         let mut pal = effective_palette(&base_pal, &dec_color);
         let mut parser = Parser::new();
@@ -850,10 +851,10 @@ pub(super) mod test_support {
             viewport.cols,
             viewport.rows,
             0,
-            color::default_fg(),
-            color::default_bg(),
-            color::default_fg(),
-            color::default_bg(),
+            default_fg(),
+            default_bg(),
+            default_fg(),
+            default_bg(),
         );
         let mut on_alt_screen = false;
         let mut modes = TerminalModes::new();
@@ -1044,7 +1045,7 @@ pub(super) mod test_support {
         screen: &mut Screen,
         viewport: &mut Viewport,
     ) -> Vec<u8> {
-        let base_pal = color::ColorPalette::default();
+        let base_pal = ColorPalette::default();
         let mut dec_color = dec_color_state_from_palette(&base_pal);
         let mut pal = effective_palette(&base_pal, &dec_color);
         let mut parser = Parser::new();
@@ -1052,10 +1053,10 @@ pub(super) mod test_support {
             viewport.cols,
             viewport.rows,
             0,
-            color::default_fg(),
-            color::default_bg(),
-            color::default_fg(),
-            color::default_bg(),
+            default_fg(),
+            default_bg(),
+            default_fg(),
+            default_bg(),
         );
         let mut on_alt_screen = false;
         let mut modes = TerminalModes::new();
@@ -1229,9 +1230,10 @@ pub(super) mod test_support {
 
 #[cfg(test)]
 mod integration_tests {
+    use config41::ProgramAllowlist;
+
     use crate::ConformanceLevel;
     use crate::FeaturePermissions;
-    use crate::ProgramAllowlist;
     use crate::TerminalLimits;
     use crate::settings;
     use crate::test_support::TestTerm;

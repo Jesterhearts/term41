@@ -1,3 +1,5 @@
+use config41::ColorPalette;
+
 use super::write::put_status_char;
 use super::write::status_delete_chars;
 use super::write::status_erase_chars;
@@ -6,7 +8,6 @@ use super::write::status_shift_chars;
 use crate::Screen;
 use crate::Viewport;
 use crate::charset;
-use crate::color;
 use crate::color::apply_sgr_groups;
 use crate::parser::AsciiControlBytes;
 use crate::parser::StatusLineCsiAction;
@@ -57,7 +58,7 @@ pub(crate) fn execute_status(
 pub(crate) fn apply_status_line_csi(
     screen: &mut Screen,
     viewport: &Viewport,
-    palette: &mut color::ColorPalette,
+    palette: &mut ColorPalette,
     insert_mode: bool,
     action: StatusLineCsiAction<'_>,
 ) {
@@ -131,6 +132,9 @@ pub(crate) fn apply_status_line_csi(
 
 #[cfg(test)]
 mod tests {
+    use config41::default_bg;
+    use config41::default_fg;
+
     use super::*;
     use crate::StatusDisplayKind;
     use crate::TerminalModes;
@@ -146,8 +150,8 @@ mod tests {
             &mut screen,
             TEST_COLS,
             StatusDisplayKind::HostWritable,
-            color::default_fg(),
-            color::default_bg(),
+            default_fg(),
+            default_bg(),
         );
         screen.active_display = ActiveDisplay::Status;
         let modes = TerminalModes::new();

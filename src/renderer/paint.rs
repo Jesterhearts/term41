@@ -1,8 +1,8 @@
+use config41::ColorPalette;
 use font41::attrs::CellAttrs;
 use palette::Srgb;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
-use terminal41::ColorPalette;
 use terminal41::DecColorLookupTable;
 use terminal41::LineAttr;
 use terminal41::RowSnapshot;
@@ -559,8 +559,8 @@ fn truncate_label(
 
 #[cfg(test)]
 mod tests {
+    use config41::CursorStyle;
     use smol_str::ToSmolStr;
-    use terminal41::CursorStyle;
 
     use super::*;
 

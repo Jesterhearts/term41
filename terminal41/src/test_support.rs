@@ -2,6 +2,7 @@ use std::ops::Deref;
 use std::ops::DerefMut;
 
 use clip41::ClipboardKind;
+use config41::StatusLineMode;
 
 use crate::ColorPalette;
 use crate::CursorStyle;
@@ -43,7 +44,7 @@ impl TestTerm {
                 cols,
                 rows,
                 scrollback,
-                StatusDisplayKind::None,
+                StatusLineMode::Off,
                 FeaturePermissions::default(),
                 TerminalLimits::default(),
                 cell_h,

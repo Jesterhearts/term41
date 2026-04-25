@@ -1,8 +1,6 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
-mod config;
-mod keybindings;
 mod output_recording;
 mod perf_ctrl_c;
 mod renderer;
@@ -15,14 +13,15 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
-use std::sync::atomic::Ordering;
 use std::sync::mpsc;
 use std::thread;
 use std::time::Duration;
 use std::time::Instant;
 
 use clip41::ClipboardKind;
-use config::Config;
+use config41::StatusLineMode;
+use config41::keybindings::Action;
+use config41::keybindings::Keybindings;
 use font41::FontSystem;
 use parking_lot::Mutex;
 use pty_pipe41::Pty;
@@ -86,8 +85,6 @@ use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::Window;
 use winit::window::WindowId;
 
-use crate::keybindings::Action;
-use crate::keybindings::Keybindings;
 use crate::output_recording::RecorderControl;
 use crate::output_recording::next_recording_path;
 use crate::renderer::PermissionChoice;
@@ -2688,11 +2685,7 @@ fn main() {
     install_log_toast_forwarder(proxy.clone());
     let startup_redraw_proxy = proxy.clone();
 
-    let config_path = config::config_file_path();
-    let config = tracing::debug_span!("load_config").in_scope(|| match config_path.as_deref() {
-        Some(p) => config::load_from(p),
-        None => Config::default(),
-    });
+    let config = config41::init_config(config_reload.clone(), render_thread_handle.clone());
 
     let font_system = tracing::debug_span!("init_font_system").in_scope(|| {
         FontSystem::new(
@@ -2716,8 +2709,7 @@ fn main() {
     let terminal_thread = TerminalThread::new();
 
     // Spawn the initial PTY early so the shell starts running immediately.
-    let initial_status_rows =
-        u32::from(config.status_line.display_kind() != terminal41::StatusDisplayKind::None);
+    let initial_status_rows = u32::from(config.status_line != StatusLineMode::Off);
     let initial_main_rows = INITIAL_ROWS.saturating_sub(initial_status_rows);
     let (pty, pty_writer, pty_reader) = tracing::debug_span!("spawn_pty").in_scope(|| {
         Pty::spawn(
@@ -2739,7 +2731,7 @@ fn main() {
         INITIAL_COLS,
         INITIAL_ROWS,
         config.scrollback_lines,
-        config.status_line.display_kind(),
+        config.status_line,
         config.feature_permissions.clone(),
         config.limits,
         cell_height,
@@ -2817,10 +2809,6 @@ fn main() {
         _terminal_thread: terminal_thread,
     };
 
-    // Clone config_path before moving it into the render thread closure —
-    // the original is still needed by the config watcher below.
-    let config_path_for_watcher = config_path.clone();
-
     // Spawn the render thread.
     let config_reload_ = config_reload.clone();
     let input_state_for_render = input_state.clone();
@@ -2841,18 +2829,12 @@ fn main() {
                 render_proxy,
                 font_system,
                 config,
-                config_path,
                 input_state_for_render,
                 render_thread_handle_for_render.clone(),
             );
             host.run(window_rx, startup_release_rx);
         })
         .expect("spawn render thread");
-
-    // Spawn the config file watcher.
-    if let Some(ref path) = config_path_for_watcher {
-        spawn_config_watcher(path.clone(), config_reload, render_thread_handle.clone());
-    }
 
     let mut host = WindowHost {
         window: None,
@@ -2901,64 +2883,6 @@ fn main() {
         new_tab_text,
     };
     event_loop.run_app(&mut host).expect("run event loop");
-}
-
-fn spawn_config_watcher(
-    config_path: PathBuf,
-    config_reload: Arc<AtomicBool>,
-    render_thread_handle: Arc<OnceLock<std::thread::Thread>>,
-) {
-    use notify::EventKind;
-    use notify::RecursiveMode;
-    use notify::Watcher;
-
-    let Some(dir) = config_path.parent().map(PathBuf::from) else {
-        return;
-    };
-
-    std::thread::Builder::new()
-        .name("config-watcher".into())
-        .spawn(move || {
-            let target = config_path.clone();
-            let scripts_dir = dir.join("scripts");
-            let config_reload_for_handler = config_reload.clone();
-            let mut watcher = match notify::recommended_watcher(move |res| {
-                let event: notify::Event = match res {
-                    Ok(e) => e,
-                    Err(e) => {
-                        warn!("config watcher error: {e}");
-                        return;
-                    }
-                };
-                let touches_config_or_script = event
-                    .paths
-                    .iter()
-                    .any(|p| p == &target || p.starts_with(&scripts_dir));
-                if !touches_config_or_script {
-                    return;
-                }
-                if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
-                    return;
-                }
-                config_reload_for_handler.store(true, Ordering::Release);
-                if let Some(thread) = render_thread_handle.get() {
-                    thread.unpark();
-                }
-            }) {
-                Ok(w) => w,
-                Err(e) => {
-                    warn!("failed to create config watcher: {e}");
-                    return;
-                }
-            };
-
-            if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
-                warn!("failed to watch config dir {}: {e}", dir.display());
-                return;
-            }
-            std::thread::park();
-        })
-        .expect("spawn config watcher");
 }
 
 fn spawn_new_window(cwd: Option<PathBuf>) {

@@ -1,30 +1,287 @@
 use std::collections::BTreeMap;
 use std::path::PathBuf;
 use std::str::FromStr;
+use std::sync::Arc;
+use std::sync::OnceLock;
+use std::sync::atomic::AtomicBool;
+use std::sync::atomic::Ordering;
+
+pub mod keybindings;
 
 use palette::Srgb;
+use parking_lot::Mutex;
 use serde::Deserialize;
 use smol_str::SmolStr;
 use smol_str::ToSmolStr;
-use terminal41::ClipboardPermission;
-use terminal41::ClipboardPermissions;
-use terminal41::ColorPalette;
-use terminal41::CursorShape;
-use terminal41::CursorStyle;
-use terminal41::EmojiCompatibilityMode;
-use terminal41::FeaturePermissions;
-use terminal41::PermissionPolicy;
-use terminal41::ProgramAllowlist;
-use terminal41::StatusDisplayKind;
-use terminal41::TerminalLimits;
 use utils41::blend_colors;
-use wgpu::PowerPreference;
 
 use crate::keybindings::Keybinding;
 use crate::keybindings::KeybindingConfig;
 use crate::keybindings::Keybindings;
 
+#[macro_use]
+extern crate log;
+
 pub const DEFAULT_SCROLLBACK: u32 = 10_000;
+pub const MAX_MACRO_BYTES: usize = 6 * 1024;
+pub const MAX_MACRO_INVOCATION_DEPTH: usize = 32;
+pub const MAX_UDK_BYTES: usize = 256;
+pub const MAX_DECUDK_PAYLOAD_BYTES: usize = 2048;
+pub const MAX_DRCS_PAYLOAD_BYTES: usize = 64 * 1024;
+pub const MAX_DRCS_TOTAL_STORAGE_BYTES: usize = 256 * 1024;
+
+/// Permission gates for terminal features that can execute stored data or
+/// otherwise need explicit host approval.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct FeaturePermissions {
+    /// Permission gate for VT420 programmable macros.
+    pub macros: ProgramAllowlist,
+    /// Permission gate for DEC user-defined keys and related keyboard controls.
+    pub udks: ProgramAllowlist,
+    /// Permission gates for host-driven OSC 52 clipboard access.
+    pub clipboard: ClipboardPermissions,
+    /// Permission gate for host-driven kitty graphics file reads.
+    pub kitty_graphics_files: PermissionPolicy,
+}
+
+/// Runtime resource limits for terminal-owned protocol state.
+///
+/// These are deliberately grouped separately from feature permissions:
+/// permissions answer "may this feature run?", while limits answer "how much
+/// state may this terminal retain or process for enabled features?".
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct TerminalLimits {
+    /// Maximum decoded bytes retained across all VT macro definitions.
+    pub macro_storage_bytes: usize,
+    /// Maximum nested macro expansion depth.
+    pub macro_invocation_depth: usize,
+    /// Maximum decoded bytes retained across all DEC user-defined keys.
+    pub udk_storage_bytes: usize,
+    /// Maximum bytes accumulated for one DECUDK DCS payload.
+    pub decudk_payload_bytes: usize,
+    /// Maximum bytes accumulated for one DRCS DCS payload.
+    pub drcs_payload_bytes: usize,
+    /// Maximum bytes accumulated for one XTGETTCAP capability query payload.
+    pub xtgettcap_payload_bytes: usize,
+    /// Maximum decoded DRCS glyph storage retained by the terminal.
+    pub drcs_storage_bytes: usize,
+    /// Maximum base64 payload bytes accepted for one kitty graphics command.
+    pub kitty_graphics_payload_bytes: usize,
+    /// Maximum decoded kitty image bytes retained for reusable images.
+    pub kitty_graphics_storage_bytes: usize,
+}
+
+impl Default for TerminalLimits {
+    fn default() -> Self {
+        Self {
+            macro_storage_bytes: MAX_MACRO_BYTES,
+            macro_invocation_depth: MAX_MACRO_INVOCATION_DEPTH,
+            udk_storage_bytes: MAX_UDK_BYTES,
+            decudk_payload_bytes: MAX_DECUDK_PAYLOAD_BYTES,
+            drcs_payload_bytes: MAX_DRCS_PAYLOAD_BYTES,
+            xtgettcap_payload_bytes: 4096,
+            drcs_storage_bytes: MAX_DRCS_TOTAL_STORAGE_BYTES,
+            kitty_graphics_payload_bytes: 32 * 1024 * 1024,
+            kitty_graphics_storage_bytes: 128 * 1024 * 1024,
+        }
+    }
+}
+
+/// Coarse allow/deny gate for a protocol feature.
+#[derive(Debug, Clone, PartialEq, Eq, Default, Deserialize)]
+pub enum ProgramAllowlist {
+    /// Deny all requests for this feature.
+    #[default]
+    #[serde(alias = "none", alias = "deny")]
+    DenyAll,
+    /// Allow all requests for this feature.
+    #[serde(alias = "*", alias = "all")]
+    AllowAll,
+}
+
+impl ProgramAllowlist {
+    /// Whether this gate allows the protected feature.
+    pub fn allow(&self) -> bool {
+        match self {
+            Self::DenyAll => false,
+            Self::AllowAll => true,
+        }
+    }
+}
+
+#[derive(Debug, Deserialize, Default, Clone, Copy, PartialEq, Eq)]
+#[serde(rename_all = "kebab-case")]
+pub enum PowerPreference {
+    #[default]
+    #[serde(alias = "none")]
+    Auto,
+    LowPower,
+    HighPerformance,
+}
+
+/// Read/write permission gates for host-driven clipboard access.
+#[derive(Debug, Clone, PartialEq, Eq, Default)]
+pub struct ClipboardPermissions {
+    /// Whether host programs may read local clipboard contents.
+    pub read: PermissionPolicy,
+    /// Whether host programs may write local clipboard contents.
+    pub write: PermissionPolicy,
+}
+
+/// Permission policy for one host-mediated local resource access direction.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum PermissionPolicy {
+    /// Ask the user for this request.
+    #[default]
+    #[serde(alias = "request")]
+    Ask,
+    /// Allow every request without prompting.
+    #[serde(alias = "*", alias = "all")]
+    Allow,
+    /// Deny every request without prompting.
+    #[serde(alias = "no", alias = "none")]
+    Deny,
+}
+
+pub const fn default_fg() -> Srgb<u8> {
+    Srgb::new(204, 204, 204)
+}
+
+pub const fn default_bg() -> Srgb<u8> {
+    Srgb::new(0, 0, 0)
+}
+
+/// Runtime color palette. Stores the 16 ANSI colors, default fg/bg,
+/// cursor colors, and selection colors. Built from the `[colors]` config
+/// section (Rio palette format), falling back to the hardcoded defaults
+/// for any value not overridden.
+#[derive(Debug, Clone)]
+pub struct ColorPalette {
+    /// Default foreground (SGR 39 / row clear).
+    pub fg: Srgb<u8>,
+    /// Default background (SGR 49 / row clear / wallpaper transparency).
+    pub bg: Srgb<u8>,
+    /// Default foreground for the DEC status line.
+    pub status_line_fg: Srgb<u8>,
+    /// Default background for the DEC status line.
+    pub status_line_bg: Srgb<u8>,
+    /// Cursor color. `None` = use cell foreground (current behavior).
+    pub cursor: Option<Srgb<u8>>,
+    /// Text color used under a block cursor. `None` = invert against the
+    /// cell background (current behavior).
+    pub cursor_text: Option<Srgb<u8>>,
+    /// Selection background. `None` = invert (current behavior).
+    pub selection_bg: Option<Srgb<u8>>,
+    /// Selection text color. `None` = invert (current behavior).
+    pub selection_fg: Option<Srgb<u8>>,
+    /// The 16 ANSI colors: indices 0–7 are normal, 8–15 are bright.
+    pub ansi: [Srgb<u8>; 16],
+}
+
+impl Default for ColorPalette {
+    fn default() -> Self {
+        let fg = default_fg();
+        let bg = default_bg();
+        Self {
+            fg,
+            bg,
+            status_line_fg: fg,
+            status_line_bg: blend_colors(bg, fg, 0.25),
+            cursor: None,
+            cursor_text: None,
+            selection_bg: None,
+            selection_fg: None,
+            ansi: [
+                Srgb::new(0, 0, 0),       // 0  black           rgb(0, 0, 0)
+                Srgb::new(205, 0, 0),     // 1  red             rgb(205, 0, 0)
+                Srgb::new(0, 205, 0),     // 2  green           rgb(0, 205, 0)
+                Srgb::new(205, 205, 0),   // 3  yellow          rgb(205, 205, 0)
+                Srgb::new(0, 0, 238),     // 4  blue            rgb(0, 0, 238)
+                Srgb::new(205, 0, 205),   // 5  magenta         rgb(205, 0, 205)
+                Srgb::new(0, 205, 205),   // 6  cyan            rgb(0, 205, 205)
+                Srgb::new(229, 229, 229), // 7  white           rgb(229, 229, 229)
+                Srgb::new(127, 127, 127), // 8  bright black    rgb(127, 127, 127)
+                Srgb::new(255, 0, 0),     // 9  bright red      rgb(255, 0, 0)
+                Srgb::new(0, 255, 0),     // 10 bright green    rgb(0, 255, 0)
+                Srgb::new(255, 255, 0),   // 11 bright yellow   rgb(255, 255, 0)
+                Srgb::new(92, 92, 255),   // 12 bright blue     rgb(92, 92, 255)
+                Srgb::new(255, 0, 255),   // 13 bright magenta  rgb(255, 0, 255)
+                Srgb::new(0, 255, 255),   // 14 bright cyan     rgb(0, 255, 255)
+                Srgb::new(255, 255, 255), // 15 bright white    rgb(255, 255, 255)
+            ],
+        }
+    }
+}
+
+/// Geometry of the cursor overlay.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum CursorShape {
+    /// Full-cell block. The glyph beneath inverts so the character stays
+    /// readable.
+    #[default]
+    Block,
+    /// Thin horizontal bar at the bottom of the cell.
+    #[serde(alias = "underscore")]
+    Underline,
+    /// Thin vertical bar at the left edge of the cell.
+    #[serde(alias = "bar")]
+    #[serde(alias = "ibeam")]
+    Beam,
+}
+
+/// Combined shape + blink state. `Default` matches the long-standing xterm
+/// default of a blinking block.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct CursorStyle {
+    /// Cursor overlay geometry.
+    pub shape: CursorShape,
+    /// Whether the renderer should blink the cursor.
+    pub blink: bool,
+}
+
+impl Default for CursorStyle {
+    fn default() -> Self {
+        Self {
+            shape: CursorShape::Block,
+            blink: true,
+        }
+    }
+}
+
+/// How term41 should handle legacy shell emoji editing compatibility.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
+#[serde(rename_all = "lowercase")]
+pub enum EmojiCompatibilityMode {
+    /// Enable only in a shell-integration command-editing phase.
+    #[default]
+    Auto,
+    /// Always use normal terminal grapheme handling.
+    Off,
+    /// Always use legacy scalar emoji handling.
+    On,
+}
+
+impl EmojiCompatibilityMode {
+    /// Cycle through the modes in the order used by the UI hotkey.
+    pub fn next(self) -> Self {
+        match self {
+            Self::Auto => Self::Off,
+            Self::Off => Self::On,
+            Self::On => Self::Auto,
+        }
+    }
+
+    /// Human-readable lowercase label for logs/UI.
+    pub fn label(self) -> &'static str {
+        match self {
+            Self::Auto => "auto",
+            Self::Off => "off",
+            Self::On => "on",
+        }
+    }
+}
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, Default)]
 #[serde(rename_all = "lowercase")]
@@ -32,15 +289,6 @@ pub enum StatusLineMode {
     #[default]
     Off,
     Indicator,
-}
-
-impl StatusLineMode {
-    pub fn display_kind(self) -> StatusDisplayKind {
-        match self {
-            Self::Off => StatusDisplayKind::None,
-            Self::Indicator => StatusDisplayKind::Indicator,
-        }
-    }
 }
 
 /// VSync mode for frame presentation. See the `vsync` config key and the
@@ -169,10 +417,10 @@ struct SecuritySettings {
 struct ClipboardPermissionsConfig {
     #[serde(deserialize_with = "clipboard_permission_opt")]
     #[serde(default)]
-    read: Option<ClipboardPermission>,
+    read: Option<PermissionPolicy>,
     #[serde(deserialize_with = "clipboard_permission_opt")]
     #[serde(default)]
-    write: Option<ClipboardPermission>,
+    write: Option<PermissionPolicy>,
 }
 
 #[derive(Deserialize, Default)]
@@ -480,7 +728,7 @@ struct ConfigFile {
     compatibility: Option<CompatibilitySettings>,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 pub struct Config {
     pub opacity: f32,
     pub fonts: Option<String>,
@@ -544,7 +792,7 @@ impl Default for Config {
 /// Read and parse the config at `path`, falling back to defaults on any
 /// I/O or parse failure. Used both by the startup loader and the
 /// live-reload watcher (which already knows the path it's watching).
-pub fn load_from(path: &std::path::Path) -> Config {
+fn load_from(path: &std::path::Path) -> Config {
     let contents = match std::fs::read_to_string(path) {
         Ok(s) => s,
         Err(_) => return Config::default(),
@@ -698,13 +946,37 @@ fn expand_path(path: PathBuf) -> PathBuf {
     }
 }
 
-/// Public so `main.rs` can hand the watcher the same path the loader uses.
-pub fn config_file_path() -> Option<PathBuf> {
-    config_path()
-}
-
 pub fn scripts_dir_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("term41").join("scripts"))
+}
+
+static CONFIG: Mutex<Option<Config>> = Mutex::new(None);
+
+pub fn init_config(
+    config_reload: Arc<AtomicBool>,
+    render_thread_handle: Arc<OnceLock<std::thread::Thread>>,
+) -> Config {
+    if let Some(config) = CONFIG.lock().clone() {
+        warn!("Init config called twice");
+        return config;
+    }
+
+    let Some(config_path) = config_path() else {
+        error!("Failed to initialize config watcher");
+        *CONFIG.lock() = Some(Config::default());
+        return Config::default();
+    };
+
+    let config = load_from(&config_path);
+    *CONFIG.lock() = Some(config);
+
+    spawn_config_watcher(config_path, config_reload, render_thread_handle);
+
+    CONFIG.lock().clone().unwrap()
+}
+
+pub fn config() -> Config {
+    CONFIG.lock().clone().unwrap_or_default()
 }
 
 /// Map the optional `keybindings = [...]` toml field onto a
@@ -747,6 +1019,67 @@ fn build_cursor_style(
 
 fn config_path() -> Option<PathBuf> {
     dirs::config_dir().map(|d| d.join("term41").join("config.toml"))
+}
+
+fn spawn_config_watcher(
+    config_path: PathBuf,
+    config_reload: Arc<AtomicBool>,
+    render_thread_handle: Arc<OnceLock<std::thread::Thread>>,
+) {
+    use notify::EventKind;
+    use notify::RecursiveMode;
+    use notify::Watcher;
+
+    let Some(dir) = config_path.parent().map(PathBuf::from) else {
+        return;
+    };
+
+    std::thread::Builder::new()
+        .name("config-watcher".into())
+        .spawn(move || {
+            let target = config_path.clone();
+            let scripts_dir = dir.join("scripts");
+            let config_reload_for_handler = config_reload.clone();
+            let mut watcher = match notify::recommended_watcher(move |res| {
+                let event: notify::Event = match res {
+                    Ok(e) => e,
+                    Err(e) => {
+                        warn!("config watcher error: {e}");
+                        return;
+                    }
+                };
+                let touches_config_or_script = event
+                    .paths
+                    .iter()
+                    .any(|p| p == &target || p.starts_with(&scripts_dir));
+                if !touches_config_or_script {
+                    return;
+                }
+                if !matches!(event.kind, EventKind::Modify(_) | EventKind::Create(_)) {
+                    return;
+                }
+
+                *CONFIG.lock() = Some(load_from(&config_path));
+
+                config_reload_for_handler.store(true, Ordering::Release);
+                if let Some(thread) = render_thread_handle.get() {
+                    thread.unpark();
+                }
+            }) {
+                Ok(w) => w,
+                Err(e) => {
+                    warn!("failed to create config watcher: {e}");
+                    return;
+                }
+            };
+
+            if let Err(e) = watcher.watch(&dir, RecursiveMode::Recursive) {
+                warn!("failed to watch config dir {}: {e}", dir.display());
+                return;
+            }
+            std::thread::park();
+        })
+        .expect("spawn config watcher");
 }
 
 fn smolstr_opt<'de, D>(deserializer: D) -> Result<Option<SmolStr>, D::Error>
@@ -919,13 +1252,11 @@ where
     }
 }
 
-fn clipboard_permission_opt<'de, D>(
-    deserializer: D
-) -> Result<Option<ClipboardPermission>, D::Error>
+fn clipboard_permission_opt<'de, D>(deserializer: D) -> Result<Option<PermissionPolicy>, D::Error>
 where
     D: serde::Deserializer<'de>,
 {
-    match Option::<ClipboardPermission>::deserialize(deserializer) {
+    match Option::<PermissionPolicy>::deserialize(deserializer) {
         Ok(opt) => Ok(opt),
         Err(e) => {
             warn!("failed to parse clipboard permission in config: {e}");
@@ -1095,8 +1426,8 @@ mod tests {
     #[test]
     fn clipboard_permissions_default_to_ask() {
         let permissions = parse("").feature_permissions.clipboard;
-        assert_eq!(permissions.read, ClipboardPermission::Ask);
-        assert_eq!(permissions.write, ClipboardPermission::Ask);
+        assert_eq!(permissions.read, PermissionPolicy::Ask);
+        assert_eq!(permissions.write, PermissionPolicy::Ask);
     }
 
     #[test]
@@ -1104,26 +1435,26 @@ mod tests {
         let allow = parse("[security.clipboard]\nread = \"all\"\nwrite = \"allow\"\n")
             .feature_permissions
             .clipboard;
-        assert_eq!(allow.read, ClipboardPermission::Allow);
-        assert_eq!(allow.write, ClipboardPermission::Allow);
+        assert_eq!(allow.read, PermissionPolicy::Allow);
+        assert_eq!(allow.write, PermissionPolicy::Allow);
 
         let wildcard = parse("[security.clipboard]\nread = \"*\"\n")
             .feature_permissions
             .clipboard;
-        assert_eq!(wildcard.read, ClipboardPermission::Allow);
-        assert_eq!(wildcard.write, ClipboardPermission::Ask);
+        assert_eq!(wildcard.read, PermissionPolicy::Allow);
+        assert_eq!(wildcard.write, PermissionPolicy::Ask);
 
         let deny = parse("[security.clipboard]\nread = \"deny\"\nwrite = \"no\"\n")
             .feature_permissions
             .clipboard;
-        assert_eq!(deny.read, ClipboardPermission::Deny);
-        assert_eq!(deny.write, ClipboardPermission::Deny);
+        assert_eq!(deny.read, PermissionPolicy::Deny);
+        assert_eq!(deny.write, PermissionPolicy::Deny);
 
         let none = parse("[security.clipboard]\nread = \"none\"\n")
             .feature_permissions
             .clipboard;
-        assert_eq!(none.read, ClipboardPermission::Deny);
-        assert_eq!(none.write, ClipboardPermission::Ask);
+        assert_eq!(none.read, PermissionPolicy::Deny);
+        assert_eq!(none.write, PermissionPolicy::Ask);
     }
 
     #[test]
@@ -1229,8 +1560,8 @@ process_info = true
         let permissions = parse("[security.clipboard]\nread = \"sometimes\"\n")
             .feature_permissions
             .clipboard;
-        assert_eq!(permissions.read, ClipboardPermission::Ask);
-        assert_eq!(permissions.write, ClipboardPermission::Ask);
+        assert_eq!(permissions.read, PermissionPolicy::Ask);
+        assert_eq!(permissions.write, PermissionPolicy::Ask);
     }
 
     #[test]

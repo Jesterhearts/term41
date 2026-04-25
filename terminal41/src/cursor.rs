@@ -7,7 +7,8 @@
 //! separately so adding new shapes or a "force-disable blink" preference is a
 //! one-line change.
 
-use serde::Deserialize;
+use config41::CursorShape;
+use config41::CursorStyle;
 
 /// DECSCUSR parameter values (CSI Ps SP q).
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -39,81 +40,45 @@ impl TryFrom<u16> for DecCusr {
     }
 }
 
-/// Geometry of the cursor overlay.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum CursorShape {
-    /// Full-cell block. The glyph beneath inverts so the character stays
-    /// readable.
-    #[default]
-    Block,
-    /// Thin horizontal bar at the bottom of the cell.
-    #[serde(alias = "underscore")]
-    Underline,
-    /// Thin vertical bar at the left edge of the cell.
-    #[serde(alias = "bar")]
-    #[serde(alias = "ibeam")]
-    Beam,
-}
-
-/// Combined shape + blink state. `Default` matches the long-standing xterm
-/// default of a blinking block.
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-pub struct CursorStyle {
-    /// Cursor overlay geometry.
-    pub shape: CursorShape,
-    /// Whether the renderer should blink the cursor.
-    pub blink: bool,
-}
-
-impl Default for CursorStyle {
-    fn default() -> Self {
-        Self {
-            shape: CursorShape::Block,
-            blink: true,
-        }
-    }
-}
-
-impl CursorStyle {
+impl DecCusr {
     /// Apply a DECSCUSR parameter (`CSI Ps SP q`). Values are taken from the
     /// VT520 manual; 0 and 1 are interchangeable per the spec, both meaning
     /// "blinking block". Out-of-range values are ignored, matching xterm.
-    pub fn apply_decscusr(
-        &mut self,
+    pub fn apply(
         ps: u16,
+        cursor: &mut CursorStyle,
     ) {
         let Ok(ps) = DecCusr::try_from(ps) else {
             return;
         };
 
         let style = match ps {
-            DecCusr::Default | DecCusr::BlinkingBlock => Self {
+            DecCusr::Default | DecCusr::BlinkingBlock => CursorStyle {
                 shape: CursorShape::Block,
                 blink: true,
             },
-            DecCusr::SteadyBlock => Self {
+            DecCusr::SteadyBlock => CursorStyle {
                 shape: CursorShape::Block,
                 blink: false,
             },
-            DecCusr::BlinkingUnderline => Self {
+            DecCusr::BlinkingUnderline => CursorStyle {
                 shape: CursorShape::Underline,
                 blink: true,
             },
-            DecCusr::SteadyUnderline => Self {
+            DecCusr::SteadyUnderline => CursorStyle {
                 shape: CursorShape::Underline,
                 blink: false,
             },
-            DecCusr::BlinkingBeam => Self {
+            DecCusr::BlinkingBeam => CursorStyle {
                 shape: CursorShape::Beam,
                 blink: true,
             },
-            DecCusr::SteadyBeam => Self {
+            DecCusr::SteadyBeam => CursorStyle {
                 shape: CursorShape::Beam,
                 blink: false,
             },
         };
-        *self = style;
+        *cursor = style;
     }
 }
 
@@ -208,7 +173,7 @@ mod tests {
     #[test]
     fn decscusr_2_is_steady_block() {
         let mut s = CursorStyle::default();
-        s.apply_decscusr(2);
+        DecCusr::apply(2, &mut s);
         assert_eq!(
             s,
             CursorStyle {
@@ -221,7 +186,7 @@ mod tests {
     #[test]
     fn decscusr_5_is_blinking_beam() {
         let mut s = CursorStyle::default();
-        s.apply_decscusr(5);
+        DecCusr::apply(5, &mut s);
         assert_eq!(
             s,
             CursorStyle {
@@ -237,7 +202,7 @@ mod tests {
             shape: CursorShape::Beam,
             blink: false,
         };
-        s.apply_decscusr(0);
+        DecCusr::apply(0, &mut s);
         assert_eq!(s, CursorStyle::default());
     }
 
@@ -247,7 +212,7 @@ mod tests {
             shape: CursorShape::Beam,
             blink: false,
         };
-        s.apply_decscusr(42);
+        DecCusr::apply(52, &mut s);
         assert_eq!(
             s,
             CursorStyle {

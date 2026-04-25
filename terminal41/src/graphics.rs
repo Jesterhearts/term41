@@ -1,8 +1,8 @@
 use std::time::Instant;
 
+use config41::PermissionPolicy;
 use vte_mode41::C1Mode;
 
-use crate::PermissionPolicy;
 use crate::PlacedImage;
 use crate::Screen;
 use crate::TerminalLimits;
@@ -1123,9 +1123,9 @@ fn place_iterm_image(
 mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
+    use config41::PermissionPolicy;
+    use config41::TerminalLimits;
 
-    use crate::PermissionPolicy;
-    use crate::TerminalLimits;
     use crate::settings;
     use crate::test_support::TestTerm;
 

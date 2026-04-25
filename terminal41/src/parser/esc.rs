@@ -1,3 +1,4 @@
+use config41::ColorPalette;
 use smol_str::SmolStr;
 use vte_mode41::C1Mode;
 use vte_mode41::ConformanceLevel;
@@ -15,7 +16,6 @@ use crate::Viewport;
 use crate::charset;
 use crate::charset::CharacterSet;
 use crate::charset::GraphicSetSlot;
-use crate::color;
 use crate::dec::r#macro::MacroStore;
 use crate::dec::udk::UdkState;
 use crate::drcs::DrcsStore;
@@ -226,7 +226,7 @@ fn apply_vt52_esc(
 fn apply_screen_alignment_test(
     screen: &mut Screen,
     viewport: &Viewport,
-    palette: &color::ColorPalette,
+    palette: &ColorPalette,
 ) {
     let first_visible = screen
         .grid
@@ -404,8 +404,8 @@ pub(crate) fn esc_apply(
     current_prompt_row: &mut Option<u64>,
     shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
-    palette: &mut color::ColorPalette,
-    base_palette: &color::ColorPalette,
+    palette: &mut ColorPalette,
+    base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
     default_status_display: &mut StatusDisplayKind,
     pending_output: &mut Vec<u8>,
@@ -586,8 +586,8 @@ pub(crate) fn esc_dispatch(
     current_prompt_row: &mut Option<u64>,
     shell_integration_phase: &mut ShellIntegrationPhase,
     bell_pending: &mut bool,
-    palette: &mut color::ColorPalette,
-    base_palette: &color::ColorPalette,
+    palette: &mut ColorPalette,
+    base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
     default_status_display: &mut StatusDisplayKind,
     pending_output: &mut Vec<u8>,
@@ -630,6 +630,8 @@ pub(crate) fn esc_dispatch(
 
 #[cfg(test)]
 mod tests {
+    use config41::default_bg;
+    use config41::default_fg;
     use vtepp::Action;
     use vtepp::Parser;
 
@@ -949,7 +951,7 @@ mod tests {
     #[test]
     fn scs_gr_translation_applies_to_split_utf8_codepoint() {
         let (mut screen, mut viewport) = setup();
-        let base_pal = color::ColorPalette::default();
+        let base_pal = ColorPalette::default();
         let mut dec_color = dec_color_state_from_palette(&base_pal);
         let mut pal = effective_palette(&base_pal, &dec_color);
         let mut parser = Parser::new();
@@ -957,10 +959,10 @@ mod tests {
             viewport.cols,
             viewport.rows,
             0,
-            color::default_fg(),
-            color::default_bg(),
-            color::default_fg(),
-            color::default_bg(),
+            default_fg(),
+            default_bg(),
+            default_fg(),
+            default_bg(),
         );
         let mut on_alt_screen = false;
         let mut modes = TerminalModes::new();

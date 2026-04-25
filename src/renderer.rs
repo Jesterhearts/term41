@@ -17,12 +17,18 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clip41::Clipboard;
+use config41::BellMode;
+use config41::Config;
+use config41::DEFAULT_SCROLLBACK;
+use config41::config;
+use config41::keybindings::Action;
 use font41::FontSystem;
 use parking_lot::Mutex;
 use pty_pipe41::Pty;
 use terminal41::C1Mode;
 use terminal41::KittyFlags;
 use terminal41::KittyKeys;
+use terminal41::StatusDisplayKind;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
 use terminal41::settings;
@@ -44,10 +50,6 @@ use crate::INITIAL_ROWS;
 use crate::InputState;
 use crate::Tab;
 use crate::TabId;
-use crate::config::BellMode;
-use crate::config::Config;
-use crate::config::DEFAULT_SCROLLBACK;
-use crate::keybindings::Action;
 use crate::output_recording::RecorderControl;
 use crate::renderer::r#impl::Renderer;
 pub(crate) use crate::renderer::r#impl::TabInfo;
@@ -322,7 +324,6 @@ pub struct RenderHost {
     next_tab_id: u64,
     font_system: FontSystem,
 
-    config_path: Option<PathBuf>,
     config: Config,
 
     applied_title: Option<String>,
@@ -381,12 +382,11 @@ impl RenderHost {
         proxy: EventLoopProxy<AppEvent>,
         font_system: FontSystem,
         config: Config,
-        config_path: Option<PathBuf>,
         input_state: Arc<Mutex<InputState>>,
         render_thread_handle: Arc<OnceLock<Thread>>,
     ) -> Self {
         let scripts = ScriptRuntime::discover(
-            crate::config::scripts_dir_path(),
+            config41::scripts_dir_path(),
             &config.script_permissions,
             render_thread_handle.clone(),
         );
@@ -402,7 +402,6 @@ impl RenderHost {
             active_tab_id: TabId(0),
             next_tab_id: 1,
             font_system,
-            config_path,
             config,
             applied_title: None,
             scripts,
@@ -1036,7 +1035,7 @@ impl RenderHost {
             cols,
             rows,
             scrollback,
-            self.config.status_line.display_kind(),
+            self.config.status_line,
             self.config.feature_permissions.clone(),
             self.config.limits,
             self.font_system.cell_height,
@@ -1181,10 +1180,7 @@ impl RenderHost {
     // -- Config -------------------------------------------------------------
 
     fn reload_config(&mut self) {
-        let Some(path) = self.config_path.as_ref() else {
-            return;
-        };
-        let cfg = crate::config::load_from(path);
+        let cfg = config();
 
         for tab in &mut self.tabs {
             let mut terminal = tab.terminal.lock();
@@ -1218,7 +1214,10 @@ impl RenderHost {
                 viewport,
                 palette,
                 default_status_display,
-                cfg.status_line.display_kind(),
+                match cfg.status_line {
+                    config41::StatusLineMode::Off => StatusDisplayKind::None,
+                    config41::StatusLineMode::Indicator => StatusDisplayKind::Indicator,
+                },
             );
             settings::set_scrollback_policy(active, viewport, cfg.scrollback_lines);
             settings::set_feature_permissions(protocol, cfg.feature_permissions.clone());
@@ -1244,7 +1243,7 @@ impl RenderHost {
         self.config.feature_permissions = cfg.feature_permissions.clone();
         self.config.limits = cfg.limits;
         self.scripts = ScriptRuntime::discover(
-            crate::config::scripts_dir_path(),
+            config41::scripts_dir_path(),
             &cfg.script_permissions,
             self.render_thread_handle.clone(),
         );

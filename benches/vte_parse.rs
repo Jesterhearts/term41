@@ -12,17 +12,17 @@
 
 use std::hint::black_box;
 
+use config41::ColorPalette;
+use config41::FeaturePermissions;
+use config41::StatusLineMode;
+use config41::TerminalLimits;
 use criterion::BatchSize;
 use criterion::BenchmarkId;
 use criterion::Criterion;
 use criterion::Throughput;
 use criterion::criterion_group;
 use criterion::criterion_main;
-use terminal41::ColorPalette;
-use terminal41::FeaturePermissions;
-use terminal41::StatusDisplayKind;
 use terminal41::Terminal;
-use terminal41::TerminalLimits;
 use terminal41::TerminalProcessor;
 use vtepp::Parser;
 
@@ -51,6 +51,7 @@ fn mixed_corpus() -> Vec<u8> {
         );
         out.extend_from_slice(b"-rw-r--r--  1 user user  1024 Apr 13 21:15 README.md\n");
         out.extend_from_slice("café résumé naïve ☃ 🦀\n".as_bytes());
+        out.extend_from_slice("👩‍❤️‍💋‍👩 👩‍💻".repeat(5).as_bytes());
     }
     out
 }
@@ -84,7 +85,7 @@ fn new_terminal() -> Terminal {
         120,
         40,
         1000,
-        StatusDisplayKind::None,
+        StatusLineMode::Off,
         FeaturePermissions::default(),
         TerminalLimits::default(),
         16,

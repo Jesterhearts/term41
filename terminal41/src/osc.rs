@@ -7,6 +7,9 @@ use base64::Engine;
 use base64::engine::general_purpose::STANDARD as BASE64;
 use clip41::Clipboard;
 use clip41::ClipboardKind;
+use config41::ClipboardPermissions;
+use config41::ColorPalette;
+use config41::PermissionPolicy;
 use percent_encoding::percent_decode;
 
 use crate::C1Mode;
@@ -15,8 +18,6 @@ use crate::Row;
 use crate::ShellIntegrationPhase;
 use crate::color;
 use crate::conformance;
-use crate::feature::ClipboardPermission;
-use crate::feature::ClipboardPermissions;
 use crate::io::clipboard::ClipboardRequest;
 use crate::screen::Screen;
 use crate::screen::grid::Viewport;
@@ -201,7 +202,7 @@ pub(super) fn handle_osc(
     /// Per-prompt metadata: command column (from B), output row (from C),
     /// and timestamps for duration calculation.
     command_metas: &mut HashMap<u64, CommandMeta>,
-    palette: &color::ColorPalette,
+    palette: &ColorPalette,
     cell_width: u32,
     cell_height: u32,
 ) {
@@ -468,7 +469,7 @@ fn apply_parsed_osc(
     current_prompt_row: &mut Option<u64>,
     shell_integration_phase: &mut ShellIntegrationPhase,
     command_metas: &mut HashMap<u64, CommandMeta>,
-    palette: &color::ColorPalette,
+    palette: &ColorPalette,
     cell_width: u32,
     cell_height: u32,
 ) {
@@ -594,7 +595,7 @@ fn apply_clipboard_action(
             kind,
             response_selector,
         } => match clipboard_permissions.read {
-            ClipboardPermission::Allow => {
+            PermissionPolicy::Allow => {
                 pending_output.extend(crate::io::clipboard::osc52_read_response(
                     clipboard,
                     kind,
@@ -602,23 +603,23 @@ fn apply_clipboard_action(
                     c1_mode,
                 ));
             }
-            ClipboardPermission::Ask => clipboard_requests.push(ClipboardRequest::Read {
+            PermissionPolicy::Ask => clipboard_requests.push(ClipboardRequest::Read {
                 kind,
                 response_selector,
                 c1_mode,
             }),
-            ClipboardPermission::Deny => {}
+            PermissionPolicy::Deny => {}
         },
         ClipboardAction::Write { kinds, text } => match clipboard_permissions.write {
-            ClipboardPermission::Allow => {
+            PermissionPolicy::Allow => {
                 for kind in kinds {
                     clipboard.set(kind, &text);
                 }
             }
-            ClipboardPermission::Ask => {
+            PermissionPolicy::Ask => {
                 clipboard_requests.push(ClipboardRequest::Write { kinds, text })
             }
-            ClipboardPermission::Deny => {}
+            PermissionPolicy::Deny => {}
         },
     }
 }
@@ -825,6 +826,9 @@ fn hex_nibble(byte: u8) -> Option<u8> {
 
 #[cfg(test)]
 mod tests {
+    use config41::default_bg;
+    use config41::default_fg;
+
     use super::*;
 
     struct Bag {
@@ -838,7 +842,7 @@ mod tests {
         prompt_row: Option<u64>,
         shell_integration_phase: ShellIntegrationPhase,
         command_metas: HashMap<u64, CommandMeta>,
-        palette: color::ColorPalette,
+        palette: ColorPalette,
         clipboard_requests: Vec<ClipboardRequest>,
         clipboard_permissions: ClipboardPermissions,
     }
@@ -861,21 +865,21 @@ mod tests {
                     cols,
                     rows,
                     100,
-                    color::default_fg(),
-                    color::default_bg(),
-                    color::default_fg(),
-                    color::default_bg(),
+                    default_fg(),
+                    default_bg(),
+                    default_fg(),
+                    default_bg(),
                 ),
                 viewport: Viewport { rows, cols, top: 0 },
                 title: None,
                 prompt_row: None,
                 shell_integration_phase: ShellIntegrationPhase::None,
                 command_metas: HashMap::new(),
-                palette: color::ColorPalette::default(),
+                palette: ColorPalette::default(),
                 clipboard_requests: Vec::new(),
                 clipboard_permissions: ClipboardPermissions {
-                    read: ClipboardPermission::Allow,
-                    write: ClipboardPermission::Allow,
+                    read: PermissionPolicy::Allow,
+                    write: PermissionPolicy::Allow,
                 },
             }
         }
@@ -1054,8 +1058,8 @@ mod tests {
     #[test]
     fn osc_52_ask_write_defers_clipboard_mutation() {
         let mut bag = Bag::new().with_clipboard_permissions(ClipboardPermissions {
-            read: ClipboardPermission::Allow,
-            write: ClipboardPermission::Ask,
+            read: PermissionPolicy::Allow,
+            write: PermissionPolicy::Ask,
         });
         bag.dispatch(b"52;c;aGVsbG8=");
 
@@ -1075,8 +1079,8 @@ mod tests {
     #[test]
     fn osc_52_ask_read_defers_clipboard_query() {
         let mut bag = Bag::new().with_clipboard_permissions(ClipboardPermissions {
-            read: ClipboardPermission::Ask,
-            write: ClipboardPermission::Allow,
+            read: PermissionPolicy::Ask,
+            write: PermissionPolicy::Allow,
         });
         bag.clipboard.set(ClipboardKind::Clipboard, "hi");
         bag.dispatch(b"52;;?");
@@ -1095,8 +1099,8 @@ mod tests {
     #[test]
     fn osc_52_deny_blocks_clipboard_access() {
         let mut bag = Bag::new().with_clipboard_permissions(ClipboardPermissions {
-            read: ClipboardPermission::Deny,
-            write: ClipboardPermission::Deny,
+            read: PermissionPolicy::Deny,
+            write: PermissionPolicy::Deny,
         });
         bag.clipboard.set(ClipboardKind::Clipboard, "old");
         bag.dispatch(b"52;c;aGVsbG8=");

@@ -58,16 +58,19 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clip41::Clipboard;
+use config41::ColorPalette;
+use config41::CursorStyle;
+use config41::EmojiCompatibilityMode;
+use config41::FeaturePermissions;
+use config41::StatusLineMode;
+use config41::TerminalLimits;
 use parking_lot::Mutex;
 use pty_pipe41::PtyReader;
 pub use vte_mode41::TextMode;
 use vtepp::Action;
 
-pub use crate::color::ColorPalette;
 pub use crate::conformance::C1Mode;
 pub use crate::conformance::ConformanceLevel;
-pub use crate::cursor::CursorShape;
-pub use crate::cursor::CursorStyle;
 pub use crate::dec::color::ColorSpace as DecColorSpace;
 pub use crate::dec::color::DecColorState;
 pub use crate::dec::color::LookupTable as DecColorLookupTable;
@@ -86,12 +89,6 @@ pub use crate::dec::udk::ModifierKeyControl;
 use crate::dec::udk::UdkState;
 use crate::dispatch::TerminalAction;
 use crate::drcs::DrcsStore;
-pub use crate::feature::ClipboardPermission;
-pub use crate::feature::ClipboardPermissions;
-pub use crate::feature::FeaturePermissions;
-pub use crate::feature::PermissionPolicy;
-pub use crate::feature::ProgramAllowlist;
-pub use crate::feature::TerminalLimits;
 pub(crate) use crate::feature::apply_status_display_mode;
 pub use crate::graphics::KittyFileRequest;
 pub use crate::image::PlacedImage;
@@ -132,39 +129,6 @@ pub use crate::snapshot::TermSnapshotOutput;
 pub use crate::snapshot::TermSnapshotPublisher;
 pub use crate::snapshot::publish_terminal_snapshot;
 pub use crate::snapshot::terminal_snapshot_buffer;
-
-/// How term41 should handle legacy shell emoji editing compatibility.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
-#[serde(rename_all = "lowercase")]
-pub enum EmojiCompatibilityMode {
-    /// Enable only in a shell-integration command-editing phase.
-    #[default]
-    Auto,
-    /// Always use normal terminal grapheme handling.
-    Off,
-    /// Always use legacy scalar emoji handling.
-    On,
-}
-
-impl EmojiCompatibilityMode {
-    /// Cycle through the modes in the order used by the UI hotkey.
-    pub fn next(self) -> Self {
-        match self {
-            Self::Auto => Self::Off,
-            Self::Off => Self::On,
-            Self::On => Self::Auto,
-        }
-    }
-
-    /// Human-readable lowercase label for logs/UI.
-    pub fn label(self) -> &'static str {
-        match self {
-            Self::Auto => "auto",
-            Self::Off => "off",
-            Self::On => "on",
-        }
-    }
-}
 
 /// Current OSC 133 shell-integration phase.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
@@ -544,13 +508,17 @@ impl Terminal {
         cols: u32,
         rows: u32,
         scrollback_limit: u32,
-        default_status_display: StatusDisplayKind,
+        default_status_display: StatusLineMode,
         feature_permissions: FeaturePermissions,
         limits: TerminalLimits,
         cell_height: u32,
         cell_width: u32,
         palette: ColorPalette,
     ) -> Self {
+        let default_status_display = match default_status_display {
+            StatusLineMode::Off => StatusDisplayKind::None,
+            StatusLineMode::Indicator => StatusDisplayKind::Indicator,
+        };
         let base_palette = palette;
         let dec_color = dec_color_state_from_palette(&base_palette);
         let palette = effective_palette(&base_palette, &dec_color);

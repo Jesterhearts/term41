@@ -512,9 +512,10 @@ fn range_bounds<R: RangeBounds<usize>>(
 
 #[cfg(test)]
 mod tests {
+    use config41::default_bg;
+    use config41::default_fg;
+
     use super::*;
-    use crate::color::default_bg;
-    use crate::color::default_fg;
 
     fn row_text(row: &Row) -> String {
         let mut s = String::new();

@@ -21,6 +21,7 @@ use crate::Viewport;
 use crate::charset;
 use crate::color::apply_sgr_groups;
 use crate::conformance;
+use crate::cursor::DecCusr;
 use crate::dec::r#macro::MacroStore;
 use crate::dec::udk::UdkState;
 use crate::drcs::DrcsStore;
@@ -1738,7 +1739,7 @@ pub(crate) fn csi_apply(
             if style == 0 {
                 *cursor_style = default_cursor_style;
             } else {
-                cursor_style.apply_decscusr(style);
+                DecCusr::apply(style, cursor_style);
             }
         }
         ParsedCsiAction::ScrollLeft { count } => {
@@ -2002,10 +2003,11 @@ pub(crate) fn csi_dispatch(
 
 #[cfg(test)]
 mod tests {
+    use config41::default_bg;
+    use config41::default_fg;
     use palette::Srgb;
 
     use super::*;
-    use crate::color;
     use crate::parser::execute;
     use crate::parser::test_support::*;
 
@@ -2408,12 +2410,12 @@ mod tests {
         feed(b"\x1b[1;7;31;42m", &mut screen, &mut viewport);
         assert!(screen.attrs.contains(CellAttrs::BOLD));
         assert!(screen.attrs.contains(CellAttrs::REVERSE));
-        assert_ne!(screen.fg, color::default_fg());
+        assert_ne!(screen.fg, default_fg());
         // Soft reset.
         feed(b"\x1b[!p", &mut screen, &mut viewport);
         assert_eq!(screen.attrs, CellAttrs::default());
-        assert_eq!(screen.fg, color::default_fg());
-        assert_eq!(screen.bg, color::default_bg());
+        assert_eq!(screen.fg, default_fg());
+        assert_eq!(screen.bg, default_bg());
     }
 
     #[test]
@@ -2677,10 +2679,10 @@ mod tests {
             screen_cols,
             TEST_ROWS,
             100,
-            color::default_fg(),
-            color::default_bg(),
-            color::default_fg(),
-            color::default_bg(),
+            default_fg(),
+            default_bg(),
+            default_fg(),
+            default_bg(),
         );
         let mut viewport = Viewport {
             rows: TEST_ROWS,
@@ -2699,10 +2701,10 @@ mod tests {
             screen_cols,
             TEST_ROWS,
             100,
-            color::default_fg(),
-            color::default_bg(),
-            color::default_fg(),
-            color::default_bg(),
+            default_fg(),
+            default_bg(),
+            default_fg(),
+            default_bg(),
         );
         let mut viewport = Viewport {
             rows: TEST_ROWS,
