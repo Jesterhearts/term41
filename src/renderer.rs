@@ -531,7 +531,9 @@ impl RenderHost {
                 }));
             }
 
-            self.renderer.as_mut().unwrap().advance_background_frame();
+            if !self.active_tab_output_streaming() {
+                self.renderer.as_mut().unwrap().advance_background_frame();
+            }
             self.render_frame();
 
             frames += 1;
@@ -613,7 +615,9 @@ impl RenderHost {
         let Some(renderer) = self.renderer.as_ref() else {
             return Some(Duration::ZERO);
         };
-        if renderer.has_animated_background() || renderer.visual_bell_active() {
+        if renderer.visual_bell_active()
+            || (renderer.has_animated_background() && !self.active_tab_output_streaming())
+        {
             return Some(FRAME_DURATION.saturating_sub(last_frame_duration));
         }
         let tab = self.active_tab()?;
@@ -949,6 +953,11 @@ impl RenderHost {
         self.tabs.iter_mut().find(|t| t.id == self.active_tab_id)
     }
 
+    fn active_tab_output_streaming(&self) -> bool {
+        self.active_tab()
+            .is_some_and(|tab| tab.output_streaming.load(Ordering::Acquire))
+    }
+
     fn tab_bar_visible(&self) -> bool {
         true
     }
@@ -1035,11 +1044,13 @@ impl RenderHost {
         let recorder = RecorderControl::new();
 
         let terminal = Arc::new(Mutex::new(terminal));
+        let output_streaming = Arc::new(AtomicBool::new(false));
         terminal_thread.spawn(
             format!("terminal-{}", id.0),
             terminal.clone(),
             pty_reader,
             self.render_thread_handle.clone(),
+            output_streaming.clone(),
             None,
             Box::new({
                 let recorder = recorder.clone();
@@ -1069,6 +1080,7 @@ impl RenderHost {
         self.tabs.push(Tab {
             id,
             terminal,
+            output_streaming,
             pty,
             window_sync_epoch: self.window_resize_epoch,
             _terminal_thread: terminal_thread,

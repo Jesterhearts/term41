@@ -249,6 +249,7 @@ fn install_log_toast_forwarder(proxy: EventLoopProxy<AppEvent>) {
 struct Tab {
     id: TabId,
     terminal: Arc<Mutex<Terminal>>,
+    output_streaming: Arc<AtomicBool>,
     pty: Pty,
     window_sync_epoch: u64,
     /// Kept alive for its Drop impl which signals the thread to stop.
@@ -2714,12 +2715,14 @@ fn main() {
         config.compatibility.emoji,
     );
     let terminal = Arc::new(Mutex::new(terminal));
+    let output_streaming = Arc::new(AtomicBool::new(false));
 
     terminal_thread.spawn(
         "terminal-0".into(),
         terminal.clone(),
         pty_reader,
         render_thread_handle.clone(),
+        output_streaming.clone(),
         Some(Box::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
         })),
@@ -2763,6 +2766,7 @@ fn main() {
     let tab = Tab {
         id: TabId(0),
         terminal: terminal.clone(),
+        output_streaming,
         pty,
         window_sync_epoch: 0,
         _terminal_thread: terminal_thread,

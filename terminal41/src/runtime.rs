@@ -23,6 +23,7 @@ pub(crate) fn run_terminal_thread(
     mut pty_reader: PtyReader,
     stop: Arc<AtomicBool>,
     render_thread_handle: Arc<OnceLock<Thread>>,
+    output_streaming: Arc<AtomicBool>,
     startup_redraw: Option<Box<dyn Fn() + Send + Sync>>,
     tee_read: Box<dyn Fn(&[u8]) + Send + Sync>,
     deliver_effects: Box<dyn Fn(TerminalEffects) + Send + Sync>,
@@ -57,6 +58,8 @@ pub(crate) fn run_terminal_thread(
             }
         }
 
+        let ended_streaming = output_streaming.swap(hit_budget, Ordering::AcqRel) && !hit_budget;
+
         if did_work && let Some(request_redraw) = startup_redraw.as_ref() {
             request_redraw();
         }
@@ -64,7 +67,8 @@ pub(crate) fn run_terminal_thread(
             deliver_effects(batch_effects);
         }
         let now = Instant::now();
-        if should_unpark_render_thread(did_work, hit_budget, last_streaming_redraw, now)
+        if (ended_streaming
+            || should_unpark_render_thread(did_work, hit_budget, last_streaming_redraw, now))
             && let Some(thread) = render_thread_handle.get()
         {
             thread.unpark();
