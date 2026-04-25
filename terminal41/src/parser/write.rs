@@ -676,19 +676,21 @@ fn write_ascii_chunk(
 ) {
     let end = col + chunk.len();
 
-    let mut idx = col;
-    while idx < end {
-        if row.cells[idx].is_empty() {
-            row.cells[idx - 1] = blank_cell();
-        } else {
-            let width = stored_cell_width(&row.cells[idx]);
-            if width > 1 {
-                for i in idx..idx + width {
-                    row.cells[i] = blank_cell();
+    if row.has_wide_cells {
+        let mut idx = col;
+        while idx < end {
+            if row.cells[idx].is_empty() {
+                row.cells[idx - 1] = blank_cell();
+            } else {
+                let width = stored_cell_width(&row.cells[idx]);
+                if width > 1 {
+                    for i in idx..idx + width {
+                        row.cells[i] = blank_cell();
+                    }
                 }
             }
+            idx += 1;
         }
-        idx += 1;
     }
 
     for (cell, &b) in row.cells[col..col + chunk.len()].iter_mut().zip(chunk) {
@@ -767,10 +769,12 @@ fn write_styled_glyph(
 
     let mut idx = col + 1;
     while idx < col + width {
-        let old_w = stored_cell_width(&row.cells[idx]);
-        if old_w > 1 {
-            for i in idx..idx + old_w {
-                row.cells[i] = blank_cell();
+        if row.has_wide_cells {
+            let old_w = stored_cell_width(&row.cells[idx]);
+            if old_w > 1 {
+                for i in idx..idx + old_w {
+                    row.cells[i] = blank_cell();
+                }
             }
         }
         row.cells[idx] = continuation_cell();
@@ -778,6 +782,9 @@ fn write_styled_glyph(
     }
 
     fill_row_style(row, col, width, style);
+    if width > 1 {
+        row.has_wide_cells = true;
+    }
 }
 
 #[inline(always)]
@@ -1089,6 +1096,9 @@ fn try_extend_row_cell(
     }
 
     row.cells[col] = combined.clone();
+    if combined.width() > 1 {
+        row.has_wide_cells = true;
+    }
     Some(combined)
 }
 

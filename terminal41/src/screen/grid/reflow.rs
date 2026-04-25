@@ -1,6 +1,7 @@
 use crate::screen::grid::Grid;
 use crate::screen::row::LineAttr;
 use crate::screen::row::Row;
+use crate::screen::row::cells_contain_wide;
 
 pub(crate) fn reflow(
     grid: &mut Grid,
@@ -92,8 +93,10 @@ fn shrink(
     while row < grid.rows.len() {
         if grid.rows[row].len() > new_width {
             if grid.rows[row].content_len() > new_width {
+                let cells = grid.rows[row].cells.split_off(new_width as usize);
+                let has_wide_cells = cells_contain_wide(&cells);
                 let overflow = Row {
-                    cells: grid.rows[row].cells.split_off(new_width as usize),
+                    cells,
                     fg: grid.rows[row].fg.split_off(new_width as usize),
                     bg: grid.rows[row].bg.split_off(new_width as usize),
                     attrs: grid.rows[row].attrs.split_off(new_width as usize),
@@ -104,6 +107,7 @@ fn shrink(
                     output_start: false,
                     exit_status: None,
                     line_attr: LineAttr::Normal,
+                    has_wide_cells,
                 };
 
                 grid.rows[row].wrapped = true;

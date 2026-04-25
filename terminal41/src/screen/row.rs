@@ -73,6 +73,9 @@ pub struct Row {
     /// to normal), and ESC#6 (DECDWL, double-width single-height). Cleared
     /// to `Normal` on a full-row wipe (`clear()`).
     pub line_attr: LineAttr,
+    /// Whether this row may contain wide-cell continuation markers. ASCII-only
+    /// rows keep this false so overwrites can skip per-cell grapheme cleanup.
+    pub(crate) has_wide_cells: bool,
 }
 
 impl Row {
@@ -95,6 +98,7 @@ impl Row {
             output_start: false,
             exit_status: None,
             line_attr: LineAttr::Normal,
+            has_wide_cells: false,
         }
     }
 
@@ -172,6 +176,7 @@ impl Row {
         self.clear(fg, bg);
         self.wrapped = false;
         self.line_attr = LineAttr::Normal;
+        self.has_wide_cells = false;
     }
 
     pub(crate) fn clear_range(
@@ -365,6 +370,7 @@ impl Row {
             output_start: false,
             exit_status: None,
             line_attr: LineAttr::Normal,
+            has_wide_cells: cells_contain_wide(&self.cells[left..right_excl]),
         }
     }
 
@@ -388,6 +394,7 @@ impl Row {
         self.underline_color[dst_start..dst_start + copy_len]
             .copy_from_slice(&snap.underline_color[..copy_len]);
         self.links[dst_start..dst_start + copy_len].copy_from_slice(&snap.links[..copy_len]);
+        self.has_wide_cells |= snap.has_wide_cells;
     }
 
     pub(crate) fn has_drawn_cell_at(
@@ -490,6 +497,10 @@ impl Row {
             };
         }
     }
+}
+
+pub(crate) fn cells_contain_wide(cells: &[SmolStr]) -> bool {
+    cells.iter().any(|cell| cell.is_empty())
 }
 
 fn range_bounds<R: RangeBounds<usize>>(
