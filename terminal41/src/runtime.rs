@@ -18,7 +18,7 @@ use crate::publish_terminal_snapshot;
 
 pub(crate) const TERMINAL_BATCH_TIME_BUDGET: std::time::Duration =
     std::time::Duration::from_millis(4);
-pub(crate) const TERMINAL_STREAMING_REDRAW_INTERVAL: Duration = Duration::from_millis(1000 / 30);
+pub(crate) const TERMINAL_STREAMING_REDRAW_INTERVAL: Duration = Duration::from_millis(1000 / 120);
 
 pub(crate) fn run_terminal_thread(
     terminal: Arc<Mutex<Terminal>>,
