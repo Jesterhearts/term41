@@ -622,10 +622,7 @@ impl RenderHost {
         }
         let tab = self.active_tab()?;
         let terminal = tab.terminal.lock();
-        if terminal.active.offset == 0
-            && terminal.active.cursor_visible
-            && terminal.cursor_style.blink
-        {
+        if terminal.active.cursor_visible && terminal.cursor_style.blink {
             Some(r#impl::CURSOR_BLINK_HALF_PERIOD.saturating_sub(last_frame_duration))
         } else {
             None
