@@ -39,6 +39,7 @@ pty-pipe41           = { path = "pty-pipe41" }
 serde                = { version = "1.0.228", features = ["derive"] }
 smol_str             = { version = "0.3.6", features = ["serde"] }
 tracing              = "0.1.44"
+triple_buffer        = "9.0.0"
 unicode-segmentation = "1.13.2"
 unicode-width        = "0.2.2"
 utils41              = { path = "utils41" }

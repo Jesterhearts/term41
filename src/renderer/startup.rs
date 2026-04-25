@@ -46,11 +46,6 @@ use crate::renderer::paint::status_line_label_row;
 
 type StartupGlyphKey = (usize, u16, u8, bool, Option<font41::DrcsGeometryClass>);
 
-pub(crate) struct StartupTab<'a> {
-    pub(crate) label: &'a str,
-    pub(crate) active: bool,
-}
-
 struct CachedBackground {
     width: u32,
     height: u32,
@@ -74,6 +69,7 @@ pub(crate) struct StartupPresenter {
     background: Option<CachedBackground>,
     first_frame: bool,
     terminal_rows: Vec<RowSnapshot>,
+    terminal_row_generations: Vec<u64>,
 }
 
 impl StartupPresenter {
@@ -115,14 +111,16 @@ impl StartupPresenter {
             background: background_path.and_then(|path| load_cached_background(&path)),
             first_frame: true,
             terminal_rows: Vec::new(),
+            terminal_row_generations: Vec::new(),
         })
     }
 
     pub(crate) fn present(
         &mut self,
         window: &Arc<Window>,
-        terminal: &Arc<parking_lot::Mutex<terminal41::Terminal>>,
-        tabs: &[StartupTab<'_>],
+        mut snap: TermSnapshot,
+        visible_images: Vec<VisibleImage>,
+        tabs: &[TabInfo<'_>],
         new_tab_text: SmolStr,
         hovered_button: Option<crate::renderer::TabBarHover>,
         tab_context_menu: Option<&TabContextMenu>,
@@ -138,20 +136,9 @@ impl StartupPresenter {
             return None;
         }
 
-        let frame = {
-            let mut terminal = terminal.lock();
-            let mut snap = terminal41::snapshot_terminal(&mut terminal);
-            let visible_images = terminal41::view::visible_images(
-                &terminal.active,
-                &terminal.viewport,
-                terminal.cell_height(),
-                Instant::now(),
-            )
-            .collect::<Vec<_>>();
-            self.apply_terminal_snapshot_rows(&snap);
-            snap.rows = self.terminal_rows.clone();
-            build_startup_frame(snap, visible_images, *APP_START_TIME.get().unwrap())
-        };
+        self.apply_terminal_snapshot_rows(&snap);
+        snap.rows = self.terminal_rows.clone();
+        let frame = build_startup_frame(snap, visible_images, *APP_START_TIME.get().unwrap());
 
         let mut buffer = match self.surface.buffer_mut() {
             Ok(buffer) => buffer,
@@ -367,6 +354,7 @@ impl StartupPresenter {
             self.terminal_rows = (0..total_rows)
                 .map(|row| blank_startup_row(row as u32, snap.viewport_cols, &snap.palette))
                 .collect();
+            self.terminal_row_generations = vec![u64::MAX; total_rows];
         }
 
         for row in &snap.rows {
@@ -376,8 +364,17 @@ impl StartupPresenter {
                     blank_startup_row(0, snap.viewport_cols, &snap.palette)
                 });
                 self.terminal_rows[idx].screen_row = idx as u32;
+                self.terminal_row_generations.resize(idx + 1, u64::MAX);
+            }
+            if self
+                .terminal_row_generations
+                .get(idx)
+                .is_some_and(|generation| *generation == row.generation)
+            {
+                continue;
             }
             self.terminal_rows[idx] = row.clone();
+            self.terminal_row_generations[idx] = row.generation;
         }
     }
 }
@@ -390,6 +387,7 @@ fn blank_startup_row(
     let cols = cols as usize;
     RowSnapshot {
         screen_row,
+        generation: 0,
         cells: vec![smol_str::SmolStr::new_inline(" "); cols],
         attrs: vec![CellAttrs::default(); cols],
         fg: vec![palette.fg; cols],
@@ -517,7 +515,7 @@ fn paint_tab_bar(
     font_system: &mut FontSystem,
     snap: &TermSnapshot,
     buffer: &mut [u32],
-    tabs: &[StartupTab<'_>],
+    tabs: &[TabInfo<'_>],
     new_tab_text: SmolStr,
     cell_w: i32,
     width: usize,
@@ -840,6 +838,7 @@ fn label_row(
     let len = text.graphemes(true).count();
     RowSnapshot {
         screen_row: 0,
+        generation: 0,
         line_attr: LineAttr::Normal,
         fg: vec![fg; len],
         bg: vec![bg; len],

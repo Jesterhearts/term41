@@ -4098,6 +4098,7 @@ dependencies = [
  "serde",
  "smol_str 0.3.6",
  "tracing",
+ "triple_buffer",
  "unicode-segmentation",
  "unicode-width",
  "utils41",
@@ -4517,6 +4518,15 @@ dependencies = [
  "memchr",
  "nom 8.0.0",
  "petgraph 0.8.3",
+]
+
+[[package]]
+name = "triple_buffer"
+version = "9.0.0"
+source = "registry+https://github.com/rust-lang/crates.io-index"
+checksum = "e875ab7068a75b74f419da453927e05527c36f0001b3c7aad3ce443640683487"
+dependencies = [
+ "crossbeam-utils",
 ]
 
 [[package]]

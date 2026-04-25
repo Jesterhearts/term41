@@ -106,6 +106,7 @@ pub(crate) fn status_line_label_row(
     let len = text.graphemes(true).count();
     RowSnapshot {
         screen_row: 0,
+        generation: 0,
         line_attr: LineAttr::Normal,
         fg: vec![palette.status_line_fg; len],
         bg: vec![palette.status_line_bg; len],
@@ -126,6 +127,38 @@ pub(crate) fn status_line_label_row(
         underline_color: vec![None; len],
         prompt_start: false,
     }
+}
+
+pub(crate) fn local_status_line_row(
+    text: &str,
+    cols: u32,
+    screen_row: u32,
+    generation: u64,
+    palette: &ColorPalette,
+) -> RowSnapshot {
+    let cols = cols as usize;
+    let mut row = RowSnapshot {
+        screen_row,
+        generation,
+        line_attr: LineAttr::Normal,
+        fg: vec![palette.status_line_fg; cols],
+        bg: vec![palette.status_line_bg; cols],
+        attrs: vec![CellAttrs::default(); cols],
+        selected: vec![false; cols],
+        matched: vec![false; cols],
+        active_match: vec![false; cols],
+        cells: vec![smol_str::SmolStr::new_inline(" "); cols],
+        exit_status: None,
+        has_link: vec![false; cols],
+        underline_color: vec![None; cols],
+        prompt_start: false,
+    };
+    for (idx, grapheme) in text.graphemes(true).take(cols).enumerate() {
+        let mut builder = SmolStrBuilder::new();
+        builder.push_str(grapheme);
+        row.cells[idx] = builder.finish();
+    }
+    row
 }
 
 #[cfg(test)]
@@ -184,6 +217,7 @@ fn blank_status_line_row(
 ) -> RowSnapshot {
     RowSnapshot {
         screen_row: 0,
+        generation: 0,
         line_attr: LineAttr::Normal,
         fg: vec![palette.status_line_fg; cols],
         bg: vec![palette.status_line_bg; cols],
@@ -538,6 +572,7 @@ mod tests {
             ..base
         };
         TermSnapshot {
+            generation: 0,
             rows: Vec::new(),
             total_rows: 1,
             viewport_rows: 1,
@@ -551,6 +586,8 @@ mod tests {
             cursor: None,
             cursor_style: CursorStyle::default(),
             screen_reverse: false,
+            synchronized_update_active: false,
+            current_title: None,
             reset_cached_rows: true,
         }
     }
@@ -558,6 +595,7 @@ mod tests {
     fn test_row(palette: &ColorPalette) -> RowSnapshot {
         RowSnapshot {
             screen_row: 0,
+            generation: 0,
             cells: vec![smol_str::SmolStr::new_inline("x")],
             attrs: vec![CellAttrs::BOLD],
             fg: vec![palette.fg],

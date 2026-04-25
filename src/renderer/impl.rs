@@ -1039,6 +1039,7 @@ fn blank_cached_row(
     let cols = cols as usize;
     RowSnapshot {
         screen_row,
+        generation: 0,
         cells: vec![smol_str::SmolStr::new_inline(" "); cols],
         attrs: vec![CellAttrs::default(); cols],
         fg: vec![palette.fg; cols],
@@ -1097,6 +1098,7 @@ pub struct Renderer {
 
     /// Materialized terminal rows reconstructed from dirty row snapshots.
     terminal_rows: Vec<RowSnapshot>,
+    terminal_row_generations: Vec<u64>,
     row_geometry_cache: Vec<Option<CachedRowKey>>,
     terminal_layer: TerminalLayer,
     uploads: RendererUploads,
@@ -1454,6 +1456,7 @@ impl Renderer {
             bell_started: None,
             gutter_enabled,
             terminal_rows: Vec::new(),
+            terminal_row_generations: Vec::new(),
             row_geometry_cache: Vec::new(),
             terminal_layer,
             uploads: RendererUploads::default(),
@@ -1664,10 +1667,12 @@ impl Renderer {
             self.terminal_rows = (0..total_rows)
                 .map(|row| blank_cached_row(row as u32, snap.viewport_cols, &snap.palette))
                 .collect();
+            self.terminal_row_generations = vec![u64::MAX; total_rows];
             self.row_geometry_cache.clear();
             self.row_geometry_cache.resize_with(total_rows, || None);
             self.terminal_layer.needs_full_repaint = true;
         } else if self.row_geometry_cache.len() != total_rows {
+            self.terminal_row_generations.resize(total_rows, u64::MAX);
             self.row_geometry_cache.clear();
             self.row_geometry_cache.resize_with(total_rows, || None);
             self.terminal_layer.needs_full_repaint = true;
@@ -1680,9 +1685,18 @@ impl Renderer {
                     blank_cached_row(0, snap.viewport_cols, &snap.palette)
                 });
                 self.terminal_rows[idx].screen_row = idx as u32;
+                self.terminal_row_generations.resize(idx + 1, u64::MAX);
                 self.row_geometry_cache.resize_with(idx + 1, || None);
             }
+            if self
+                .terminal_row_generations
+                .get(idx)
+                .is_some_and(|generation| *generation == row.generation)
+            {
+                continue;
+            }
             self.terminal_rows[idx] = row.clone();
+            self.terminal_row_generations[idx] = row.generation;
             invalidate_row_cache_with_neighbors(&mut self.row_geometry_cache, idx);
         }
     }
@@ -5006,6 +5020,7 @@ mod tests {
     fn blank_row(cols: usize) -> RowSnapshot {
         RowSnapshot {
             screen_row: 0,
+            generation: 0,
             cells: vec![smol_str::SmolStr::new_inline(" "); cols],
             attrs: vec![CellAttrs::default(); cols],
             fg: vec![Srgb::new(255, 255, 255); cols],
@@ -5027,6 +5042,7 @@ mod tests {
     ) -> TermSnapshot {
         let palette = ColorPalette::default();
         TermSnapshot {
+            generation: 0,
             rows: (0..rows)
                 .map(|row| {
                     let mut snapshot = blank_row(cols as usize);
@@ -5046,6 +5062,8 @@ mod tests {
             cursor: None,
             cursor_style: CursorStyle::default(),
             screen_reverse: false,
+            synchronized_update_active: false,
+            current_title: None,
             reset_cached_rows: true,
         }
     }

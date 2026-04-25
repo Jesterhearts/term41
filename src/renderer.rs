@@ -25,7 +25,6 @@ use terminal41::KittyFlags;
 use terminal41::KittyKeys;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
-use terminal41::host;
 use terminal41::settings;
 use tracing::debug_span;
 use winit::event_loop::EventLoopProxy;
@@ -51,9 +50,10 @@ use crate::config::DEFAULT_SCROLLBACK;
 use crate::keybindings::Action;
 use crate::output_recording::RecorderControl;
 use crate::renderer::r#impl::Renderer;
-use crate::renderer::r#impl::TabInfo;
+pub(crate) use crate::renderer::r#impl::TabInfo;
 use crate::renderer::r#impl::WindowControls;
 pub use crate::renderer::r#impl::compute_gutter_width;
+use crate::renderer::paint::local_status_line_row;
 use crate::scripting::ScriptInput;
 use crate::scripting::ScriptOutput;
 use crate::scripting::ScriptRuntime;
@@ -272,6 +272,7 @@ fn resize_tab_to_grid(
     let pty_rows = {
         let mut terminal = tab.terminal.lock();
         terminal.resize(cols, rows);
+        terminal41::publish_terminal_snapshot(&mut terminal, &tab.snapshot_publisher);
         terminal.viewport.rows
     };
     tab.pty.resize(cols as u16, pty_rows as u16);
@@ -316,6 +317,7 @@ pub struct RenderHost {
     proxy: EventLoopProxy<AppEvent>,
 
     tabs: Vec<Tab>,
+    pending_child_exits: Vec<TabId>,
     active_tab_id: TabId,
     next_tab_id: u64,
     font_system: FontSystem,
@@ -327,6 +329,7 @@ pub struct RenderHost {
     scripts: ScriptRuntime,
     last_script_input: Option<ScriptInput>,
     last_script_status_text: Option<String>,
+    script_status_generation: u64,
     last_script_error: Option<String>,
     last_rendered_tab_id: Option<TabId>,
 
@@ -377,7 +380,6 @@ impl RenderHost {
         config_reload: Arc<AtomicBool>,
         proxy: EventLoopProxy<AppEvent>,
         font_system: FontSystem,
-        tab: Tab,
         config: Config,
         config_path: Option<PathBuf>,
         input_state: Arc<Mutex<InputState>>,
@@ -395,7 +397,8 @@ impl RenderHost {
             child_exit_tx,
             config_reload,
             proxy,
-            tabs: vec![tab],
+            tabs: Vec::new(),
+            pending_child_exits: Vec::new(),
             active_tab_id: TabId(0),
             next_tab_id: 1,
             font_system,
@@ -405,6 +408,7 @@ impl RenderHost {
             scripts,
             last_script_input: None,
             last_script_status_text: None,
+            script_status_generation: 1,
             last_script_error: None,
             last_rendered_tab_id: None,
             window_size: (0, 0),
@@ -424,7 +428,7 @@ impl RenderHost {
     pub fn run(
         &mut self,
         window_rx: mpsc::Receiver<(Arc<Window>, OwnedDisplayHandle)>,
-        startup_release_rx: mpsc::Receiver<()>,
+        startup_release_rx: mpsc::Receiver<Vec<Tab>>,
     ) {
         #[cfg(feature = "software-only")]
         {
@@ -507,7 +511,7 @@ impl RenderHost {
                 });
 
                 let _ = self.proxy.send_event(AppEvent::ReleaseStartupSurface);
-                let _ = startup_release_rx.recv();
+                let startup_tabs = startup_release_rx.recv().ok();
                 // Surface the precedence rule once at startup so the user
                 // isn't confused why their config edit appears to do
                 // nothing — the pasted bg overrides until cleared.
@@ -529,6 +533,9 @@ impl RenderHost {
                         self.config.vsync,
                     )
                 }));
+                if let Some(startup_tabs) = startup_tabs {
+                    self.accept_startup_tabs(startup_tabs);
+                }
             }
 
             if !self.active_tab_output_streaming() {
@@ -596,9 +603,42 @@ impl RenderHost {
         }
     }
 
+    fn accept_startup_tabs(
+        &mut self,
+        startup_tabs: Vec<Tab>,
+    ) {
+        self.tabs = startup_tabs;
+        self.tabs
+            .retain(|tab| !self.pending_child_exits.contains(&tab.id));
+        self.pending_child_exits.clear();
+        if self.tabs.is_empty() {
+            self.sync_input_state();
+            self.sync_active_input_tab();
+            self.should_exit = true;
+            return;
+        }
+        if !self.tabs.iter().any(|tab| tab.id == self.active_tab_id) {
+            self.active_tab_id = self.tabs[0].id;
+        }
+        self.next_tab_id = self
+            .tabs
+            .iter()
+            .map(|tab| tab.id.0)
+            .max()
+            .unwrap_or(0)
+            .saturating_add(1);
+        self.recalculate_grid_size();
+        self.sync_input_state();
+        self.sync_active_input_tab();
+    }
+
     fn drain_child_exit_notifications(&mut self) {
         while let Ok(tab_id) = self.child_exit_rx.try_recv() {
-            self.handle_child_exited(tab_id);
+            if self.tabs.is_empty() {
+                self.pending_child_exits.push(tab_id);
+            } else {
+                self.handle_child_exited(tab_id);
+            }
         }
     }
 
@@ -621,8 +661,8 @@ impl RenderHost {
             return Some(FRAME_DURATION.saturating_sub(last_frame_duration));
         }
         let tab = self.active_tab()?;
-        let terminal = tab.terminal.lock();
-        if terminal.active.cursor_visible && terminal.cursor_style.blink {
+        let snap = tab.snapshot_output.output_buffer();
+        if snap.cursor.is_some() && snap.cursor_style.blink {
             Some(r#impl::CURSOR_BLINK_HALF_PERIOD.saturating_sub(last_frame_duration))
         } else {
             None
@@ -665,13 +705,10 @@ impl RenderHost {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let terminal = tab.terminal.lock();
-        // The compositor doesn't care about IME positioning when the user
-        // has scrolled away from live output, and we don't want to signal
-        // one — clear it so the popup doesn't stick to stale coordinates.
-        if terminal.active.offset != 0 || !terminal.active.cursor_visible {
+        let snap = tab.snapshot_output.output_buffer();
+        let Some((cursor_row, cursor_col)) = snap.cursor else {
             return;
-        }
+        };
 
         let cell_w = self.font_system.cell_width as f32;
         let cell_h = self.font_system.cell_height as f32;
@@ -682,12 +719,10 @@ impl RenderHost {
             .unwrap_or(0) as f32;
         let tab_bar_h = if self.tab_bar_visible() { cell_h } else { 0.0 };
 
-        let cursor = terminal.active.cursor;
-        drop(terminal);
         // Place the area at the row *below* the cursor so the popup doesn't
         // cover the cell the user is about to type into.
-        let x = cursor.col as f32 * cell_w + gutter_px;
-        let y = cursor.row as f32 * cell_h + tab_bar_h;
+        let x = cursor_col as f32 * cell_w + gutter_px;
+        let y = cursor_row as f32 * cell_h + tab_bar_h;
 
         let new_area = (x, y, cell_w, cell_h);
         if self.ime_cursor_area == Some(new_area) {
@@ -1040,6 +1075,8 @@ impl RenderHost {
         };
         let recorder = RecorderControl::new();
 
+        let (snapshot_publisher, snapshot_output) =
+            terminal41::terminal_snapshot_buffer(&mut terminal);
         let terminal = Arc::new(Mutex::new(terminal));
         let output_streaming = Arc::new(AtomicBool::new(false));
         terminal_thread.spawn(
@@ -1048,6 +1085,7 @@ impl RenderHost {
             pty_reader,
             self.render_thread_handle.clone(),
             output_streaming.clone(),
+            snapshot_publisher.clone(),
             None,
             Box::new({
                 let recorder = recorder.clone();
@@ -1070,6 +1108,7 @@ impl RenderHost {
         let _ = self.proxy.send_event(AppEvent::RegisterInputEndpoint {
             tab_id: id,
             terminal: terminal.clone(),
+            snapshot_publisher: snapshot_publisher.clone(),
             writer,
             recorder,
         });
@@ -1077,6 +1116,8 @@ impl RenderHost {
         self.tabs.push(Tab {
             id,
             terminal,
+            snapshot_publisher,
+            snapshot_output,
             output_streaming,
             pty,
             window_sync_epoch: self.window_resize_epoch,
@@ -1191,6 +1232,7 @@ impl RenderHost {
                 cfg.palette.clone(),
             );
             terminal.invalidate_snapshot_rows();
+            terminal41::publish_terminal_snapshot(terminal, &tab.snapshot_publisher);
         }
         self.config.keybindings = cfg.keybindings;
         self.sync_input_state();
@@ -1208,6 +1250,7 @@ impl RenderHost {
         );
         self.last_script_input = None;
         self.last_script_status_text = None;
+        self.script_status_generation = self.script_status_generation.wrapping_add(1).max(1);
         self.last_script_error = None;
         self.last_rendered_tab_id = None;
         self.applied_title = None;
@@ -1314,29 +1357,23 @@ impl RenderHost {
             .position(|t| t.id == self.active_tab_id)
             .expect("active tab must exist");
         let active_tab_id = self.tabs[active_idx].id;
+        self.tabs[active_idx].snapshot_output.update();
         let script_output = self.sync_scripts(active_idx);
         self.sync_window_title(&script_output);
 
-        {
-            let guard = self.tabs[active_idx].terminal.lock();
-            let synced = host::synchronized_update_active(guard.modes.synchronized_update_since);
-            if synced {
-                return;
-            }
+        let mut snap = self.tabs[active_idx].snapshot_output.read().clone();
+        if snap.synchronized_update_active {
+            return;
         }
 
-        // Collect owned tab titles under brief per-tab locks before
-        // borrowing the renderer. Two-pass so the MutexGuards are dropped
-        // before we enter the render call.
         let tab_titles: Vec<(String, bool)> = if self.tab_bar_visible() {
             self.tabs
-                .iter()
+                .iter_mut()
                 .enumerate()
                 .map(|(idx, t)| {
                     let terminal_title = t
-                        .terminal
-                        .lock()
-                        .metadata
+                        .snapshot_output
+                        .read()
                         .current_title
                         .clone()
                         .unwrap_or_else(|| "Shell".to_owned());
@@ -1399,26 +1436,10 @@ impl RenderHost {
             tab_menu: tab_context_menu.as_ref().map(|m| (m.x, m.hovered_item)),
         };
 
-        // Snapshot terminal state under a brief lock, then release it so
-        // the terminal thread can continue processing PTY data while the
-        // renderer does shaping, glyph caching, and image-atlas work.
-        let (snap, visible_images) = {
+        let visible_images = {
             debug_span!("reading terminal state").in_scope(|| {
-                let mut terminal = self.tabs[active_idx].terminal.lock();
-                let force_status_line = self.last_script_status_text != script_output.status_text;
-                let force_all_rows = self.last_rendered_tab_id != Some(active_tab_id);
-
-                let snap = debug_span!("taking snapshot").in_scope(|| {
-                    terminal41::snapshot_terminal_with_options(
-                        &mut terminal,
-                        terminal41::SnapshotOptions {
-                            indicator_status_text: script_output.status_text.as_deref(),
-                            force_status_line,
-                            force_all_rows,
-                        },
-                    )
-                });
-                let visible_images = debug_span!("recording visible images").in_scope(|| {
+                let terminal = self.tabs[active_idx].terminal.lock();
+                debug_span!("recording visible images").in_scope(|| {
                     terminal41::view::visible_images(
                         &terminal.active,
                         &terminal.viewport,
@@ -1426,10 +1447,20 @@ impl RenderHost {
                         Instant::now(),
                     )
                     .collect::<Vec<_>>()
-                });
-                (snap, visible_images)
+                })
             })
         };
+        if self.last_rendered_tab_id != Some(active_tab_id) {
+            snap.reset_cached_rows = true;
+        }
+        if self.last_script_status_text != script_output.status_text {
+            self.script_status_generation = self.script_status_generation.wrapping_add(1).max(1);
+        }
+        apply_script_status_line(
+            &mut snap,
+            script_output.status_text.as_deref(),
+            self.script_status_generation,
+        );
         self.last_script_status_text = script_output.status_text.clone();
         self.last_rendered_tab_id = Some(active_tab_id);
         renderer.render(
@@ -1458,7 +1489,7 @@ impl RenderHost {
         let base = script_output
             .title
             .clone()
-            .or_else(|| tab.terminal.lock().metadata.current_title.clone());
+            .or_else(|| tab.snapshot_output.output_buffer().current_title.clone());
         let want = if self.tabs.len() > 1 {
             let idx = self
                 .tabs
@@ -1509,7 +1540,11 @@ impl RenderHost {
     ) -> ScriptInput {
         let terminal = self.tabs[active_idx].terminal.lock();
         ScriptInput {
-            tab_title: terminal.metadata.current_title.clone(),
+            tab_title: self.tabs[active_idx]
+                .snapshot_output
+                .output_buffer()
+                .current_title
+                .clone(),
             cwd: terminal
                 .metadata
                 .current_directory
@@ -1556,8 +1591,10 @@ impl RenderHost {
     fn sync_input_state(&mut self) {
         let mut input_state = self.input_state.lock();
         input_state.keybindings = self.config.keybindings.clone();
-        input_state.tab_count = self.tabs.len();
-        input_state.tab_order = self.tabs.iter().map(|tab| tab.id).collect();
+        if !self.tabs.is_empty() {
+            input_state.tab_count = self.tabs.len();
+            input_state.tab_order = self.tabs.iter().map(|tab| tab.id).collect();
+        }
         input_state.cell_width = self.font_system.cell_width;
         input_state.cell_height = self.font_system.cell_height;
         input_state.gutter_width = if self.config.gutter {
@@ -2158,6 +2195,35 @@ fn clear_pasted_backgrounds() {
 /// "does a pasted file exist?" is the whole question.
 pub(crate) fn effective_bg_path(config: &Config) -> Option<PathBuf> {
     find_pasted_background().or_else(|| config.background_image.clone())
+}
+
+fn apply_script_status_line(
+    snap: &mut terminal41::TermSnapshot,
+    status_text: Option<&str>,
+    generation: u64,
+) {
+    let Some(text) = status_text else {
+        return;
+    };
+    let Some(screen_row) = snap.status_line_row else {
+        return;
+    };
+    let row = local_status_line_row(
+        text,
+        snap.viewport_cols,
+        screen_row,
+        generation,
+        &snap.palette,
+    );
+    if let Some(existing) = snap
+        .rows
+        .iter_mut()
+        .find(|row| row.screen_row == screen_row)
+    {
+        *existing = row;
+    } else {
+        snap.rows.push(row);
+    }
 }
 
 /// Encode an RGBA byte buffer to PNG at `path`. Always RGBA8 — the

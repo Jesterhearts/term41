@@ -29,7 +29,6 @@ use pty_pipe41::Pty;
 use pty_pipe41::PtyWriter;
 use renderer::RenderHost;
 use renderer::startup::StartupPresenter;
-use renderer::startup::StartupTab;
 use smol_str::SmolStr;
 use terminal41::ClipboardRequest;
 use terminal41::HostInput;
@@ -39,6 +38,8 @@ use terminal41::KittyFileRequest;
 use terminal41::MouseButton as TermMouseButton;
 use terminal41::MouseEventKind;
 use terminal41::MouseModifiers;
+use terminal41::TermSnapshotOutput;
+use terminal41::TermSnapshotPublisher;
 use terminal41::Terminal;
 use terminal41::TerminalEffects;
 use terminal41::TerminalThread;
@@ -140,6 +141,7 @@ enum AppEvent {
     RegisterInputEndpoint {
         tab_id: TabId,
         terminal: Arc<Mutex<Terminal>>,
+        snapshot_publisher: TermSnapshotPublisher,
         writer: PtyWriter,
         recorder: RecorderControl,
     },
@@ -249,6 +251,8 @@ fn install_log_toast_forwarder(proxy: EventLoopProxy<AppEvent>) {
 struct Tab {
     id: TabId,
     terminal: Arc<Mutex<Terminal>>,
+    snapshot_publisher: TermSnapshotPublisher,
+    snapshot_output: TermSnapshotOutput,
     output_streaming: Arc<AtomicBool>,
     pty: Pty,
     window_sync_epoch: u64,
@@ -258,6 +262,7 @@ struct Tab {
 
 struct InputEndpoint {
     terminal: Arc<Mutex<Terminal>>,
+    snapshot_publisher: TermSnapshotPublisher,
     writer: PtyWriter,
     recorder: RecorderControl,
 }
@@ -311,8 +316,9 @@ pub(crate) struct InputState {
 struct WindowHost {
     window: Option<Arc<Window>>,
     startup_presenter: Option<StartupPresenter>,
+    startup_tabs: Vec<Tab>,
     startup_next_redraw: Option<Instant>,
-    startup_release_tx: Option<mpsc::SyncSender<()>>,
+    startup_release_tx: Option<mpsc::SyncSender<Vec<Tab>>>,
     input_endpoints: HashMap<TabId, InputEndpoint>,
     active_input_tab: Option<TabId>,
     input_state: Arc<Mutex<InputState>>,
@@ -365,16 +371,15 @@ impl WindowHost {
         self.input_endpoints.get_mut(&tab_id)
     }
 
-    fn startup_tab_titles(&self) -> Vec<(String, bool)> {
+    fn startup_tab_titles(&mut self) -> Vec<(String, bool)> {
         let tab_order = self.input_state.lock().tab_order.clone();
         let mut titles: Vec<(String, bool)> = tab_order
             .iter()
             .filter_map(|tab_id| {
-                let target = self.input_endpoints.get(tab_id)?;
-                let title = target
-                    .terminal
-                    .lock()
-                    .metadata
+                let tab = self.startup_tabs.iter_mut().find(|tab| tab.id == *tab_id)?;
+                let title = tab
+                    .snapshot_output
+                    .read()
                     .current_title
                     .clone()
                     .unwrap_or_else(|| "Shell".to_owned());
@@ -384,12 +389,11 @@ impl WindowHost {
 
         if titles.is_empty()
             && let Some(tab_id) = self.active_input_tab
-            && let Some(target) = self.input_endpoints.get(&tab_id)
+            && let Some(tab) = self.startup_tabs.iter_mut().find(|tab| tab.id == tab_id)
         {
-            let title = target
-                .terminal
-                .lock()
-                .metadata
+            let title = tab
+                .snapshot_output
+                .read()
                 .current_title
                 .clone()
                 .unwrap_or_else(|| "Shell".to_owned());
@@ -422,22 +426,32 @@ impl WindowHost {
         let Some(tab_id) = self.active_input_tab else {
             return false;
         };
-        let Some(terminal) = self
-            .input_endpoints
-            .get(&tab_id)
-            .map(|target| target.terminal.clone())
+        let Some(active_startup_tab_idx) =
+            self.startup_tabs.iter().position(|tab| tab.id == tab_id)
         else {
             return false;
         };
 
         let tab_titles = self.startup_tab_titles();
-        let tabs: Vec<StartupTab<'_>> = tab_titles
+        let tabs: Vec<renderer::TabInfo<'_>> = tab_titles
             .iter()
-            .map(|(label, active)| StartupTab {
+            .map(|(label, active)| renderer::TabInfo {
                 label,
                 active: *active,
             })
             .collect();
+        let active_startup_tab = &mut self.startup_tabs[active_startup_tab_idx];
+        let snap = active_startup_tab.snapshot_output.read().clone();
+        let visible_images = {
+            let terminal = active_startup_tab.terminal.lock();
+            terminal41::view::visible_images(
+                &terminal.active,
+                &terminal.viewport,
+                terminal.cell_height(),
+                Instant::now(),
+            )
+            .collect::<Vec<_>>()
+        };
         let (hovered_button, tab_context_menu, gutter_popup) = self.startup_interaction_snapshot();
         let maximized = window.is_maximized();
         let Some(presenter) = self.startup_presenter.as_mut() else {
@@ -446,7 +460,8 @@ impl WindowHost {
 
         let delay = presenter.present(
             window,
-            &terminal,
+            snap,
+            visible_images,
             &tabs,
             self.new_tab_text.clone(),
             hovered_button,
@@ -534,6 +549,7 @@ impl WindowHost {
     }
 
     fn notify_interaction_changed(&mut self) {
+        self.publish_active_input_snapshot();
         let _ = self.event_tx.push(RenderEvent::None);
         if let Some(thread) = self.render_thread_handle.get() {
             thread.unpark();
@@ -543,6 +559,17 @@ impl WindowHost {
         {
             window.request_redraw();
         }
+    }
+
+    fn publish_active_input_snapshot(&mut self) {
+        let Some(tab_id) = self.active_input_tab else {
+            return;
+        };
+        let Some(target) = self.input_endpoints.get(&tab_id) else {
+            return;
+        };
+        let mut terminal = target.terminal.lock();
+        terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
     }
 
     fn schedule_startup_redraw(
@@ -795,7 +822,9 @@ impl WindowHost {
         }
         let _ = target.writer.write(&host_bytes);
         if reset_viewport {
-            view::reset_viewport(&mut target.terminal.lock().active);
+            let mut terminal = target.terminal.lock();
+            view::reset_viewport(&mut terminal.active);
+            terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
         }
     }
 
@@ -806,7 +835,9 @@ impl WindowHost {
     ) {
         let effects = {
             let mut terminal = target.terminal.lock();
-            apply_host_input(&mut terminal, input)
+            let effects = apply_host_input(&mut terminal, input);
+            terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
+            effects
         };
         Self::write_host_bytes(target, effects.host_bytes, reset_viewport);
     }
@@ -875,7 +906,12 @@ impl WindowHost {
         };
         let host_bytes = {
             let mut terminal = target.terminal.lock();
-            terminal41::io::clipboard::apply_clipboard_request(&mut terminal.clipboard, request)
+            let host_bytes = terminal41::io::clipboard::apply_clipboard_request(
+                &mut terminal.clipboard,
+                request,
+            );
+            terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
+            host_bytes
         };
         Self::write_host_bytes(target, host_bytes, false);
     }
@@ -909,10 +945,12 @@ impl WindowHost {
         };
         let effects = {
             let mut terminal = target.terminal.lock();
-            match decision {
+            let effects = match decision {
                 PermissionDecision::Allow => terminal.apply_kitty_file_request(request),
                 PermissionDecision::Deny => terminal.deny_kitty_file_request(request),
-            }
+            };
+            terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
+            effects
         };
         Self::write_host_bytes(target, effects.host_bytes, false);
     }
@@ -2255,7 +2293,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 self.startup_presenter = None;
                 self.startup_next_redraw = None;
                 if let Some(tx) = self.startup_release_tx.take() {
-                    let _ = tx.send(());
+                    let _ = tx.send(std::mem::take(&mut self.startup_tabs));
                 }
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
@@ -2265,6 +2303,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             AppEvent::RegisterInputEndpoint {
                 tab_id,
                 terminal,
+                snapshot_publisher,
                 writer,
                 recorder,
             } => {
@@ -2272,6 +2311,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     tab_id,
                     InputEndpoint {
                         terminal,
+                        snapshot_publisher,
                         writer,
                         recorder,
                     },
@@ -2279,6 +2319,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
             AppEvent::RemoveInputEndpoint(tab_id) => {
                 self.input_endpoints.remove(&tab_id);
+                self.startup_tabs.retain(|tab| tab.id != tab_id);
             }
             AppEvent::SetActiveInputTab(tab_id) => {
                 self.active_input_tab = tab_id;
@@ -2714,6 +2755,7 @@ fn main() {
         &mut terminal.emoji_compatibility_mode,
         config.compatibility.emoji,
     );
+    let (snapshot_publisher, snapshot_output) = terminal41::terminal_snapshot_buffer(&mut terminal);
     let terminal = Arc::new(Mutex::new(terminal));
     let output_streaming = Arc::new(AtomicBool::new(false));
 
@@ -2723,6 +2765,7 @@ fn main() {
         pty_reader,
         render_thread_handle.clone(),
         output_streaming.clone(),
+        snapshot_publisher.clone(),
         Some(Box::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
         })),
@@ -2766,6 +2809,8 @@ fn main() {
     let tab = Tab {
         id: TabId(0),
         terminal: terminal.clone(),
+        snapshot_publisher: snapshot_publisher.clone(),
+        snapshot_output,
         output_streaming,
         pty,
         window_sync_epoch: 0,
@@ -2795,7 +2840,6 @@ fn main() {
                 config_reload_,
                 render_proxy,
                 font_system,
-                tab,
                 config,
                 config_path,
                 input_state_for_render,
@@ -2813,12 +2857,14 @@ fn main() {
     let mut host = WindowHost {
         window: None,
         startup_presenter: None,
+        startup_tabs: vec![tab],
         startup_next_redraw: None,
         startup_release_tx: Some(startup_release_tx),
         input_endpoints: HashMap::from([(
             TabId(0),
             InputEndpoint {
                 terminal: terminal.clone(),
+                snapshot_publisher: snapshot_publisher.clone(),
                 writer: pty_writer,
                 recorder: initial_recorder,
             },

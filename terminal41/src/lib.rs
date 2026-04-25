@@ -125,11 +125,13 @@ use crate::selection::Selection;
 use crate::selection::search::SearchState;
 pub use crate::snapshot::RowSnapshot;
 pub use crate::snapshot::SearchSnapshot;
-pub use crate::snapshot::SnapshotOptions;
 use crate::snapshot::SnapshotState;
 pub use crate::snapshot::TermSnapshot;
-pub use crate::snapshot::snapshot_terminal;
-pub use crate::snapshot::snapshot_terminal_with_options;
+pub use crate::snapshot::TermSnapshotInput;
+pub use crate::snapshot::TermSnapshotOutput;
+pub use crate::snapshot::TermSnapshotPublisher;
+pub use crate::snapshot::publish_terminal_snapshot;
+pub use crate::snapshot::terminal_snapshot_buffer;
 
 /// How term41 should handle legacy shell emoji editing compatibility.
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Default, serde::Deserialize)]
@@ -1217,6 +1219,7 @@ impl TerminalThread {
         pty_reader: PtyReader,
         render_thread_handle: Arc<OnceLock<Thread>>,
         output_streaming: Arc<AtomicBool>,
+        snapshot_publisher: TermSnapshotPublisher,
         startup_redraw: Option<Box<dyn Fn() + Send + Sync>>,
         tee_read: Box<dyn Fn(&[u8]) + Send + Sync>,
         deliver_effects: Box<dyn Fn(TerminalEffects) + Send + Sync>,
@@ -1241,6 +1244,7 @@ impl TerminalThread {
                     stop,
                     render_thread_handle,
                     output_streaming,
+                    snapshot_publisher,
                     startup_redraw,
                     tee_read,
                     deliver_effects,

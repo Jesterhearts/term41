@@ -1,5 +1,8 @@
+use std::sync::Arc;
+
 use font41::attrs::CellAttrs;
 use palette::Srgb;
+use parking_lot::Mutex;
 use smol_str::SmolStrBuilder;
 use tracing::debug_span;
 use unicode_segmentation::UnicodeSegmentation;
@@ -9,6 +12,7 @@ use crate::ColorPalette;
 use crate::LineAttr;
 use crate::StatusDisplayKind;
 use crate::Terminal;
+use crate::host;
 use crate::selection::is_cell_active_match;
 use crate::selection::is_cell_match;
 use crate::selection::is_cell_selected;
@@ -16,13 +20,15 @@ use crate::selection::search_active;
 use crate::selection::search_state;
 use crate::view;
 
-/// Per-row snapshot of terminal state. Dirty snapshots include only rows
-/// whose visible row index is named by [`screen_row`].
+/// Per-row snapshot of terminal state.
 #[derive(Debug, Clone)]
 pub struct RowSnapshot {
     /// Row index in the rendered terminal surface. Visible terminal rows start
     /// at 0; a visible status line uses `viewport_rows`.
     pub screen_row: u32,
+    /// Monotonic generation of this row. Renderers can skip rows whose
+    /// generation matches the last generation they consumed.
+    pub generation: u64,
     pub cells: Vec<smol_str::SmolStr>,
     pub attrs: Vec<CellAttrs>,
     pub fg: Vec<Srgb<u8>>,
@@ -48,11 +54,12 @@ pub struct SearchSnapshot {
 }
 
 /// All terminal state needed for one render frame, captured under the lock.
-///
-/// `rows` contains row updates rather than the entire viewport. Consumers keep
-/// their previous row cache and replace entries by `RowSnapshot::screen_row`.
 #[derive(Debug, Clone)]
 pub struct TermSnapshot {
+    /// Monotonic generation of any renderer-visible terminal change.
+    pub generation: u64,
+    /// Every row in the visible viewport, plus the visible status line when
+    /// present.
     pub rows: Vec<RowSnapshot>,
     pub total_rows: u32,
     pub viewport_rows: u32,
@@ -69,39 +76,52 @@ pub struct TermSnapshot {
     /// DECSCNM — screen-wide reverse video. When true, default fg/bg are
     /// swapped and per-cell REVERSE is XORed with this.
     pub screen_reverse: bool,
+    pub synchronized_update_active: bool,
+    pub current_title: Option<String>,
     /// True when the consumer should discard any cached rows before applying
     /// this snapshot.
     pub reset_cached_rows: bool,
 }
 
-#[derive(Debug, Clone, Copy, Default)]
-pub struct SnapshotOptions<'a> {
-    pub indicator_status_text: Option<&'a str>,
-    pub force_status_line: bool,
-    pub force_all_rows: bool,
-}
+pub type TermSnapshotInput = triple_buffer::Input<TermSnapshot>;
+pub type TermSnapshotOutput = triple_buffer::Output<TermSnapshot>;
+pub type TermSnapshotPublisher = Arc<Mutex<TermSnapshotInput>>;
 
-/// Dirty-row state for terminal snapshots.
+/// Row-generation state for terminal snapshots.
 ///
-/// Keep row dirtiness in this single sidecar vector rather than on `Row`
-/// itself.
+/// Keep renderer invalidation in this single sidecar vector rather than on
+/// `Row` itself.
 #[derive(Debug, Default)]
 pub(crate) struct SnapshotState {
-    dirty_rows: Vec<bool>,
-    all_dirty: bool,
+    row_generations: Vec<u64>,
+    generation: u64,
     shape: Option<SnapshotShape>,
 }
 
 impl SnapshotState {
+    fn next_generation(&mut self) -> u64 {
+        self.generation = self.generation.wrapping_add(1).max(1);
+        self.generation
+    }
+
     pub(crate) fn mark_row(
         &mut self,
         row: u32,
     ) {
+        let generation = self.next_generation();
+        self.mark_row_with_generation(row, generation);
+    }
+
+    fn mark_row_with_generation(
+        &mut self,
+        row: u32,
+        generation: u64,
+    ) {
         let idx = row as usize;
-        if idx >= self.dirty_rows.len() {
-            self.dirty_rows.resize(idx + 1, false);
+        if idx >= self.row_generations.len() {
+            self.row_generations.resize(idx + 1, 0);
         }
-        self.dirty_rows[idx] = true;
+        self.row_generations[idx] = generation;
     }
 
     pub(crate) fn mark_rows(
@@ -109,15 +129,16 @@ impl SnapshotState {
         start: u32,
         end: u32,
     ) {
+        let generation = self.next_generation();
         for row in start.min(end)..=start.max(end) {
-            self.mark_row(row);
+            self.mark_row_with_generation(row, generation);
         }
     }
 
     pub(crate) fn mark_all(&mut self) {
-        self.all_dirty = true;
-        for dirty in &mut self.dirty_rows {
-            *dirty = true;
+        let generation = self.next_generation();
+        for row_generation in &mut self.row_generations {
+            *row_generation = generation;
         }
     }
 }
@@ -130,16 +151,23 @@ struct SnapshotShape {
     status_line_row: Option<u32>,
 }
 
-/// Snapshot the terminal's visible state under the lock.
-pub fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
-    snapshot_terminal_with_options(terminal, SnapshotOptions::default())
+pub fn terminal_snapshot_buffer(
+    terminal: &mut Terminal
+) -> (TermSnapshotPublisher, TermSnapshotOutput) {
+    let (input, output) = triple_buffer::triple_buffer(&snapshot_terminal(terminal));
+    (Arc::new(Mutex::new(input)), output)
 }
 
-/// Snapshot the terminal's visible state with renderer-owned overrides.
-pub fn snapshot_terminal_with_options(
+pub fn publish_terminal_snapshot(
     terminal: &mut Terminal,
-    options: SnapshotOptions<'_>,
-) -> TermSnapshot {
+    publisher: &TermSnapshotPublisher,
+) {
+    let mut input = publisher.lock();
+    input.write(snapshot_terminal(terminal));
+}
+
+/// Snapshot the terminal's visible state under the lock.
+pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
     let vp_rows = terminal.viewport.rows;
     let vp_cols = terminal.viewport.cols;
     let search_active = search_active(&terminal.search);
@@ -151,39 +179,29 @@ pub fn snapshot_terminal_with_options(
         viewport_cols: vp_cols,
         status_line_row,
     };
-    let reset_cached_rows = options.force_all_rows || terminal.snapshot.shape != Some(shape);
+    let reset_cached_rows = terminal.snapshot.shape != Some(shape);
     if reset_cached_rows {
-        terminal.snapshot.dirty_rows = vec![true; total_rows as usize];
+        let generation = terminal.snapshot.next_generation();
+        terminal.snapshot.row_generations = vec![generation; total_rows as usize];
         terminal.snapshot.shape = Some(shape);
     } else {
         ensure_snapshot_len(&mut terminal.snapshot, total_rows as usize);
-        if terminal.snapshot.all_dirty {
-            terminal.snapshot.dirty_rows.fill(true);
-        }
     }
-    terminal.snapshot.all_dirty = false;
 
     let mut rows = Vec::new();
-    let dirty_visible_rows: Vec<_> = (0..vp_rows)
-        .filter(|&row| take_dirty_row(&mut terminal.snapshot, row))
-        .collect();
-    let dirty_status_row = status_line_row
-        .map(|row| {
-            let terminal_dirty = take_dirty_row(&mut terminal.snapshot, row);
-            (row, terminal_dirty || options.force_status_line)
-        })
-        .filter(|(_, dirty)| *dirty)
-        .map(|(row, _)| row);
-
-    debug_span!("copying dirty rows").in_scope(|| {
-        for row in dirty_visible_rows {
-            rows.push(snapshot_visible_row(terminal, row));
+    debug_span!("copying visible rows").in_scope(|| {
+        for row in 0..vp_rows {
+            let generation = row_generation(&terminal.snapshot, row);
+            rows.push(snapshot_visible_row(terminal, row, generation));
         }
     });
 
-    if dirty_status_row.is_some()
-        && let Some(status_row) =
-            snapshot_status_line_row(terminal, vp_cols, options.indicator_status_text)
+    if status_line_row.is_some()
+        && let Some(status_row) = snapshot_status_line_row(
+            terminal,
+            vp_cols,
+            row_generation(&terminal.snapshot, vp_rows),
+        )
     {
         rows.push(status_row);
     }
@@ -205,6 +223,7 @@ pub fn snapshot_terminal_with_options(
     };
 
     TermSnapshot {
+        generation: terminal.snapshot.generation,
         rows,
         total_rows,
         viewport_rows: vp_rows,
@@ -218,6 +237,10 @@ pub fn snapshot_terminal_with_options(
         cursor,
         cursor_style: terminal.cursor_style,
         screen_reverse: terminal.modes.screen_reverse,
+        synchronized_update_active: host::synchronized_update_active(
+            terminal.modes.synchronized_update_since,
+        ),
+        current_title: terminal.metadata.current_title.clone(),
         reset_cached_rows,
     }
 }
@@ -226,24 +249,23 @@ fn ensure_snapshot_len(
     snapshot: &mut SnapshotState,
     len: usize,
 ) {
-    if len > snapshot.dirty_rows.len() {
-        snapshot.dirty_rows.resize(len, snapshot.all_dirty);
+    if len > snapshot.row_generations.len() {
+        snapshot.row_generations.resize(len, snapshot.generation);
     }
 }
 
-fn take_dirty_row(
-    snapshot: &mut SnapshotState,
+fn row_generation(
+    snapshot: &SnapshotState,
     screen_row: u32,
-) -> bool {
+) -> u64 {
     let idx = screen_row as usize;
-    let dirty = snapshot.dirty_rows[idx];
-    snapshot.dirty_rows[idx] = false;
-    dirty
+    snapshot.row_generations[idx]
 }
 
 fn snapshot_visible_row(
     terminal: &Terminal,
     row: u32,
+    generation: u64,
 ) -> RowSnapshot {
     let grid_row = view::visible_row(&terminal.active, &terminal.viewport, row);
     let is_double = !matches!(grid_row.line_attr, LineAttr::Normal);
@@ -255,6 +277,7 @@ fn snapshot_visible_row(
 
     RowSnapshot {
         screen_row: row,
+        generation,
         cells: grid_row.cells.clone(),
         attrs: grid_row.attrs.clone(),
         fg: grid_row.fg.clone(),
@@ -303,20 +326,13 @@ fn snapshot_visible_row(
 fn snapshot_status_line_row(
     terminal: &Terminal,
     vp_cols: u32,
-    indicator_status_text: Option<&str>,
+    generation: u64,
 ) -> Option<RowSnapshot> {
     if view::status_display_kind(&terminal.active) == StatusDisplayKind::Indicator {
-        let default_text;
-        let text = match indicator_status_text {
-            Some(text) => text,
-            None => {
-                default_text = view::indicator_status_text(&terminal.metadata, &terminal.active)
-                    .unwrap_or_default();
-                &default_text
-            }
-        };
+        let text =
+            view::indicator_status_text(&terminal.metadata, &terminal.active).unwrap_or_default();
         return Some(status_line_indicator_row(
-            text,
+            &text,
             UdkIndicator {
                 enabled: terminal.udk_feature_enabled(),
                 locked: terminal.udks_locked(),
@@ -330,11 +346,13 @@ fn snapshot_status_line_row(
             vp_cols,
             &terminal.palette,
             terminal.viewport.rows,
+            generation,
         ));
     }
     let grid_row = view::status_line_row(&terminal.active)?;
     Some(RowSnapshot {
         screen_row: terminal.viewport.rows,
+        generation,
         cells: grid_row.cells.clone(),
         attrs: grid_row.attrs.clone(),
         fg: grid_row.fg.clone(),
@@ -362,8 +380,10 @@ fn status_line_indicator_row(
     cols: u32,
     palette: &ColorPalette,
     screen_row: u32,
+    generation: u64,
 ) -> RowSnapshot {
     let mut row = blank_status_line_row(cols as usize, palette, screen_row);
+    row.generation = generation;
     let right = format_udk_indicator(udks);
     let left_graphemes: Vec<_> = text.graphemes(true).collect();
     let right_graphemes: Vec<_> = right.graphemes(true).collect();
@@ -405,6 +425,7 @@ fn blank_status_line_row(
 ) -> RowSnapshot {
     RowSnapshot {
         screen_row,
+        generation: 0,
         line_attr: LineAttr::Normal,
         fg: vec![palette.status_line_fg; cols],
         bg: vec![palette.status_line_bg; cols],
@@ -536,56 +557,47 @@ mod tests {
     }
 
     #[test]
-    fn unchanged_snapshot_contains_no_row_updates() {
+    fn unchanged_snapshot_keeps_row_generations() {
         let mut terminal = terminal();
-        let _ = snapshot_terminal(&mut terminal);
+        let first = snapshot_terminal(&mut terminal);
 
         let snap = snapshot_terminal(&mut terminal);
 
         assert!(!snap.reset_cached_rows);
-        assert!(snap.rows.is_empty());
-    }
-
-    #[test]
-    fn forced_all_rows_resets_cached_rows_and_snapshots_every_row() {
-        let mut terminal = terminal();
-        let _ = snapshot_terminal(&mut terminal);
-
-        let snap = snapshot_terminal_with_options(
-            &mut terminal,
-            SnapshotOptions {
-                force_all_rows: true,
-                ..SnapshotOptions::default()
-            },
-        );
-
-        assert!(snap.reset_cached_rows);
         assert_eq!(snap.rows.len(), snap.total_rows as usize);
         assert_eq!(
             snap.rows
                 .iter()
-                .map(|row| row.screen_row)
+                .map(|row| row.generation)
                 .collect::<Vec<_>>(),
-            (0..snap.total_rows).collect::<Vec<_>>()
+            first
+                .rows
+                .iter()
+                .map(|row| row.generation)
+                .collect::<Vec<_>>()
         );
     }
 
     #[test]
-    fn text_write_snapshots_only_dirty_cursor_row() {
+    fn text_write_bumps_only_dirty_cursor_row_generation() {
         let mut terminal = terminal();
-        let _ = snapshot_terminal(&mut terminal);
+        let first = snapshot_terminal(&mut terminal);
 
         TerminalProcessor::new().process_bytes(&mut terminal, b"A");
         let snap = snapshot_terminal(&mut terminal);
 
         assert!(!snap.reset_cached_rows);
-        assert_eq!(snap.rows.len(), 1);
+        assert_eq!(snap.rows.len(), snap.total_rows as usize);
         assert_eq!(snap.rows[0].screen_row, 0);
         assert_eq!(snap.rows[0].cells[0].as_str(), "A");
+        assert_ne!(snap.rows[0].generation, first.rows[0].generation);
+        for row in 1..snap.rows.len() {
+            assert_eq!(snap.rows[row].generation, first.rows[row].generation);
+        }
     }
 
     #[test]
-    fn forced_indicator_status_override_snapshots_status_row() {
+    fn indicator_status_snapshots_status_row() {
         let mut terminal = Terminal::new(
             20,
             3,
@@ -605,19 +617,9 @@ mod tests {
             &mut terminal.default_status_display,
             StatusDisplayKind::Indicator,
         );
-        let _ = snapshot_terminal(&mut terminal);
+        let snap = snapshot_terminal(&mut terminal);
 
-        let snap = snapshot_terminal_with_options(
-            &mut terminal,
-            SnapshotOptions {
-                indicator_status_text: Some("lua status"),
-                force_status_line: true,
-                force_all_rows: false,
-            },
-        );
-
-        assert_eq!(snap.rows.len(), 1);
-        assert_eq!(snap.rows[0].screen_row, terminal.viewport.rows);
-        assert_eq!(snap.rows[0].cells[..10].concat(), "lua status");
+        assert_eq!(snap.rows.len(), snap.total_rows as usize);
+        assert_eq!(snap.rows.last().unwrap().screen_row, terminal.viewport.rows);
     }
 }
