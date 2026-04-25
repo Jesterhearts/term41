@@ -754,11 +754,11 @@ fn write_styled_glyph(
     s: &SmolStr,
 ) {
     let old_w = stored_cell_width(&row.cells[col]);
-    let jbc_offset = if col > 0 {
-        usize::from(stored_cell_width(&row.cells[col - 1]) > 1)
-    } else {
-        0
-    };
+    let mut jbc_offset = 0;
+    while col - jbc_offset > 0 && row.cells[col - jbc_offset].is_empty() {
+        jbc_offset += 1;
+    }
+
     let mut idx = col - jbc_offset;
     while idx < col + old_w {
         row.cells[idx] = blank_cell();
