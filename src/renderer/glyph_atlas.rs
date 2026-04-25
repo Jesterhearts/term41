@@ -18,7 +18,7 @@ use font41::RasterizedGlyph;
 use crate::renderer::shelf::Allocation;
 use crate::renderer::shelf::ShelfPacker;
 
-pub const ATLAS_SIZE: u32 = 512;
+pub const ATLAS_SIZE: u32 = 1024;
 // Keep worst-case glyph texture memory equal to the old eager 2048² atlas
 // while letting the common ASCII path start at a single 512² page.
 const MAX_ATLAS_PAGES: usize = 16;
