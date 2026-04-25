@@ -324,6 +324,7 @@ pub struct RenderHost {
 
     applied_title: Option<String>,
     scripts: ScriptRuntime,
+    last_script_input: Option<ScriptInput>,
     last_script_status_text: Option<String>,
     last_script_error: Option<String>,
     last_rendered_tab_id: Option<TabId>,
@@ -401,6 +402,7 @@ impl RenderHost {
             config,
             applied_title: None,
             scripts,
+            last_script_input: None,
             last_script_status_text: None,
             last_script_error: None,
             last_rendered_tab_id: None,
@@ -1194,6 +1196,7 @@ impl RenderHost {
             &cfg.script_permissions,
             self.render_thread_handle.clone(),
         );
+        self.last_script_input = None;
         self.last_script_status_text = None;
         self.last_script_error = None;
         self.last_rendered_tab_id = None;
@@ -1295,17 +1298,14 @@ impl RenderHost {
             return;
         }
 
-        self.sync_window_title();
-
         let active_idx = self
             .tabs
             .iter()
             .position(|t| t.id == self.active_tab_id)
             .expect("active tab must exist");
         let active_tab_id = self.tabs[active_idx].id;
-        self.scripts.send_input(self.script_input(active_idx));
-        let script_output = self.scripts.output();
-        self.report_script_error(&script_output);
+        let script_output = self.sync_scripts(active_idx);
+        self.sync_window_title(&script_output);
 
         {
             let guard = self.tabs[active_idx].terminal.lock();
@@ -1431,13 +1431,16 @@ impl RenderHost {
         );
     }
 
-    fn sync_window_title(&mut self) {
+    fn sync_window_title(
+        &mut self,
+        script_output: &ScriptOutput,
+    ) {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let script_output = self.scripts.output();
         let base = script_output
             .title
+            .clone()
             .or_else(|| tab.terminal.lock().metadata.current_title.clone());
         let want = if self.tabs.len() > 1 {
             let idx = self
@@ -1460,6 +1463,27 @@ impl RenderHost {
         let title = want.clone().unwrap_or_else(|| "term41".to_owned());
         let _ = self.proxy.send_event(AppEvent::SetTitle(title));
         self.applied_title = want;
+    }
+
+    fn sync_scripts(
+        &mut self,
+        active_idx: usize,
+    ) -> ScriptOutput {
+        if self.scripts.is_empty() {
+            return ScriptOutput::default();
+        }
+
+        let input = self.script_input(active_idx);
+        if self.last_script_input.as_ref() != Some(&input) {
+            let delivered = self.scripts.send_input(input.clone());
+            if delivered {
+                self.last_script_input = Some(input);
+            }
+        }
+
+        let output = self.scripts.output();
+        self.report_script_error(&output);
+        output
     }
 
     fn script_input(

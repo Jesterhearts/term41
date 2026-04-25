@@ -21,7 +21,7 @@ use crate::config::ScriptPermissions;
 
 const MAX_SCRIPT_TEXT_BYTES: usize = 4096;
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ScriptInput {
     pub tab_title: Option<String>,
     pub cwd: Option<String>,
@@ -74,13 +74,22 @@ impl ScriptRuntime {
     pub(crate) fn send_input(
         &self,
         input: ScriptInput,
-    ) {
+    ) -> bool {
+        let mut delivered = true;
         for script in &self.scripts {
             match script.tx.try_send(input.clone()) {
-                Ok(()) | Err(mpsc::TrySendError::Full(_)) => {}
+                Ok(()) => {}
+                Err(mpsc::TrySendError::Full(_)) => {
+                    delivered = false;
+                }
                 Err(mpsc::TrySendError::Disconnected(_)) => {}
             }
         }
+        delivered
+    }
+
+    pub(crate) fn is_empty(&self) -> bool {
+        self.scripts.is_empty()
     }
 
     pub(crate) fn output(&self) -> ScriptOutput {
@@ -415,8 +424,9 @@ fn publish_context_output(
 ) {
     let mut script_output = context.lock().output.clone();
     script_output.error = error;
-    publish_script_output(output, script_output);
-    if let Some(thread) = render_thread_handle.get() {
+    if publish_script_output_if_changed(output, script_output)
+        && let Some(thread) = render_thread_handle.get()
+    {
         thread.unpark();
     }
 }
@@ -426,6 +436,17 @@ fn publish_script_output(
     script_output: ScriptOutput,
 ) {
     output.store(Arc::new(script_output));
+}
+
+fn publish_script_output_if_changed(
+    output: &ArcSwap<ScriptOutput>,
+    script_output: ScriptOutput,
+) -> bool {
+    if output.load().as_ref() == &script_output {
+        return false;
+    }
+    publish_script_output(output, script_output);
+    true
 }
 
 #[cfg(test)]
@@ -500,5 +521,52 @@ terminal.set_status_text(terminal.current_cwd())
         let output = &context.lock().output;
         assert_eq!(output.title.as_deref(), Some("build ok"));
         assert_eq!(output.status_text.as_deref(), Some("/tmp/project"));
+    }
+
+    #[test]
+    fn publishing_unchanged_output_does_not_store_again() {
+        let output = ArcSwap::from_pointee(ScriptOutput {
+            title: Some("build".to_owned()),
+            status_text: Some("ok".to_owned()),
+            error: None,
+        });
+
+        assert!(!publish_script_output_if_changed(
+            &output,
+            ScriptOutput {
+                title: Some("build".to_owned()),
+                status_text: Some("ok".to_owned()),
+                error: None,
+            }
+        ));
+        assert!(publish_script_output_if_changed(
+            &output,
+            ScriptOutput {
+                title: Some("build".to_owned()),
+                status_text: Some("done".to_owned()),
+                error: None,
+            }
+        ));
+        assert_eq!(output.load().status_text.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn send_input_reports_full_script_mailboxes() {
+        let (tx, _rx) = mpsc::sync_channel(1);
+        tx.try_send(ScriptInput::default()).unwrap();
+        let runtime = ScriptRuntime {
+            scripts: vec![ScriptHandle {
+                name: "status".to_owned(),
+                tx,
+                output: Arc::new(ArcSwap::from_pointee(ScriptOutput::default())),
+            }],
+        };
+
+        assert!(!runtime.send_input(ScriptInput {
+            tab_title: Some("build".to_owned()),
+            cwd: None,
+            tab_count: 1,
+            active_tab_index: 1,
+        }));
     }
 }
