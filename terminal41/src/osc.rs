@@ -294,6 +294,7 @@ fn parse_file_uri_directory(value: &[u8]) -> Option<DirectoryAction> {
     let uri = std::str::from_utf8(value).ok()?;
     let rest = uri.strip_prefix("file://")?;
     let path_start = rest.find('/').unwrap_or(rest.len());
+    let authority = &rest[..path_start];
     let encoded_path = &rest[path_start..];
     if encoded_path.is_empty() {
         return None;
@@ -301,7 +302,7 @@ fn parse_file_uri_directory(value: &[u8]) -> Option<DirectoryAction> {
 
     let decoded = percent_decode(encoded_path.as_bytes()).collect::<Vec<u8>>();
     let path = std::str::from_utf8(&decoded).ok()?;
-    Some(DirectoryAction::Set(PathBuf::from(path)))
+    absolute_directory_action(normalize_file_uri_path(authority, path))
 }
 
 fn parse_absolute_or_file_directory(value: &[u8]) -> Option<DirectoryAction> {
@@ -313,10 +314,31 @@ fn parse_absolute_or_file_directory(value: &[u8]) -> Option<DirectoryAction> {
     if path.starts_with("file://") {
         return parse_file_uri_directory(value);
     }
-    if !Path::new(path).is_absolute() {
-        return None;
+    absolute_directory_action(PathBuf::from(path))
+}
+
+fn absolute_directory_action(path: PathBuf) -> Option<DirectoryAction> {
+    Path::new(&path)
+        .is_absolute()
+        .then_some(DirectoryAction::Set(path))
+}
+
+fn normalize_file_uri_path(
+    authority: &str,
+    path: &str,
+) -> PathBuf {
+    #[cfg(unix)]
+    {
+        // PowerShell snippets commonly build OSC 7 as
+        // `file://$hostName/$escapedPath`. On Unix, `$escapedPath` already
+        // starts with `/`, producing `file://host//home/...`. Treat that as
+        // the local absolute path the shell intended to report.
+        if !authority.is_empty() && path.starts_with("//") {
+            return PathBuf::from(&path[1..]);
+        }
     }
-    Some(DirectoryAction::Set(PathBuf::from(path)))
+
+    PathBuf::from(path)
 }
 
 fn parse_osc_hyperlink(rest: &[u8]) -> ParsedOscAction<'_> {
@@ -1178,6 +1200,14 @@ mod tests {
         assert_eq!(bag.cwd, Some(PathBuf::from("/home/has space/proj")));
     }
 
+    #[cfg(unix)]
+    #[test]
+    fn osc_7_normalizes_powershell_host_absolute_path() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"7;file://workstation//home/has%20space/proj");
+        assert_eq!(bag.cwd, Some(PathBuf::from("/home/has space/proj")));
+    }
+
     #[test]
     fn osc_7_empty_clears() {
         let mut bag = Bag::new();
@@ -1697,6 +1727,17 @@ mod process_tests {
         assert_eq!(
             term.metadata.current_directory.as_deref(),
             Some(std::path::Path::new("/tmp/work"))
+        );
+    }
+
+    #[cfg(unix)]
+    #[test]
+    fn osc_7_bel_terminated_powershell_uri_updates_terminal_cwd() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b]7;file://workstation//tmp/pwsh%20work\x07");
+        assert_eq!(
+            term.metadata.current_directory.as_deref(),
+            Some(std::path::Path::new("/tmp/pwsh work"))
         );
     }
 
