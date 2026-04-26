@@ -491,13 +491,9 @@ impl WindowHost {
         let Some(window) = &self.window else {
             return;
         };
-        let (_, _, gutter_width, _) = self.layout_snapshot();
-        let width = cols
-            .saturating_mul(self.cell_width)
-            .saturating_add(gutter_width);
-        let height = rows
-            .saturating_mul(self.cell_height)
-            .saturating_add(self.cell_height);
+        let (cell_width, cell_height, gutter_width, _) = self.layout_snapshot();
+        let width = cols.saturating_mul(cell_width).saturating_add(gutter_width);
+        let height = rows.saturating_mul(cell_height).saturating_add(cell_height);
         let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
     }
 

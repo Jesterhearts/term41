@@ -41,6 +41,7 @@ use read_fonts::tables::glyf::CompositeGlyph;
 use read_fonts::tables::glyf::CurvePoint;
 use read_fonts::tables::glyf::Glyph;
 use read_fonts::tables::glyf::SimpleGlyph;
+use read_fonts::tables::head::Head;
 use read_fonts::tables::loca::Loca;
 use read_fonts::types::GlyphId;
 use smol_str::SmolStr;
@@ -112,6 +113,7 @@ struct LoadedFont {
     face_index: u32,
     shaper_data: ShaperData,
     units_per_em: f32,
+    metrics: FontEmMetrics,
     /// True if the font carries colour glyph tables (COLR, CBDT, sbix, or
     /// SVG). Used by shape_row to prefer colour fonts for emoji clusters
     /// over text fonts that might also have a monochrome outline for the
@@ -123,6 +125,21 @@ struct LoadedFont {
     is_bold: bool,
     /// True when the face was loaded as an italic/oblique variant.
     is_italic: bool,
+}
+
+#[derive(Debug, Clone, Copy)]
+struct FontEmMetrics {
+    ascender: f32,
+    descender: f32,
+    line_gap: f32,
+    cell_width: f32,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq)]
+struct ScaledCellMetrics {
+    cell_width: u32,
+    cell_height: u32,
+    ascent: f32,
 }
 
 type SharedFontData = Arc<dyn AsRef<[u8]> + Send + Sync>;
@@ -218,7 +235,8 @@ static FAMILIES: RwLock<Vec<FamilyVariants>> = RwLock::new(Vec::new());
 static FONT_LOAD_STATE: Mutex<FontLoadState> = Mutex::new(FontLoadState::NotStarted);
 static FONT_LOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
 static INSTALLED_FONT_GENERATION: AtomicU64 = AtomicU64::new(0);
-const NERD_SYMBOL_FAMILY: &str = " nerd font";
+const NERD_SYMBOL_FAMILY: &str = "nerd font";
+const NERD_SYMBOL_FAMILY_MONO: &str = "nerd font mono";
 const NERD_SYMBOL_SAMPLE: &[char] = &[
     '\u{e0a0}',  // Powerline branch.
     '\u{e0b0}',  // Powerline separator.
@@ -385,6 +403,7 @@ pub struct FontSystem {
 
     plan_cache: HashMap<PlanKey, ShapePlan>,
     font_generation: u64,
+    metrics_generation: u64,
     /// Current terminal cell width in physical pixels.
     pub cell_width: u32,
     /// Current terminal cell height in physical pixels.
@@ -424,6 +443,7 @@ impl FontSystem {
             final_font,
             plan_cache: HashMap::new(),
             font_generation: INSTALLED_FONT_GENERATION.load(Ordering::Acquire),
+            metrics_generation: INSTALLED_FONT_GENERATION.load(Ordering::Acquire),
             cell_width: 0,
             cell_height: 0,
             font_size,
@@ -452,6 +472,7 @@ impl FontSystem {
         self.supersample = supersample;
         self.plan_cache.clear();
         self.font_generation = INSTALLED_FONT_GENERATION.load(Ordering::Acquire);
+        self.metrics_generation = self.font_generation;
         self.recompute_metrics();
     }
 
@@ -467,26 +488,51 @@ impl FontSystem {
         INSTALLED_FONT_GENERATION.load(Ordering::Acquire)
     }
 
-    /// Recompute cell_width, cell_height, ascent, and font_size from the
-    /// fallback font's metrics and the current base_font_size. Shared by
-    /// `new()`, `reload()`, and `set_scale_factor()`.
+    /// Pull in newly installed background fonts and recompute the aggregate
+    /// cell metrics. Returns true when the live grid cell size changed.
+    pub fn sync_loaded_fonts(&mut self) -> bool {
+        let generation = INSTALLED_FONT_GENERATION.load(Ordering::Acquire);
+        if self.metrics_generation == generation {
+            return false;
+        }
+
+        let old_metrics = ScaledCellMetrics {
+            cell_width: self.cell_width,
+            cell_height: self.cell_height,
+            ascent: self.ascent,
+        };
+        self.plan_cache.clear();
+        self.font_generation = generation;
+        self.metrics_generation = generation;
+        self.recompute_metrics();
+
+        old_metrics
+            != (ScaledCellMetrics {
+                cell_width: self.cell_width,
+                cell_height: self.cell_height,
+                ascent: self.ascent,
+            })
+    }
+
+    /// Recompute cell_width, cell_height, and ascent from the largest loaded
+    /// font metrics and the current effective font_size. Shared by `new()`,
+    /// `reload()`, `sync_loaded_fonts()`, and `set_scale_factor()`.
     fn recompute_metrics(&mut self) {
-        let rf = loaded_font_ref(&self.final_font).expect("parse font");
-        let hhea = rf.hhea().expect("hhea table");
-        let hmtx = rf.hmtx().expect("hmtx table");
+        let font_faces = FONTS.read().unwrap().clone();
+        let metrics = font_faces
+            .iter()
+            .filter_map(|font| font.load())
+            .filter(|font| !font.is_color)
+            .map(|font| scaled_font_metrics(&font, self.font_size))
+            .chain(std::iter::once(scaled_font_metrics(
+                &self.final_font,
+                self.font_size,
+            )));
+        let metrics = aggregate_cell_metrics(metrics);
 
-        let s = self.font_size / self.final_font.units_per_em;
-        let ascent = hhea.ascender().to_i16() as f32 * s;
-        let descent = hhea.descender().to_i16() as f32 * s;
-        let line_gap = hhea.line_gap().to_i16() as f32 * s;
-
-        self.cell_height = (ascent - descent + line_gap).ceil() as u32;
-        let m_advance = hmtx
-            .advance(GlyphId::new(charmap_lookup(&rf, 'M')))
-            .unwrap_or(0) as f32
-            * s;
-        self.cell_width = m_advance.ceil() as u32;
-        self.ascent = ascent;
+        self.cell_width = metrics.cell_width;
+        self.cell_height = metrics.cell_height;
+        self.ascent = metrics.ascent;
     }
 
     /// Whether `font_index`'s face was loaded as a bold weight. The renderer
@@ -825,13 +871,23 @@ impl FontSystem {
                         }
                     }
 
+                    let y_offset = pos.y_offset as f32 * scale
+                        + symbol_cell_y_offset(
+                            wants_nerd_symbol[col as usize],
+                            &font_ref,
+                            glyph_id,
+                            scale,
+                            self.cell_height,
+                            self.ascent,
+                        );
+
                     result.push(ShapedGlyph {
                         glyph_id,
                         font_index: font_idx,
                         col,
                         cells_wide: glyph_cells_wide(cells, col, max_col),
                         x_offset: pos.x_offset as f32 * scale,
-                        y_offset: pos.y_offset as f32 * scale,
+                        y_offset,
                     });
                 }
 
@@ -1051,6 +1107,65 @@ fn glyph_cells_wide(
     end_excl.saturating_sub(start).clamp(1, u8::MAX as usize) as u8
 }
 
+fn symbol_cell_y_offset(
+    is_symbol_cell: bool,
+    font: &read_fonts::FontRef<'_>,
+    glyph_id: u16,
+    scale: f32,
+    cell_height: u32,
+    baseline: f32,
+) -> f32 {
+    if !is_symbol_cell {
+        return 0.0;
+    }
+
+    let Some([_, y_min, _, y_max]) = outline_glyph_bounds(font, glyph_id, scale) else {
+        return 0.0;
+    };
+
+    cell_centering_y_offset(cell_height as f32, baseline, y_min, y_max)
+}
+
+fn cell_centering_y_offset(
+    cell_height: f32,
+    baseline: f32,
+    y_min: f32,
+    y_max: f32,
+) -> f32 {
+    let glyph_height = y_max - y_min;
+    if glyph_height <= 0.0 {
+        return 0.0;
+    }
+
+    let current_top = baseline - y_max;
+    let desired_top = ((cell_height - glyph_height) * 0.5).max(0.0);
+    current_top - desired_top
+}
+
+fn outline_glyph_bounds(
+    font: &read_fonts::FontRef<'_>,
+    glyph_id: u16,
+    scale: f32,
+) -> Option<[f32; 4]> {
+    let loca = font.loca(None).ok()?;
+    let glyf = font.glyf().ok()?;
+    let glyph = loca.get_glyf(GlyphId::new(glyph_id as u32), &glyf).ok()??;
+
+    match glyph {
+        Glyph::Simple(simple) => Some([
+            simple.x_min() as f32 * scale,
+            simple.y_min() as f32 * scale,
+            simple.x_max() as f32 * scale,
+            simple.y_max() as f32 * scale,
+        ]),
+        Glyph::Composite(composite) => {
+            let mut bounds = [f32::MAX, f32::MAX, f32::MIN, f32::MIN];
+            composite_bounds(&composite, &loca, &glyf, scale, 0.0, 0.0, &mut bounds);
+            (bounds[0] < bounds[2] && bounds[1] < bounds[3]).then_some(bounds)
+        }
+    }
+}
+
 /// Heuristic: true when a cluster is likely meant to render as a colour
 /// emoji. Covers the two common routes: explicit `VS16` selector, and
 /// default-emoji-presentation codepoints in the main emoji blocks. Keeps
@@ -1108,6 +1223,7 @@ fn load_font(
     let rf = read_fonts::FontRef::from_index(bytes, face_index).ok()?;
     let head = rf.head().ok()?;
     let units_per_em = head.units_per_em() as f32;
+    let metrics = font_em_metrics(&rf, head);
     // Probe for colour glyph tables. If any is present, we treat this as a
     // colour font and let it win the font-selection race for emoji clusters.
     let color_tables = color_tables(&rf);
@@ -1118,10 +1234,77 @@ fn load_font(
         face_index,
         shaper_data,
         units_per_em,
+        metrics,
         is_color,
         is_bold,
         is_italic,
     })
+}
+
+fn font_em_metrics(
+    rf: &read_fonts::FontRef<'_>,
+    head: Head,
+) -> FontEmMetrics {
+    let Ok(hhea) = rf.hhea() else {
+        return FontEmMetrics {
+            ascender: head.x_max() as f32,
+            descender: head.y_min() as f32,
+            line_gap: 0.0,
+            cell_width: head.units_per_em() as f32,
+        };
+    };
+
+    let cell_width = rf
+        .hmtx()
+        .ok()
+        .and_then(|hmtx| hmtx.advance(GlyphId::new(charmap_lookup(rf, 'M'))))
+        .filter(|advance| *advance > 0)
+        .unwrap_or_else(|| hhea.advance_width_max().to_u16()) as f32;
+
+    FontEmMetrics {
+        ascender: hhea.ascender().to_i16() as f32,
+        descender: hhea.descender().to_i16() as f32,
+        line_gap: hhea.line_gap().to_i16() as f32,
+        cell_width,
+    }
+}
+
+fn scaled_font_metrics(
+    font: &LoadedFont,
+    font_size: f32,
+) -> ScaledCellMetrics {
+    let scale = font_size / font.units_per_em;
+    let ascent = (font.metrics.ascender * scale).max(0.0);
+    let descent = (-font.metrics.descender * scale).max(0.0);
+    let line_gap = (font.metrics.line_gap * scale).max(0.0);
+    let cell_width = (font.metrics.cell_width * scale).ceil().max(1.0) as u32;
+    let cell_height = (ascent + descent + line_gap).ceil().max(1.0) as u32;
+
+    ScaledCellMetrics {
+        cell_width,
+        cell_height,
+        ascent,
+    }
+}
+
+fn aggregate_cell_metrics(
+    metrics: impl IntoIterator<Item = ScaledCellMetrics>
+) -> ScaledCellMetrics {
+    let mut cell_width = 1;
+    let mut ascent = 1.0_f32;
+    let mut descent_and_gap = 0.0_f32;
+
+    for metric in metrics {
+        cell_width = cell_width.max(metric.cell_width);
+        ascent = ascent.max(metric.ascent);
+        descent_and_gap = descent_and_gap.max(metric.cell_height as f32 - metric.ascent);
+    }
+
+    ScaledCellMetrics {
+        cell_width,
+        cell_height: (ascent + descent_and_gap).ceil().max(1.0) as u32,
+        ascent,
+    }
 }
 
 fn shared_font_data_from_source(source: &fontdb::Source) -> Option<SharedFontData> {
@@ -1271,7 +1454,10 @@ fn nerd_symbol_family_priority(face: &fontdb::FaceInfo) -> Option<u8> {
         .iter()
         .filter_map(|(name, _)| {
             debug!("checking family {name} for Nerd Font symbol fallback");
-            if name.to_lowercase().contains(NERD_SYMBOL_FAMILY) {
+            let name = name.to_lowercase();
+            if name.contains(NERD_SYMBOL_FAMILY_MONO) {
+                Some(2)
+            } else if name.contains(NERD_SYMBOL_FAMILY) {
                 Some(1)
             } else {
                 None
@@ -1961,6 +2147,38 @@ mod tests {
     }
 
     #[test]
+    fn aggregate_cell_metrics_keeps_largest_width_and_vertical_extents() {
+        let metrics = aggregate_cell_metrics([
+            ScaledCellMetrics {
+                cell_width: 8,
+                cell_height: 17,
+                ascent: 12.0,
+            },
+            ScaledCellMetrics {
+                cell_width: 11,
+                cell_height: 16,
+                ascent: 9.0,
+            },
+            ScaledCellMetrics {
+                cell_width: 9,
+                cell_height: 19,
+                ascent: 14.0,
+            },
+        ]);
+
+        assert_eq!(metrics.cell_width, 11);
+        assert_eq!(metrics.cell_height, 21);
+        assert_eq!(metrics.ascent, 14.0);
+    }
+
+    #[test]
+    fn cell_centering_y_offset_moves_high_symbol_down() {
+        let offset = cell_centering_y_offset(20.0, 14.0, -3.0, 18.0);
+
+        assert_eq!(offset, -4.0);
+    }
+
+    #[test]
     fn nerd_symbol_family_priority_prefers_mono_symbol_face() {
         let plain = face_info(
             &[NERD_SYMBOL_FAMILY],
@@ -1972,7 +2190,7 @@ mod tests {
             fontdb::Weight::NORMAL,
             fontdb::Style::Normal,
         );
-        let unrelated = face_info(
+        let patched = face_info(
             &["JetBrainsMono Nerd Font"],
             fontdb::Weight::NORMAL,
             fontdb::Style::Normal,
@@ -1980,6 +2198,6 @@ mod tests {
 
         assert_eq!(nerd_symbol_family_priority(&plain), Some(1));
         assert_eq!(nerd_symbol_family_priority(&mono), Some(2));
-        assert_eq!(nerd_symbol_family_priority(&unrelated), None);
+        assert_eq!(nerd_symbol_family_priority(&patched), Some(1));
     }
 }

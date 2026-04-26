@@ -280,6 +280,25 @@ fn resize_tab_to_grid(
     tab.pty.resize(cols as u16, pty_rows as u16);
 }
 
+fn update_terminal_cell_dimensions(
+    tab: &Tab,
+    cell_width: u32,
+    cell_height: u32,
+) {
+    let mut terminal = tab.terminal.lock();
+    let terminal41::Terminal {
+        cell_width: terminal_cell_width,
+        cell_height: terminal_cell_height,
+        ..
+    } = &mut *terminal;
+    settings::set_cell_dimensions(
+        terminal_cell_width,
+        terminal_cell_height,
+        cell_width,
+        cell_height,
+    );
+}
+
 // ---------------------------------------------------------------------------
 // RenderEvent — window thread → render thread (via cueue ring buffer)
 // ---------------------------------------------------------------------------
@@ -486,6 +505,7 @@ impl RenderHost {
 
             // Hot-reload config if the watcher flagged a change.
             self.reload_config_if_requested();
+            self.sync_loaded_font_metrics();
 
             if self.should_exit || self.event_rx.is_abandoned() {
                 break;
@@ -581,6 +601,7 @@ impl RenderHost {
             self.drain_render_events();
             self.drain_child_exit_notifications();
             self.reload_config_if_requested();
+            self.sync_loaded_font_metrics();
 
             if self.should_exit || self.event_rx.is_abandoned() {
                 break;
@@ -624,6 +645,7 @@ impl RenderHost {
             .max()
             .unwrap_or(0)
             .saturating_add(1);
+        self.apply_font_cell_dimensions_to_tabs();
         self.recalculate_grid_size();
         self.sync_input_state();
         self.sync_active_input_tab();
@@ -643,6 +665,19 @@ impl RenderHost {
         if self.config_reload.swap(false, Ordering::Acquire) {
             self.reload_config();
         }
+    }
+
+    fn sync_loaded_font_metrics(&mut self) {
+        if !self.font_system.sync_loaded_fonts() {
+            return;
+        }
+
+        self.apply_font_cell_dimensions_to_tabs();
+        if let Some(renderer) = self.renderer.as_mut() {
+            renderer.reset_glyph_atlas();
+        }
+        self.recalculate_grid_size();
+        self.sync_input_state();
     }
 
     fn next_render_wait(
@@ -1274,16 +1309,8 @@ impl RenderHost {
                 renderer.reset_glyph_atlas();
             }
             for tab in &self.tabs {
-                let mut terminal = tab.terminal.lock();
-                let terminal = &mut *terminal;
-                let terminal41::Terminal {
-                    cell_width,
-                    cell_height,
-                    ..
-                } = terminal;
-                settings::set_cell_dimensions(
-                    cell_width,
-                    cell_height,
+                update_terminal_cell_dimensions(
+                    tab,
                     self.font_system.cell_width,
                     self.font_system.cell_height,
                 );
@@ -1595,6 +1622,16 @@ impl RenderHost {
         } else {
             0
         };
+    }
+
+    fn apply_font_cell_dimensions_to_tabs(&self) {
+        for tab in &self.tabs {
+            update_terminal_cell_dimensions(
+                tab,
+                self.font_system.cell_width,
+                self.font_system.cell_height,
+            );
+        }
     }
 
     fn sync_active_input_tab(&self) {
