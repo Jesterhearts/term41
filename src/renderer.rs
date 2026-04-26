@@ -31,6 +31,7 @@ use terminal41::KittyKeys;
 use terminal41::StatusDisplayKind;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
+use terminal41::VisibleImage;
 use terminal41::settings;
 use tracing::debug_span;
 use winit::event_loop::EventLoopProxy;
@@ -352,6 +353,7 @@ pub struct RenderHost {
     script_status_generation: u64,
     last_script_error: Option<String>,
     last_rendered_tab_id: Option<TabId>,
+    last_visible_images: Vec<VisibleImage>,
 
     /// Last known window size in physical pixels. Updated on Resized events.
     window_size: (u32, u32),
@@ -429,6 +431,7 @@ impl RenderHost {
             script_status_generation: 1,
             last_script_error: None,
             last_rendered_tab_id: None,
+            last_visible_images: Vec::new(),
             window_size: (0, 0),
             window_resize_epoch: 0,
             window: None,
@@ -1379,9 +1382,12 @@ impl RenderHost {
         self.sync_window_title(&script_output);
 
         let mut snap = self.tabs[active_idx].snapshot_output.read().clone();
-        if snap.synchronized_update_active {
-            return;
-        }
+        let suspend_terminal_area = should_suspend_terminal_area(
+            active_tab_id,
+            self.last_rendered_tab_id,
+            snap.synchronized_update_active,
+            snap.reset_cached_rows,
+        );
 
         let tab_titles: Vec<(String, bool)> = if self.tab_bar_visible() {
             self.tabs
@@ -1453,8 +1459,10 @@ impl RenderHost {
             tab_menu: tab_context_menu.as_ref().map(|m| (m.x, m.hovered_item)),
         };
 
-        let visible_images = {
-            debug_span!("reading terminal state").in_scope(|| {
+        let visible_images = if suspend_terminal_area {
+            self.last_visible_images.clone()
+        } else {
+            let images = debug_span!("reading terminal state").in_scope(|| {
                 let terminal = self.tabs[active_idx].terminal.lock();
                 debug_span!("recording visible images").in_scope(|| {
                     terminal41::view::visible_images(
@@ -1465,7 +1473,9 @@ impl RenderHost {
                     )
                     .collect::<Vec<_>>()
                 })
-            })
+            });
+            self.last_visible_images = images.clone();
+            images
         };
         if self.last_rendered_tab_id != Some(active_tab_id) {
             snap.reset_cached_rows = true;
@@ -1493,6 +1503,7 @@ impl RenderHost {
             permission_modal.as_ref(),
             toast.as_ref(),
             preedit.as_ref(),
+            suspend_terminal_area,
         );
     }
 
@@ -2273,6 +2284,15 @@ fn encode_png_rgba(
     Ok(())
 }
 
+fn should_suspend_terminal_area(
+    active_tab_id: TabId,
+    last_rendered_tab_id: Option<TabId>,
+    synchronized_update_active: bool,
+    reset_cached_rows: bool,
+) -> bool {
+    synchronized_update_active && !reset_cached_rows && last_rendered_tab_id == Some(active_tab_id)
+}
+
 #[cfg(test)]
 mod kitty_encode_tests {
     use winit::keyboard::Key;
@@ -2452,6 +2472,51 @@ mod kitty_encode_tests {
         )
         .expect("encoded");
         assert_eq!(bytes, b"7");
+    }
+}
+
+#[cfg(test)]
+mod synchronized_render_tests {
+    use super::*;
+
+    #[test]
+    fn synchronized_update_suspends_previously_rendered_terminal_area() {
+        assert!(should_suspend_terminal_area(
+            TabId(7),
+            Some(TabId(7)),
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn synchronized_update_does_not_reuse_another_tabs_terminal_area() {
+        assert!(!should_suspend_terminal_area(
+            TabId(7),
+            Some(TabId(6)),
+            true,
+            false
+        ));
+    }
+
+    #[test]
+    fn terminal_area_not_suspended_when_synchronized_update_is_inactive() {
+        assert!(!should_suspend_terminal_area(
+            TabId(7),
+            Some(TabId(7)),
+            false,
+            false
+        ));
+    }
+
+    #[test]
+    fn terminal_area_not_suspended_when_cached_rows_must_reset() {
+        assert!(!should_suspend_terminal_area(
+            TabId(7),
+            Some(TabId(7)),
+            true,
+            true
+        ));
     }
 }
 

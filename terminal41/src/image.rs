@@ -42,6 +42,7 @@ pub struct PlacedImage {
 }
 
 /// A snapshot of an image visible in the current viewport.
+#[derive(Clone)]
 pub struct VisibleImage {
     /// Decoded image pixels and frames.
     pub image: DecodedImage,

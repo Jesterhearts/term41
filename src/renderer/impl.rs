@@ -1685,11 +1685,14 @@ impl Renderer {
         permission_modal: Option<&crate::renderer::PermissionModal>,
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
+        suspend_terminal_area: bool,
     ) {
         let layout = self.frame_layout(font_system, tabs);
         let under_text_image_geometry = self.build_image_geometry(visible_images, &layout, true);
         let over_text_image_geometry = self.build_image_geometry(visible_images, &layout, false);
-        self.apply_terminal_snapshot_rows(snap);
+        if !suspend_terminal_area {
+            self.apply_terminal_snapshot_rows(snap);
+        }
         let terminal_rows = std::mem::take(&mut self.terminal_rows);
         let geometry = self.build_render_geometry(
             font_system,
@@ -1704,6 +1707,7 @@ impl Renderer {
             toast,
             preedit,
             &layout,
+            suspend_terminal_area,
         );
         self.terminal_rows = terminal_rows;
         self.submit_render_passes(
@@ -1866,6 +1870,7 @@ impl Renderer {
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
         layout: &FrameLayout,
+        suspend_terminal_area: bool,
     ) -> RenderGeometry {
         for attempt in 0..2 {
             let glyph_generation = self.glyph_atlas.generation();
@@ -1883,6 +1888,7 @@ impl Renderer {
                 toast,
                 preedit,
                 layout,
+                suspend_terminal_area,
             );
             if self.glyph_atlas.generation() == glyph_generation
                 && font_system.font_generation() == font_generation
@@ -1909,6 +1915,7 @@ impl Renderer {
             toast,
             preedit,
             layout,
+            suspend_terminal_area,
         )
     }
 
@@ -1926,6 +1933,7 @@ impl Renderer {
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
         layout: &FrameLayout,
+        suspend_terminal_area: bool,
     ) -> RenderGeometry {
         let mut geometry = RenderGeometry::default();
         let cursor_state = self.cursor_state_from_snapshot(snap);
@@ -1934,9 +1942,42 @@ impl Renderer {
         let rapid_blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 250) & 1 == 1;
         let font_generation = font_system.font_generation();
 
-        for snap_row in rows {
-            let row = snap_row.screen_row;
-            if snap.search_active && row == snap.viewport_rows - 1 {
+        if !suspend_terminal_area {
+            for snap_row in rows {
+                let row = snap_row.screen_row;
+                if snap.search_active && row == snap.viewport_rows - 1 {
+                    push_terminal_dirty_rect(
+                        &mut geometry,
+                        row,
+                        layout,
+                        self.surface_config.width,
+                        self.surface_config.height,
+                    );
+                    if let Some(cache) = self.row_geometry_cache.get_mut(row as usize) {
+                        *cache = None;
+                    }
+                    continue;
+                }
+                let cache_key = self.row_render_key(
+                    snap,
+                    snap_row,
+                    row,
+                    cursor_state,
+                    popup_clip.as_ref(),
+                    blink_off,
+                    rapid_blink_off,
+                    font_generation,
+                    layout,
+                );
+                if let Some(cached) = self
+                    .row_geometry_cache
+                    .get(row as usize)
+                    .and_then(Option::as_ref)
+                    && cached.key == cache_key
+                {
+                    continue;
+                }
+
                 push_terminal_dirty_rect(
                     &mut geometry,
                     row,
@@ -1944,68 +1985,37 @@ impl Renderer {
                     self.surface_config.width,
                     self.surface_config.height,
                 );
-                if let Some(cache) = self.row_geometry_cache.get_mut(row as usize) {
-                    *cache = None;
+                let mut row_geometry = RowGeometry::default();
+                self.append_row_geometry(
+                    font_system,
+                    snap,
+                    snap_row,
+                    row,
+                    cursor_state,
+                    popup_clip.as_ref(),
+                    blink_off,
+                    rapid_blink_off,
+                    layout,
+                    &mut row_geometry,
+                );
+                let cache_key = self.row_render_key(
+                    snap,
+                    snap_row,
+                    row,
+                    cursor_state,
+                    popup_clip.as_ref(),
+                    blink_off,
+                    rapid_blink_off,
+                    font_generation,
+                    layout,
+                );
+                append_cached_row_geometry(&mut geometry, &row_geometry);
+                if row as usize >= self.row_geometry_cache.len() {
+                    self.row_geometry_cache
+                        .resize_with(row as usize + 1, || None);
                 }
-                continue;
+                self.row_geometry_cache[row as usize] = Some(CachedRowKey { key: cache_key });
             }
-            let cache_key = self.row_render_key(
-                snap,
-                snap_row,
-                row,
-                cursor_state,
-                popup_clip.as_ref(),
-                blink_off,
-                rapid_blink_off,
-                font_generation,
-                layout,
-            );
-            if let Some(cached) = self
-                .row_geometry_cache
-                .get(row as usize)
-                .and_then(Option::as_ref)
-                && cached.key == cache_key
-            {
-                continue;
-            }
-
-            push_terminal_dirty_rect(
-                &mut geometry,
-                row,
-                layout,
-                self.surface_config.width,
-                self.surface_config.height,
-            );
-            let mut row_geometry = RowGeometry::default();
-            self.append_row_geometry(
-                font_system,
-                snap,
-                snap_row,
-                row,
-                cursor_state,
-                popup_clip.as_ref(),
-                blink_off,
-                rapid_blink_off,
-                layout,
-                &mut row_geometry,
-            );
-            let cache_key = self.row_render_key(
-                snap,
-                snap_row,
-                row,
-                cursor_state,
-                popup_clip.as_ref(),
-                blink_off,
-                rapid_blink_off,
-                font_generation,
-                layout,
-            );
-            append_cached_row_geometry(&mut geometry, &row_geometry);
-            if row as usize >= self.row_geometry_cache.len() {
-                self.row_geometry_cache
-                    .resize_with(row as usize + 1, || None);
-            }
-            self.row_geometry_cache[row as usize] = Some(CachedRowKey { key: cache_key });
         }
 
         self.append_visual_bell_overlay(&mut geometry, snap, layout);
