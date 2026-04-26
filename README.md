@@ -56,6 +56,7 @@ What I wanted out of this terminal was pretty straightforward:
   status lines, macros, and user-defined keys
 - shell integration, tabs, scrollback search, hyperlinks, and background images
 
+Release notes live in [CHANGELOG.md](CHANGELOG.md).
 
 <details>
 <summary><strong>Protocol and Spec Compatibility</strong></summary>
@@ -156,8 +157,8 @@ cargo run --release
 
 ### Installing
 
-The `0.1.0` release is source-only. To build and install it from the GitHub tag
-into your cargo bin dir:
+Releases are source-only. To build and install from the GitHub tag into your
+cargo bin dir:
 
 ```sh
 cargo install --git https://github.com/Jesterhearts/term41.git --tag 0.1.1 --locked term41
