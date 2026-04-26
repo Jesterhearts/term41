@@ -3,6 +3,10 @@ use std::collections::BTreeMap;
 use crate::Row;
 use crate::Viewport;
 use crate::image::PlacedImage;
+use crate::image::shift_anchored_cells_down;
+use crate::image::shift_anchored_cells_left;
+use crate::image::shift_anchored_cells_right;
+use crate::image::shift_anchored_cells_up;
 use crate::image::shift_in_region;
 use crate::screen::grid::Grid;
 
@@ -104,6 +108,7 @@ fn trim_scrollback_to_limit(
 pub(crate) fn scroll_up_in_rect(
     grid: &mut Grid,
     viewport: &Viewport,
+    images: &mut BTreeMap<u64, PlacedImage>,
     top: u32,
     bottom: u32,
     left: u32,
@@ -137,11 +142,13 @@ pub(crate) fn scroll_up_in_rect(
     for row in (abs_bottom - n + 1)..=abs_bottom {
         grid.rows[row].clear_range(l..r, grid.default_fg, grid.default_bg);
     }
+    shift_anchored_cells_up(images, abs_top, abs_bottom + 1, l, r, n);
 }
 
 pub(crate) fn scroll_down_in_rect(
     grid: &mut Grid,
     viewport: &Viewport,
+    images: &mut BTreeMap<u64, PlacedImage>,
     top: u32,
     bottom: u32,
     left: u32,
@@ -175,11 +182,13 @@ pub(crate) fn scroll_down_in_rect(
     for row in abs_top..(abs_top + n) {
         grid.rows[row].clear_range(l..r, grid.default_fg, grid.default_bg);
     }
+    shift_anchored_cells_down(images, abs_top, abs_bottom + 1, l, r, n);
 }
 
 pub(crate) fn scroll_left(
     grid: &mut Grid,
     viewport: &Viewport,
+    images: &mut BTreeMap<u64, PlacedImage>,
     top: u32,
     bottom: u32,
     n: u32,
@@ -195,11 +204,20 @@ pub(crate) fn scroll_left(
         grid.rows[abs].copy_within(n..cols, 0);
         grid.rows[abs].clear_range(cols - n..cols, grid.default_fg, grid.default_bg);
     }
+    shift_anchored_cells_left(
+        images,
+        first_visible + top as usize,
+        first_visible + bottom as usize + 1,
+        0,
+        cols,
+        n,
+    );
 }
 
 pub(crate) fn scroll_right(
     grid: &mut Grid,
     viewport: &Viewport,
+    images: &mut BTreeMap<u64, PlacedImage>,
     top: u32,
     bottom: u32,
     n: u32,
@@ -215,11 +233,20 @@ pub(crate) fn scroll_right(
         grid.rows[abs].copy_within(0..cols - n, n);
         grid.rows[abs].clear_range(0..n, grid.default_fg, grid.default_bg);
     }
+    shift_anchored_cells_right(
+        images,
+        first_visible + top as usize,
+        first_visible + bottom as usize + 1,
+        0,
+        cols,
+        n,
+    );
 }
 
 pub(crate) fn insert_cols(
     grid: &mut Grid,
     viewport: &Viewport,
+    images: &mut BTreeMap<u64, PlacedImage>,
     cursor_col: u32,
     top: u32,
     bottom: u32,
@@ -237,11 +264,20 @@ pub(crate) fn insert_cols(
         grid.rows[abs].copy_within(col..cols - n, col + n);
         grid.rows[abs].clear_range(col..col + n, grid.default_fg, grid.default_bg);
     }
+    shift_anchored_cells_right(
+        images,
+        first_visible + top as usize,
+        first_visible + bottom as usize + 1,
+        col,
+        cols,
+        n,
+    );
 }
 
 pub(crate) fn delete_cols(
     grid: &mut Grid,
     viewport: &Viewport,
+    images: &mut BTreeMap<u64, PlacedImage>,
     cursor_col: u32,
     top: u32,
     bottom: u32,
@@ -259,4 +295,12 @@ pub(crate) fn delete_cols(
         grid.rows[abs].copy_within(col + n..cols, col);
         grid.rows[abs].clear_range(cols - n..cols, grid.default_fg, grid.default_bg);
     }
+    shift_anchored_cells_left(
+        images,
+        first_visible + top as usize,
+        first_visible + bottom as usize + 1,
+        col,
+        cols,
+        n,
+    );
 }

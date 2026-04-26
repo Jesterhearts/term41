@@ -89,7 +89,7 @@ pub(super) fn remove_overlapping(
         if img.col != col {
             return true;
         }
-        let old_rows = img.image.height.div_ceil(cell_height).max(1) as usize;
+        let old_rows = img.display_height.div_ceil(cell_height).max(1) as usize;
         let old_bottom = img.row + old_rows;
         // Keep only if disjoint on rows (half-open intervals).
         old_bottom <= top_row || img.row >= new_bottom
@@ -127,6 +127,158 @@ pub(super) fn clear_in_range(
     end: usize,
 ) {
     images.retain(|_, img| img.row < start || img.row >= end);
+}
+
+/// Remove images whose anchor cell lies inside a cleared cell range.
+///
+/// Rows are absolute indices in `grid.rows`; columns are half-open terminal
+/// cell coordinates. Images are stored as independent placements, but their
+/// lifetime follows the cell where the escape sequence placed them.
+pub(super) fn clear_anchored_cells(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    top_row: usize,
+    bottom_row: usize,
+    left_col: usize,
+    right_col: usize,
+) {
+    if top_row >= bottom_row || left_col >= right_col {
+        return;
+    }
+
+    images.retain(|_, img| {
+        img.row < top_row
+            || img.row >= bottom_row
+            || img.col < left_col as u32
+            || img.col >= right_col as u32
+    });
+}
+
+/// Move image anchors left inside a rectangular cell range, matching a cell
+/// copy-left operation. Anchors shifted out of the rectangle are removed.
+pub(super) fn shift_anchored_cells_left(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    top_row: usize,
+    bottom_row: usize,
+    left_col: usize,
+    right_col: usize,
+    count: usize,
+) {
+    if top_row >= bottom_row || left_col >= right_col || count == 0 {
+        return;
+    }
+
+    let count = count.min(right_col - left_col);
+    let removed_until = left_col + count;
+    images.retain(|_, img| {
+        if img.row < top_row || img.row >= bottom_row {
+            return true;
+        }
+        let col = img.col as usize;
+        if col < left_col || col >= right_col {
+            return true;
+        }
+        if col < removed_until {
+            return false;
+        }
+        img.col = (col - count) as u32;
+        true
+    });
+}
+
+/// Move image anchors right inside a rectangular cell range, matching a cell
+/// copy-right operation. Anchors shifted out of the rectangle are removed.
+pub(super) fn shift_anchored_cells_right(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    top_row: usize,
+    bottom_row: usize,
+    left_col: usize,
+    right_col: usize,
+    count: usize,
+) {
+    if top_row >= bottom_row || left_col >= right_col || count == 0 {
+        return;
+    }
+
+    let count = count.min(right_col - left_col);
+    let kept_until = right_col - count;
+    images.retain(|_, img| {
+        if img.row < top_row || img.row >= bottom_row {
+            return true;
+        }
+        let col = img.col as usize;
+        if col < left_col || col >= right_col {
+            return true;
+        }
+        if col >= kept_until {
+            return false;
+        }
+        img.col = (col + count) as u32;
+        true
+    });
+}
+
+/// Move image anchors up inside a rectangular cell range, matching a
+/// rectangular scroll-up operation.
+pub(super) fn shift_anchored_cells_up(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    top_row: usize,
+    bottom_row: usize,
+    left_col: usize,
+    right_col: usize,
+    count: usize,
+) {
+    if top_row >= bottom_row || left_col >= right_col || count == 0 {
+        return;
+    }
+
+    let count = count.min(bottom_row - top_row);
+    let removed_until = top_row + count;
+    images.retain(|_, img| {
+        if img.row < top_row || img.row >= bottom_row {
+            return true;
+        }
+        let col = img.col as usize;
+        if col < left_col || col >= right_col {
+            return true;
+        }
+        if img.row < removed_until {
+            return false;
+        }
+        img.row -= count;
+        true
+    });
+}
+
+/// Move image anchors down inside a rectangular cell range, matching a
+/// rectangular scroll-down operation.
+pub(super) fn shift_anchored_cells_down(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    top_row: usize,
+    bottom_row: usize,
+    left_col: usize,
+    right_col: usize,
+    count: usize,
+) {
+    if top_row >= bottom_row || left_col >= right_col || count == 0 {
+        return;
+    }
+
+    let count = count.min(bottom_row - top_row);
+    let kept_until = bottom_row - count;
+    images.retain(|_, img| {
+        if img.row < top_row || img.row >= bottom_row {
+            return true;
+        }
+        let col = img.col as usize;
+        if col < left_col || col >= right_col {
+            return true;
+        }
+        if img.row >= kept_until {
+            return false;
+        }
+        img.row += count;
+        true
+    });
 }
 
 /// Save image positions as logical-line anchors that survive reflow.
@@ -297,6 +449,102 @@ mod tests {
         assert!(
             !term.active.images.contains_key(&id),
             "ED 2 should drop images on the visible area"
+        );
+    }
+
+    #[test]
+    fn el_removes_image_when_anchor_cell_is_cleared() {
+        let mut term = TestTerm::new(10, 10, 0, 16, 8);
+        let id = place_image(&mut term, 5, 3, 32);
+
+        term.process(b"\x1b[6;4H\x1b[K");
+
+        assert!(
+            !term.active.images.contains_key(&id),
+            "EL should drop an image whose anchor cell is erased"
+        );
+    }
+
+    #[test]
+    fn printing_removes_image_when_anchor_cell_is_overwritten() {
+        let mut term = TestTerm::new(10, 10, 0, 16, 8);
+        let id = place_image(&mut term, 5, 3, 32);
+
+        term.process(b"\x1b[6;4Ha");
+
+        assert!(
+            !term.active.images.contains_key(&id),
+            "printing over an image anchor cell should drop the image"
+        );
+    }
+
+    #[test]
+    fn insert_chars_moves_image_anchor_right() {
+        let mut term = TestTerm::new(10, 10, 0, 16, 8);
+        let id = place_image(&mut term, 5, 3, 16);
+
+        term.process(b"\x1b[6;4H\x1b[2@");
+
+        let img = term.active.images.get(&id).expect("image retained");
+        assert_eq!(img.col, 5);
+    }
+
+    #[test]
+    fn delete_chars_moves_image_anchor_left() {
+        let mut term = TestTerm::new(10, 10, 0, 16, 8);
+        let id = place_image(&mut term, 5, 5, 16);
+
+        term.process(b"\x1b[6;4H\x1b[2P");
+
+        let img = term.active.images.get(&id).expect("image retained");
+        assert_eq!(img.col, 3);
+    }
+
+    #[test]
+    fn insert_chars_drops_image_anchor_pushed_past_right_edge() {
+        let mut term = TestTerm::new(10, 10, 0, 16, 8);
+        let id = place_image(&mut term, 5, 9, 16);
+
+        term.process(b"\x1b[6;9H\x1b[2@");
+
+        assert!(
+            !term.active.images.contains_key(&id),
+            "ICH should drop anchors shifted past the row edge"
+        );
+    }
+
+    #[test]
+    fn insert_columns_moves_image_anchor_right() {
+        let mut term = TestTerm::new(10, 10, 0, 16, 8);
+        let id = place_image(&mut term, 5, 3, 16);
+
+        term.process(b"\x1b[6;4H\x1b[2'}");
+
+        let img = term.active.images.get(&id).expect("image retained");
+        assert_eq!(img.col, 5);
+    }
+
+    #[test]
+    fn delete_columns_moves_image_anchor_left() {
+        let mut term = TestTerm::new(10, 10, 0, 16, 8);
+        let id = place_image(&mut term, 5, 5, 16);
+
+        term.process(b"\x1b[6;4H\x1b[2'~");
+
+        let img = term.active.images.get(&id).expect("image retained");
+        assert_eq!(img.col, 3);
+    }
+
+    #[test]
+    fn el_keeps_image_when_only_covered_cells_are_cleared() {
+        let mut term = TestTerm::new(10, 10, 0, 16, 8);
+        let id = place_image(&mut term, 5, 3, 32);
+
+        term.process(b"\x1b[7;1H\x1b[2K");
+
+        assert!(
+            term.active.images.contains_key(&id),
+            "clearing cells covered by image pixels should not drop the anchor"
         );
     }
 }

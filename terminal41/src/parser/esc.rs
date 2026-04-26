@@ -209,7 +209,13 @@ fn apply_vt52_esc(
             );
         }
         Vt52EscAction::EraseToEndOfLine => {
-            grid::erase_in_line(&mut screen.grid, &screen.cursor, viewport, 0);
+            grid::erase_in_line(
+                &mut screen.grid,
+                &screen.cursor,
+                viewport,
+                &mut screen.images,
+                0,
+            );
         }
         Vt52EscAction::DirectCursorAddressStart => {
             *vt52_cursor_addr = crate::Vt52CursorAddr::AwaitingRow;
@@ -360,6 +366,7 @@ fn apply_esc_back_index(
         grid::scroll_right(
             &mut screen.grid,
             screen_view,
+            &mut screen.images,
             screen.scroll_top,
             screen.scroll_bottom,
             1,
@@ -377,6 +384,7 @@ fn apply_esc_forward_index(
         grid::scroll_left(
             &mut screen.grid,
             screen_view,
+            &mut screen.images,
             screen.scroll_top,
             screen.scroll_bottom,
             1,

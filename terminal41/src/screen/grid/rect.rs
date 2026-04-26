@@ -1,8 +1,12 @@
+use std::collections::BTreeMap;
+
 use font41::attrs::CellAttrs;
 use palette::Srgb;
 use smol_str::SmolStr;
 
 use crate::Viewport;
+use crate::image::PlacedImage;
+use crate::image::clear_anchored_cells;
 use crate::screen::grid::AttrChangeExtent;
 use crate::screen::grid::Grid;
 
@@ -40,6 +44,7 @@ pub(crate) fn fill_rect(
 pub(crate) fn erase_rect(
     grid: &mut Grid,
     viewport: &Viewport,
+    images: &mut BTreeMap<u64, PlacedImage>,
     top: u32,
     left: u32,
     bottom: u32,
@@ -52,11 +57,19 @@ pub(crate) fn erase_rect(
         let abs = first_visible + r as usize;
         grid.rows[abs].clear_range(left..right_excl, grid.default_fg, grid.default_bg);
     }
+    clear_anchored_cells(
+        images,
+        first_visible + top as usize,
+        first_visible + bottom as usize + 1,
+        left,
+        right_excl,
+    );
 }
 
 pub(crate) fn erase_rect_selective(
     grid: &mut Grid,
     viewport: &Viewport,
+    images: &mut BTreeMap<u64, PlacedImage>,
     top: u32,
     left: u32,
     bottom: u32,
@@ -69,6 +82,13 @@ pub(crate) fn erase_rect_selective(
         let abs = first_visible + r as usize;
         grid.rows[abs].clear_range_selective(left..right_excl, grid.default_fg, grid.default_bg);
     }
+    clear_anchored_cells(
+        images,
+        first_visible + top as usize,
+        first_visible + bottom as usize + 1,
+        left,
+        right_excl,
+    );
 }
 
 pub(crate) fn copy_rect(

@@ -621,6 +621,7 @@ fn put_ascii_run_fast(
             target_shift_chars(screen, viewport, target, chunk_len);
         }
 
+        target_clear_anchored_cells(screen, viewport, target, col, col + chunk_len);
         write_ascii_chunk(
             target_row_mut(screen, viewport, target).unwrap(),
             col,
@@ -656,6 +657,7 @@ fn put_char_to_target(
     }
 
     let col = target_cursor_col(screen, target).unwrap() as usize;
+    target_clear_anchored_cells(screen, viewport, target, col, col + width);
     write_styled_glyph(
         target_row_mut(screen, viewport, target).unwrap(),
         col,
@@ -947,7 +949,13 @@ fn target_shift_chars(
 ) {
     match target {
         WriteTarget::Main { .. } => {
-            grid::shift_chars(&mut screen.grid, &mut screen.cursor, viewport, count as u16);
+            grid::shift_chars(
+                &mut screen.grid,
+                &mut screen.cursor,
+                viewport,
+                &mut screen.images,
+                count as u16,
+            );
         }
         WriteTarget::Status => {
             if let Some(status) = status_line_mut(screen) {
@@ -955,6 +963,22 @@ fn target_shift_chars(
             }
         }
     }
+}
+
+#[inline(always)]
+fn target_clear_anchored_cells(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    target: WriteTarget,
+    left_col: usize,
+    right_col: usize,
+) {
+    if !matches!(target, WriteTarget::Main { .. }) {
+        return;
+    }
+
+    let row = screen::active_row_index(screen, viewport);
+    crate::image::clear_anchored_cells(&mut screen.images, row, row + 1, left_col, right_col);
 }
 
 #[inline(always)]

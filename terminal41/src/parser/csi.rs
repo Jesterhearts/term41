@@ -1012,7 +1012,13 @@ fn apply_main_csi(
             );
         }
         MainCsiAction::EraseInLine { mode } => {
-            grid::erase_in_line(&mut screen.grid, &screen.cursor, &viewport, mode);
+            grid::erase_in_line(
+                &mut screen.grid,
+                &screen.cursor,
+                &viewport,
+                &mut screen.images,
+                mode,
+            );
         }
         MainCsiAction::SetGraphicsRendition { params } => {
             apply_sgr_groups(
@@ -1061,6 +1067,7 @@ fn apply_main_csi(
                     grid::scroll_down_in_rect(
                         &mut screen.grid,
                         &viewport,
+                        &mut screen.images,
                         top,
                         screen.scroll_bottom,
                         screen.left_margin,
@@ -1087,6 +1094,7 @@ fn apply_main_csi(
                     grid::scroll_up_in_rect(
                         &mut screen.grid,
                         &viewport,
+                        &mut screen.images,
                         top,
                         screen.scroll_bottom,
                         screen.left_margin,
@@ -1111,6 +1119,7 @@ fn apply_main_csi(
                 &mut screen.grid,
                 &mut screen.cursor,
                 &viewport,
+                &mut screen.images,
                 count.max(1),
             );
         }
@@ -1119,6 +1128,7 @@ fn apply_main_csi(
                 &mut screen.grid,
                 &mut screen.cursor,
                 &viewport,
+                &mut screen.images,
                 count.max(1),
             );
         }
@@ -1127,6 +1137,7 @@ fn apply_main_csi(
                 &mut screen.grid,
                 &mut screen.cursor,
                 &viewport,
+                &mut screen.images,
                 count.max(1),
             );
         }
@@ -1418,7 +1429,13 @@ pub(crate) fn csi_apply(
         }
         ParsedCsiAction::SelectiveEraseLine { mode } => {
             let view = screen::screen_viewport(screen, viewport);
-            grid::erase_in_line_selective(&mut screen.grid, &screen.cursor, &view, mode);
+            grid::erase_in_line_selective(
+                &mut screen.grid,
+                &screen.cursor,
+                &view,
+                &mut screen.images,
+                mode,
+            );
         }
         ParsedCsiAction::KittyKeyboard {
             intermediate,
@@ -1611,6 +1628,7 @@ pub(crate) fn csi_apply(
                     grid::erase_rect(
                         &mut screen.grid,
                         &view,
+                        &mut screen.images,
                         rect_top,
                         rect_left,
                         rect_bottom,
@@ -1621,6 +1639,7 @@ pub(crate) fn csi_apply(
                     grid::erase_rect_selective(
                         &mut screen.grid,
                         &view,
+                        &mut screen.images,
                         rect_top,
                         rect_left,
                         rect_bottom,
@@ -1748,6 +1767,7 @@ pub(crate) fn csi_apply(
             grid::scroll_left(
                 &mut screen.grid,
                 &view,
+                &mut screen.images,
                 screen.scroll_top,
                 screen.scroll_bottom,
                 n,
@@ -1759,6 +1779,7 @@ pub(crate) fn csi_apply(
             grid::scroll_right(
                 &mut screen.grid,
                 &view,
+                &mut screen.images,
                 screen.scroll_top,
                 screen.scroll_bottom,
                 n,
@@ -1804,6 +1825,7 @@ pub(crate) fn csi_apply(
             grid::insert_cols(
                 &mut screen.grid,
                 &view,
+                &mut screen.images,
                 screen.cursor.col,
                 screen.scroll_top,
                 screen.scroll_bottom,
@@ -1815,6 +1837,7 @@ pub(crate) fn csi_apply(
             grid::delete_cols(
                 &mut screen.grid,
                 &view,
+                &mut screen.images,
                 screen.cursor.col,
                 screen.scroll_top,
                 screen.scroll_bottom,
