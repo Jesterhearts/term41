@@ -478,7 +478,7 @@ pub struct Terminal {
 /// (`CSI ? 2026 h`) but never sends ESU (because it crashed, was killed,
 /// forgot the terminator, etc.) rendering resumes after this window so the
 /// UI doesn't appear frozen. 150ms matches the contour-terminal spec.
-const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_millis(150);
+const SYNCHRONIZED_UPDATE_TIMEOUT: Duration = Duration::from_millis(16);
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum SnapshotDirtyScope {

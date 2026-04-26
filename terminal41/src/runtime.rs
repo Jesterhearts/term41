@@ -8,6 +8,7 @@ use parking_lot::Mutex;
 use pty_pipe41::MAX_READ_CHUNK;
 use pty_pipe41::PtyReader;
 
+use crate::SYNCHRONIZED_UPDATE_TIMEOUT;
 use crate::TermSnapshotPublisher;
 use crate::Terminal;
 use crate::TerminalEffects;
@@ -22,7 +23,7 @@ pub(crate) fn run_terminal_thread(
     mut pty_reader: PtyReader,
     stop: Arc<AtomicBool>,
     render_thread_handle: Arc<OnceLock<Thread>>,
-    snapshot_publisher: TermSnapshotPublisher,
+    mut snapshot_publisher: TermSnapshotPublisher,
     startup_redraw: Option<Box<dyn Fn() + Send + Sync>>,
     tee_read: Box<dyn Fn(&[u8]) + Send + Sync>,
     deliver_effects: Box<dyn Fn(TerminalEffects) + Send + Sync>,
@@ -59,17 +60,19 @@ pub(crate) fn run_terminal_thread(
         if did_work && !batch_effects.is_empty() {
             deliver_effects(batch_effects);
         }
-        if did_work {
-            {
-                let mut terminal = terminal.lock();
-                publish_terminal_snapshot(&mut terminal, &snapshot_publisher);
-            }
-            if let Some(request_redraw) = startup_redraw.as_ref() {
-                request_redraw();
-            }
-            if let Some(thread) = render_thread_handle.get() {
-                thread.unpark();
-            }
+
+        let synchronize_start;
+        {
+            let mut terminal = terminal.lock();
+            synchronize_start = terminal.modes.synchronized_update_since;
+            publish_terminal_snapshot(&mut terminal, &mut snapshot_publisher);
+        }
+
+        if let Some(request_redraw) = startup_redraw.as_ref() {
+            request_redraw();
+        }
+        if let Some(thread) = render_thread_handle.get() {
+            thread.unpark();
         }
 
         if stop.load(Ordering::Acquire) {
@@ -81,7 +84,17 @@ pub(crate) fn run_terminal_thread(
             continue;
         }
 
-        std::thread::park();
+        if let Some(synch_start) = synchronize_start {
+            let time_until_sync =
+                synch_start + SYNCHRONIZED_UPDATE_TIMEOUT - std::time::Instant::now();
+            if time_until_sync > std::time::Duration::from_millis(0) {
+                std::thread::park_timeout(time_until_sync);
+            } else {
+                std::thread::yield_now();
+            }
+        } else {
+            std::thread::park();
+        }
         if stop.load(Ordering::Acquire) {
             break;
         }

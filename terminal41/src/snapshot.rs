@@ -1,8 +1,5 @@
-use std::sync::Arc;
-
 use font41::attrs::CellAttrs;
 use palette::Srgb;
-use parking_lot::Mutex;
 use smol_str::SmolStrBuilder;
 use tracing::debug_span;
 use unicode_segmentation::UnicodeSegmentation;
@@ -85,7 +82,7 @@ pub struct TermSnapshot {
 
 pub type TermSnapshotInput = triple_buffer::Input<TermSnapshot>;
 pub type TermSnapshotOutput = triple_buffer::Output<TermSnapshot>;
-pub type TermSnapshotPublisher = Arc<Mutex<TermSnapshotInput>>;
+pub type TermSnapshotPublisher = TermSnapshotInput;
 
 /// Row-generation state for terminal snapshots.
 ///
@@ -155,15 +152,14 @@ pub fn terminal_snapshot_buffer(
     terminal: &mut Terminal
 ) -> (TermSnapshotPublisher, TermSnapshotOutput) {
     let (input, output) = triple_buffer::triple_buffer(&snapshot_terminal(terminal));
-    (Arc::new(Mutex::new(input)), output)
+    (input, output)
 }
 
 pub fn publish_terminal_snapshot(
     terminal: &mut Terminal,
-    publisher: &TermSnapshotPublisher,
+    publisher: &mut TermSnapshotPublisher,
 ) {
-    let mut input = publisher.lock();
-    input.write(snapshot_terminal(terminal));
+    publisher.write(snapshot_terminal(terminal));
 }
 
 /// Snapshot the terminal's visible state under the lock.

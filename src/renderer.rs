@@ -274,7 +274,7 @@ fn resize_tab_to_grid(
     let pty_rows = {
         let mut terminal = tab.terminal.lock();
         terminal.resize(cols, rows);
-        terminal41::publish_terminal_snapshot(&mut terminal, &tab.snapshot_publisher);
+        tab.terminal_thread.thread_handle.get().unwrap().unpark();
         terminal.viewport.rows
     };
     tab.pty.resize(cols as u16, pty_rows as u16);
@@ -1079,6 +1079,7 @@ impl RenderHost {
         );
 
         let terminal_thread = TerminalThread::new();
+        let term_thread_handle = terminal_thread.thread_handle.clone();
         let pty_rows = terminal.viewport.rows;
         let term_features =
             terminal41::iterm_features::term_features(&self.config.feature_permissions);
@@ -1111,7 +1112,7 @@ impl RenderHost {
             terminal.clone(),
             pty_reader,
             self.render_thread_handle.clone(),
-            snapshot_publisher.clone(),
+            snapshot_publisher,
             None,
             Box::new({
                 let recorder = recorder.clone();
@@ -1134,7 +1135,7 @@ impl RenderHost {
         let _ = self.proxy.send_event(AppEvent::RegisterInputEndpoint {
             tab_id: id,
             terminal: terminal.clone(),
-            snapshot_publisher: snapshot_publisher.clone(),
+            terminal_thread: term_thread_handle,
             writer,
             recorder,
         });
@@ -1142,11 +1143,10 @@ impl RenderHost {
         self.tabs.push(Tab {
             id,
             terminal,
-            snapshot_publisher,
             snapshot_output,
             pty,
             window_sync_epoch: self.window_resize_epoch,
-            _terminal_thread: terminal_thread,
+            terminal_thread,
         });
         self.active_tab_id = id;
         self.sync_input_state();
@@ -1257,7 +1257,7 @@ impl RenderHost {
                 cfg.palette.clone(),
             );
             terminal.invalidate_snapshot_rows();
-            terminal41::publish_terminal_snapshot(terminal, &tab.snapshot_publisher);
+            tab.terminal_thread.thread_handle.get().unwrap().unpark();
         }
         self.config.keybindings = cfg.keybindings;
         self.sync_input_state();

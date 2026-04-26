@@ -15,6 +15,7 @@ use std::sync::OnceLock;
 use std::sync::atomic::AtomicBool;
 use std::sync::mpsc;
 use std::thread;
+use std::thread::Thread;
 use std::time::Duration;
 use std::time::Instant;
 
@@ -38,7 +39,6 @@ use terminal41::MouseButton as TermMouseButton;
 use terminal41::MouseEventKind;
 use terminal41::MouseModifiers;
 use terminal41::TermSnapshotOutput;
-use terminal41::TermSnapshotPublisher;
 use terminal41::Terminal;
 use terminal41::TerminalEffects;
 use terminal41::TerminalThread;
@@ -138,7 +138,7 @@ enum AppEvent {
     RegisterInputEndpoint {
         tab_id: TabId,
         terminal: Arc<Mutex<Terminal>>,
-        snapshot_publisher: TermSnapshotPublisher,
+        terminal_thread: Arc<OnceLock<Thread>>,
         writer: PtyWriter,
         recorder: RecorderControl,
     },
@@ -248,17 +248,16 @@ fn install_log_toast_forwarder(proxy: EventLoopProxy<AppEvent>) {
 struct Tab {
     id: TabId,
     terminal: Arc<Mutex<Terminal>>,
-    snapshot_publisher: TermSnapshotPublisher,
     snapshot_output: TermSnapshotOutput,
     pty: Pty,
     window_sync_epoch: u64,
     /// Kept alive for its Drop impl which signals the thread to stop.
-    _terminal_thread: TerminalThread,
+    terminal_thread: TerminalThread,
 }
 
 struct InputEndpoint {
     terminal: Arc<Mutex<Terminal>>,
-    snapshot_publisher: TermSnapshotPublisher,
+    terminal_thread: Arc<OnceLock<Thread>>,
     writer: PtyWriter,
     recorder: RecorderControl,
 }
@@ -560,8 +559,7 @@ impl WindowHost {
         let Some(target) = self.input_endpoints.get(&tab_id) else {
             return;
         };
-        let mut terminal = target.terminal.lock();
-        terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
+        target.terminal_thread.get().unwrap().unpark();
     }
 
     fn schedule_startup_redraw(
@@ -816,7 +814,7 @@ impl WindowHost {
         if reset_viewport {
             let mut terminal = target.terminal.lock();
             view::reset_viewport(&mut terminal.active);
-            terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
+            target.terminal_thread.get().unwrap().unpark();
         }
     }
 
@@ -827,10 +825,9 @@ impl WindowHost {
     ) {
         let effects = {
             let mut terminal = target.terminal.lock();
-            let effects = apply_host_input(&mut terminal, input);
-            terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
-            effects
+            apply_host_input(&mut terminal, input)
         };
+        target.terminal_thread.get().unwrap().unpark();
         Self::write_host_bytes(target, effects.host_bytes, reset_viewport);
     }
 
@@ -898,13 +895,9 @@ impl WindowHost {
         };
         let host_bytes = {
             let mut terminal = target.terminal.lock();
-            let host_bytes = terminal41::io::clipboard::apply_clipboard_request(
-                &mut terminal.clipboard,
-                request,
-            );
-            terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
-            host_bytes
+            terminal41::io::clipboard::apply_clipboard_request(&mut terminal.clipboard, request)
         };
+        target.terminal_thread.get().unwrap().unpark();
         Self::write_host_bytes(target, host_bytes, false);
     }
 
@@ -937,13 +930,12 @@ impl WindowHost {
         };
         let effects = {
             let mut terminal = target.terminal.lock();
-            let effects = match decision {
+            match decision {
                 PermissionDecision::Allow => terminal.apply_kitty_file_request(request),
                 PermissionDecision::Deny => terminal.deny_kitty_file_request(request),
-            };
-            terminal41::publish_terminal_snapshot(&mut terminal, &target.snapshot_publisher);
-            effects
+            }
         };
+        target.terminal_thread.get().unwrap().unpark();
         Self::write_host_bytes(target, effects.host_bytes, false);
     }
 
@@ -2295,17 +2287,17 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             AppEvent::RegisterInputEndpoint {
                 tab_id,
                 terminal,
-                snapshot_publisher,
                 writer,
                 recorder,
+                terminal_thread,
             } => {
                 self.input_endpoints.insert(
                     tab_id,
                     InputEndpoint {
                         terminal,
-                        snapshot_publisher,
                         writer,
                         recorder,
+                        terminal_thread,
                     },
                 );
             }
@@ -2702,6 +2694,7 @@ fn main() {
     // Create the terminal thread handle before spawning the PTY so the PTY
     // reader can unpark the terminal thread once it starts.
     let terminal_thread = TerminalThread::new();
+    let term_thread_handle = terminal_thread.thread_handle.clone();
 
     // Spawn the initial PTY early so the shell starts running immediately.
     let initial_status_rows = u32::from(config.status_line != StatusLineMode::Off);
@@ -2752,7 +2745,7 @@ fn main() {
         terminal.clone(),
         pty_reader,
         render_thread_handle.clone(),
-        snapshot_publisher.clone(),
+        snapshot_publisher,
         Some(Box::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
         })),
@@ -2796,11 +2789,10 @@ fn main() {
     let tab = Tab {
         id: TabId(0),
         terminal: terminal.clone(),
-        snapshot_publisher: snapshot_publisher.clone(),
         snapshot_output,
         pty,
         window_sync_epoch: 0,
-        _terminal_thread: terminal_thread,
+        terminal_thread,
     };
 
     // Spawn the render thread.
@@ -2840,7 +2832,7 @@ fn main() {
             TabId(0),
             InputEndpoint {
                 terminal: terminal.clone(),
-                snapshot_publisher: snapshot_publisher.clone(),
+                terminal_thread: term_thread_handle,
                 writer: pty_writer,
                 recorder: initial_recorder,
             },
