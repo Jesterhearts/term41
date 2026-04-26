@@ -100,12 +100,13 @@ impl DecodedImage {
 /// crate and dispatches to the right decoder. Returns `None` on unknown
 /// formats, malformed data, or formats whose decoder isn't compiled in.
 ///
-/// PNG is always available. GIF and video formats require the `ffmpeg`
-/// cargo feature.
+/// PNG and JPEG are always available. GIF and video formats require the
+/// `ffmpeg` cargo feature.
 pub fn decode_image(data: &[u8]) -> Option<DecodedImage> {
     let kind = infer::get(data)?;
     match kind.mime_type() {
         "image/png" => decode_png(data),
+        "image/jpeg" => decode_jpeg(data),
         #[cfg(feature = "ffmpeg")]
         "image/gif" | "video/mp4" | "video/webm" | "video/x-matroska" | "video/quicktime"
         | "video/x-msvideo" => ffmpeg_decoder::decode(data),
@@ -170,9 +171,56 @@ pub fn decode_png(data: &[u8]) -> Option<DecodedImage> {
     Some(DecodedImage::single_frame(width, height, pixels))
 }
 
+/// Decode a JPEG into RGBA pixels. JPEG has no alpha channel, so the decoder
+/// expands every pixel to opaque RGBA for the renderer.
+pub fn decode_jpeg(data: &[u8]) -> Option<DecodedImage> {
+    use zune_jpeg::JpegDecoder;
+    use zune_jpeg::zune_core::bytestream::ZCursor;
+    use zune_jpeg::zune_core::colorspace::ColorSpace;
+    use zune_jpeg::zune_core::options::DecoderOptions;
+
+    let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
+    let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
+    let pixels = decoder.decode().ok()?;
+    let (width, height) = decoder.dimensions()?;
+    let width = u32::try_from(width).ok()?;
+    let height = u32::try_from(height).ok()?;
+    let expected_len = width as usize * height as usize * 4;
+    if pixels.len() != expected_len {
+        return None;
+    }
+
+    Some(DecodedImage::single_frame(width, height, pixels))
+}
+
 #[cfg(test)]
 mod tests {
+    use base64::Engine;
+    use base64::engine::general_purpose::STANDARD as BASE64;
+
     use super::*;
+
+    /// 15x7 JPEG fixture from kamadak-exif's public test corpus. Keeping this
+    /// inline avoids tying image41 tests to the local cargo registry layout.
+    const SMALL_JPEG_B64: &str = concat!(
+        "/9j/4AAQSkZJRgABAQEASABIAAD/4QNeRXhpZgAATU0AKgAAAAgABgEOAAIAAAALAAAAVgEaAAUAAAABAAAAYgEbAAUAAAABAAAA",
+        "agEoAAMAAAABAAIAAAEyAAIAAAAUAAAAcodpAAQAAAABAAAAhgAAALBUZXN0IGltYWdlAEYAAABIAAAAAQAAAEgAAAABMjAxNjow",
+        "NTowNCAwMzowMjowMQAAA5AAAAcAAAAEMDIzMKACAAMAAAABAA8AAKADAAMAAAABAAcAAAAAAAAAAgIBAAQAAAABAAAAzgICAAQA",
+        "AAABAAACiAAAAAD/2P/gABBKRklGAAEBAAABAAEAAP/bAEMACAYGBwYFCAcHBwkJCAoMFA0MCwsMGRITDxQdGh8eHRocHCAkLicg",
+        "IiwjHBwoNyksMDE0NDQfJzk9ODI8LjM0Mv/bAEMBCQkJDAsMGA0NGDIhHCEyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy",
+        "MjIyMjIyMjIyMjIyMjIyMjIyMv/AABEIAAMABwMBIgACEQEDEQH/xAAfAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgv/xAC1",
+        "EAACAQMDAgQDBQUEBAAAAX0BAgMABBEFEiExQQYTUWEHInEUMoGRoQgjQrHBFVLR8CQzYnKCCQoWFxgZGiUmJygpKjQ1Njc4OTpD",
+        "REVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK",
+        "0tPU1dbX2Nna4eLj5OXm5+jp6vHy8/T19vf4+fr/xAAfAQADAQEBAQEBAQEBAAAAAAAAAQIDBAUGBwgJCgv/xAC1EQACAQIEBAME",
+        "BwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpT",
+        "VFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY",
+        "2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/APRdHhW5ltIJmleJDIVTzWx39+aKKKAP/9n/2wBDAAMCAgMCAgMDAwME",
+        "AwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQU",
+        "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAHAA8DAREAAhEBAxEB/8QAFQABAQAA",
+        "AAAAAAAAAAAAAAAABgj/xAAfEAABBAMAAwEAAAAAAAAAAAACAQMEBQYHEhMUFRb/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEB",
+        "AAAAAAAAAAAAAAAAAAAAAP/dAAQAIP/aAAwDAQACEQMRAD8AqnB6zeWDzNmzGqawt59hk016sS7l+5HKtV6ycjlHQ7pQDkChILQx",
+        "4fS+NlxUEjmRQVY/hW05+7MMurWX8rDKr9WUurbmynfO47Z81zjq+8ou9xCR0ANo24/DwIDauMJHD//Z",
+    );
 
     fn frame(delay_ms: u64) -> Frame {
         Frame {
@@ -228,5 +276,13 @@ mod tests {
         // Every frame having zero delay would divide-by-zero if we tried
         // modulo. `frame_at` has to be defensive and pick a stable frame.
         assert_eq!(img.frame_at(Duration::from_millis(5)), 0);
+    }
+
+    #[test]
+    fn decode_image_accepts_jpeg() {
+        let bytes = BASE64.decode(SMALL_JPEG_B64).expect("valid fixture");
+        let img = decode_image(&bytes).expect("decode ok");
+        assert_eq!((img.width, img.height), (15, 7));
+        assert_eq!(img.frames[0].pixels.len(), 15 * 7 * 4);
     }
 }

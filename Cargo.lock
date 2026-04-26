@@ -1664,6 +1664,7 @@ dependencies = [
  "palette",
  "png 0.18.1",
  "vtepp",
+ "zune-jpeg",
 ]
 
 [[package]]

@@ -212,10 +212,10 @@ fn decode_base64(s: &[u8]) -> Option<Vec<u8>> {
     BASE64.decode(&filtered).ok()
 }
 
-/// Decode an iTerm2 image payload into a [`DecodedImage`]. PNG is always
-/// supported; with the `ffmpeg` cargo feature animated GIF is recognized
-/// as well. Other raster formats return `None` and the caller silently
-/// drops the image.
+/// Decode an iTerm2 image payload into a [`DecodedImage`]. PNG and JPEG are
+/// always supported; with the `ffmpeg` cargo feature animated GIF is recognized
+/// as well. Other raster formats return `None` and the caller silently drops
+/// the image.
 pub fn decode_payload(data: &[u8]) -> Option<DecodedImage> {
     decode_image(data)
 }
