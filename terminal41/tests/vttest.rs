@@ -433,6 +433,21 @@ fn osc_1337_report_cell_size() {
     assert!(s.ends_with("\x1b\\"));
 }
 
+#[test]
+fn osc_1337_capabilities() {
+    let mut t = VtTerm::new_80x24();
+    t.process(b"\x1b]1337;Capabilities\x1b\\");
+    let out = t.take_pending_output();
+    let s = String::from_utf8(out).unwrap();
+    assert!(
+        s.starts_with("\x1b]1337;Capabilities="),
+        "unexpected response: {s:?}"
+    );
+    assert!(s.contains("T3"));
+    assert!(s.contains("Sx"));
+    assert!(s.ends_with("\x1b\\"));
+}
+
 // ---------------------------------------------------------------------------
 // 11. DECCKM (Application Cursor Keys)
 // ---------------------------------------------------------------------------

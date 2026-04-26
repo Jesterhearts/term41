@@ -1054,6 +1054,8 @@ impl RenderHost {
 
         let terminal_thread = TerminalThread::new();
         let pty_rows = terminal.viewport.rows;
+        let term_features =
+            terminal41::iterm_features::term_features(&self.config.feature_permissions);
 
         let (pty, writer, pty_reader) = match Pty::spawn(
             id,
@@ -1061,6 +1063,7 @@ impl RenderHost {
             pty_rows as u16,
             self.font_system.cell_width as u16,
             self.font_system.cell_height as u16,
+            Some(term_features),
             None,
             cwd,
             terminal_thread.thread_handle.clone(),

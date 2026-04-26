@@ -9,6 +9,7 @@ use clip41::Clipboard;
 use clip41::ClipboardKind;
 use config41::ClipboardPermissions;
 use config41::ColorPalette;
+use config41::FeaturePermissions;
 use config41::PermissionPolicy;
 use percent_encoding::percent_decode;
 
@@ -29,6 +30,7 @@ use crate::screen::hyperlink::HyperlinkRegistry;
 #[repr(u16)]
 pub enum OscCommand {
     SetIconAndTitle = 0,
+    SetIcon = 1,
     SetTitle = 2,
     PaletteColor = 4,
     SetDirectory = 7,
@@ -61,6 +63,7 @@ enum ParsedOscAction<'a> {
     ShellIntegration(ShellIntegrationAction),
     VscodeShellIntegration(VscodeShellIntegrationAction),
     ReportItermCellSize,
+    ReportItermCapabilities,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -108,6 +111,7 @@ impl TryFrom<u16> for OscCommand {
     fn try_from(value: u16) -> Result<Self, Self::Error> {
         match value {
             0 => Ok(Self::SetIconAndTitle),
+            1 => Ok(Self::SetIcon),
             2 => Ok(Self::SetTitle),
             4 => Ok(Self::PaletteColor),
             7 => Ok(Self::SetDirectory),
@@ -184,7 +188,7 @@ pub(super) fn handle_osc(
     clipboard: &mut Clipboard,
     pending_output: &mut Vec<u8>,
     clipboard_requests: &mut Vec<ClipboardRequest>,
-    clipboard_permissions: &ClipboardPermissions,
+    feature_permissions: &FeaturePermissions,
     c1_mode: C1Mode,
     current_directory: &mut Option<PathBuf>,
     hyperlinks: &mut HyperlinkRegistry,
@@ -212,7 +216,7 @@ pub(super) fn handle_osc(
         .clipboard(clipboard)
         .pending_output(pending_output)
         .clipboard_requests(clipboard_requests)
-        .clipboard_permissions(clipboard_permissions)
+        .feature_permissions(feature_permissions)
         .c1_mode(c1_mode)
         .current_directory(current_directory)
         .hyperlinks(hyperlinks)
@@ -242,7 +246,9 @@ fn parse_osc(payload: &[u8]) -> ParsedOscAction<'_> {
     };
 
     match cmd {
-        OscCommand::SetIconAndTitle | OscCommand::SetTitle => parse_osc_title(rest),
+        OscCommand::SetIconAndTitle | OscCommand::SetIcon | OscCommand::SetTitle => {
+            parse_osc_title(rest)
+        }
         OscCommand::SetDirectory => parse_osc_directory(rest),
         OscCommand::Hyperlink => parse_osc_hyperlink(rest),
         OscCommand::PaletteColor => parse_osc_palette_query(rest),
@@ -259,6 +265,7 @@ fn parse_osc(payload: &[u8]) -> ParsedOscAction<'_> {
         OscCommand::Iterm2 if rest.starts_with(b"ReportCellSize") => {
             ParsedOscAction::ReportItermCellSize
         }
+        OscCommand::Iterm2 if rest == b"Capabilities" => ParsedOscAction::ReportItermCapabilities,
         OscCommand::Iterm2 => ParsedOscAction::AcceptedNoop,
     }
 }
@@ -459,7 +466,7 @@ fn apply_parsed_osc(
     clipboard: &mut Clipboard,
     pending_output: &mut Vec<u8>,
     clipboard_requests: &mut Vec<ClipboardRequest>,
-    clipboard_permissions: &ClipboardPermissions,
+    feature_permissions: &FeaturePermissions,
     c1_mode: C1Mode,
     current_directory: &mut Option<PathBuf>,
     hyperlinks: &mut HyperlinkRegistry,
@@ -515,7 +522,7 @@ fn apply_parsed_osc(
             c1_mode,
             pending_output,
             clipboard_requests,
-            clipboard_permissions,
+            &feature_permissions.clipboard,
         ),
         ParsedOscAction::ShellIntegration(action) => apply_shell_integration_action(
             action,
@@ -539,6 +546,14 @@ fn apply_parsed_osc(
                 pending_output,
                 c1_mode,
                 format_args!("1337;ReportCellSize={};{}", cell_height, cell_width),
+            );
+        }
+        ParsedOscAction::ReportItermCapabilities => {
+            let features = crate::iterm_features::term_features(feature_permissions);
+            conformance::write_osc(
+                pending_output,
+                c1_mode,
+                format_args!("1337;Capabilities={features}"),
             );
         }
     }
@@ -844,7 +859,7 @@ mod tests {
         command_metas: HashMap<u64, CommandMeta>,
         palette: ColorPalette,
         clipboard_requests: Vec<ClipboardRequest>,
-        clipboard_permissions: ClipboardPermissions,
+        feature_permissions: FeaturePermissions,
     }
 
     impl Bag {
@@ -877,9 +892,12 @@ mod tests {
                 command_metas: HashMap::new(),
                 palette: ColorPalette::default(),
                 clipboard_requests: Vec::new(),
-                clipboard_permissions: ClipboardPermissions {
-                    read: PermissionPolicy::Allow,
-                    write: PermissionPolicy::Allow,
+                feature_permissions: FeaturePermissions {
+                    clipboard: ClipboardPermissions {
+                        read: PermissionPolicy::Allow,
+                        write: PermissionPolicy::Allow,
+                    },
+                    ..FeaturePermissions::default()
                 },
             }
         }
@@ -888,7 +906,7 @@ mod tests {
             mut self,
             clipboard_permissions: ClipboardPermissions,
         ) -> Self {
-            self.clipboard_permissions = clipboard_permissions;
+            self.feature_permissions.clipboard = clipboard_permissions;
             self
         }
 
@@ -905,7 +923,7 @@ mod tests {
                 .clipboard(&mut self.clipboard)
                 .pending_output(&mut self.pending)
                 .clipboard_requests(&mut self.clipboard_requests)
-                .clipboard_permissions(&self.clipboard_permissions)
+                .feature_permissions(&self.feature_permissions)
                 .c1_mode(C1Mode::SevenBit)
                 .current_directory(&mut self.cwd)
                 .hyperlinks(&mut self.registry)
@@ -926,6 +944,14 @@ mod tests {
     fn osc_parse_maps_title_semantically() {
         assert!(matches!(
             parse_osc(b"2;term41"),
+            ParsedOscAction::SetTitle(Some("term41"))
+        ));
+    }
+
+    #[test]
+    fn osc_parse_maps_icon_title_semantically() {
+        assert!(matches!(
+            parse_osc(b"1;term41"),
             ParsedOscAction::SetTitle(Some("term41"))
         ));
     }
@@ -1237,10 +1263,10 @@ mod tests {
     }
 
     #[test]
-    fn osc_1_is_ignored() {
+    fn osc_1_sets_shared_title() {
         let mut bag = Bag::new();
         bag.dispatch(b"1;icon-name-only");
-        assert!(bag.title.is_none());
+        assert_eq!(bag.title.as_deref(), Some("icon-name-only"));
     }
 
     // ---- OSC 10 / OSC 11 / OSC 4 — color queries ----
@@ -1374,6 +1400,29 @@ mod tests {
         let mut bag = Bag::new();
         bag.dispatch(b"1337;SetUserVar=foo=bar");
         assert!(bag.pending.is_empty());
+    }
+
+    #[test]
+    fn osc_1337_reports_policy_filtered_capabilities() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"1337;Capabilities");
+        let reply = String::from_utf8(bag.pending).unwrap();
+        assert!(reply.starts_with("\x1b]1337;Capabilities="));
+        assert!(reply.contains("Cw"));
+        assert!(reply.contains("Sx"));
+        assert!(reply.ends_with("\x1b\\"));
+    }
+
+    #[test]
+    fn osc_1337_capabilities_hide_clipboard_when_writes_are_denied() {
+        let mut bag = Bag::new().with_clipboard_permissions(ClipboardPermissions {
+            write: PermissionPolicy::Deny,
+            ..ClipboardPermissions::default()
+        });
+        bag.dispatch(b"1337;Capabilities");
+        let reply = String::from_utf8(bag.pending).unwrap();
+        assert!(!reply.contains("Cw"));
+        assert!(reply.contains("Sx"));
     }
 
     #[test]

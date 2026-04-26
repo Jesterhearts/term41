@@ -112,6 +112,7 @@ Legend:
 | ---------------------------------------------------- | ------------ | --------------------------------------------------------------------------------------------------------- |
 | OSC 1337 inline images                               | ✅ Supported | Includes multipart image payloads.                                                                        |
 | OSC 1337 `ReportCellSize`                            | ✅ Supported | Used by image-aware tools to size output.                                                                 |
+| OSC 1337 `Capabilities` / `TERM_FEATURES`            | ✅ Supported | iTerm2 Terminal Feature Reporting with policy-filtered clipboard-write advertisement.                     |
 | OSC 1337 current-directory / user-var style metadata | ✅ Supported | Safe metadata subset is accepted as untrusted annotation data.                                            |
 | iTerm2 upload / download / silent file placement     | ❌ Unplanned | Host-triggered local file transfer is outside the trust model.                                            |
 | iTerm2 terminal chrome controls                      | ❌ Unplanned | Profile switching, focus stealing, cursor guides, attention effects, and similar trusted-UI manipulation. |

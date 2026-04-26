@@ -104,6 +104,7 @@ impl Pty {
         rows: u16,
         cell_width: u16,
         cell_height: u16,
+        term_features: Option<String>,
         command: Option<Vec<String>>,
         cwd: Option<std::path::PathBuf>,
         data_thread: Arc<OnceLock<Thread>>,
@@ -145,6 +146,9 @@ impl Pty {
         // render full images.
         cmd.env("TERM_PROGRAM", "iTerm.app");
         cmd.env("TERM_PROGRAM_VERSION", "3.5.0");
+        if let Some(features) = term_features {
+            cmd.env("TERM_FEATURES", features);
+        }
         match cwd {
             Some(dir) => cmd.cwd(dir),
             None => {

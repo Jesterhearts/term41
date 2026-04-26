@@ -89,6 +89,8 @@ Implemented:
   numbers, query/ack responses, and bounded image storage
 - iTerm2 OSC 1337 inline images, including multipart image payloads
 - iTerm2 OSC 1337 `ReportCellSize`
+- iTerm2 Terminal Feature Reporting via `OSC 1337;Capabilities` and
+  `TERM_FEATURES`
 
 Maintenance direction:
 

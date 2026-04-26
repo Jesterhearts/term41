@@ -27,6 +27,7 @@ pub mod host;
 mod image;
 /// Host clipboard helpers plus keyboard/mouse protocol state reexports.
 pub mod io;
+pub mod iterm_features;
 mod lifecycle_ops;
 mod mode;
 mod osc;

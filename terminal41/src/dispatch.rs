@@ -426,7 +426,7 @@ pub(super) fn apply_osc_action(
                 .clipboard(clipboard)
                 .pending_output(pending_output)
                 .clipboard_requests(clipboard_requests)
-                .clipboard_permissions(&feature_permissions.clipboard)
+                .feature_permissions(feature_permissions)
                 .c1_mode(c1_mode)
                 .current_directory(current_directory)
                 .hyperlinks(hyperlinks)

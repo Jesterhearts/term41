@@ -2712,12 +2712,14 @@ fn main() {
     let initial_status_rows = u32::from(config.status_line != StatusLineMode::Off);
     let initial_main_rows = INITIAL_ROWS.saturating_sub(initial_status_rows);
     let (pty, pty_writer, pty_reader) = tracing::debug_span!("spawn_pty").in_scope(|| {
+        let term_features = terminal41::iterm_features::term_features(&config.feature_permissions);
         Pty::spawn(
             TabId(0),
             INITIAL_COLS as u16,
             initial_main_rows as u16,
             cell_width as u16,
             cell_height as u16,
+            Some(term_features),
             command,
             None,
             terminal_thread.thread_handle.clone(),
