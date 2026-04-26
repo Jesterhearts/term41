@@ -94,6 +94,7 @@ pub(crate) use crate::feature::apply_status_display_mode;
 pub use crate::graphics::KittyFileRequest;
 pub use crate::image::PlacedImage;
 pub use crate::image::VisibleImage;
+pub use crate::image::is_kitty_unicode_placeholder_cell;
 pub use crate::io::clipboard::ClipboardRequest;
 pub use crate::io::keyboard::KittyFlags;
 pub use crate::io::keyboard::KittyKeyboardState;
@@ -718,6 +719,10 @@ impl Terminal {
     /// Current cell height in pixels.
     pub fn cell_height(&self) -> u32 {
         self.cell_height
+    }
+
+    pub fn kitty_images(&self) -> &image41::kitty::KittyImageStore {
+        &self.images.kitty_images
     }
 
     /// Whether a non-empty selection is active.

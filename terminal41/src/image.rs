@@ -6,6 +6,12 @@ use image41::DecodedImage;
 
 use crate::screen::row::Row;
 
+pub const KITTY_UNICODE_PLACEHOLDER: char = '\u{10EEEE}';
+
+pub fn is_kitty_unicode_placeholder_cell(cell: &str) -> bool {
+    cell.starts_with(KITTY_UNICODE_PLACEHOLDER)
+}
+
 /// Inline image placed in the terminal grid.
 #[derive(Debug, Clone)]
 pub struct PlacedImage {

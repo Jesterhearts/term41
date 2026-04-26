@@ -5,6 +5,7 @@
 //! pixels or encoded images), and produces a [`DecodedImage`] ready for the
 //! atlas.
 
+use std::collections::BTreeMap;
 use std::collections::HashMap;
 use std::fs::File;
 use std::io::Read;
@@ -12,6 +13,7 @@ use std::io::Seek;
 use std::io::SeekFrom;
 use std::path::Path;
 use std::path::PathBuf;
+use std::time::Instant;
 
 use crate::DecodedImage;
 use crate::decode_png_or_jpeg;
@@ -444,12 +446,39 @@ pub fn crop_source_rect(
 pub struct KittyImageStore {
     /// Images keyed by their kitty image id.
     images: HashMap<u32, DecodedImage>,
+    /// Monotonic generation per stored image id. Renderer cache ids include
+    /// this so replacing an image under the same kitty id uploads new pixels.
+    image_generations: HashMap<u32, u64>,
+    next_generation: u64,
+    /// Virtual placements used by Unicode placeholders, keyed by
+    /// `(image_id, placement_id)`.
+    virtual_placements: BTreeMap<(u32, u32), KittyVirtualPlacement>,
+    next_virtual_generation: u64,
     /// Maps client-assigned image numbers to terminal-assigned image ids.
     number_to_id: HashMap<u32, u32>,
     /// Next auto-assigned image id (when client sends `I=` without `i=`).
     next_id: u32,
     /// Decoded image bytes currently retained in `images`.
     used_bytes: usize,
+}
+
+/// Metadata for a kitty virtual placement (`U=1`). The placement has no fixed
+/// screen location; text cells containing `U+10EEEE` decide where it appears.
+#[derive(Debug, Clone)]
+pub struct KittyVirtualPlacement {
+    pub image_id: u32,
+    pub placement_id: u32,
+    pub columns: u32,
+    pub rows: u32,
+    pub src_x: u32,
+    pub src_y: u32,
+    pub src_w: u32,
+    pub src_h: u32,
+    pub cell_x_offset: u32,
+    pub cell_y_offset: u32,
+    pub z_index: i32,
+    pub generation: u64,
+    pub created_at: Instant,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -468,6 +497,10 @@ impl KittyImageStore {
     pub fn new() -> Self {
         Self {
             images: HashMap::new(),
+            image_generations: HashMap::new(),
+            next_generation: 1,
+            virtual_placements: BTreeMap::new(),
+            next_virtual_generation: 1,
             number_to_id: HashMap::new(),
             next_id: 1,
             used_bytes: 0,
@@ -520,6 +553,8 @@ impl KittyImageStore {
         }
         self.used_bytes = projected;
         self.images.insert(id, image);
+        self.image_generations.insert(id, self.next_generation);
+        self.next_generation = self.next_generation.wrapping_add(1).max(1);
         Ok(())
     }
 
@@ -531,6 +566,74 @@ impl KittyImageStore {
         self.images.get(&id)
     }
 
+    pub fn image_generation(
+        &self,
+        id: u32,
+    ) -> u64 {
+        self.image_generations.get(&id).copied().unwrap_or(0)
+    }
+
+    pub fn store_virtual_placement(
+        &mut self,
+        image_id: u32,
+        cmd: &KittyCommand,
+        created_at: Instant,
+    ) {
+        let placement = KittyVirtualPlacement {
+            image_id,
+            placement_id: cmd.placement_id,
+            columns: cmd.columns,
+            rows: cmd.rows,
+            src_x: cmd.src_x,
+            src_y: cmd.src_y,
+            src_w: cmd.src_w,
+            src_h: cmd.src_h,
+            cell_x_offset: cmd.cell_x_offset,
+            cell_y_offset: cmd.cell_y_offset,
+            z_index: cmd.z_index,
+            generation: self.next_virtual_generation,
+            created_at,
+        };
+        self.next_virtual_generation = self.next_virtual_generation.wrapping_add(1).max(1);
+        self.virtual_placements
+            .insert((image_id, cmd.placement_id), placement);
+    }
+
+    pub fn virtual_placement(
+        &self,
+        image_id: u32,
+        placement_id: u32,
+    ) -> Option<&KittyVirtualPlacement> {
+        if placement_id != 0 {
+            return self.virtual_placements.get(&(image_id, placement_id));
+        }
+        self.virtual_placements
+            .range((image_id, 0)..=(image_id, u32::MAX))
+            .next()
+            .map(|(_, placement)| placement)
+    }
+
+    pub fn remove_virtual_placements(
+        &mut self,
+        image_id: u32,
+        placement_id: Option<u32>,
+    ) {
+        if let Some(placement_id) = placement_id {
+            self.virtual_placements.remove(&(image_id, placement_id));
+        } else {
+            self.virtual_placements.retain(|&(id, _), _| id != image_id);
+        }
+    }
+
+    pub fn remove_virtual_placements_range(
+        &mut self,
+        lo: u32,
+        hi: u32,
+    ) {
+        self.virtual_placements
+            .retain(|&(id, _), _| id < lo || id > hi);
+    }
+
     /// Remove one image id and any image-number aliases that resolve to it.
     pub fn remove(
         &mut self,
@@ -539,12 +642,16 @@ impl KittyImageStore {
         if let Some(image) = self.images.remove(&id) {
             self.used_bytes = self.used_bytes.saturating_sub(image_storage_bytes(&image));
         }
+        self.image_generations.remove(&id);
+        self.remove_virtual_placements(id, None);
         self.number_to_id.retain(|_, v| *v != id);
     }
 
     /// Drop all stored images and aliases.
     pub fn clear(&mut self) {
         self.images.clear();
+        self.image_generations.clear();
+        self.virtual_placements.clear();
         self.number_to_id.clear();
         self.used_bytes = 0;
     }
@@ -559,9 +666,11 @@ impl KittyImageStore {
             let keep = id < lo || id > hi;
             if !keep {
                 self.used_bytes = self.used_bytes.saturating_sub(image_storage_bytes(image));
+                self.image_generations.remove(&id);
             }
             keep
         });
+        self.remove_virtual_placements_range(lo, hi);
         self.number_to_id.retain(|_, v| *v < lo || *v > hi);
     }
 }

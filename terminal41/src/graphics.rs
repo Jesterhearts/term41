@@ -339,6 +339,22 @@ pub(crate) fn apply_kitty_file_request(
                 send_kitty_response(&cmd, id, false, message, request.c1_mode, pending_output);
                 return;
             }
+            if cmd.virtual_placement {
+                match store_kitty_virtual_placement(store, &cmd, id) {
+                    Ok(()) => {
+                        send_kitty_response(&cmd, id, true, "", request.c1_mode, pending_output)
+                    }
+                    Err(message) => send_kitty_response(
+                        &cmd,
+                        id,
+                        false,
+                        message,
+                        request.c1_mode,
+                        pending_output,
+                    ),
+                }
+                return;
+            }
             match place_kitty_image_at(
                 image,
                 &cmd,
@@ -420,7 +436,7 @@ fn place_kitty_image_at(
     move_cursor: bool,
 ) -> Result<(), &'static str> {
     if cmd.virtual_placement {
-        return Err("ENOTSUP");
+        return Err("EINVAL");
     }
 
     let image = image41::kitty::crop_source_rect(image, cmd);
@@ -485,6 +501,21 @@ fn place_kitty_image_at(
         screen.cursor.col = 0;
     }
 
+    Ok(())
+}
+
+fn store_kitty_virtual_placement(
+    store: &mut image41::kitty::KittyImageStore,
+    cmd: &image41::kitty::KittyCommand,
+    kitty_image_id: u32,
+) -> Result<(), &'static str> {
+    if kitty_image_id == 0 {
+        return Err("EINVAL");
+    }
+    if store.get(kitty_image_id).is_none() {
+        return Err("ENOENT");
+    }
+    store.store_virtual_placement(kitty_image_id, cmd, Instant::now());
     Ok(())
 }
 
@@ -765,6 +796,15 @@ fn handle_kitty_transmit_display(
                 send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
                 return;
             }
+            if cmd.virtual_placement {
+                match store_kitty_virtual_placement(store, cmd, id) {
+                    Ok(()) => send_kitty_response(cmd, id, true, "", c1_mode, pending_output),
+                    Err(message) => {
+                        send_kitty_response(cmd, id, false, message, c1_mode, pending_output)
+                    }
+                }
+                return;
+            }
             let placed = place_kitty_image(
                 image,
                 cmd,
@@ -821,6 +861,15 @@ fn handle_kitty_place(
     };
     match store.get(id) {
         Some(image) => {
+            if cmd.virtual_placement {
+                match store_kitty_virtual_placement(store, cmd, id) {
+                    Ok(()) => send_kitty_response(cmd, id, true, "", c1_mode, pending_output),
+                    Err(message) => {
+                        send_kitty_response(cmd, id, false, message, c1_mode, pending_output)
+                    }
+                }
+                return;
+            }
             let image = image.clone();
             let placed = place_kitty_image(
                 image,
@@ -868,10 +917,12 @@ fn handle_kitty_delete(
                     !(img.kitty_image_id == Some(id)
                         && img.kitty_placement_id == Some(cmd.placement_id))
                 });
+                store.remove_virtual_placements(id, Some(cmd.placement_id));
             } else {
                 screen
                     .images
                     .retain(|_, img| img.kitty_image_id != Some(id));
+                store.remove_virtual_placements(id, None);
             }
             if uppercase {
                 store.remove(id);
@@ -886,10 +937,12 @@ fn handle_kitty_delete(
                     !(img.kitty_image_id == Some(id)
                         && img.kitty_placement_id == Some(cmd.placement_id))
                 });
+                store.remove_virtual_placements(id, Some(cmd.placement_id));
             } else {
                 screen
                     .images
                     .retain(|_, img| img.kitty_image_id != Some(id));
+                store.remove_virtual_placements(id, None);
             }
             if uppercase {
                 store.remove(id);
@@ -925,6 +978,7 @@ fn handle_kitty_delete(
                     .map(|id| id < lo || id > hi)
                     .unwrap_or(true)
             });
+            store.remove_virtual_placements_range(lo, hi);
             if uppercase {
                 store.remove_range(lo, hi);
             }
@@ -1121,6 +1175,8 @@ fn place_iterm_image(
 
 #[cfg(test)]
 mod tests {
+    use std::time::Instant;
+
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
     use config41::PermissionPolicy;
@@ -1142,6 +1198,19 @@ mod tests {
     fn kitty_file_query(path: &std::path::Path) -> Vec<u8> {
         let encoded_path = BASE64.encode(path.to_string_lossy().as_bytes());
         format!("\x1b_Ga=q,t=f,f=32,s=1,v=1,i=7;{encoded_path}\x1b\\").into_bytes()
+    }
+
+    fn visible_images(term: &TestTerm) -> Vec<crate::VisibleImage> {
+        crate::view::visible_images(
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.cell_height(),
+            term.inner.cell_width(),
+            &term.inner.images.kitty_images,
+            &term.inner.palette,
+            Instant::now(),
+        )
+        .collect()
     }
 
     #[test]
@@ -1180,6 +1249,62 @@ mod tests {
         term.process(b"\x1b_Ga=t,i=7;AAAA\x1b\\");
 
         assert_eq!(term.take_pending_output(), b"\x1b_Gi=7;ENOSPC\x1b\\");
+    }
+
+    #[test]
+    fn kitty_unicode_placeholder_renders_virtual_placement_from_text() {
+        let mut term = TestTerm::new_80x24();
+
+        term.process(b"\x1b_Ga=T,f=32,s=1,v=1,i=42,U=1,c=2,r=2;/wAA/w==\x1b\\");
+        term.process(
+            concat!(
+                "\x1b[38;5;42m",
+                "\u{10EEEE}\u{0305}\u{0305}",
+                "\u{10EEEE}\u{0305}\u{030D}",
+                "\r\n",
+                "\u{10EEEE}\u{030D}\u{0305}",
+                "\u{10EEEE}\u{030D}\u{030D}",
+                "\x1b[39m",
+            )
+            .as_bytes(),
+        );
+
+        assert_eq!(term.take_pending_output(), b"\x1b_Gi=42;OK\x1b\\");
+        let images = visible_images(&term);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].kitty_image_id, Some(42));
+        assert_eq!(images[0].screen_row, 0);
+        assert_eq!(images[0].screen_col, 0);
+        assert_eq!(images[0].display_width, 16);
+        assert_eq!(images[0].display_height, 32);
+    }
+
+    #[test]
+    fn kitty_unicode_placeholder_inherits_columns_left_to_right() {
+        let mut term = TestTerm::new_80x24();
+
+        term.process(b"\x1b_Ga=T,f=32,s=1,v=1,i=42,U=1,c=3,r=2;/wAA/w==\x1b\\");
+        term.process(
+            concat!(
+                "\x1b[38;5;42m",
+                "\u{10EEEE}\u{0305}",
+                "\u{10EEEE}",
+                "\u{10EEEE}",
+                "\r\n",
+                "\u{10EEEE}\u{030D}",
+                "\u{10EEEE}",
+                "\u{10EEEE}",
+                "\x1b[39m",
+            )
+            .as_bytes(),
+        );
+
+        let images = visible_images(&term);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].screen_row, 0);
+        assert_eq!(images[0].screen_col, 0);
+        assert_eq!(images[0].display_width, 24);
+        assert_eq!(images[0].display_height, 32);
     }
 
     #[test]

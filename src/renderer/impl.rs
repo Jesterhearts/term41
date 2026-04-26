@@ -187,6 +187,9 @@ pub(crate) fn collect_row_glyphs(
         if sg.col as u32 >= visible_cols {
             continue;
         }
+        if terminal41::is_kitty_unicode_placeholder_cell(&snap_row.cells[sg.col as usize]) {
+            continue;
+        }
 
         let cell_attrs = snap_row.attrs[sg.col as usize];
         if blink_animation_enabled(snap, cell_attrs)

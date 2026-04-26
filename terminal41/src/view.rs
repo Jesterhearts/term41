@@ -128,7 +128,18 @@ pub fn visible_images(
     screen: &Screen,
     viewport: &Viewport,
     cell_height: u32,
+    cell_width: u32,
+    kitty_images: &image41::kitty::KittyImageStore,
+    palette: &crate::ColorPalette,
     now: Instant,
 ) -> impl Iterator<Item = VisibleImage> {
-    lifecycle_ops::visible_images(screen, viewport, cell_height, now)
+    lifecycle_ops::visible_images(
+        screen,
+        viewport,
+        cell_height,
+        cell_width,
+        kitty_images,
+        palette,
+        now,
+    )
 }

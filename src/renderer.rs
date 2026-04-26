@@ -1469,6 +1469,9 @@ impl RenderHost {
                         &terminal.active,
                         &terminal.viewport,
                         terminal.cell_height(),
+                        terminal.cell_width(),
+                        terminal.kitty_images(),
+                        &terminal.palette,
                         Instant::now(),
                     )
                     .collect::<Vec<_>>()

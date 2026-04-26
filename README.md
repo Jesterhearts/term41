@@ -99,7 +99,7 @@ Legend:
 | Kitty graphics file/temp-file payloads | ✅ Supported                  | File and temp-file media with byte range support and safe temp-file deletion rules.                                 |
 | Kitty graphics placement model         | ✅ Supported                  | Image IDs, image numbers, placement IDs, relative placements, cell offsets, z-index, and expanded delete selectors. |
 | Kitty graphics shared memory (`t=s`)   | ❌ Unplanned                  | Rejected as a local cross-process attack surface.                                                                   |
-| Kitty graphics Unicode placeholders    | 🟨 Planned, not supported yet | Needs text-grid support for placeholder codepoints and combining marks.                                             |
+| Kitty graphics Unicode placeholders    | ✅ Supported                  | `U=1` virtual placements render from `U+10EEEE` placeholder cells with row/column/image-id combining marks.         |
 | Kitty graphics animation actions       | 🟨 Planned, not supported yet | Needs separate frame mutation, lifecycle, and quota design.                                                         |
 | Kitty text sizing protocol             | 🟦 Watching                   | Could be useful, but affects shaping, selection, hit testing, scrollback, and reflow.                               |
 | Kitty mouse pointer shapes             | 🟦 Watching                   | Reasonable if real applications use it; should stay scoped to terminal content.                                     |
@@ -257,7 +257,7 @@ triggered the prompt.
 ### Images and Media
 
 - sixel graphics
-- Kitty graphics protocol
+- Kitty graphics protocol, including Unicode placeholder placements
 - OSC 1337 inline images
 - PNG and JPEG always available
 - GIF/video formats available with the `ffmpeg` feature
