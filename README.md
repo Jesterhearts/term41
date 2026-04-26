@@ -47,24 +47,15 @@ I've always wanted to write my own, with the features I prefer.
 
 What I wanted out of this terminal was pretty straightforward:
 
-- GPU rendering via `wgpu`
+- Fast startup times
+- High throughput
+- Low latency
 - Unicode shaping and fallback fonts
 - modern image protocols (`sixel`, Kitty, OSC 1337)
 - DEC/VT-style terminal emulation, including page geometry, rectangular ops,
   status lines, macros, and user-defined keys
 - shell integration, tabs, scrollback search, hyperlinks, and background images
 
-The codebase is split into a few focused crates:
-
-- `term41`: windowing, rendering, config, input, and app orchestration
-- `terminal41`: terminal state machine and escape-sequence behavior
-- `vtepp`: pull-based VTE parser
-- `font41`, `image41`, `pty-pipe41`: supporting subsystems
-
-Roadmap notes live in:
-
-- `VT_COMPATIBILITY_ROADMAP.md` for DEC VT-family compatibility decisions
-- `TERMINAL_EXTENSIONS_ROADMAP.md` for modern terminal extension protocols
 
 <details>
 <summary><strong>Protocol and Spec Compatibility</strong></summary>
