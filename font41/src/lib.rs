@@ -16,6 +16,7 @@ mod legacy;
 mod svg;
 
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
 use std::sync::RwLock;
@@ -142,6 +143,7 @@ struct LazyFontFace {
     source: fontdb::Source,
     face_index: u32,
     is_color_hint: bool,
+    is_nerd_symbol_hint: bool,
     is_bold: bool,
     is_italic: bool,
     loaded: Mutex<Option<Arc<LoadedFont>>>,
@@ -152,6 +154,7 @@ impl LazyFontFace {
         source: fontdb::Source,
         face_index: u32,
         is_color_hint: bool,
+        is_nerd_symbol_hint: bool,
         is_bold: bool,
         is_italic: bool,
     ) -> Self {
@@ -159,6 +162,7 @@ impl LazyFontFace {
             source,
             face_index,
             is_color_hint,
+            is_nerd_symbol_hint,
             is_bold,
             is_italic,
             loaded: Mutex::new(None),
@@ -214,6 +218,18 @@ static FAMILIES: RwLock<Vec<FamilyVariants>> = RwLock::new(Vec::new());
 static FONT_LOAD_STATE: Mutex<FontLoadState> = Mutex::new(FontLoadState::NotStarted);
 static FONT_LOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
 static INSTALLED_FONT_GENERATION: AtomicU64 = AtomicU64::new(0);
+const NERD_SYMBOL_FAMILY: &str = " nerd font";
+const NERD_SYMBOL_SAMPLE: &[char] = &[
+    '\u{e0a0}',  // Powerline branch.
+    '\u{e0b0}',  // Powerline separator.
+    '\u{e200}',  // Font Awesome Extension.
+    '\u{e300}',  // Weather icons.
+    '\u{e5fa}',  // Seti UI + custom icons.
+    '\u{e700}',  // Devicons.
+    '\u{f000}',  // Font Awesome.
+    '\u{f400}',  // Octicons.
+    '\u{f0001}', // Material Design Icons.
+];
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum FontLoadState {
@@ -223,13 +239,20 @@ enum FontLoadState {
 }
 
 fn load_fonts(fonts_config: Option<String>) -> (Vec<Arc<LazyFontFace>>, Vec<FamilyVariants>) {
+    let mut db = fontdb::Database::new();
+    db.load_system_fonts();
+    load_fonts_from_database(&db, fonts_config.as_deref())
+}
+
+fn load_fonts_from_database(
+    db: &fontdb::Database,
+    fonts_config: Option<&str>,
+) -> (Vec<Arc<LazyFontFace>>, Vec<FamilyVariants>) {
     let mut fonts: Vec<Arc<LazyFontFace>> = Vec::new();
     let mut families: Vec<FamilyVariants> = Vec::new();
+    let mut loaded_face_ids: HashSet<fontdb::ID> = HashSet::new();
 
     if let Some(families_str) = fonts_config {
-        let mut db = fontdb::Database::new();
-        db.load_system_fonts();
-
         for family_name in families_str.split(',').map(|s| s.trim()) {
             if family_name.is_empty() {
                 continue;
@@ -243,8 +266,9 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<Arc<LazyFontFace>>, Vec<Fami
             };
 
             let Some(regular) = load_family_variant(
-                &db,
+                db,
                 &mut fonts,
+                &mut loaded_face_ids,
                 &family,
                 fontdb::Weight::NORMAL,
                 fontdb::Style::Normal,
@@ -255,8 +279,9 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<Arc<LazyFontFace>>, Vec<Fami
                 continue;
             };
             let bold = load_family_variant(
-                &db,
+                db,
                 &mut fonts,
+                &mut loaded_face_ids,
                 &family,
                 fontdb::Weight::BOLD,
                 fontdb::Style::Normal,
@@ -264,8 +289,9 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<Arc<LazyFontFace>>, Vec<Fami
                 false,
             );
             let italic = load_family_variant(
-                &db,
+                db,
                 &mut fonts,
+                &mut loaded_face_ids,
                 &family,
                 fontdb::Weight::NORMAL,
                 fontdb::Style::Italic,
@@ -273,8 +299,9 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<Arc<LazyFontFace>>, Vec<Fami
                 true,
             );
             let bold_italic = load_family_variant(
-                &db,
+                db,
                 &mut fonts,
+                &mut loaded_face_ids,
                 &family,
                 fontdb::Weight::BOLD,
                 fontdb::Style::Italic,
@@ -295,6 +322,8 @@ fn load_fonts(fonts_config: Option<String>) -> (Vec<Arc<LazyFontFace>>, Vec<Fami
             });
         }
     }
+
+    append_nerd_symbol_fallback(db, &mut fonts, &mut loaded_face_ids);
 
     (fonts, families)
 }
@@ -612,6 +641,11 @@ impl FontSystem {
         }
 
         let wants_color: Vec<bool> = cells.iter().map(|c| cluster_prefers_color(c)).collect();
+        let wants_nerd_symbol: Vec<bool> = cells
+            .iter()
+            .map(|c| cluster_prefers_nerd_symbol(c))
+            .collect();
+        let nerd_symbol_font_index = font_faces.iter().position(|font| font.is_nerd_symbol_hint);
 
         // Preferred face per cell on pass 0. `Some(idx)` pins the cell to
         // that exact face (text cells lock the variant that matches their
@@ -622,18 +656,14 @@ impl FontSystem {
             .iter()
             .enumerate()
             .map(|(col, _)| {
-                if wants_color[col] {
-                    None
-                } else {
-                    let a = attrs[col];
-                    let (idx, _, _) = pick_variant(
-                        &families,
-                        final_font_index,
-                        a.contains(CellAttrs::BOLD),
-                        a.contains(CellAttrs::ITALIC),
-                    );
-                    Some(idx)
-                }
+                preferred_font_for_cell(
+                    &families,
+                    final_font_index,
+                    attrs[col],
+                    wants_color[col],
+                    wants_nerd_symbol[col],
+                    nerd_symbol_font_index,
+                )
             })
             .collect();
 
@@ -971,6 +1001,41 @@ fn font_is_color_candidate(
         .unwrap_or(final_font.is_color)
 }
 
+fn preferred_font_for_cell(
+    families: &[FamilyVariants],
+    final_font_index: usize,
+    attrs: CellAttrs,
+    wants_color: bool,
+    wants_nerd_symbol: bool,
+    nerd_symbol_font_index: Option<usize>,
+) -> Option<usize> {
+    if wants_color {
+        return None;
+    }
+
+    if wants_nerd_symbol && let Some(font_index) = nerd_symbol_font_index {
+        return Some(font_index);
+    }
+
+    let (font_index, _, _) = pick_variant(
+        families,
+        final_font_index,
+        attrs.contains(CellAttrs::BOLD),
+        attrs.contains(CellAttrs::ITALIC),
+    );
+    Some(font_index)
+}
+
+fn cluster_prefers_nerd_symbol(cell: &str) -> bool {
+    cell.chars()
+        .any(|ch| is_private_use_codepoint(ch) && ch != '\u{FE0F}')
+}
+
+fn is_private_use_codepoint(ch: char) -> bool {
+    let cp = ch as u32;
+    matches!(cp, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
+}
+
 fn glyph_cells_wide(
     cells: &[SmolStr],
     start_col: u16,
@@ -1083,6 +1148,7 @@ fn shared_font_data_from_source(source: &fontdb::Source) -> Option<SharedFontDat
 fn load_family_variant(
     db: &fontdb::Database,
     fonts: &mut Vec<Arc<LazyFontFace>>,
+    loaded_face_ids: &mut HashSet<fontdb::ID>,
     family: &fontdb::Family,
     weight: fontdb::Weight,
     style: fontdb::Style,
@@ -1090,10 +1156,19 @@ fn load_family_variant(
     is_italic: bool,
 ) -> Option<usize> {
     if let fontdb::Family::Name(name) = family {
-        let (id, is_color_hint) = pick_named_family_face(db, name, weight, style)?;
-        let font_face = lazy_font_face(db, id, is_color_hint, is_bold, is_italic)?;
+        let (id, is_color_hint, is_nerd_symbol_hint) =
+            pick_named_family_face(db, name, weight, style)?;
+        let font_face = lazy_font_face(
+            db,
+            id,
+            is_color_hint,
+            is_nerd_symbol_hint,
+            is_bold,
+            is_italic,
+        )?;
         let idx = fonts.len();
         fonts.push(font_face);
+        loaded_face_ids.insert(id);
         return Some(idx);
     }
 
@@ -1109,9 +1184,18 @@ fn load_family_variant(
         return None;
     }
     let is_color_hint = db.with_face_data(id, color_table_score).unwrap_or_default() > 0;
-    let font_face = lazy_font_face(db, id, is_color_hint, is_bold, is_italic)?;
+    let is_nerd_symbol_hint = nerd_symbol_family_priority(face).is_some();
+    let font_face = lazy_font_face(
+        db,
+        id,
+        is_color_hint,
+        is_nerd_symbol_hint,
+        is_bold,
+        is_italic,
+    )?;
     let idx = fonts.len();
     fonts.push(font_face);
+    loaded_face_ids.insert(id);
     Some(idx)
 }
 
@@ -1119,6 +1203,7 @@ fn lazy_font_face(
     db: &fontdb::Database,
     id: fontdb::ID,
     is_color_hint: bool,
+    is_nerd_symbol_hint: bool,
     is_bold: bool,
     is_italic: bool,
 ) -> Option<Arc<LazyFontFace>> {
@@ -1127,9 +1212,91 @@ fn lazy_font_face(
         source,
         face_index,
         is_color_hint,
+        is_nerd_symbol_hint,
         is_bold,
         is_italic,
     )))
+}
+
+fn append_nerd_symbol_fallback(
+    db: &fontdb::Database,
+    fonts: &mut Vec<Arc<LazyFontFace>>,
+    loaded_face_ids: &mut HashSet<fontdb::ID>,
+) {
+    let Some((id, family_name)) = pick_nerd_symbol_face(db, loaded_face_ids) else {
+        return;
+    };
+    let is_color_hint = db.with_face_data(id, color_table_score).unwrap_or_default() > 0;
+    let Some(font_face) = lazy_font_face(db, id, is_color_hint, true, false, false) else {
+        return;
+    };
+
+    fonts.push(font_face);
+    loaded_face_ids.insert(id);
+    info!("loaded Nerd Font symbol fallback: {family_name}");
+}
+
+fn pick_nerd_symbol_face(
+    db: &fontdb::Database,
+    loaded_face_ids: &HashSet<fontdb::ID>,
+) -> Option<(fontdb::ID, String)> {
+    db.faces()
+        .filter(|face| !loaded_face_ids.contains(&face.id))
+        .filter_map(|face| {
+            let family_priority = nerd_symbol_family_priority(face)?;
+            let glyph_score = db
+                .with_face_data(face.id, nerd_symbol_coverage_score)
+                .unwrap_or_default();
+            if glyph_score == 0 {
+                return None;
+            }
+
+            let regular_style = face.weight == fontdb::Weight::NORMAL
+                && face.style == fontdb::Style::Normal
+                && face.stretch == fontdb::Stretch::Normal;
+            let rank = (glyph_score, family_priority, regular_style, face.monospaced);
+            let family_name = face
+                .families
+                .iter()
+                .find_map(|(name, _)| is_nerd_symbol_family(name).then(|| name.clone()))
+                .unwrap_or_else(|| face.post_script_name.clone());
+            Some((rank, face.id, family_name))
+        })
+        .max_by_key(|(rank, _, _)| *rank)
+        .map(|(_, id, family_name)| (id, family_name))
+}
+
+fn nerd_symbol_family_priority(face: &fontdb::FaceInfo) -> Option<u8> {
+    face.families
+        .iter()
+        .filter_map(|(name, _)| {
+            debug!("checking family {name} for Nerd Font symbol fallback");
+            if name.to_lowercase().contains(NERD_SYMBOL_FAMILY) {
+                Some(1)
+            } else {
+                None
+            }
+        })
+        .max()
+}
+
+fn is_nerd_symbol_family(name: &str) -> bool {
+    name.to_lowercase().contains(NERD_SYMBOL_FAMILY)
+}
+
+fn nerd_symbol_coverage_score(
+    data: &[u8],
+    face_index: u32,
+) -> u8 {
+    let Ok(font) = read_fonts::FontRef::from_index(data, face_index) else {
+        return 0;
+    };
+    NERD_SYMBOL_SAMPLE
+        .iter()
+        .filter(|&&ch| charmap_lookup(&font, ch) != 0)
+        .count()
+        .try_into()
+        .unwrap_or(u8::MAX)
 }
 
 fn pick_named_family_face(
@@ -1137,7 +1304,7 @@ fn pick_named_family_face(
     name: &str,
     weight: fontdb::Weight,
     style: fontdb::Style,
-) -> Option<(fontdb::ID, bool)> {
+) -> Option<(fontdb::ID, bool, bool)> {
     db.faces()
         .filter(|face| {
             face.weight == weight
@@ -1154,7 +1321,8 @@ fn pick_named_family_face(
                 .with_face_data(face.id, color_table_score)
                 .unwrap_or_default()
                 > 0;
-            (face.id, is_color_hint)
+            let is_nerd_symbol_hint = nerd_symbol_family_priority(face).is_some();
+            (face.id, is_color_hint, is_nerd_symbol_hint)
         })
 }
 
@@ -1682,6 +1850,27 @@ fn add_contour_to_path_with_offset(
 mod tests {
     use super::*;
 
+    fn face_info(
+        families: &[&str],
+        weight: fontdb::Weight,
+        style: fontdb::Style,
+    ) -> fontdb::FaceInfo {
+        fontdb::FaceInfo {
+            id: fontdb::ID::dummy(),
+            source: fontdb::Source::Binary(Arc::new(Vec::<u8>::new())),
+            index: 0,
+            families: families
+                .iter()
+                .map(|family| (family.to_string(), fontdb::Language::English_UnitedStates))
+                .collect(),
+            post_script_name: families.first().copied().unwrap_or("TestFont").to_string(),
+            style,
+            weight,
+            stretch: fontdb::Stretch::Normal,
+            monospaced: true,
+        }
+    }
+
     /// All shaped glyphs for visible characters must rasterize to non-empty
     /// bitmaps, including ligature replacement glyphs that may be nested
     /// composites (composite referencing another composite).
@@ -1735,5 +1924,62 @@ mod tests {
 
         let ligature = vec![SmolStr::new("🇺"), SmolStr::new("🇸"), SmolStr::new(" ")];
         assert_eq!(glyph_cells_wide(&ligature, 0, 1), 2);
+    }
+
+    #[test]
+    fn nerd_font_private_use_symbols_stay_on_text_fallback_path() {
+        assert!(!cluster_prefers_color("\u{e0b0}"));
+        assert!(!cluster_prefers_color("\u{f000}"));
+        assert!(!cluster_prefers_color("\u{f0001}"));
+        assert!(cluster_prefers_nerd_symbol("\u{e0b0}"));
+        assert!(cluster_prefers_nerd_symbol("\u{f000}"));
+        assert!(cluster_prefers_nerd_symbol("\u{f0001}"));
+        assert!(!cluster_prefers_nerd_symbol("H"));
+    }
+
+    #[test]
+    fn private_use_cells_prefer_symbol_font_before_primary_text_font() {
+        let families = [FamilyVariants {
+            regular: 1,
+            bold: Some(2),
+            italic: None,
+            bold_italic: None,
+        }];
+
+        assert_eq!(
+            preferred_font_for_cell(&families, 99, CellAttrs::default(), false, true, Some(8),),
+            Some(8)
+        );
+        assert_eq!(
+            preferred_font_for_cell(&families, 99, CellAttrs::default(), false, true, None),
+            Some(1)
+        );
+        assert_eq!(
+            preferred_font_for_cell(&families, 99, CellAttrs::default(), true, true, Some(8)),
+            None
+        );
+    }
+
+    #[test]
+    fn nerd_symbol_family_priority_prefers_mono_symbol_face() {
+        let plain = face_info(
+            &[NERD_SYMBOL_FAMILY],
+            fontdb::Weight::NORMAL,
+            fontdb::Style::Normal,
+        );
+        let mono = face_info(
+            &[NERD_SYMBOL_FAMILY_MONO],
+            fontdb::Weight::NORMAL,
+            fontdb::Style::Normal,
+        );
+        let unrelated = face_info(
+            &["JetBrainsMono Nerd Font"],
+            fontdb::Weight::NORMAL,
+            fontdb::Style::Normal,
+        );
+
+        assert_eq!(nerd_symbol_family_priority(&plain), Some(1));
+        assert_eq!(nerd_symbol_family_priority(&mono), Some(2));
+        assert_eq!(nerd_symbol_family_priority(&unrelated), None);
     }
 }

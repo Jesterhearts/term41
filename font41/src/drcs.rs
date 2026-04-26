@@ -84,6 +84,15 @@ pub fn encode_char(glyph_id: u16) -> Option<char> {
 }
 
 pub fn encode_single(cell: &str) -> Option<u16> {
+    let glyph_id = private_use_glyph_id(cell)?;
+    if active_glyph_exists(glyph_id) {
+        Some(glyph_id)
+    } else {
+        None
+    }
+}
+
+fn private_use_glyph_id(cell: &str) -> Option<u16> {
     let mut chars = cell.chars();
     let ch = chars.next()?;
     if chars.next().is_some() {
@@ -94,6 +103,17 @@ pub fn encode_single(cell: &str) -> Option<u16> {
         return None;
     }
     Some((cp - PUA_BASE) as u16)
+}
+
+fn active_glyph_exists(glyph_id: u16) -> bool {
+    let Some(geometry) = CURRENT_GEOMETRY.get() else {
+        return false;
+    };
+    let glyphs = CURRENT_GLYPHS.with(|current| current.borrow().as_ref().cloned());
+    let Some(glyphs) = glyphs else {
+        return false;
+    };
+    resolve_glyph(&glyphs, geometry, glyph_id).is_some()
 }
 
 pub fn rasterize(
@@ -235,6 +255,28 @@ mod tests {
             full_cell: false,
             pixels: vec![1],
         }
+    }
+
+    #[test]
+    fn encode_single_only_claims_active_drcs_glyphs() {
+        let glyph_id = 1;
+        let ch = encode_char(glyph_id).unwrap();
+
+        assert_eq!(private_use_glyph_id(&ch.to_string()), Some(glyph_id));
+        assert_eq!(encode_single(&ch.to_string()), None);
+
+        let glyphs: GlyphMap = Arc::new(HashMap::from([(
+            (GeometryClass::Col80Line24, glyph_id),
+            single_pixel_glyph(glyph_id),
+        )]));
+        let _guard = set_context(Some(GeometryClass::Col80Line24), Some(glyphs));
+
+        assert_eq!(encode_single(&ch.to_string()), Some(glyph_id));
+    }
+
+    #[test]
+    fn encode_single_does_not_swallow_undefined_nerd_font_pua() {
+        assert_eq!(encode_single("\u{f0001}"), None);
     }
 
     #[test]
