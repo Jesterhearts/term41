@@ -250,7 +250,6 @@ struct Tab {
     terminal: Arc<Mutex<Terminal>>,
     snapshot_publisher: TermSnapshotPublisher,
     snapshot_output: TermSnapshotOutput,
-    output_streaming: Arc<AtomicBool>,
     pty: Pty,
     window_sync_epoch: u64,
     /// Kept alive for its Drop impl which signals the thread to stop.
@@ -2751,14 +2750,12 @@ fn main() {
     );
     let (snapshot_publisher, snapshot_output) = terminal41::terminal_snapshot_buffer(&mut terminal);
     let terminal = Arc::new(Mutex::new(terminal));
-    let output_streaming = Arc::new(AtomicBool::new(false));
 
     terminal_thread.spawn(
         "terminal-0".into(),
         terminal.clone(),
         pty_reader,
         render_thread_handle.clone(),
-        output_streaming.clone(),
         snapshot_publisher.clone(),
         Some(Box::new(move || {
             let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
@@ -2805,7 +2802,6 @@ fn main() {
         terminal: terminal.clone(),
         snapshot_publisher: snapshot_publisher.clone(),
         snapshot_output,
-        output_streaming,
         pty,
         window_sync_epoch: 0,
         _terminal_thread: terminal_thread,
