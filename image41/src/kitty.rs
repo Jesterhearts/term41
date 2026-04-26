@@ -2,7 +2,8 @@
 //!
 //! Handles APC payloads of the form `G key=val,...;base64_payload`. Parses the
 //! control keys, decodes the payload (base64 → optional zlib inflate → raw
-//! pixels or PNG), and produces a [`DecodedImage`] ready for the atlas.
+//! pixels or encoded images), and produces a [`DecodedImage`] ready for the
+//! atlas.
 
 use std::collections::HashMap;
 use std::fs::File;
@@ -13,7 +14,7 @@ use std::path::Path;
 use std::path::PathBuf;
 
 use crate::DecodedImage;
-use crate::decode_png;
+use crate::decode_png_or_jpeg;
 
 // ---------------------------------------------------------------------------
 // Parsed command
@@ -24,7 +25,8 @@ use crate::decode_png;
 pub struct KittyCommand {
     /// `a` — action (default `t`).
     pub action: u8,
-    /// `f` — pixel format: 24 (RGB), 32 (RGBA, default), 100 (PNG).
+    /// `f` — pixel format: 24 (RGB), 32 (RGBA, default), 100 (PNG by spec;
+    /// term41 also accepts JPEG bytes as a compatibility extension).
     pub format: u32,
     /// `t` — transmission medium: `d` direct, `f` file, `t` temp file.
     /// The kitty protocol also defines `s` for shared memory; term41 parses
@@ -322,7 +324,7 @@ fn decode_data(
     };
 
     match cmd.format {
-        100 => decode_png(&pixels),
+        100 => decode_png_or_jpeg(&pixels),
         24 => decode_rgb(&pixels, cmd.width, cmd.height),
         _ => decode_rgba(&pixels, cmd.width, cmd.height),
     }
@@ -843,6 +845,25 @@ mod tests {
         assert_eq!(image.width, 2);
         assert_eq!(image.height, 1);
         assert_eq!(image.frames[0].pixels, vec![255, 0, 0, 255, 0, 255, 0, 255]);
+    }
+
+    #[test]
+    fn decode_png_format_accepts_jpeg_payload() {
+        use base64::Engine;
+        let engine = base64::engine::general_purpose::STANDARD;
+
+        let jpeg = engine
+            .decode(crate::SMALL_JPEG_B64)
+            .expect("valid JPEG fixture");
+        let b64 = engine.encode(jpeg);
+
+        let cmd = KittyCommand {
+            format: 100,
+            ..Default::default()
+        };
+        let image = decode_payload(&cmd, b64.as_bytes()).unwrap();
+        assert_eq!((image.width, image.height), (15, 7));
+        assert_eq!(image.frames[0].pixels.len(), 15 * 7 * 4);
     }
 
     #[test]

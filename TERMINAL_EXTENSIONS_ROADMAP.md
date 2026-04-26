@@ -84,9 +84,10 @@ Implemented:
 
 - sixel graphics
 - kitty graphics protocol core parsing, direct/file/temp-file transmission,
-  PNG/RGB/RGBA decode, placement IDs, relative placement, cell offsets,
-  cropping, expanded deletion selectors, z-index ordering, chunking, image
-  numbers, query/ack responses, and bounded image storage
+  PNG/RGB/RGBA decode, JPEG compatibility for `f=100` payloads, placement
+  IDs, relative placement, cell offsets, cropping, expanded deletion
+  selectors, z-index ordering, chunking, image numbers, query/ack responses,
+  and bounded image storage
 - iTerm2 OSC 1337 inline images, including multipart image payloads
 - iTerm2 OSC 1337 `ReportCellSize`
 - iTerm2 Terminal Feature Reporting via `OSC 1337;Capabilities` and

@@ -11,9 +11,6 @@ pub mod ffmpeg_decoder;
 use std::sync::Arc;
 use std::time::Duration;
 
-#[macro_use]
-extern crate log;
-
 /// A single frame of a decoded image. Static images carry exactly one
 /// frame with `delay = Duration::ZERO`; animated images (GIFs today) carry
 /// multiple frames with per-frame presentation delays.
@@ -114,10 +111,24 @@ pub fn decode_image(data: &[u8]) -> Option<DecodedImage> {
     }
 }
 
+/// Decode a static encoded image payload in formats that are always available.
+///
+/// This intentionally excludes GIF/video even when the `ffmpeg` feature is
+/// enabled. Protocols that accept arbitrary image/video payloads should use
+/// [`decode_image`] instead; protocols with a PNG-shaped escape hatch can use
+/// this for the PNG baseline plus term41's JPEG compatibility extension.
+pub fn decode_png_or_jpeg(data: &[u8]) -> Option<DecodedImage> {
+    let kind = infer::get(data)?;
+    match kind.mime_type() {
+        "image/png" => decode_png(data),
+        "image/jpeg" => decode_jpeg(data),
+        _ => None,
+    }
+}
+
 /// Decode an 8-bit PNG into an RGBA [`DecodedImage`]. Returns `None` on any
 /// decode failure — unsupported bit depth (16-bit), indexed colour, or
-/// malformed data. Shared between kitty (`f=100`) and iterm2 payloads, both
-/// of which carry raw PNG bytes.
+/// malformed data.
 pub fn decode_png(data: &[u8]) -> Option<DecodedImage> {
     let decoder = png::Decoder::new(std::io::Cursor::new(data));
     let mut reader = decoder.read_info().ok()?;
@@ -194,33 +205,32 @@ pub fn decode_jpeg(data: &[u8]) -> Option<DecodedImage> {
 }
 
 #[cfg(test)]
+pub(crate) const SMALL_JPEG_B64: &str = concat!(
+    "/9j/4AAQSkZJRgABAQEASABIAAD/4QNeRXhpZgAATU0AKgAAAAgABgEOAAIAAAALAAAAVgEaAAUAAAABAAAAYgEbAAUAAAABAAAA",
+    "agEoAAMAAAABAAIAAAEyAAIAAAAUAAAAcodpAAQAAAABAAAAhgAAALBUZXN0IGltYWdlAEYAAABIAAAAAQAAAEgAAAABMjAxNjow",
+    "NTowNCAwMzowMjowMQAAA5AAAAcAAAAEMDIzMKACAAMAAAABAA8AAKADAAMAAAABAAcAAAAAAAAAAgIBAAQAAAABAAAAzgICAAQA",
+    "AAABAAACiAAAAAD/2P/gABBKRklGAAEBAAABAAEAAP/bAEMACAYGBwYFCAcHBwkJCAoMFA0MCwsMGRITDxQdGh8eHRocHCAkLicg",
+    "IiwjHBwoNyksMDE0NDQfJzk9ODI8LjM0Mv/bAEMBCQkJDAsMGA0NGDIhHCEyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy",
+    "MjIyMjIyMjIyMjIyMjIyMjIyMv/AABEIAAMABwMBIgACEQEDEQH/xAAfAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgv/xAC1",
+    "EAACAQMDAgQDBQUEBAAAAX0BAgMABBEFEiExQQYTUWEHInEUMoGRoQgjQrHBFVLR8CQzYnKCCQoWFxgZGiUmJygpKjQ1Njc4OTpD",
+    "REVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK",
+    "0tPU1dbX2Nna4eLj5OXm5+jp6vHy8/T19vf4+fr/xAAfAQADAQEBAQEBAQEBAAAAAAAAAQIDBAUGBwgJCgv/xAC1EQACAQIEBAME",
+    "BwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpT",
+    "VFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY",
+    "2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/APRdHhW5ltIJmleJDIVTzWx39+aKKKAP/9n/2wBDAAMCAgMCAgMDAwME",
+    "AwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQU",
+    "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAHAA8DAREAAhEBAxEB/8QAFQABAQAA",
+    "AAAAAAAAAAAAAAAABgj/xAAfEAABBAMAAwEAAAAAAAAAAAACAQMEBQYHEhMUFRb/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEB",
+    "AAAAAAAAAAAAAAAAAAAAAP/dAAQAIP/aAAwDAQACEQMRAD8AqnB6zeWDzNmzGqawt59hk016sS7l+5HKtV6ycjlHQ7pQDkChILQx",
+    "4fS+NlxUEjmRQVY/hW05+7MMurWX8rDKr9WUurbmynfO47Z81zjq+8ou9xCR0ANo24/DwIDauMJHD//Z",
+);
+
+#[cfg(test)]
 mod tests {
     use base64::Engine;
     use base64::engine::general_purpose::STANDARD as BASE64;
 
     use super::*;
-
-    /// 15x7 JPEG fixture from kamadak-exif's public test corpus. Keeping this
-    /// inline avoids tying image41 tests to the local cargo registry layout.
-    const SMALL_JPEG_B64: &str = concat!(
-        "/9j/4AAQSkZJRgABAQEASABIAAD/4QNeRXhpZgAATU0AKgAAAAgABgEOAAIAAAALAAAAVgEaAAUAAAABAAAAYgEbAAUAAAABAAAA",
-        "agEoAAMAAAABAAIAAAEyAAIAAAAUAAAAcodpAAQAAAABAAAAhgAAALBUZXN0IGltYWdlAEYAAABIAAAAAQAAAEgAAAABMjAxNjow",
-        "NTowNCAwMzowMjowMQAAA5AAAAcAAAAEMDIzMKACAAMAAAABAA8AAKADAAMAAAABAAcAAAAAAAAAAgIBAAQAAAABAAAAzgICAAQA",
-        "AAABAAACiAAAAAD/2P/gABBKRklGAAEBAAABAAEAAP/bAEMACAYGBwYFCAcHBwkJCAoMFA0MCwsMGRITDxQdGh8eHRocHCAkLicg",
-        "IiwjHBwoNyksMDE0NDQfJzk9ODI8LjM0Mv/bAEMBCQkJDAsMGA0NGDIhHCEyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIyMjIy",
-        "MjIyMjIyMjIyMjIyMjIyMjIyMv/AABEIAAMABwMBIgACEQEDEQH/xAAfAAABBQEBAQEBAQAAAAAAAAAAAQIDBAUGBwgJCgv/xAC1",
-        "EAACAQMDAgQDBQUEBAAAAX0BAgMABBEFEiExQQYTUWEHInEUMoGRoQgjQrHBFVLR8CQzYnKCCQoWFxgZGiUmJygpKjQ1Njc4OTpD",
-        "REVGR0hJSlNUVVZXWFlaY2RlZmdoaWpzdHV2d3h5eoOEhYaHiImKkpOUlZaXmJmaoqOkpaanqKmqsrO0tba3uLm6wsPExcbHyMnK",
-        "0tPU1dbX2Nna4eLj5OXm5+jp6vHy8/T19vf4+fr/xAAfAQADAQEBAQEBAQEBAAAAAAAAAQIDBAUGBwgJCgv/xAC1EQACAQIEBAME",
-        "BwUEBAABAncAAQIDEQQFITEGEkFRB2FxEyIygQgUQpGhscEJIzNS8BVictEKFiQ04SXxFxgZGiYnKCkqNTY3ODk6Q0RFRkdISUpT",
-        "VFVWV1hZWmNkZWZnaGlqc3R1dnd4eXqCg4SFhoeIiYqSk5SVlpeYmZqio6Slpqeoqaqys7S1tre4ubrCw8TFxsfIycrS09TV1tfY",
-        "2dri4+Tl5ufo6ery8/T19vf4+fr/2gAMAwEAAhEDEQA/APRdHhW5ltIJmleJDIVTzWx39+aKKKAP/9n/2wBDAAMCAgMCAgMDAwME",
-        "AwMEBQgFBQQEBQoHBwYIDAoMDAsKCwsNDhIQDQ4RDgsLEBYQERMUFRUVDA8XGBYUGBIUFRT/2wBDAQMEBAUEBQkFBQkUDQsNFBQU",
-        "FBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBQUFBT/wAARCAAHAA8DAREAAhEBAxEB/8QAFQABAQAA",
-        "AAAAAAAAAAAAAAAABgj/xAAfEAABBAMAAwEAAAAAAAAAAAACAQMEBQYHEhMUFRb/xAAUAQEAAAAAAAAAAAAAAAAAAAAA/8QAFBEB",
-        "AAAAAAAAAAAAAAAAAAAAAP/dAAQAIP/aAAwDAQACEQMRAD8AqnB6zeWDzNmzGqawt59hk016sS7l+5HKtV6ycjlHQ7pQDkChILQx",
-        "4fS+NlxUEjmRQVY/hW05+7MMurWX8rDKr9WUurbmynfO47Z81zjq+8ou9xCR0ANo24/DwIDauMJHD//Z",
-    );
 
     fn frame(delay_ms: u64) -> Frame {
         Frame {

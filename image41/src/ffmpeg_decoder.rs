@@ -425,13 +425,13 @@ impl FrameReader {
     /// codec can't be initialised.
     pub fn open(data: Vec<u8>) -> Option<Self> {
         if !ensure_init() {
-            warn!("ffmpeg init failed; cannot decode");
+            log::warn!("ffmpeg init failed; cannot decode");
             return None;
         }
         let mem = match memory_input::open(data) {
             Ok(mem) => mem,
             Err(err) => {
-                warn!("ffmpeg in-memory input open failed: {err}");
+                log::warn!("ffmpeg in-memory input open failed: {err}");
                 return None;
             }
         };

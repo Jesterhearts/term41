@@ -259,7 +259,7 @@ triggered the prompt.
 - sixel graphics
 - Kitty graphics protocol
 - OSC 1337 inline images
-- PNG always available
+- PNG and JPEG always available
 - GIF/video formats available with the `ffmpeg` feature
 
 ### Input, Selection, and Shell Integration
