@@ -333,6 +333,31 @@ pub fn extend_selection(
     })
 }
 
+#[must_use]
+/// Extend from the current ordered start of a selection to a new viewport
+/// cell. This is used for shift-click extension, where the fixed endpoint is
+/// the visible selection start rather than the original drag origin.
+pub fn extend_selection_from_start(
+    selection: &Selection,
+    screen: &Screen,
+    viewport: &Viewport,
+    col: u32,
+    screen_row: u32,
+) -> Option<Selection> {
+    let (start, _) = selection.ordered();
+    absolute_row_to_local(screen, start.row)?;
+    let abs_row = screen_row_to_absolute(screen, viewport, screen_row);
+    absolute_row_to_local(screen, abs_row)?;
+    let head = SelectionPoint { row: abs_row, col };
+
+    Some(Selection {
+        anchor: start,
+        head,
+        mode: SelectionMode::Char,
+        origin: start,
+    })
+}
+
 /// Whether a viewport cell is covered by the current selection.
 pub fn is_cell_selected(
     selection: Option<&Selection>,
@@ -773,6 +798,93 @@ mod integration_tests {
         assert_eq!(
             selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
             Some("abc\ndef")
+        );
+    }
+
+    #[test]
+    fn selection_can_extend_into_scrolled_history() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        for i in 0..6 {
+            term.process(format!("line{i}\r\n").as_bytes());
+        }
+        term.process(b"tail");
+        assert!(term.active.grid.scrollback_len(&term.viewport) > 0);
+
+        let live_bottom = term.viewport.rows - 1;
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            3,
+            live_bottom,
+            SelectionMode::Char,
+        );
+        let origin = term.inner.selection.as_ref().unwrap().origin;
+
+        let viewport = term.inner.viewport;
+        crate::view::scroll_viewport_up(&mut term.inner.active, &viewport, 1);
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            0,
+        );
+
+        let selection = term.inner.selection.as_ref().unwrap();
+        let (start, end) = selection.ordered();
+        assert!(start.row < origin.row);
+        assert_eq!(end, origin);
+        assert!(
+            selection_text(Some(selection), &term.inner.active)
+                .unwrap()
+                .contains("tail")
+        );
+    }
+
+    #[test]
+    fn shift_extension_uses_selection_start_after_viewport_scroll() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        for i in 0..6 {
+            term.process(format!("line{i}\r\n").as_bytes());
+        }
+        term.process(b"tail");
+
+        let live_bottom = term.viewport.rows - 1;
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            live_bottom,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            3,
+            live_bottom,
+        );
+        let original_start = term.inner.selection.as_ref().unwrap().ordered().0;
+
+        let viewport = term.inner.viewport;
+        crate::view::scroll_viewport_up(&mut term.inner.active, &viewport, 1);
+        term.inner.selection = extend_selection_from_start(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            4,
+            0,
+        );
+
+        let selection = term.inner.selection.as_ref().unwrap();
+        assert_eq!(selection.anchor, original_start);
+        assert_eq!(selection.origin, original_start);
+        assert_eq!(
+            selection.head,
+            SelectionPoint {
+                row: screen_row_to_absolute(&term.inner.active, &term.inner.viewport, 0),
+                col: 4,
+            }
         );
     }
 

@@ -56,6 +56,7 @@ use terminal41::selection::SelectionMode;
 use terminal41::selection::close_search;
 use terminal41::selection::copy_selection;
 use terminal41::selection::extend_selection;
+use terminal41::selection::extend_selection_from_start;
 use terminal41::selection::open_search;
 use terminal41::selection::search_active;
 use terminal41::selection::search_append;
@@ -112,6 +113,8 @@ const INITIAL_ROWS: u32 = 24;
 
 /// Size of the cueue ring buffer for window→renderer events (in elements).
 const EVENT_QUEUE_SIZE: usize = 4096;
+
+const SELECTION_AUTOSCROLL_INTERVAL: Duration = Duration::from_millis(45);
 
 /// Stable identifier for a tab. Monotonically increasing; never reused, so
 /// background threads that race with a tab close can't accidentally address
@@ -331,6 +334,9 @@ struct WindowHost {
     last_click_cell: Option<(u32, u32)>,
     click_count: u32,
     left_drag_active: bool,
+    selection_drag_moved: bool,
+    selection_autoscroll_direction: Option<SelectionAutoscroll>,
+    selection_autoscroll_next: Option<Instant>,
     window_size: (u32, u32),
     new_tab_text: SmolStr,
     opacity: f32,
@@ -552,6 +558,125 @@ impl WindowHost {
             && let Some(window) = &self.window
         {
             window.request_redraw();
+        }
+    }
+
+    fn extend_selection_to_mouse(&mut self) -> bool {
+        let cell = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+        let Some(target) = self.active_input_target() else {
+            return false;
+        };
+        let mut guard = target.terminal.lock();
+        let terminal = &mut *guard;
+        let Some(selection) = terminal.selection.as_ref() else {
+            return false;
+        };
+        let Some(new_sel) = extend_selection(
+            selection,
+            &terminal.active,
+            &terminal.viewport,
+            cell.0,
+            cell.1,
+        ) else {
+            return false;
+        };
+        terminal.selection = Some(new_sel);
+        terminal.invalidate_snapshot_rows();
+        true
+    }
+
+    fn current_selection_autoscroll_direction(&mut self) -> Option<SelectionAutoscroll> {
+        if !self.left_drag_active
+            || !self.selection_drag_moved
+            || self.permission_modal.is_some()
+            || self.recording_popup.is_some()
+        {
+            return None;
+        }
+        let mouse_y = self.mouse_pos.1;
+        let (_, cell_height, _, _) = self.layout_snapshot();
+        let target = self.active_input_target()?;
+        let terminal = target.terminal.lock();
+        terminal.selection.as_ref()?;
+        let viewport_rows = terminal.viewport.rows;
+        selection_autoscroll_direction(mouse_y, cell_height, viewport_rows)
+    }
+
+    fn refresh_selection_autoscroll_direction(&mut self) -> Option<SelectionAutoscroll> {
+        let direction = self.current_selection_autoscroll_direction();
+        if self.selection_autoscroll_direction != direction {
+            self.selection_autoscroll_next = None;
+            self.selection_autoscroll_direction = direction;
+        }
+        direction
+    }
+
+    fn clear_selection_autoscroll(&mut self) {
+        self.selection_autoscroll_direction = None;
+        self.selection_autoscroll_next = None;
+    }
+
+    fn apply_selection_autoscroll(
+        &mut self,
+        direction: SelectionAutoscroll,
+    ) -> bool {
+        let cell = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+        let Some(target) = self.active_input_target() else {
+            return false;
+        };
+        let mut guard = target.terminal.lock();
+        let terminal = &mut *guard;
+        if terminal.selection.is_none() {
+            return false;
+        }
+        let scrolled = match direction {
+            SelectionAutoscroll::Up => {
+                let viewport = terminal.viewport;
+                view::scroll_viewport_up(&mut terminal.active, &viewport, 1)
+            }
+            SelectionAutoscroll::Down => view::scroll_viewport_down(&mut terminal.active, 1),
+        };
+        if scrolled == 0 {
+            return false;
+        }
+        if let Some(selection) = terminal.selection.as_ref()
+            && let Some(new_sel) = extend_selection(
+                selection,
+                &terminal.active,
+                &terminal.viewport,
+                cell.0,
+                cell.1,
+            )
+        {
+            terminal.selection = Some(new_sel);
+        }
+        terminal.invalidate_snapshot_rows();
+        true
+    }
+
+    fn run_selection_autoscroll(
+        &mut self,
+        event_loop: &ActiveEventLoop,
+    ) {
+        let Some(direction) = self.refresh_selection_autoscroll_direction() else {
+            self.clear_selection_autoscroll();
+            return;
+        };
+
+        let now = Instant::now();
+        let due = self.selection_autoscroll_next.unwrap_or(now);
+        if now < due {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+            return;
+        }
+
+        if self.apply_selection_autoscroll(direction) {
+            self.notify_interaction_changed();
+            let next = now + SELECTION_AUTOSCROLL_INTERVAL;
+            self.selection_autoscroll_next = Some(next);
+            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+        } else {
+            self.selection_autoscroll_next = None;
         }
     }
 
@@ -1397,25 +1522,9 @@ impl WindowHost {
             return;
         }
 
-        if self.left_drag_active
-            && let Some(target) = self.active_input_target()
-        {
-            {
-                let mut guard = target.terminal.lock();
-                let terminal = &mut *guard;
-                if let Some(selection) = terminal.selection.as_ref()
-                    && let Some(new_sel) = extend_selection(
-                        selection,
-                        &terminal.active,
-                        &terminal.viewport,
-                        cell.0,
-                        cell.1,
-                    )
-                {
-                    terminal.selection = Some(new_sel);
-                    terminal.invalidate_snapshot_rows();
-                }
-            }
+        if self.left_drag_active && self.extend_selection_to_mouse() {
+            self.selection_drag_moved = true;
+            self.refresh_selection_autoscroll_direction();
             self.notify_interaction_changed();
             return;
         }
@@ -1655,6 +1764,35 @@ impl WindowHost {
                         return;
                     }
                 }
+                if self.modifiers.shift_key() {
+                    let extended = if let Some(target) = self.active_input_target() {
+                        let mut terminal = target.terminal.lock();
+                        if let Some(selection) = terminal.selection.as_ref()
+                            && let Some(new_selection) = extend_selection_from_start(
+                                selection,
+                                &terminal.active,
+                                &terminal.viewport,
+                                col,
+                                row,
+                            )
+                        {
+                            terminal.selection = Some(new_selection);
+                            terminal.invalidate_snapshot_rows();
+                            true
+                        } else {
+                            false
+                        }
+                    } else {
+                        false
+                    };
+                    if extended {
+                        self.left_drag_active = true;
+                        self.selection_drag_moved = true;
+                        self.refresh_selection_autoscroll_direction();
+                        self.notify_interaction_changed();
+                        return;
+                    }
+                }
                 self.click_count = self.next_click_count((col, row));
                 self.last_click_cell = Some((col, row));
                 self.last_click_time = Some(Instant::now());
@@ -1671,10 +1809,14 @@ impl WindowHost {
                     target.invalidate_snapshot_rows();
                 }
                 self.left_drag_active = true;
+                self.selection_drag_moved = false;
+                self.refresh_selection_autoscroll_direction();
                 self.notify_interaction_changed();
             }
             (MouseButton::Left, false) => {
                 self.left_drag_active = false;
+                self.selection_drag_moved = false;
+                self.clear_selection_autoscroll();
                 if let Some(target) = self.active_input_target() {
                     let mut guard = target.terminal.lock();
                     let terminal = &mut *guard;
@@ -2241,12 +2383,43 @@ fn popup_command_text(
 /// Maximum time between clicks that still count as part of a sequence.
 const MULTI_CLICK_WINDOW: Duration = Duration::from_millis(400);
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionAutoscroll {
+    Up,
+    Down,
+}
+
+fn selection_autoscroll_direction(
+    mouse_y: f64,
+    cell_height: u32,
+    viewport_rows: u32,
+) -> Option<SelectionAutoscroll> {
+    if cell_height == 0 || viewport_rows == 0 {
+        return None;
+    }
+
+    let cell_height = cell_height as f64;
+    let terminal_top = cell_height;
+    let terminal_bottom = terminal_top + viewport_rows as f64 * cell_height;
+    let top_edge = terminal_top + cell_height;
+    let bottom_edge = terminal_bottom - cell_height;
+
+    if mouse_y < top_edge {
+        Some(SelectionAutoscroll::Up)
+    } else if mouse_y >= bottom_edge {
+        Some(SelectionAutoscroll::Down)
+    } else {
+        None
+    }
+}
+
 impl ApplicationHandler<AppEvent> for WindowHost {
     fn about_to_wait(
         &mut self,
         event_loop: &ActiveEventLoop,
     ) {
         self.request_due_startup_redraw(event_loop);
+        self.run_selection_autoscroll(event_loop);
     }
 
     fn user_event(
@@ -2853,6 +3026,9 @@ fn main() {
         last_click_cell: None,
         click_count: 0,
         left_drag_active: false,
+        selection_drag_moved: false,
+        selection_autoscroll_direction: None,
+        selection_autoscroll_next: None,
         window_size: (0, 0),
         opacity,
         cell_width,
@@ -2911,6 +3087,38 @@ fn parse_command_args() -> Option<Vec<String>> {
         rest.remove(0);
     }
     if rest.is_empty() { None } else { Some(rest) }
+}
+
+#[cfg(test)]
+mod selection_autoscroll_tests {
+    use super::*;
+
+    #[test]
+    fn selection_autoscroll_detects_terminal_edges() {
+        assert_eq!(
+            selection_autoscroll_direction(15.0, 20, 5),
+            Some(SelectionAutoscroll::Up)
+        );
+        assert_eq!(
+            selection_autoscroll_direction(39.0, 20, 5),
+            Some(SelectionAutoscroll::Up)
+        );
+        assert_eq!(selection_autoscroll_direction(60.0, 20, 5), None);
+        assert_eq!(
+            selection_autoscroll_direction(100.0, 20, 5),
+            Some(SelectionAutoscroll::Down)
+        );
+        assert_eq!(
+            selection_autoscroll_direction(125.0, 20, 5),
+            Some(SelectionAutoscroll::Down)
+        );
+    }
+
+    #[test]
+    fn selection_autoscroll_ignores_empty_viewports() {
+        assert_eq!(selection_autoscroll_direction(0.0, 0, 5), None);
+        assert_eq!(selection_autoscroll_direction(0.0, 20, 0), None);
+    }
 }
 
 #[cfg(test)]
