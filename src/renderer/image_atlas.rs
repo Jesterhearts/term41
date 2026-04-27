@@ -10,7 +10,8 @@
 //! has been reached (handled by popping the LRU and returning each of its tile
 //! regions to its page until the new allocation fits), and a full cache
 //! (handled by `insert()` returning the evicted entry, whose tiles we then
-//! free).
+//! free). The page cap keeps a single terminal process from pinning excessive
+//! GPU texture memory during long inline-image or animated-image sessions.
 
 use std::num::NonZeroUsize;
 
@@ -21,7 +22,7 @@ use crate::renderer::shelf::Allocation;
 use crate::renderer::shelf::ShelfPacker;
 
 pub const IMAGE_ATLAS_SIZE: u32 = 2048;
-const MAX_ATLAS_PAGES: usize = 64;
+const MAX_ATLAS_PAGES: usize = 12;
 const CACHE_CAPACITY: usize = 256;
 
 /// A single rectangular tile of an image in the atlas.
