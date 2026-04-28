@@ -624,6 +624,23 @@ impl WindowHost {
         self.selection_autoscroll_next = None;
     }
 
+    fn stop_selection_drag(&mut self) {
+        self.left_drag_active = false;
+        self.selection_drag_moved = false;
+        self.clear_selection_autoscroll();
+    }
+
+    fn set_idle_control_flow(
+        &self,
+        event_loop: &ActiveEventLoop,
+    ) {
+        if let Some(when) = self.startup_next_redraw {
+            event_loop.set_control_flow(ControlFlow::WaitUntil(when));
+        } else {
+            event_loop.set_control_flow(ControlFlow::Wait);
+        }
+    }
+
     fn apply_selection_autoscroll(
         &mut self,
         direction: SelectionAutoscroll,
@@ -668,6 +685,7 @@ impl WindowHost {
     ) {
         let Some(direction) = self.refresh_selection_autoscroll_direction() else {
             self.clear_selection_autoscroll();
+            self.set_idle_control_flow(event_loop);
             return;
         };
 
@@ -684,7 +702,8 @@ impl WindowHost {
             self.selection_autoscroll_next = Some(next);
             event_loop.set_control_flow(ControlFlow::WaitUntil(next));
         } else {
-            self.selection_autoscroll_next = None;
+            self.clear_selection_autoscroll();
+            self.set_idle_control_flow(event_loop);
         }
     }
 
@@ -1145,6 +1164,9 @@ impl WindowHost {
         action: Action,
         tab_id: TabId,
     ) -> bool {
+        if matches!(action, Action::Copy) {
+            self.stop_selection_drag();
+        }
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return true;
         };
@@ -1822,9 +1844,7 @@ impl WindowHost {
                 self.notify_interaction_changed();
             }
             (MouseButton::Left, false) => {
-                self.left_drag_active = false;
-                self.selection_drag_moved = false;
-                self.clear_selection_autoscroll();
+                self.stop_selection_drag();
                 if let Some(target) = self.active_input_target() {
                     let mut guard = target.terminal.lock();
                     let terminal = &mut *guard;
