@@ -539,6 +539,7 @@ struct RowRenderKey {
     layout: RowLayoutKey,
     cursor: RowCursorKey,
     blink: RowBlinkKey,
+    gutter_marker: RowGutterMarkerKey,
     popup_clip: Option<ClipRectKey>,
     background_present: bool,
     screen_reverse: bool,
@@ -571,6 +572,12 @@ enum RowCursorKey {
 struct RowBlinkKey {
     blink_off: bool,
     rapid_blink_off: bool,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct RowGutterMarkerKey {
+    prompt_start: bool,
+    exit_status: Option<i32>,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -2023,17 +2030,6 @@ impl Renderer {
 
         self.append_visual_bell_overlay(&mut geometry, snap, layout);
 
-        if layout.gutter_px > 0.0 {
-            render_gutter_markers(
-                rows,
-                layout.gutter_px,
-                layout.cell_h,
-                layout.tab_bar_h,
-                &mut geometry.bg_vertices,
-                &mut geometry.bg_indices,
-            );
-        }
-
         self.render_status_line_chrome(
             font_system,
             snap,
@@ -2156,6 +2152,10 @@ impl Renderer {
             },
             cursor: row_cursor_key(cursor_state, row),
             blink: row_blink_key(snap, snap_row, blink_off, rapid_blink_off),
+            gutter_marker: RowGutterMarkerKey {
+                prompt_start: snap_row.prompt_start,
+                exit_status: snap_row.exit_status,
+            },
             popup_clip: row_popup_clip_key(row, layout, popup_clip),
             background_present: self.background.is_some(),
             screen_reverse: snap.screen_reverse,
@@ -2218,6 +2218,14 @@ impl Renderer {
         } else {
             snap.viewport_cols
         };
+
+        append_gutter_marker(
+            snap_row,
+            layout.gutter_px,
+            layout.cell_h,
+            layout.tab_bar_h,
+            geometry,
+        );
 
         for col in 0..visible_cols {
             let x = col as f32 * effective_cell_w + layout.gutter_px;
@@ -4623,10 +4631,9 @@ pub fn compute_gutter_width(cell_width: u32) -> u32 {
     (cell_width / 3).max(12)
 }
 
-/// Paint one status bar per visible prompt row. Each bar spans the full
-/// height of the row so the prompt boundary is obvious even at a glance,
-/// and fills most of the gutter width with a small horizontal margin so
-/// the coloured column doesn't butt up against col 0 of the text.
+/// Paint a status bar for a prompt row. It spans most of the row height so the
+/// prompt boundary is obvious at a glance, and leaves a small horizontal margin
+/// so the coloured column doesn't butt up against col 0 of the text.
 ///
 /// Colors:
 ///
@@ -4637,59 +4644,47 @@ pub fn compute_gutter_width(cell_width: u32) -> u32 {
 ///   next prompt before D arrived. All three look the same at the terminal
 ///   layer, so we show one "unknown" colour for all of them.
 ///
-/// Drawn as plain rectangular quads in the bg pass so we don't need an
-/// extra pipeline.
-fn render_gutter_markers(
-    rows: &[RowSnapshot],
+/// Drawn into the cached terminal row layer, not the dynamic frame overlay:
+/// marker state changes with row contents, so caching it with the row avoids
+/// rebuilding and uploading the whole gutter every output-heavy frame.
+fn append_gutter_marker(
+    row: &RowSnapshot,
     gutter_px: f32,
     cell_h: f32,
     y_offset: f32,
-    bg_vertices: &mut Vec<BgVertex>,
-    bg_indices: &mut Vec<u32>,
+    geometry: &mut RowGeometry,
 ) {
+    if gutter_px <= 0.0 || !row.prompt_start {
+        return;
+    }
+
     // Leave a small horizontal margin on both sides so the bar doesn't
     // touch either the window edge or the first text column.
     let bar_w = (gutter_px * 0.6).max(3.0);
     let bar_x = (gutter_px - bar_w) * 0.5;
     let bar_h = cell_h * 0.9;
     let bar_y = (cell_h - bar_h) * 0.5;
+    let color = gutter_marker_color(row.exit_status);
+    let y0 = row.screen_row as f32 * cell_h + bar_y + y_offset;
 
-    for row in rows {
-        if !row.prompt_start {
-            continue;
-        }
-        let rgb = match row.exit_status {
-            Some(0) => SUCCESS,
-            Some(_) => FAILURE,
-            None => RUNNING,
-        };
-        let color = u32::from_be_bytes([rgb[0], rgb[1], rgb[2], 255]);
+    push_rect(
+        bar_x,
+        y0,
+        bar_w,
+        bar_h,
+        color,
+        &mut geometry.bg.vertices,
+        &mut geometry.bg.indices,
+    );
+}
 
-        let y0 = row.screen_row as f32 * cell_h + bar_y + y_offset;
-        let y1 = y0 + bar_h;
-        let x0 = bar_x;
-        let x1 = x0 + bar_w;
-        let bi = bg_vertices.len() as u32;
-        bg_vertices.extend_from_slice(&[
-            BgVertex {
-                pos: [x0, y0],
-                color,
-            },
-            BgVertex {
-                pos: [x1, y0],
-                color,
-            },
-            BgVertex {
-                pos: [x0, y1],
-                color,
-            },
-            BgVertex {
-                pos: [x1, y1],
-                color,
-            },
-        ]);
-        bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
-    }
+fn gutter_marker_color(exit_status: Option<i32>) -> u32 {
+    let rgb = match exit_status {
+        Some(0) => SUCCESS,
+        Some(_) => FAILURE,
+        None => RUNNING,
+    };
+    u32::from_be_bytes([rgb[0], rgb[1], rgb[2], 255])
 }
 
 /// Convert a byte-indexed `(start, end)` range on `text` to a character-index
@@ -5086,11 +5081,14 @@ mod tests {
     use super::ImageQuad;
     use super::PageDrawRange;
     use super::PageGeometryUpload;
+    use super::RowGeometry;
     use super::RowSnapshot;
     use super::TermSnapshot;
+    use super::append_gutter_marker;
     use super::clip_image_quad;
     use super::drcs_geometry_class;
     use super::fg_batch_for_page;
+    use super::gutter_marker_color;
     use super::image_batch_for_page;
 
     fn blank_row(cols: usize) -> RowSnapshot {
@@ -5158,6 +5156,27 @@ mod tests {
             .map(|batch| batch.page_index)
             .collect();
         assert_eq!(pages, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn gutter_marker_geometry_is_row_local() {
+        let mut row = blank_row(4);
+        let mut geometry = RowGeometry::default();
+        append_gutter_marker(&row, 12.0, 20.0, 5.0, &mut geometry);
+        assert!(geometry.bg.indices.is_empty());
+
+        row.screen_row = 2;
+        row.prompt_start = true;
+        row.exit_status = Some(0);
+        append_gutter_marker(&row, 12.0, 20.0, 5.0, &mut geometry);
+
+        assert_eq!(geometry.bg.vertices.len(), 4);
+        assert_eq!(geometry.bg.indices.len(), 6);
+        assert!((geometry.bg.vertices[0].pos[0] - 2.4).abs() < 0.0001);
+        assert!((geometry.bg.vertices[0].pos[1] - 46.0).abs() < 0.0001);
+        assert!((geometry.bg.vertices[3].pos[0] - 9.6).abs() < 0.0001);
+        assert!((geometry.bg.vertices[3].pos[1] - 64.0).abs() < 0.0001);
+        assert_eq!(geometry.bg.vertices[0].color, gutter_marker_color(Some(0)));
     }
 
     #[test]
