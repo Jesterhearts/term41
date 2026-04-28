@@ -265,6 +265,14 @@ struct InputEndpoint {
     recorder: RecorderControl,
 }
 
+fn reset_viewport_and_invalidate(terminal: &mut Terminal) {
+    let offset = terminal.active.offset;
+    view::reset_viewport(&mut terminal.active);
+    if terminal.active.offset != offset {
+        terminal.invalidate_snapshot_rows();
+    }
+}
+
 #[derive(Clone)]
 struct RecordingPopupView {
     lines: Vec<String>,
@@ -941,7 +949,7 @@ impl WindowHost {
         let _ = target.writer.write(&host_bytes);
         if reset_viewport {
             let mut terminal = target.terminal.lock();
-            view::reset_viewport(&mut terminal.active);
+            reset_viewport_and_invalidate(&mut terminal);
             target.terminal_thread.get().unwrap().unpark();
         }
     }
@@ -1284,7 +1292,7 @@ impl WindowHost {
         if let Some(selector) = dec_udk_selector(&key, self.modifiers) {
             let bytes = { target.terminal.lock().user_defined_key(selector) };
             if let Some(bytes) = bytes {
-                view::reset_viewport(&mut target.terminal.lock().active);
+                reset_viewport_and_invalidate(&mut target.terminal.lock());
                 let _ = target.writer.write(&bytes);
                 self.notify_interaction_changed();
                 return;
@@ -1308,7 +1316,7 @@ impl WindowHost {
             (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
         };
         if let Some(bytes) = kitty_encode_input(&key, self.modifiers, kitty_flags, c1_mode) {
-            view::reset_viewport(&mut target.terminal.lock().active);
+            reset_viewport_and_invalidate(&mut target.terminal.lock());
             let _ = target.writer.write(&bytes);
             self.notify_interaction_changed();
             return;
@@ -1325,7 +1333,7 @@ impl WindowHost {
                 if byte == 0x03 {
                     crate::perf_ctrl_c::record_ctrl_c_hit(active_tab_id);
                 }
-                view::reset_viewport(&mut target.terminal.lock().active);
+                reset_viewport_and_invalidate(&mut target.terminal.lock());
                 if self.modifiers.alt_key() {
                     let _ = target.writer.write(&[0x1b, byte]);
                 } else {
@@ -1376,7 +1384,7 @@ impl WindowHost {
         };
 
         if let Some(bytes) = bytes {
-            view::reset_viewport(&mut target.terminal.lock().active);
+            reset_viewport_and_invalidate(&mut target.terminal.lock());
             let _ = target.writer.write(&bytes);
             self.notify_interaction_changed();
         }
@@ -1446,7 +1454,7 @@ impl WindowHost {
         } else {
             text.as_bytes().to_vec()
         };
-        view::reset_viewport(&mut target.terminal.lock().active);
+        reset_viewport_and_invalidate(&mut target.terminal.lock());
         let _ = target.writer.write(&bytes);
         self.notify_interaction_changed();
     }
@@ -3118,6 +3126,45 @@ mod selection_autoscroll_tests {
     fn selection_autoscroll_ignores_empty_viewports() {
         assert_eq!(selection_autoscroll_direction(0.0, 0, 5), None);
         assert_eq!(selection_autoscroll_direction(0.0, 20, 0), None);
+    }
+}
+
+#[cfg(test)]
+mod viewport_reset_tests {
+    use super::*;
+
+    #[test]
+    fn reset_viewport_and_invalidate_marks_visible_rows_dirty() {
+        let mut terminal = Terminal::new(
+            4,
+            3,
+            10,
+            StatusLineMode::Off,
+            config41::FeaturePermissions::default(),
+            config41::TerminalLimits::default(),
+            16,
+            8,
+            config41::ColorPalette::default(),
+        );
+        let (mut publisher, mut output) = terminal41::terminal_snapshot_buffer(&mut terminal);
+        output.update();
+        let first = output.read().clone();
+        let first_generations: Vec<u64> = first.rows.iter().map(|row| row.generation).collect();
+
+        terminal.active.offset = 1;
+        reset_viewport_and_invalidate(&mut terminal);
+        terminal41::publish_terminal_snapshot(&mut terminal, &mut publisher);
+        output.update();
+        let snap = output.read().clone();
+
+        assert_eq!(terminal.active.offset, 0);
+        assert!(!snap.reset_cached_rows);
+        assert!(
+            snap.rows
+                .iter()
+                .zip(first_generations)
+                .all(|(row, generation)| row.generation > generation)
+        );
     }
 }
 
