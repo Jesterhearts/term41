@@ -22,7 +22,7 @@ pub enum MouseTracking {
 }
 
 /// On-the-wire encoding for mouse events. The app selects these with
-/// DECSET ?1005/?1006/?1015.
+/// DECSET ?1005/?1006/?1015/?1016.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum MouseEncoding {
     /// Legacy xterm `CSI M Cb Cx Cy` with each byte offset by 32. Cells
@@ -35,6 +35,16 @@ pub enum MouseEncoding {
     /// Mode 1015. `CSI Pb ; Px ; Py M` — decimal, no angle bracket, release
     /// encoded with button code 3.
     Urxvt,
+    /// Mode 1016. Same wire shape as SGR, but coordinates are physical
+    /// pixels rather than terminal cells.
+    SgrPixels,
+}
+
+impl MouseEncoding {
+    /// Whether this encoding uses the SGR press/release grammar.
+    pub fn is_sgr_style(self) -> bool {
+        matches!(self, MouseEncoding::Sgr | MouseEncoding::SgrPixels)
+    }
 }
 
 /// Kind of event the app is being told about.
@@ -110,6 +120,7 @@ pub fn apply_mouse_mode(
         mode::PrivateMode::Utf8Mouse => Some(MouseEncoding::Utf8),
         mode::PrivateMode::SgrMouse => Some(MouseEncoding::Sgr),
         mode::PrivateMode::UrxvtMouse => Some(MouseEncoding::Urxvt),
+        mode::PrivateMode::SgrPixelsMouse => Some(MouseEncoding::SgrPixels),
         _ => None,
     };
     if let Some(target) = encoding_target {
@@ -168,8 +179,7 @@ fn build_mouse_cb(
     button: MouseButton,
     mods: MouseModifiers,
 ) -> u16 {
-    let base = if matches!(kind, MouseEventKind::Release) && !matches!(encoding, MouseEncoding::Sgr)
-    {
+    let base = if matches!(kind, MouseEventKind::Release) && !encoding.is_sgr_style() {
         3
     } else {
         button_number(button)
@@ -225,7 +235,7 @@ pub fn encode_mouse_event(
     let cb = build_mouse_cb(encoding, kind, button, mods);
 
     match encoding {
-        MouseEncoding::Sgr => {
+        MouseEncoding::Sgr | MouseEncoding::SgrPixels => {
             let release = matches!(kind, MouseEventKind::Release);
             conformance::push_csi_prefix(out, c1_mode);
             let _ = write!(out, "<{cb};{col_1based};{row_1based}");
@@ -349,6 +359,28 @@ mod tests {
             MouseModifiers::default(),
         );
         assert_eq!(out, b"\x1b[<64;4;2M");
+    }
+
+    #[test]
+    fn sgr_pixels_uses_sgr_shape() {
+        let press = encode(
+            MouseEncoding::SgrPixels,
+            MouseEventKind::Press,
+            MouseButton::Left,
+            160,
+            48,
+            MouseModifiers::default(),
+        );
+        let release = encode(
+            MouseEncoding::SgrPixels,
+            MouseEventKind::Release,
+            MouseButton::Left,
+            160,
+            48,
+            MouseModifiers::default(),
+        );
+        assert_eq!(press, b"\x1b[<0;160;48M");
+        assert_eq!(release, b"\x1b[<0;160;48m");
     }
 
     #[test]

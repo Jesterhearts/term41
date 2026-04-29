@@ -158,6 +158,8 @@ impl TestTerm {
                 button,
                 col,
                 row,
+                pixel_x: col,
+                pixel_y: row,
                 mods,
             }),
         );

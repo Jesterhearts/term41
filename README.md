@@ -130,7 +130,7 @@ Legend:
 | OSC 52 clipboard                               | ✅ Supported | Read/write requests are policy-gated and default to asking.                                       |
 | Bracketed paste                                | ✅ Supported | xterm-compatible paste wrapping.                                                                  |
 | Focus reporting                                | ✅ Supported | Standard focus in/out reporting.                                                                  |
-| xterm mouse protocols                          | ✅ Supported | Legacy, UTF-8, SGR, and URXVT-style encodings.                                                    |
+| xterm mouse protocols                          | ✅ Supported | Legacy, UTF-8, SGR, URXVT, and SGR-Pixels (`?1016`) encodings.                                    |
 | Window and cell size reports                   | ✅ Supported | Includes common size-query responses.                                                             |
 | XTVERSION-style reports                        | ✅ Supported | Coarse terminal version reporting.                                                                |
 | Synchronized output (`DECSET 2026`)            | ✅ Supported | Buffered painting during synchronized update windows.                                             |

@@ -12,6 +12,7 @@ use crate::CursorStyle;
 use crate::DecColorState;
 use crate::FeaturePermissions;
 use crate::KittyKeyboardState;
+use crate::MouseEncoding;
 use crate::MouseTracking;
 use crate::Screen;
 use crate::ShellIntegrationPhase;
@@ -537,6 +538,34 @@ fn query_private_mode(
         }
         mode::PrivateMode::FocusReporting => {
             if modes.focus_reporting {
+                1
+            } else {
+                2
+            }
+        }
+        mode::PrivateMode::Utf8Mouse => {
+            if modes.mouse_encoding == MouseEncoding::Utf8 {
+                1
+            } else {
+                2
+            }
+        }
+        mode::PrivateMode::SgrMouse => {
+            if modes.mouse_encoding == MouseEncoding::Sgr {
+                1
+            } else {
+                2
+            }
+        }
+        mode::PrivateMode::UrxvtMouse => {
+            if modes.mouse_encoding == MouseEncoding::Urxvt {
+                1
+            } else {
+                2
+            }
+        }
+        mode::PrivateMode::SgrPixelsMouse => {
+            if modes.mouse_encoding == MouseEncoding::SgrPixels {
                 1
             } else {
                 2
@@ -2517,6 +2546,13 @@ mod tests {
         screen.cursor_visible = false;
         let out = feed_with_output(b"\x1b[?25$p", &mut screen, &mut viewport);
         assert_eq!(out, b"\x1b[?25;2$y");
+    }
+
+    #[test]
+    fn decrqm_reports_sgr_pixels_mouse_encoding_set() {
+        let (mut screen, mut viewport) = setup();
+        let out = feed_with_output(b"\x1b[?1016h\x1b[?1016$p", &mut screen, &mut viewport);
+        assert_eq!(out, b"\x1b[?1016;1$y");
     }
 
     #[test]

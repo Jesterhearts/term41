@@ -337,7 +337,7 @@ struct WindowHost {
     ime_preedit_active: bool,
     mouse_pos: (f64, f64),
     mouse_buttons: MouseButtonState,
-    last_motion_cell: Option<(u32, u32)>,
+    last_motion_position: Option<(u32, u32)>,
     last_click_time: Option<Instant>,
     last_click_cell: Option<(u32, u32)>,
     click_count: u32,
@@ -1526,12 +1526,13 @@ impl WindowHost {
             w.set_cursor(winit::window::CursorIcon::Default);
         }
 
-        let cell = self.cell_at(x, y);
+        let pos = self.mouse_report_position_at(x, y);
         if self.forward_mouse_to_app() {
-            if self.last_motion_cell == Some(cell) {
+            let motion_position = self.mouse_motion_position_key(pos);
+            if self.last_motion_position == Some(motion_position) {
                 return;
             }
-            self.last_motion_cell = Some(cell);
+            self.last_motion_position = Some(motion_position);
             let button = self.mouse_buttons.primary_held();
             let mods = self.mouse_modifiers();
             let Some(target) = self.active_input_target() else {
@@ -1542,8 +1543,10 @@ impl WindowHost {
                 HostInput::Mouse(HostMouse {
                     kind: MouseEventKind::Motion,
                     button,
-                    col: cell.0,
-                    row: cell.1,
+                    col: pos.col,
+                    row: pos.row,
+                    pixel_x: pos.pixel_x,
+                    pixel_y: pos.pixel_y,
                     mods,
                 }),
                 true,
@@ -1748,11 +1751,11 @@ impl WindowHost {
         }
 
         if pressed {
-            self.last_motion_cell = None;
+            self.last_motion_position = None;
         }
 
         if self.forward_mouse_to_app() {
-            let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+            let pos = self.mouse_report_position_at(self.mouse_pos.0, self.mouse_pos.1);
             let kind = if pressed {
                 MouseEventKind::Press
             } else {
@@ -1767,8 +1770,10 @@ impl WindowHost {
                 HostInput::Mouse(HostMouse {
                     kind,
                     button: term_button,
-                    col,
-                    row,
+                    col: pos.col,
+                    row: pos.row,
+                    pixel_x: pos.pixel_x,
+                    pixel_y: pos.pixel_y,
                     mods,
                 }),
                 true,
@@ -1918,7 +1923,7 @@ impl WindowHost {
         };
 
         if self.forward_mouse_to_app() {
-            let (col, row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
+            let pos = self.mouse_report_position_at(self.mouse_pos.0, self.mouse_pos.1);
             let mods = self.mouse_modifiers();
             let Some(target) = self.active_input_target() else {
                 return;
@@ -1933,8 +1938,10 @@ impl WindowHost {
                             HostInput::Mouse(HostMouse {
                                 kind: MouseEventKind::Press,
                                 button: TermMouseButton::WheelUp,
-                                col,
-                                row,
+                                col: pos.col,
+                                row: pos.row,
+                                pixel_x: pos.pixel_x,
+                                pixel_y: pos.pixel_y,
                                 mods,
                             }),
                         ));
@@ -1946,8 +1953,10 @@ impl WindowHost {
                             HostInput::Mouse(HostMouse {
                                 kind: MouseEventKind::Press,
                                 button: TermMouseButton::WheelDown,
-                                col,
-                                row,
+                                col: pos.col,
+                                row: pos.row,
+                                pixel_x: pos.pixel_x,
+                                pixel_y: pos.pixel_y,
                                 mods,
                             }),
                         ));
@@ -1960,8 +1969,10 @@ impl WindowHost {
                             HostInput::Mouse(HostMouse {
                                 kind: MouseEventKind::Press,
                                 button: TermMouseButton::WheelLeft,
-                                col,
-                                row,
+                                col: pos.col,
+                                row: pos.row,
+                                pixel_x: pos.pixel_x,
+                                pixel_y: pos.pixel_y,
                                 mods,
                             }),
                         ));
@@ -1973,8 +1984,10 @@ impl WindowHost {
                             HostInput::Mouse(HostMouse {
                                 kind: MouseEventKind::Press,
                                 button: TermMouseButton::WheelRight,
-                                col,
-                                row,
+                                col: pos.col,
+                                row: pos.row,
+                                pixel_x: pos.pixel_x,
+                                pixel_y: pos.pixel_y,
                                 mods,
                             }),
                         ));
@@ -2174,18 +2187,55 @@ impl WindowHost {
         x: f64,
         y: f64,
     ) -> (u32, u32) {
+        let pos = self.mouse_report_position_at(x, y);
+        (pos.col, pos.row)
+    }
+
+    fn mouse_report_position_at(
+        &mut self,
+        x: f64,
+        y: f64,
+    ) -> MouseReportPosition {
         let (cell_w, cell_h, gutter_w, _) = self.layout_snapshot();
+        let cell_w = cell_w.max(1);
+        let cell_h = cell_h.max(1);
         let raw_x = x.max(0.0) as u32;
         let raw_y = y.max(0.0) as u32;
-        let y = raw_y.saturating_sub(cell_h);
-        let x = raw_x.saturating_sub(gutter_w);
+        let pixel_y = raw_y.saturating_sub(cell_h);
+        let pixel_x = raw_x.saturating_sub(gutter_w);
         let Some(target) = self.active_input_target() else {
-            return (0, 0);
+            return MouseReportPosition {
+                col: 0,
+                row: 0,
+                pixel_x: 0,
+                pixel_y: 0,
+            };
         };
         let terminal = target.terminal.lock();
-        let cols = terminal.viewport.cols.saturating_sub(1);
-        let rows = terminal.viewport.rows.saturating_sub(1);
-        ((x / cell_w).min(cols), (y / cell_h).min(rows))
+        let cols = terminal.viewport.cols.max(1);
+        let rows = terminal.viewport.rows.max(1);
+        let pixel_x = pixel_x.min(cols.saturating_mul(cell_w).saturating_sub(1));
+        let pixel_y = pixel_y.min(rows.saturating_mul(cell_h).saturating_sub(1));
+        MouseReportPosition {
+            col: (pixel_x / cell_w).min(cols.saturating_sub(1)),
+            row: (pixel_y / cell_h).min(rows.saturating_sub(1)),
+            pixel_x,
+            pixel_y,
+        }
+    }
+
+    fn mouse_motion_position_key(
+        &mut self,
+        pos: MouseReportPosition,
+    ) -> (u32, u32) {
+        let pixel_reporting = self.active_input_target().is_some_and(|target| {
+            target.terminal.lock().modes.mouse_encoding == terminal41::MouseEncoding::SgrPixels
+        });
+        if pixel_reporting {
+            (pos.pixel_x, pos.pixel_y)
+        } else {
+            (pos.col, pos.row)
+        }
     }
 
     fn is_in_tab_bar(&self) -> bool {
@@ -2778,6 +2828,14 @@ struct MouseButtonState {
     right: bool,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct MouseReportPosition {
+    col: u32,
+    row: u32,
+    pixel_x: u32,
+    pixel_y: u32,
+}
+
 impl MouseButtonState {
     fn set(
         &mut self,
@@ -3049,7 +3107,7 @@ fn main() {
         ime_preedit_active: false,
         mouse_pos: (0.0, 0.0),
         mouse_buttons: MouseButtonState::default(),
-        last_motion_cell: None,
+        last_motion_position: None,
         last_click_time: None,
         last_click_cell: None,
         click_count: 0,

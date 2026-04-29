@@ -43,6 +43,10 @@ pub struct HostMouse {
     pub col: u32,
     /// Zero-based terminal row.
     pub row: u32,
+    /// Zero-based terminal-content x coordinate in physical pixels.
+    pub pixel_x: u32,
+    /// Zero-based terminal-content y coordinate in physical pixels.
+    pub pixel_y: u32,
     /// Keyboard modifiers active during the event.
     pub mods: MouseModifiers,
 }
@@ -91,6 +95,8 @@ pub fn apply_host_input(
                 mouse.button,
                 mouse.col,
                 mouse.row,
+                mouse.pixel_x,
+                mouse.pixel_y,
                 mouse.mods,
             );
         }

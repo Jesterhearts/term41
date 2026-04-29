@@ -54,18 +54,24 @@ pub fn mouse_report(
     button: MouseButton,
     col: u32,
     row: u32,
+    pixel_x: u32,
+    pixel_y: u32,
     mods: MouseModifiers,
 ) -> bool {
     if !should_report(mouse_tracking, kind, button) {
         return false;
     }
+    let (x, y) = match mouse_encoding {
+        MouseEncoding::SgrPixels => (pixel_x, pixel_y),
+        _ => (col, row),
+    };
     encode_mouse_event(
         c1_mode,
         mouse_encoding,
         kind,
         button,
-        col + 1,
-        row + 1,
+        x + 1,
+        y + 1,
         mods,
         host_bytes,
     );
@@ -79,6 +85,7 @@ mod tests {
 
     use super::*;
     use crate::HostInput;
+    use crate::HostMouse;
     use crate::apply_host_input;
     use crate::test_support::TestTerm;
 
@@ -88,6 +95,15 @@ mod tests {
         term.process(b"\x1b[?1006h");
         assert_eq!(term.modes.mouse_encoding, MouseEncoding::Sgr);
         term.process(b"\x1b[?1006l");
+        assert_eq!(term.modes.mouse_encoding, MouseEncoding::Default);
+    }
+
+    #[test]
+    fn decset_1016_switches_to_sgr_pixels_encoding() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?1016h");
+        assert_eq!(term.modes.mouse_encoding, MouseEncoding::SgrPixels);
+        term.process(b"\x1b[?1016l");
         assert_eq!(term.modes.mouse_encoding, MouseEncoding::Default);
     }
 
@@ -136,6 +152,26 @@ mod tests {
         );
         assert!(emitted);
         assert_eq!(term.take_pending_output(), b"\x9b<0;5;10M");
+    }
+
+    #[test]
+    fn mouse_report_uses_pixels_when_sgr_pixels_is_enabled() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.process(b"\x1b[?1000h\x1b[?1016h");
+        let effects = apply_host_input(
+            &mut term.inner,
+            HostInput::Mouse(HostMouse {
+                kind: MouseEventKind::Press,
+                button: MouseButton::Left,
+                col: 4,
+                row: 9,
+                pixel_x: 39,
+                pixel_y: 79,
+                mods: MouseModifiers::default(),
+            }),
+        );
+        term.effects.host_bytes.extend(effects.host_bytes);
+        assert_eq!(term.take_pending_output(), b"\x1b[<0;40;80M");
     }
 
     #[test]
