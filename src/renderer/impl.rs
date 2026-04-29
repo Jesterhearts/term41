@@ -1,3 +1,4 @@
+use std::cmp::Ordering;
 use std::collections::HashMap;
 use std::num::NonZeroU64;
 use std::path::PathBuf;
@@ -50,6 +51,7 @@ pub const MAX_TAB_WIDTH: f32 = 30.0;
 pub const SUCCESS: [u8; 3] = [80, 200, 120];
 pub const FAILURE: [u8; 3] = [220, 80, 80];
 pub const RUNNING: [u8; 3] = [140, 140, 140];
+const IMAGE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Packed vertex for background quads: position + color.
 #[repr(C)]
@@ -85,6 +87,7 @@ struct LabelGlyph {
 struct ImageVertex {
     pos: [f32; 2],
     uv: [f32; 2],
+    z: f32,
 }
 
 fn pack_color(
@@ -405,6 +408,7 @@ struct ImageQuad {
     v0: f32,
     u1: f32,
     v1: f32,
+    z: f32,
 }
 
 fn image_batch_for_page(
@@ -450,20 +454,62 @@ fn clip_image_quad(
         ImageVertex {
             pos: [left, top],
             uv: [u0, v0],
+            z: quad.z,
         },
         ImageVertex {
             pos: [right, top],
             uv: [u1, v0],
+            z: quad.z,
         },
         ImageVertex {
             pos: [left, bottom],
             uv: [u0, v1],
+            z: quad.z,
         },
         ImageVertex {
             pos: [right, bottom],
             uv: [u1, v1],
+            z: quad.z,
         },
     ])
+}
+
+fn image_vertex_z(
+    draw_index: usize,
+    draw_count: usize,
+) -> f32 {
+    (draw_index + 1) as f32 / (draw_count + 1).max(2) as f32
+}
+
+fn image_render_order(
+    left: &VisibleImage,
+    right: &VisibleImage,
+    layout: &FrameLayout,
+) -> Ordering {
+    left.z_index
+        .cmp(&right.z_index)
+        .then_with(|| image_page_y(left, layout).total_cmp(&image_page_y(right, layout)))
+        .then_with(|| image_page_x(left, layout).total_cmp(&image_page_x(right, layout)))
+        .then_with(|| {
+            left.kitty_image_id
+                .unwrap_or(u32::MAX)
+                .cmp(&right.kitty_image_id.unwrap_or(u32::MAX))
+        })
+        .then_with(|| left.id.cmp(&right.id))
+}
+
+fn image_page_y(
+    image: &VisibleImage,
+    layout: &FrameLayout,
+) -> f32 {
+    image.screen_row as f32 * layout.cell_h + image.cell_y_offset as f32
+}
+
+fn image_page_x(
+    image: &VisibleImage,
+    layout: &FrameLayout,
+) -> f32 {
+    image.screen_col as f32 * layout.cell_w + image.cell_x_offset as f32
 }
 
 #[derive(Clone, Default)]
@@ -849,6 +895,55 @@ impl TerminalLayer {
     }
 }
 
+struct ImageDepthLayer {
+    _texture: wgpu::Texture,
+    view: wgpu::TextureView,
+    width: u32,
+    height: u32,
+}
+
+impl ImageDepthLayer {
+    fn new(
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) -> Self {
+        let texture = device.create_texture(&wgpu::TextureDescriptor {
+            label: Some("image_depth"),
+            size: wgpu::Extent3d {
+                width: width.max(1),
+                height: height.max(1),
+                depth_or_array_layers: 1,
+            },
+            mip_level_count: 1,
+            sample_count: 1,
+            dimension: wgpu::TextureDimension::D2,
+            format: IMAGE_DEPTH_FORMAT,
+            usage: wgpu::TextureUsages::RENDER_ATTACHMENT,
+            view_formats: &[],
+        });
+        let view = texture.create_view(&wgpu::TextureViewDescriptor::default());
+        Self {
+            _texture: texture,
+            view,
+            width,
+            height,
+        }
+    }
+
+    fn resize(
+        &mut self,
+        device: &wgpu::Device,
+        width: u32,
+        height: u32,
+    ) {
+        if self.width == width && self.height == height {
+            return;
+        }
+        *self = Self::new(device, width, height);
+    }
+}
+
 fn create_terminal_layer_texture(
     device: &wgpu::Device,
     format: TextureFormat,
@@ -882,18 +977,22 @@ fn create_terminal_layer_quad(
         ImageVertex {
             pos: [0.0, 0.0],
             uv: [0.0, 0.0],
+            z: 0.0,
         },
         ImageVertex {
             pos: [w, 0.0],
             uv: [1.0, 0.0],
+            z: 0.0,
         },
         ImageVertex {
             pos: [0.0, h],
             uv: [0.0, 1.0],
+            z: 0.0,
         },
         ImageVertex {
             pos: [w, h],
             uv: [1.0, 1.0],
+            z: 0.0,
         },
     ];
     let indices = [0_u32, 1, 2, 2, 1, 3];
@@ -1163,6 +1262,7 @@ pub struct Renderer {
     terminal_row_generations: Vec<u64>,
     row_geometry_cache: Vec<Option<CachedRowKey>>,
     terminal_layer: TerminalLayer,
+    image_depth: ImageDepthLayer,
     uploads: RendererUploads,
 }
 
@@ -1501,6 +1601,8 @@ impl Renderer {
             surface_config.width,
             surface_config.height,
         );
+        let image_depth =
+            ImageDepthLayer::new(&device, surface_config.width, surface_config.height);
 
         let mut renderer = Self {
             device,
@@ -1525,6 +1627,7 @@ impl Renderer {
             terminal_row_generations: Vec::new(),
             row_geometry_cache: Vec::new(),
             terminal_layer,
+            image_depth,
             uploads: RendererUploads::default(),
         };
 
@@ -1553,6 +1656,8 @@ impl Renderer {
             size.width,
             size.height,
         );
+        self.image_depth
+            .resize(&self.device, size.width, size.height);
         self.row_geometry_cache.clear();
         if let Some(background) = self.background.as_mut() {
             background.resize(&self.queue, (size.width, size.height));
@@ -1800,10 +1905,15 @@ impl Renderer {
             right: self.surface_config.width as f32,
             bottom: self.surface_config.height as f32,
         };
-        for vis in visible_images {
-            if (vis.z_index < 0) != under_text {
-                continue;
-            }
+        let mut ordered_images: Vec<&VisibleImage> = visible_images
+            .iter()
+            .filter(|vis| (vis.z_index < 0) == under_text)
+            .collect();
+        ordered_images.sort_by(|left, right| image_render_order(left, right, layout));
+        let draw_count = ordered_images.len();
+
+        for (draw_index, vis) in ordered_images.into_iter().enumerate() {
+            let z = image_vertex_z(draw_index, draw_count);
             let entry = match self.image_atlas.ensure_cached(
                 &self.device,
                 &self.queue,
@@ -1850,6 +1960,7 @@ impl Renderer {
                         v0,
                         u1,
                         v1,
+                        z,
                     },
                     content_clip,
                 ) else {
@@ -2973,6 +3084,14 @@ impl Renderer {
                 },
                 depth_slice: None,
             })],
+            depth_stencil_attachment: Some(wgpu::RenderPassDepthStencilAttachment {
+                view: &self.image_depth.view,
+                depth_ops: Some(wgpu::Operations {
+                    load: wgpu::LoadOp::Clear(0.0),
+                    store: wgpu::StoreOp::Discard,
+                }),
+                stencil_ops: None,
+            }),
             ..Default::default()
         });
         pass.set_pipeline(&self.image_pipeline);
@@ -4875,6 +4994,7 @@ fn build_pipeline_for_format(
                 attributes: &wgpu::vertex_attr_array![
                     0 => Float32x2,
                     1 => Float32x2,
+                    2 => Float32,
                 ],
             }],
             compilation_options: Default::default(),
@@ -4893,7 +5013,13 @@ fn build_pipeline_for_format(
             topology: wgpu::PrimitiveTopology::TriangleList,
             ..Default::default()
         },
-        depth_stencil: None,
+        depth_stencil: Some(wgpu::DepthStencilState {
+            format: IMAGE_DEPTH_FORMAT,
+            depth_write_enabled: Some(true),
+            depth_compare: Some(wgpu::CompareFunction::Greater),
+            stencil: wgpu::StencilState::default(),
+            bias: wgpu::DepthBiasState::default(),
+        }),
         multisample: wgpu::MultisampleState::default(),
         multiview_mask: None,
         cache: pipeline_cache.as_ref(),
@@ -4921,6 +5047,7 @@ fn build_pipeline_for_format(
                 attributes: &wgpu::vertex_attr_array![
                     0 => Float32x2,
                     1 => Float32x2,
+                    2 => Float32,
                 ],
             }],
             compilation_options: Default::default(),
@@ -5077,6 +5204,7 @@ mod tests {
     use super::ClipRect;
     use super::FgGeometry;
     use super::FgVertex;
+    use super::FrameLayout;
     use super::ImageGeometry;
     use super::ImageQuad;
     use super::PageDrawRange;
@@ -5090,6 +5218,8 @@ mod tests {
     use super::fg_batch_for_page;
     use super::gutter_marker_color;
     use super::image_batch_for_page;
+    use super::image_render_order;
+    use super::image_vertex_z;
 
     fn blank_row(cols: usize) -> RowSnapshot {
         RowSnapshot {
@@ -5191,6 +5321,7 @@ mod tests {
                 v0: 0.0,
                 u1: 1.0,
                 v1: 1.0,
+                z: 0.25,
             },
             ClipRect {
                 left: 20.0,
@@ -5207,6 +5338,8 @@ mod tests {
         assert_eq!(vertices[3].pos, [90.0, 70.0]);
         assert_close(vertices[0].uv, [0.1, 0.3]);
         assert_close(vertices[3].uv, [0.8, 0.9]);
+        assert_eq!(vertices[0].z, 0.25);
+        assert_eq!(vertices[3].z, 0.25);
     }
 
     #[test]
@@ -5221,6 +5354,7 @@ mod tests {
                 v0: 0.0,
                 u1: 1.0,
                 v1: 1.0,
+                z: 0.0,
             },
             ClipRect {
                 left: 0.0,
@@ -5231,6 +5365,63 @@ mod tests {
         );
 
         assert!(vertices.is_none());
+    }
+
+    #[test]
+    fn image_vertex_z_is_ordered_and_inside_depth_range() {
+        let first = image_vertex_z(0, 3);
+        let second = image_vertex_z(1, 3);
+        let third = image_vertex_z(2, 3);
+
+        assert!(first > 0.0);
+        assert!(first < second);
+        assert!(second < third);
+        assert!(third < 1.0);
+    }
+
+    #[test]
+    fn image_render_order_uses_page_position_within_z_index() {
+        let layout = FrameLayout {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            baseline: 14.0,
+            gutter_px: 0.0,
+            tab_bar_h: 0.0,
+        };
+        let mut images = vec![
+            visible_image(1, 0, 8, 0, 0, 0),
+            visible_image(2, 1, 0, 0, 0, 0),
+            visible_image(3, 0, 9, 0, 0, 0),
+            visible_image(4, 0, 0, 0, 5, 0),
+        ];
+
+        images.sort_by(|left, right| image_render_order(left, right, &layout));
+
+        let ids: Vec<u64> = images.iter().map(|image| image.id).collect();
+        assert_eq!(ids, vec![1, 3, 4, 2]);
+    }
+
+    fn visible_image(
+        id: u64,
+        screen_row: i32,
+        screen_col: u32,
+        cell_x_offset: u32,
+        cell_y_offset: u32,
+        z_index: i32,
+    ) -> terminal41::VisibleImage {
+        terminal41::VisibleImage {
+            image: image41::DecodedImage::single_frame(1, 1, vec![0, 0, 0, 255]),
+            id,
+            kitty_image_id: None,
+            screen_row,
+            screen_col,
+            cell_x_offset,
+            cell_y_offset,
+            display_width: 1,
+            display_height: 1,
+            frame_index: 0,
+            z_index,
+        }
     }
 
     fn assert_close(

@@ -6,6 +6,7 @@
 struct VsInput {
     @location(0) pos: vec2<f32>,
     @location(1) uv: vec2<f32>,
+    @location(2) z: f32,
 }
 
 struct VsOutput {
@@ -17,7 +18,7 @@ struct VsOutput {
 fn vs_main(in: VsInput) -> VsOutput {
     var out: VsOutput;
     let ndc = (2.0 * in.pos / screen_size.xy - 1.0) * vec2<f32>(1.0, -1.0);
-    out.position = vec4<f32>(ndc, 0.0, 1.0);
+    out.position = vec4<f32>(ndc, in.z, 1.0);
     out.uv = in.uv;
     return out;
 }
