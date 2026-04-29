@@ -174,8 +174,20 @@ pub(crate) fn visible_images(
         palette,
         now,
     );
-    visible.sort_by_key(|img| (img.z_index, img.kitty_image_id.unwrap_or(u32::MAX), img.id));
+    visible.sort_by_key(visible_image_draw_order);
     visible.into_iter()
+}
+
+fn visible_image_draw_order(img: &VisibleImage) -> (i32, i32, u32, u32, u64) {
+    // Protocol z-index still chooses the image layer; page position decides
+    // overlap order inside that layer so lower/rightward anchors draw last.
+    (
+        img.z_index,
+        img.screen_row,
+        img.screen_col,
+        img.kitty_image_id.unwrap_or(u32::MAX),
+        img.id,
+    )
 }
 
 fn visible_physical_images(
@@ -571,5 +583,56 @@ pub(crate) fn track_scroll(
         }
         let min_abs = screen.grid.total_popped as u64;
         command_metas.retain(|&abs, _| abs >= min_abs);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    fn visible_image(
+        id: u64,
+        screen_row: i32,
+        screen_col: u32,
+        z_index: i32,
+    ) -> VisibleImage {
+        VisibleImage {
+            image: image41::DecodedImage::single_frame(1, 1, vec![0, 0, 0, 255]),
+            id,
+            kitty_image_id: None,
+            screen_row,
+            screen_col,
+            cell_x_offset: 0,
+            cell_y_offset: 0,
+            display_width: 1,
+            display_height: 1,
+            frame_index: 0,
+            z_index,
+        }
+    }
+
+    #[test]
+    fn visible_images_draw_in_row_major_order_within_z_index() {
+        let mut images = vec![
+            visible_image(1, 2, 10, 0),
+            visible_image(2, 3, 0, 0),
+            visible_image(3, 2, 5, 0),
+            visible_image(4, 1, 20, 0),
+        ];
+
+        images.sort_by_key(visible_image_draw_order);
+
+        let ids: Vec<u64> = images.iter().map(|image| image.id).collect();
+        assert_eq!(ids, vec![4, 3, 1, 2]);
+    }
+
+    #[test]
+    fn visible_images_keep_protocol_z_index_primary() {
+        let mut images = vec![visible_image(1, 10, 0, 0), visible_image(2, 0, 0, 1)];
+
+        images.sort_by_key(visible_image_draw_order);
+
+        let ids: Vec<u64> = images.iter().map(|image| image.id).collect();
+        assert_eq!(ids, vec![1, 2]);
     }
 }
