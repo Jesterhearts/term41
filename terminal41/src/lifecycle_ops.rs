@@ -178,6 +178,21 @@ pub(crate) fn visible_images(
     visible.into_iter()
 }
 
+pub(crate) fn referenced_kitty_image_ids(
+    screen: &Screen,
+    kitty_images: &image41::kitty::KittyImageStore,
+    palette: &ColorPalette,
+) -> HashSet<u32> {
+    let mut referenced = HashSet::new();
+    for img in screen.images.values() {
+        if let Some(image_id) = img.kitty_image_id {
+            referenced.insert(image_id);
+        }
+    }
+    append_placeholder_references(&mut referenced, screen, kitty_images, palette);
+    referenced
+}
+
 fn visible_image_draw_order(img: &VisibleImage) -> (i32, i32, u32, u32, u64) {
     // Protocol z-index still chooses the image layer; page position decides
     // overlap order inside that layer so lower/rightward anchors draw last.
@@ -222,6 +237,28 @@ fn visible_physical_images(
             })
         })
         .collect()
+}
+
+fn append_placeholder_references(
+    referenced: &mut HashSet<u32>,
+    screen: &Screen,
+    kitty_images: &image41::kitty::KittyImageStore,
+    palette: &ColorPalette,
+) {
+    for row in &screen.grid.rows {
+        let mut previous: Option<PlaceholderCell> = None;
+        for col in 0..row.cells.len() {
+            let Some(cell) = decode_placeholder_cell(row, col, previous, palette) else {
+                previous = None;
+                continue;
+            };
+            previous = Some(cell);
+
+            if let Some((image_id, _, _)) = resolve_placeholder_image(kitty_images, cell) {
+                referenced.insert(image_id);
+            }
+        }
+    }
 }
 
 fn append_unicode_placeholder_images(

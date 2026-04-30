@@ -13,6 +13,7 @@
 //! free). The page cap keeps a single terminal process from pinning excessive
 //! GPU texture memory during long inline-image or animated-image sessions.
 
+use std::collections::HashSet;
 use std::num::NonZeroUsize;
 
 use evictor::Lru;
@@ -53,6 +54,7 @@ pub struct ImageAtlas {
     sampler: wgpu::Sampler,
     pages: Vec<ImageAtlasPage>,
     cache: Lru<u64, ImageEntry>,
+    frame_pins: HashSet<u64>,
 }
 
 impl ImageAtlas {
@@ -90,7 +92,19 @@ impl ImageAtlas {
             sampler,
             pages: Vec::new(),
             cache: Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
+            frame_pins: HashSet::new(),
         }
+    }
+
+    /// Start a new renderer frame. Entries touched after this point are
+    /// protected from eviction until [`Self::end_frame`], because emitted
+    /// geometry contains direct atlas coordinates into those entries.
+    pub fn begin_frame(&mut self) {
+        self.frame_pins.clear();
+    }
+
+    pub fn end_frame(&mut self) {
+        self.frame_pins.clear();
     }
 
     pub fn bind_group(
@@ -125,7 +139,18 @@ impl ImageAtlas {
         let frame = image.frames.get(frame_index)?;
         let key = atlas_key(image_id, frame_index);
         if self.cache.contains_key(&key) {
+            self.frame_pins.insert(key);
             return self.cache.get(&key);
+        }
+
+        if self.cache.len() >= self.cache.capacity()
+            && !evict_one_unpinned(&mut self.cache, &mut self.pages, &self.frame_pins)
+        {
+            warn!(
+                "image {image_id} frame {frame_index} cannot be cached; all atlas entries are \
+                 already used by this frame"
+            );
+            return None;
         }
 
         let regions = tile_regions(image.width, image.height, IMAGE_ATLAS_SIZE);
@@ -136,9 +161,9 @@ impl ImageAtlas {
                 if let Some(tile) = allocate_tile(self, device, region) {
                     break tile;
                 }
-                if !evict_one(&mut self.cache, &mut self.pages) {
+                if !evict_one_unpinned(&mut self.cache, &mut self.pages, &self.frame_pins) {
                     // All allocated pages are full, the page limit has been
-                    // reached, and no cached entry exists to evict.
+                    // reached, and no unpinned cached entry exists to evict.
                     free_tiles(&mut self.pages, &tiles);
                     warn!(
                         "image {image_id} frame {frame_index} tile {}x{} does not fit in atlas",
@@ -157,10 +182,22 @@ impl ImageAtlas {
             tiles.push(tile);
         }
 
+        if self.cache.len() >= self.cache.capacity()
+            && !evict_one_unpinned(&mut self.cache, &mut self.pages, &self.frame_pins)
+        {
+            free_tiles(&mut self.pages, &tiles);
+            warn!(
+                "image {image_id} frame {frame_index} cannot be cached; all atlas entries are \
+                 already used by this frame"
+            );
+            return None;
+        }
+
         let evicted = self.cache.insert(key, ImageEntry { tiles });
         if let Some(entry) = evicted {
             free_tiles(&mut self.pages, &entry.tiles);
         }
+        self.frame_pins.insert(key);
         self.cache.get(&key)
     }
 }
@@ -306,17 +343,28 @@ fn tile_regions(
     tiles
 }
 
-fn evict_one(
+fn evict_one_unpinned(
     cache: &mut Lru<u64, ImageEntry>,
     pages: &mut [ImageAtlasPage],
+    pinned: &HashSet<u64>,
 ) -> bool {
-    match cache.pop() {
-        Some((_, entry)) => {
+    match least_recent_unpinned_key(cache, pinned) {
+        Some(key) => {
+            let Some(entry) = cache.remove(&key) else {
+                return false;
+            };
             free_tiles(pages, &entry.tiles);
             true
         }
         None => false,
     }
+}
+
+fn least_recent_unpinned_key(
+    cache: &Lru<u64, ImageEntry>,
+    pinned: &HashSet<u64>,
+) -> Option<u64> {
+    cache.keys().find(|key| !pinned.contains(key)).copied()
 }
 
 fn free_tiles(
@@ -371,6 +419,8 @@ fn upload_tile(
 
 #[cfg(test)]
 mod tests {
+    use std::collections::HashSet;
+
     use super::*;
 
     #[test]
@@ -380,6 +430,19 @@ mod tests {
         assert_eq!(tiles[0].width, 100);
         assert_eq!(tiles[0].height, 50);
         assert_eq!((tiles[0].src_x, tiles[0].src_y), (0, 0));
+    }
+
+    #[test]
+    fn unpinned_eviction_skips_entries_used_by_current_frame() {
+        let mut cache = Lru::new(NonZeroUsize::new(4).unwrap());
+        cache.insert(1, ImageEntry { tiles: Vec::new() });
+        cache.insert(2, ImageEntry { tiles: Vec::new() });
+        cache.insert(3, ImageEntry { tiles: Vec::new() });
+        cache.insert(4, ImageEntry { tiles: Vec::new() });
+
+        let pinned = HashSet::from([1, 2]);
+
+        assert_eq!(least_recent_unpinned_key(&cache, &pinned), Some(3));
     }
 
     #[test]

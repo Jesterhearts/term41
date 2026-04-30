@@ -1803,6 +1803,7 @@ impl Renderer {
         suspend_terminal_area: bool,
     ) {
         let layout = self.frame_layout(font_system, tabs);
+        self.image_atlas.begin_frame();
         let under_text_image_geometry = self.build_image_geometry(visible_images, &layout, true);
         let over_text_image_geometry = self.build_image_geometry(visible_images, &layout, false);
         if !suspend_terminal_area {
@@ -1831,6 +1832,7 @@ impl Renderer {
             under_text_image_geometry,
             over_text_image_geometry,
         );
+        self.image_atlas.end_frame();
     }
 
     fn apply_terminal_snapshot_rows(
@@ -5388,7 +5390,7 @@ mod tests {
             gutter_px: 0.0,
             tab_bar_h: 0.0,
         };
-        let mut images = vec![
+        let mut images = [
             visible_image(1, 0, 8, 0, 0, 0),
             visible_image(2, 1, 0, 0, 0, 0),
             visible_image(3, 0, 9, 0, 0, 0),

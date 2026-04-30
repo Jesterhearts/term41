@@ -1,5 +1,7 @@
+use std::collections::HashSet;
 use std::time::Instant;
 
+use config41::ColorPalette;
 use config41::PermissionPolicy;
 use vte_mode41::C1Mode;
 
@@ -8,6 +10,7 @@ use crate::Screen;
 use crate::TerminalLimits;
 use crate::Viewport;
 use crate::conformance;
+use crate::lifecycle_ops;
 use crate::screen;
 
 pub(crate) fn handle_kitty_graphics(
@@ -19,6 +22,7 @@ pub(crate) fn handle_kitty_graphics(
     limits: TerminalLimits,
     screen: &mut Screen,
     viewport: &Viewport,
+    palette: &ColorPalette,
     next_image_id: &mut u64,
     cell_height: u32,
     cell_width: u32,
@@ -69,6 +73,7 @@ pub(crate) fn handle_kitty_graphics(
             limits,
             file_requests,
             file_permission,
+            palette,
         ),
         b'T' => handle_kitty_transmit_display(
             &cmd,
@@ -83,6 +88,7 @@ pub(crate) fn handle_kitty_graphics(
             limits,
             file_requests,
             file_permission,
+            palette,
         ),
         b't' => handle_kitty_transmit(
             &cmd,
@@ -97,6 +103,7 @@ pub(crate) fn handle_kitty_graphics(
             limits,
             file_requests,
             file_permission,
+            palette,
         ),
         b'p' => handle_kitty_place(
             &cmd,
@@ -221,6 +228,7 @@ fn handle_file_request(
     cell_width: u32,
     pending_output: &mut Vec<u8>,
     file_requests: &mut Vec<KittyFileRequest>,
+    palette: &ColorPalette,
 ) {
     match permission {
         PermissionPolicy::Allow => apply_kitty_file_request(
@@ -228,6 +236,7 @@ fn handle_file_request(
             store,
             screen,
             viewport,
+            palette,
             next_image_id,
             cell_height,
             cell_width,
@@ -266,9 +275,21 @@ fn store_kitty_image(
     id: u32,
     image: image41::DecodedImage,
     limits: TerminalLimits,
+    screen: &Screen,
+    palette: &ColorPalette,
 ) -> Result<(), &'static str> {
     if id == 0 {
         return Ok(());
+    }
+    if !store.can_store(id, &image, limits.kitty_graphics_storage_bytes) {
+        let mut referenced = lifecycle_ops::referenced_kitty_image_ids(screen, store, palette);
+        referenced.insert(id);
+        store.remove_unreferenced(&referenced);
+
+        let retained = HashSet::from([id]);
+        while !store.can_store(id, &image, limits.kitty_graphics_storage_bytes)
+            && store.remove_oldest_except(&retained)
+        {}
     }
     store
         .store(id, image, limits.kitty_graphics_storage_bytes)
@@ -280,6 +301,7 @@ pub(crate) fn apply_kitty_file_request(
     store: &mut image41::kitty::KittyImageStore,
     screen: &mut Screen,
     viewport: &Viewport,
+    palette: &ColorPalette,
     next_image_id: &mut u64,
     cell_height: u32,
     cell_width: u32,
@@ -315,7 +337,7 @@ pub(crate) fn apply_kitty_file_request(
         }
         (KittyFileAction::Transmit, Some(image)) => {
             let id = store.resolve_transmission_id(&cmd);
-            match store_kitty_image(store, id, image, request.limits) {
+            match store_kitty_image(store, id, image, request.limits, screen, palette) {
                 Ok(()) => send_kitty_response(&cmd, id, true, "", request.c1_mode, pending_output),
                 Err(message) => {
                     send_kitty_response(&cmd, id, false, message, request.c1_mode, pending_output)
@@ -335,7 +357,9 @@ pub(crate) fn apply_kitty_file_request(
             Some(image),
         ) => {
             let id = store.resolve_transmission_id(&cmd);
-            if let Err(message) = store_kitty_image(store, id, image.clone(), request.limits) {
+            if let Err(message) =
+                store_kitty_image(store, id, image.clone(), request.limits, screen, palette)
+            {
                 send_kitty_response(&cmd, id, false, message, request.c1_mode, pending_output);
                 return;
             }
@@ -590,6 +614,7 @@ fn handle_kitty_query(
     limits: TerminalLimits,
     file_requests: &mut Vec<KittyFileRequest>,
     file_permission: PermissionPolicy,
+    palette: &ColorPalette,
 ) {
     if command_has_conflicting_ids(cmd) {
         send_kitty_response(
@@ -620,6 +645,7 @@ fn handle_kitty_query(
                 cell_width,
                 pending_output,
                 file_requests,
+                palette,
             );
             return;
         }
@@ -648,6 +674,7 @@ fn handle_kitty_transmit(
     limits: TerminalLimits,
     file_requests: &mut Vec<KittyFileRequest>,
     file_permission: PermissionPolicy,
+    palette: &ColorPalette,
 ) {
     if command_has_conflicting_ids(cmd) {
         send_kitty_response(
@@ -684,6 +711,7 @@ fn handle_kitty_transmit(
                 cell_width,
                 pending_output,
                 file_requests,
+                palette,
             );
             return;
         }
@@ -703,7 +731,7 @@ fn handle_kitty_transmit(
     let id = store.resolve_transmission_id(cmd);
     match decode_kitty_image(cmd, limits) {
         Some(image) => {
-            if let Err(message) = store_kitty_image(store, id, image, limits) {
+            if let Err(message) = store_kitty_image(store, id, image, limits, screen, palette) {
                 send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
                 return;
             }
@@ -726,6 +754,7 @@ fn handle_kitty_transmit_display(
     limits: TerminalLimits,
     file_requests: &mut Vec<KittyFileRequest>,
     file_permission: PermissionPolicy,
+    palette: &ColorPalette,
 ) {
     if command_has_conflicting_ids(cmd) {
         send_kitty_response(
@@ -773,6 +802,7 @@ fn handle_kitty_transmit_display(
                 cell_width,
                 pending_output,
                 file_requests,
+                palette,
             );
             return;
         }
@@ -792,7 +822,9 @@ fn handle_kitty_transmit_display(
     let id = store.resolve_transmission_id(cmd);
     match decode_kitty_image(cmd, limits) {
         Some(image) => {
-            if let Err(message) = store_kitty_image(store, id, image.clone(), limits) {
+            if let Err(message) =
+                store_kitty_image(store, id, image.clone(), limits, screen, palette)
+            {
                 send_kitty_response(cmd, id, false, message, c1_mode, pending_output);
                 return;
             }
@@ -1200,6 +1232,18 @@ mod tests {
         format!("\x1b_Ga=q,t=f,f=32,s=1,v=1,i=7;{encoded_path}\x1b\\").into_bytes()
     }
 
+    fn kitty_virtual_rgba(
+        image_id: u32,
+        rgba: &[u8],
+    ) -> Vec<u8> {
+        let payload = BASE64.encode(rgba);
+        format!("\x1b_Ga=T,f=32,s=2,v=1,i={image_id},U=1,c=1,r=1;{payload}\x1b\\").into_bytes()
+    }
+
+    fn kitty_placeholder(image_id: u8) -> String {
+        format!("\x1b[38;5;{image_id}m\u{10EEEE}\u{0305}\u{0305}\x1b[39m")
+    }
+
     fn visible_images(term: &TestTerm) -> Vec<crate::VisibleImage> {
         crate::view::visible_images(
             &term.inner.active,
@@ -1305,6 +1349,60 @@ mod tests {
         assert_eq!(images[0].screen_col, 0);
         assert_eq!(images[0].display_width, 24);
         assert_eq!(images[0].display_height, 32);
+    }
+
+    #[test]
+    fn kitty_storage_prunes_unreferenced_placeholder_images_before_rejecting_new_image() {
+        let mut term = TestTerm::new_80x24();
+        settings::set_terminal_limits(
+            &mut term.inner.protocol,
+            TerminalLimits {
+                kitty_graphics_storage_bytes: 8,
+                ..TerminalLimits::default()
+            },
+        );
+
+        term.process(&kitty_virtual_rgba(1, &[255, 0, 0, 255, 0, 0, 255, 255]));
+        term.process(kitty_placeholder(1).as_bytes());
+        assert_eq!(visible_images(&term).len(), 1);
+
+        term.process(b"\r \r");
+        term.process(&kitty_virtual_rgba(2, &[0, 255, 0, 255, 0, 255, 0, 255]));
+        term.process(kitty_placeholder(2).as_bytes());
+
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1b_Gi=1;OK\x1b\\\x1b_Gi=2;OK\x1b\\"
+        );
+        let images = visible_images(&term);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].kitty_image_id, Some(2));
+    }
+
+    #[test]
+    fn kitty_storage_evicts_old_placeholder_images_when_repaint_transmits_before_clearing() {
+        let mut term = TestTerm::new_80x24();
+        settings::set_terminal_limits(
+            &mut term.inner.protocol,
+            TerminalLimits {
+                kitty_graphics_storage_bytes: 8,
+                ..TerminalLimits::default()
+            },
+        );
+
+        term.process(&kitty_virtual_rgba(1, &[255, 0, 0, 255, 0, 0, 255, 255]));
+        term.process(kitty_placeholder(1).as_bytes());
+
+        term.process(&kitty_virtual_rgba(2, &[0, 255, 0, 255, 0, 255, 0, 255]));
+        term.process(format!("\r{}", kitty_placeholder(2)).as_bytes());
+
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1b_Gi=1;OK\x1b\\\x1b_Gi=2;OK\x1b\\"
+        );
+        let images = visible_images(&term);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].kitty_image_id, Some(2));
     }
 
     #[test]

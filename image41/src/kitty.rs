@@ -7,6 +7,7 @@
 
 use std::collections::BTreeMap;
 use std::collections::HashMap;
+use std::collections::HashSet;
 use std::fs::File;
 use std::io::Read;
 use std::io::Seek;
@@ -542,20 +543,34 @@ impl KittyImageStore {
         image: DecodedImage,
         max_storage_bytes: usize,
     ) -> Result<(), KittyStoreError> {
-        let previous_bytes = self.images.get(&id).map_or(0, image_storage_bytes);
-        let image_bytes = image_storage_bytes(&image);
-        let projected = self
-            .used_bytes
-            .saturating_sub(previous_bytes)
-            .saturating_add(image_bytes);
-        if projected > max_storage_bytes {
+        if !self.can_store(id, &image, max_storage_bytes) {
             return Err(KittyStoreError::StorageLimitExceeded);
         }
-        self.used_bytes = projected;
+        self.used_bytes = self.projected_storage_bytes(id, &image);
         self.images.insert(id, image);
         self.image_generations.insert(id, self.next_generation);
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         Ok(())
+    }
+
+    pub fn can_store(
+        &self,
+        id: u32,
+        image: &DecodedImage,
+        max_storage_bytes: usize,
+    ) -> bool {
+        self.projected_storage_bytes(id, image) <= max_storage_bytes
+    }
+
+    fn projected_storage_bytes(
+        &self,
+        id: u32,
+        image: &DecodedImage,
+    ) -> usize {
+        let previous_bytes = self.images.get(&id).map_or(0, image_storage_bytes);
+        self.used_bytes
+            .saturating_sub(previous_bytes)
+            .saturating_add(image_storage_bytes(image))
     }
 
     /// Return the image stored under `id`, if any.
@@ -672,6 +687,39 @@ impl KittyImageStore {
         });
         self.remove_virtual_placements_range(lo, hi);
         self.number_to_id.retain(|_, v| *v < lo || *v > hi);
+    }
+
+    /// Drop stored images that no live terminal content still references.
+    pub fn remove_unreferenced(
+        &mut self,
+        referenced: &HashSet<u32>,
+    ) {
+        let ids: Vec<u32> = self
+            .images
+            .keys()
+            .copied()
+            .filter(|id| !referenced.contains(id))
+            .collect();
+        for id in ids {
+            self.remove(id);
+        }
+    }
+
+    pub fn remove_oldest_except(
+        &mut self,
+        retained: &HashSet<u32>,
+    ) -> bool {
+        let Some(id) = self
+            .image_generations
+            .iter()
+            .filter(|(id, _)| !retained.contains(id))
+            .min_by_key(|(_, generation)| *generation)
+            .map(|(id, _)| *id)
+        else {
+            return false;
+        };
+        self.remove(id);
+        true
     }
 }
 
@@ -911,6 +959,34 @@ mod tests {
         assert!(store.get(1).is_none());
         assert!(store.store(1, image, 8).is_ok());
         assert!(store.get(1).is_some());
+    }
+
+    #[test]
+    fn image_store_removes_unreferenced_images() {
+        let mut store = KittyImageStore::new();
+        let image = DecodedImage::single_frame(2, 1, vec![0; 8]);
+        store.store(1, image.clone(), 16).unwrap();
+        store.store(2, image, 16).unwrap();
+
+        store.remove_unreferenced(&HashSet::from([2]));
+
+        assert!(store.get(1).is_none());
+        assert!(store.get(2).is_some());
+    }
+
+    #[test]
+    fn image_store_removes_oldest_non_retained_image() {
+        let mut store = KittyImageStore::new();
+        let image = DecodedImage::single_frame(2, 1, vec![0; 8]);
+        store.store(1, image.clone(), 24).unwrap();
+        store.store(2, image.clone(), 24).unwrap();
+        store.store(3, image, 24).unwrap();
+
+        assert!(store.remove_oldest_except(&HashSet::from([1])));
+
+        assert!(store.get(1).is_some());
+        assert!(store.get(2).is_none());
+        assert!(store.get(3).is_some());
     }
 
     #[test]
