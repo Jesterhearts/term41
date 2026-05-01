@@ -617,6 +617,28 @@ mod tests {
     }
 
     #[test]
+    fn clear_to_end_of_wrapped_row_drops_stale_continuations() {
+        let mut terminal = terminal();
+        let mut processor = TerminalProcessor::new();
+
+        processor.process_bytes(&mut terminal, b"abcdefghijk");
+        let first = snapshot_terminal(&mut terminal);
+        assert_eq!(snapshot_row_text(&first.rows[0]), "abcde");
+        assert_eq!(snapshot_row_text(&first.rows[1]), "fghij");
+        assert_eq!(snapshot_row_text(&first.rows[2]), "k    ");
+
+        processor.process_bytes(&mut terminal, b"\x1b[2A\rbcdefghijk\x1b[K");
+        let snap = snapshot_terminal(&mut terminal);
+
+        assert!(!snap.reset_cached_rows);
+        assert_eq!(snapshot_row_text(&snap.rows[0]), "bcdef");
+        assert_eq!(snapshot_row_text(&snap.rows[1]), "ghij ");
+        assert_eq!(snapshot_row_text(&snap.rows[2]), "     ");
+        assert_ne!(snap.rows[1].generation, first.rows[1].generation);
+        assert_ne!(snap.rows[2].generation, first.rows[2].generation);
+    }
+
+    #[test]
     fn snapshot_rows_are_normalized_to_viewport_width() {
         let mut terminal = terminal();
         terminal.active.grid.rows[0].truncate(4);
@@ -658,5 +680,9 @@ mod tests {
 
         assert_eq!(snap.rows.len(), snap.total_rows as usize);
         assert_eq!(snap.rows.last().unwrap().screen_row, terminal.viewport.rows);
+    }
+
+    fn snapshot_row_text(row: &RowSnapshot) -> String {
+        row.cells.concat()
     }
 }

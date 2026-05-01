@@ -16,6 +16,25 @@ fn reset_row_after_full_clear(row: &mut Row) {
     row.line_attr = LineAttr::Normal;
 }
 
+fn clear_wrapped_continuation_rows(
+    grid: &mut Grid,
+    images: &mut BTreeMap<u64, PlacedImage>,
+    first: usize,
+    cols: usize,
+) {
+    let mut row = first;
+    while row < grid.rows.len() {
+        let continued = grid.rows[row].wrapped;
+        grid.rows[row].clear(grid.default_fg, grid.default_bg);
+        reset_row_after_full_clear(&mut grid.rows[row]);
+        clear_anchored_cells(images, row, row + 1, 0, cols);
+        row += 1;
+        if !continued {
+            break;
+        }
+    }
+}
+
 pub(crate) fn erase_in_display(
     grid: &mut Grid,
     cursor: &Cursor,
@@ -32,8 +51,10 @@ pub(crate) fn erase_in_display(
         0 => {
             let cols = grid.rows[active].cells.len();
             grid.rows[active].clear_range(col..cols, grid.default_fg, grid.default_bg);
+            grid.rows[active].wrapped = false;
             for r in (active + 1)..grid.rows.len() {
                 grid.rows[r].clear(grid.default_fg, grid.default_bg);
+                reset_row_after_full_clear(&mut grid.rows[r]);
             }
             clear_anchored_cells(images, active, active + 1, col, cols);
             clear_anchored_cells(images, active + 1, grid.rows.len(), 0, cols);
@@ -146,14 +167,23 @@ pub(crate) fn erase_in_line(
         0 => {
             grid.rows[active].clear_range(col..cols, grid.default_fg, grid.default_bg);
             clear_anchored_cells(images, active, active + 1, col, cols);
+            if grid.rows[active].wrapped {
+                grid.rows[active].wrapped = false;
+                clear_wrapped_continuation_rows(grid, images, active + 1, cols);
+            }
         }
         1 => {
             grid.rows[active].clear_range(0..col + 1, grid.default_fg, grid.default_bg);
             clear_anchored_cells(images, active, active + 1, 0, col + 1);
         }
         2 => {
+            let had_wrapped_continuation = grid.rows[active].wrapped;
             grid.rows[active].clear(grid.default_fg, grid.default_bg);
+            grid.rows[active].wrapped = false;
             clear_anchored_cells(images, active, active + 1, 0, cols);
+            if had_wrapped_continuation {
+                clear_wrapped_continuation_rows(grid, images, active + 1, cols);
+            }
         }
         _ => {}
     }
