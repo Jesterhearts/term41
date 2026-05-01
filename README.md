@@ -354,7 +354,7 @@ vsync = "auto"
 
 [command_editor]
 # Off by default. When enabled, it is active only while OSC 133 / OSC 633 shell
-# integration reports that the shell is editing a command.
+# integration reports that the shell is editing a command on the primary screen.
 # enabled = true
 # completions = ["cargo", "git", "rg"]
 # max_history = 200
@@ -409,11 +409,14 @@ Notes:
   plus `require("terminal")`.
 - `[command_editor]` enables the terminal-local command editor layer. It keeps
   keyboard handling unchanged while disabled, uses Up/Down for its own command
-  history while active, and completes prefixes from configured words plus recent
-  history and paths relative to the shell's OSC-reported current directory. When
-  a path has multiple matches, Tab cycles the ghost candidate and Right accepts
-  the active one. Alternate-screen applications always receive normal terminal
-  input; the command editor only intercepts keys on the primary screen.
+  history while active, and completes prefixes from recent history, configured
+  words, executable commands discovered from `PATH`, and paths relative to the
+  shell's OSC-reported current directory. Discovered `PATH` commands are offered
+  only where a shell command can start, so they do not pollute normal argument
+  completion. When a path has multiple matches, Tab cycles the ghost candidate
+  and Right accepts the active one. Alternate-screen applications always receive
+  normal terminal input; the command editor only intercepts keys on the primary
+  screen.
   `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
   config.
 - Example scripts are available under `examples/`, including

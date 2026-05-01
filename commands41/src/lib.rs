@@ -16,6 +16,7 @@ const DEFAULT_MAX_HISTORY: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditorSettings {
     pub completion_words: Vec<String>,
+    pub command_words: Vec<String>,
     pub current_dir: Option<PathBuf>,
     pub max_history: usize,
 }
@@ -24,6 +25,7 @@ impl Default for EditorSettings {
     fn default() -> Self {
         Self {
             completion_words: Vec::new(),
+            command_words: Vec::new(),
             current_dir: None,
             max_history: DEFAULT_MAX_HISTORY,
         }
@@ -429,7 +431,7 @@ fn completion_suffix(
     history: &[String],
 ) -> Option<String> {
     if cursor == buffer.len() && !buffer.is_empty() {
-        for candidate in completion_candidates(settings, history) {
+        for candidate in history_command_candidates(history) {
             if candidate != buffer && candidate.starts_with(buffer) {
                 return Some(candidate[buffer.len()..].to_owned());
             }
@@ -440,11 +442,16 @@ fn completion_suffix(
         return Some(suffix);
     }
 
-    let prefix = current_completion_prefix(buffer, cursor)?;
+    let (word_start, prefix) = current_completion_word(buffer, cursor)?;
     if prefix.is_empty() {
         return None;
     }
-    for candidate in completion_candidates(settings, history) {
+    let candidates = if is_command_completion_word(buffer, word_start) {
+        command_completion_candidates(settings, history)
+    } else {
+        word_completion_candidates(settings, history)
+    };
+    for candidate in candidates {
         if candidate != prefix && candidate.starts_with(prefix) {
             return Some(candidate[prefix.len()..].to_owned());
         }
@@ -485,13 +492,6 @@ fn path_completion_word_and_candidates(
     Some((word.to_owned(), candidates))
 }
 
-fn current_completion_prefix(
-    buffer: &str,
-    cursor: usize,
-) -> Option<&str> {
-    current_completion_word(buffer, cursor).map(|(_, word)| word)
-}
-
 fn current_completion_word(
     buffer: &str,
     cursor: usize,
@@ -508,19 +508,43 @@ fn current_completion_word(
     Some((start, &buffer[start..cursor]))
 }
 
-fn completion_candidates(
+fn history_command_candidates(history: &[String]) -> Vec<String> {
+    let mut out = Vec::new();
+    for command in history.iter().rev() {
+        push_unique(&mut out, command);
+    }
+    out
+}
+
+fn command_completion_candidates(
     settings: &EditorSettings,
     history: &[String],
 ) -> Vec<String> {
     let mut out = Vec::new();
-    for word in &settings.completion_words {
-        push_unique(&mut out, word);
-    }
     for command in history.iter().rev() {
-        push_unique(&mut out, command);
         if let Some(first_word) = command.split_whitespace().next() {
             push_unique(&mut out, first_word);
         }
+    }
+    for word in &settings.completion_words {
+        push_unique(&mut out, word);
+    }
+    for word in shortest_first(&settings.command_words) {
+        push_unique(&mut out, word);
+    }
+    out
+}
+
+fn word_completion_candidates(
+    settings: &EditorSettings,
+    history: &[String],
+) -> Vec<String> {
+    let mut out = Vec::new();
+    for command in history.iter().rev() {
+        push_unique(&mut out, command);
+    }
+    for word in &settings.completion_words {
+        push_unique(&mut out, word);
     }
     out
 }
@@ -532,6 +556,12 @@ fn push_unique(
     if !value.is_empty() && !out.iter().any(|existing| existing == value) {
         out.push(value.to_owned());
     }
+}
+
+fn shortest_first(words: &[String]) -> Vec<&str> {
+    let mut sorted = words.iter().map(String::as_str).collect::<Vec<_>>();
+    sorted.sort_by(|a, b| a.len().cmp(&b.len()).then_with(|| a.cmp(b)));
+    sorted
 }
 
 #[derive(Debug)]
@@ -654,7 +684,7 @@ fn path_completion_allowed(
     word_start: usize,
     word: &str,
 ) -> bool {
-    is_explicit_path(word) || !is_first_shell_word(buffer, word_start)
+    is_explicit_path(word) || !is_command_completion_word(buffer, word_start)
 }
 
 fn is_explicit_path(word: &str) -> bool {
@@ -664,13 +694,21 @@ fn is_explicit_path(word: &str) -> bool {
         || word.starts_with(std::path::MAIN_SEPARATOR)
 }
 
-fn is_first_shell_word(
+fn is_command_completion_word(
     buffer: &str,
     word_start: usize,
 ) -> bool {
-    buffer[..word_start]
-        .split(|ch: char| ch.is_whitespace() || is_operator_char(ch))
-        .all(str::is_empty)
+    let Some(prefix) = buffer.get(..word_start) else {
+        return false;
+    };
+    let prefix = prefix.trim_end();
+    if prefix.is_empty() {
+        return true;
+    }
+    prefix
+        .chars()
+        .next_back()
+        .is_some_and(is_command_separator_char)
 }
 
 fn path_completion_request(
@@ -799,6 +837,10 @@ fn is_operator_char(ch: char) -> bool {
     matches!(ch, '|' | '&' | ';' | '<' | '>' | '(' | ')')
 }
 
+fn is_command_separator_char(ch: char) -> bool {
+    matches!(ch, '|' | '&' | ';' | '(')
+}
+
 fn starts_shell_comment(
     text: &str,
     idx: usize,
@@ -871,6 +913,16 @@ mod tests {
     fn settings(words: &[&str]) -> EditorSettings {
         EditorSettings {
             completion_words: words.iter().map(|word| (*word).to_owned()).collect(),
+            command_words: Vec::new(),
+            current_dir: None,
+            max_history: 20,
+        }
+    }
+
+    fn command_settings(words: &[&str]) -> EditorSettings {
+        EditorSettings {
+            completion_words: Vec::new(),
+            command_words: words.iter().map(|word| (*word).to_owned()).collect(),
             current_dir: None,
             max_history: 20,
         }
@@ -879,6 +931,7 @@ mod tests {
     fn path_settings(current_dir: PathBuf) -> EditorSettings {
         EditorSettings {
             completion_words: Vec::new(),
+            command_words: Vec::new(),
             current_dir: Some(current_dir),
             max_history: 20,
         }
@@ -965,6 +1018,76 @@ mod tests {
         );
 
         assert_eq!(editor.view(&settings).completion.as_deref(), Some("uild"));
+    }
+
+    #[test]
+    fn command_words_complete_initial_command() {
+        let settings = command_settings(&["cargo", "cat"]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("car".to_owned()),
+            &settings,
+        );
+
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn command_words_prefer_shortest_matching_command() {
+        let settings = command_settings(&["cargo-audit", "cargo"]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("car".to_owned()),
+            &settings,
+        );
+
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn history_first_words_win_before_command_words() {
+        let settings = command_settings(&["cargo"]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cat README.md".to_owned()),
+            &settings,
+        );
+        apply_input(&mut editor, EditorInput::Enter, &settings);
+        apply_input(&mut editor, EditorInput::Insert("ca".to_owned()), &settings);
+
+        assert_eq!(
+            editor.view(&settings).completion.as_deref(),
+            Some("t README.md")
+        );
+    }
+
+    #[test]
+    fn command_words_do_not_complete_argument_words() {
+        let settings = command_settings(&["cargo"]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("echo car".to_owned()),
+            &settings,
+        );
+
+        assert_eq!(editor.view(&settings).completion, None);
+    }
+
+    #[test]
+    fn command_words_complete_after_shell_separator() {
+        let settings = command_settings(&["cargo"]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("echo ok | car".to_owned()),
+            &settings,
+        );
+
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
     }
 
     #[test]

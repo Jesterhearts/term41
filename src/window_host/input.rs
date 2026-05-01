@@ -266,6 +266,7 @@ impl WindowHost {
         let Some(input) = command_editor_input(key, self.modifiers) else {
             return false;
         };
+        let command_words = self.command_catalog.names().to_vec();
         let mut cleared_inactive_editor = false;
         let handled = {
             let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
@@ -276,7 +277,8 @@ impl WindowHost {
                 command_editor_context(&terminal)
             };
             if let Some(context) = editor_context {
-                let settings = Self::command_editor_settings(&config, context.current_dir);
+                let settings =
+                    Self::command_editor_settings(&config, context.current_dir, command_words);
                 let outcome = apply_input(&mut target.command_editor, input.clone(), &settings);
                 match outcome {
                     EditOutcome::Submitted(command) => {

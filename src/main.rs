@@ -1,6 +1,7 @@
 #![allow(clippy::too_many_arguments)]
 #![allow(clippy::type_complexity)]
 
+mod command_catalog;
 mod output_recording;
 mod perf_ctrl_c;
 mod renderer;
@@ -32,6 +33,7 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clip41::ClipboardKind;
+use command_catalog::CommandCatalog;
 use commands41::CommandEditor;
 use commands41::CommandLineView;
 use commands41::EditOutcome;
@@ -372,6 +374,7 @@ struct WindowHost {
     startup_next_redraw: Option<Instant>,
     startup_release_tx: Option<mpsc::SyncSender<Vec<Tab>>>,
     input_endpoints: HashMap<TabId, InputEndpoint>,
+    command_catalog: CommandCatalog,
     active_input_tab: Option<TabId>,
     input_state: Arc<Mutex<InputState>>,
     event_tx: cueue::Writer<RenderEvent>,
@@ -923,6 +926,7 @@ fn main() {
                 command_editor: CommandEditor::new(),
             },
         )]),
+        command_catalog: CommandCatalog::from_environment(),
         active_input_tab: Some(TabId(0)),
         input_state,
         event_tx,

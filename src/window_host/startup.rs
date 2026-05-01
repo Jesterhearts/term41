@@ -167,16 +167,22 @@ impl WindowHost {
             let terminal = target.terminal.lock();
             command_editor_context(&terminal)
         };
-        let settings = Self::command_editor_settings(&config, context?.current_dir);
+        let settings = Self::command_editor_settings(
+            &config,
+            context?.current_dir,
+            self.command_catalog.names().to_vec(),
+        );
         command_editor_view(&target.command_editor, &settings)
     }
 
     pub(crate) fn command_editor_settings(
         config: &CommandEditorConfig,
         current_dir: Option<PathBuf>,
+        command_words: Vec<String>,
     ) -> EditorSettings {
         EditorSettings {
             completion_words: config.completions.clone(),
+            command_words,
             current_dir,
             max_history: config.max_history,
         }
