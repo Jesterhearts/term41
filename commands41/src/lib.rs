@@ -67,8 +67,15 @@ pub enum EditorInput {
     Delete,
     MoveLeft,
     MoveRight,
+    MoveWordLeft,
+    MoveWordRight,
     MoveHome,
     MoveEnd,
+    DeleteWordLeft,
+    DeleteWordRight,
+    KillToStart,
+    KillToEnd,
+    Yank,
     HistoryPrevious,
     HistoryNext,
     Complete,
@@ -90,6 +97,7 @@ pub struct CommandEditor {
     history: Vec<String>,
     history_pos: Option<usize>,
     draft: String,
+    kill_buffer: String,
     path_cycle: Option<PathCompletionCycle>,
 }
 
@@ -193,6 +201,22 @@ pub fn apply_input(
             editor.cursor = next;
             EditOutcome::Updated
         }
+        EditorInput::MoveWordLeft => {
+            let Some(prev) = previous_word_start(&editor.buffer, editor.cursor) else {
+                return EditOutcome::Ignored;
+            };
+            editor.path_cycle = None;
+            editor.cursor = prev;
+            EditOutcome::Updated
+        }
+        EditorInput::MoveWordRight => {
+            let Some(next) = next_word_end(&editor.buffer, editor.cursor) else {
+                return EditOutcome::Ignored;
+            };
+            editor.path_cycle = None;
+            editor.cursor = next;
+            EditOutcome::Updated
+        }
         EditorInput::MoveHome => {
             if editor.cursor == 0 {
                 EditOutcome::Ignored
@@ -210,6 +234,58 @@ pub fn apply_input(
                 editor.cursor = editor.buffer.len();
                 EditOutcome::Updated
             }
+        }
+        EditorInput::DeleteWordLeft => {
+            let Some(prev) = previous_word_start(&editor.buffer, editor.cursor) else {
+                return EditOutcome::Ignored;
+            };
+            editor.path_cycle = None;
+            replace_history_edit_with_draft(editor);
+            editor.kill_buffer = editor.buffer[prev..editor.cursor].to_owned();
+            editor.buffer.drain(prev..editor.cursor);
+            editor.cursor = prev;
+            EditOutcome::Updated
+        }
+        EditorInput::DeleteWordRight => {
+            let Some(next) = next_word_end(&editor.buffer, editor.cursor) else {
+                return EditOutcome::Ignored;
+            };
+            editor.path_cycle = None;
+            replace_history_edit_with_draft(editor);
+            editor.kill_buffer = editor.buffer[editor.cursor..next].to_owned();
+            editor.buffer.drain(editor.cursor..next);
+            EditOutcome::Updated
+        }
+        EditorInput::KillToStart => {
+            if editor.cursor == 0 {
+                return EditOutcome::Ignored;
+            }
+            editor.path_cycle = None;
+            replace_history_edit_with_draft(editor);
+            editor.kill_buffer = editor.buffer[..editor.cursor].to_owned();
+            editor.buffer.drain(..editor.cursor);
+            editor.cursor = 0;
+            EditOutcome::Updated
+        }
+        EditorInput::KillToEnd => {
+            if editor.cursor == editor.buffer.len() {
+                return EditOutcome::Ignored;
+            }
+            editor.path_cycle = None;
+            replace_history_edit_with_draft(editor);
+            editor.kill_buffer = editor.buffer[editor.cursor..].to_owned();
+            editor.buffer.truncate(editor.cursor);
+            EditOutcome::Updated
+        }
+        EditorInput::Yank => {
+            if editor.kill_buffer.is_empty() {
+                return EditOutcome::Ignored;
+            }
+            editor.path_cycle = None;
+            replace_history_edit_with_draft(editor);
+            editor.buffer.insert_str(editor.cursor, &editor.kill_buffer);
+            editor.cursor += editor.kill_buffer.len();
+            EditOutcome::Updated
         }
         EditorInput::HistoryPrevious => history_previous(editor),
         EditorInput::HistoryNext => history_next(editor),
@@ -343,6 +419,63 @@ fn next_grapheme_boundary(
     text.grapheme_indices(true)
         .map(|(idx, g)| idx + g.len())
         .find(|idx| *idx > cursor)
+}
+
+fn previous_word_start(
+    text: &str,
+    cursor: usize,
+) -> Option<usize> {
+    if cursor == 0 || cursor > text.len() || !text.is_char_boundary(cursor) {
+        return None;
+    }
+
+    let mut boundary = cursor;
+    while let Some(prev) = previous_grapheme_boundary(text, boundary) {
+        if !is_word_separator(&text[prev..boundary]) {
+            break;
+        }
+        boundary = prev;
+    }
+    while let Some(prev) = previous_grapheme_boundary(text, boundary) {
+        if is_word_separator(&text[prev..boundary]) {
+            break;
+        }
+        boundary = prev;
+    }
+
+    (boundary != cursor).then_some(boundary)
+}
+
+fn next_word_end(
+    text: &str,
+    cursor: usize,
+) -> Option<usize> {
+    if cursor >= text.len() || !text.is_char_boundary(cursor) {
+        return None;
+    }
+
+    let mut boundary = cursor;
+    while let Some(next) = next_grapheme_boundary(text, boundary) {
+        if !is_word_separator(&text[boundary..next]) {
+            break;
+        }
+        boundary = next;
+    }
+    while let Some(next) = next_grapheme_boundary(text, boundary) {
+        if is_word_separator(&text[boundary..next]) {
+            break;
+        }
+        boundary = next;
+    }
+
+    (boundary != cursor).then_some(boundary)
+}
+
+fn is_word_separator(grapheme: &str) -> bool {
+    grapheme
+        .chars()
+        .next()
+        .is_some_and(|ch| ch.is_whitespace() || is_operator_char(ch))
 }
 
 fn replace_history_edit_with_draft(editor: &mut CommandEditor) {
@@ -985,6 +1118,64 @@ mod tests {
         apply_input(&mut editor, EditorInput::HistoryNext, &settings);
         apply_input(&mut editor, EditorInput::HistoryNext, &settings);
         assert_eq!(editor.view(&settings).text, "draft");
+    }
+
+    #[test]
+    fn word_motion_skips_shell_words_and_separators() {
+        let mut editor = CommandEditor::new();
+        let settings = EditorSettings::default();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cargo test | rg foo".to_owned()),
+            &settings,
+        );
+
+        apply_input(&mut editor, EditorInput::MoveWordLeft, &settings);
+        assert_eq!(editor.view(&settings).cursor, "cargo test | rg ".len());
+
+        apply_input(&mut editor, EditorInput::MoveWordLeft, &settings);
+        assert_eq!(editor.view(&settings).cursor, "cargo test | ".len());
+
+        apply_input(&mut editor, EditorInput::MoveWordRight, &settings);
+        assert_eq!(editor.view(&settings).cursor, "cargo test | rg".len());
+    }
+
+    #[test]
+    fn word_delete_updates_kill_buffer_for_yank() {
+        let mut editor = CommandEditor::new();
+        let settings = EditorSettings::default();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cargo test".to_owned()),
+            &settings,
+        );
+
+        apply_input(&mut editor, EditorInput::DeleteWordLeft, &settings);
+        assert_eq!(editor.view(&settings).text, "cargo ");
+        apply_input(&mut editor, EditorInput::Yank, &settings);
+        assert_eq!(editor.view(&settings).text, "cargo test");
+    }
+
+    #[test]
+    fn line_kill_to_start_and_end_can_yank() {
+        let mut editor = CommandEditor::new();
+        let settings = EditorSettings::default();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cargo test --all".to_owned()),
+            &settings,
+        );
+        apply_input(&mut editor, EditorInput::MoveWordLeft, &settings);
+
+        apply_input(&mut editor, EditorInput::KillToStart, &settings);
+        assert_eq!(editor.view(&settings).text, "--all");
+        apply_input(&mut editor, EditorInput::Yank, &settings);
+        assert_eq!(editor.view(&settings).text, "cargo test --all");
+
+        apply_input(&mut editor, EditorInput::KillToEnd, &settings);
+        assert_eq!(editor.view(&settings).text, "cargo test ");
+        apply_input(&mut editor, EditorInput::Yank, &settings);
+        assert_eq!(editor.view(&settings).text, "cargo test --all");
     }
 
     #[test]

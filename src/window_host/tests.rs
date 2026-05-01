@@ -141,6 +141,68 @@ mod command_editor_context_tests {
 }
 
 #[cfg(test)]
+mod command_editor_input_tests {
+    use winit::keyboard::ModifiersState;
+
+    use super::*;
+
+    #[test]
+    fn control_keys_map_to_line_editor_inputs() {
+        assert_eq!(
+            command_editor_input(&Key::Character("a".into()), ModifiersState::CONTROL),
+            Some(EditorInput::MoveHome)
+        );
+        assert_eq!(
+            command_editor_input(&Key::Character("e".into()), ModifiersState::CONTROL),
+            Some(EditorInput::MoveEnd)
+        );
+        assert_eq!(
+            command_editor_input(&Key::Character("k".into()), ModifiersState::CONTROL),
+            Some(EditorInput::KillToEnd)
+        );
+        assert_eq!(
+            command_editor_input(&Key::Character("u".into()), ModifiersState::CONTROL),
+            Some(EditorInput::KillToStart)
+        );
+        assert_eq!(
+            command_editor_input(&Key::Character("w".into()), ModifiersState::CONTROL),
+            Some(EditorInput::DeleteWordLeft)
+        );
+        assert_eq!(
+            command_editor_input(&Key::Character("y".into()), ModifiersState::CONTROL),
+            Some(EditorInput::Yank)
+        );
+    }
+
+    #[test]
+    fn alt_keys_map_to_word_editor_inputs() {
+        assert_eq!(
+            command_editor_input(&Key::Character("b".into()), ModifiersState::ALT),
+            Some(EditorInput::MoveWordLeft)
+        );
+        assert_eq!(
+            command_editor_input(&Key::Character("f".into()), ModifiersState::ALT),
+            Some(EditorInput::MoveWordRight)
+        );
+        assert_eq!(
+            command_editor_input(&Key::Character("d".into()), ModifiersState::ALT),
+            Some(EditorInput::DeleteWordRight)
+        );
+    }
+
+    #[test]
+    fn control_shift_keys_still_fall_through_to_keybindings() {
+        assert_eq!(
+            command_editor_input(
+                &Key::Character("D".into()),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+            ),
+            None
+        );
+    }
+}
+
+#[cfg(test)]
 mod popup_command_tests {
     use terminal41::test_support::TestTerm;
 

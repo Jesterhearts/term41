@@ -578,7 +578,13 @@ fn command_editor_input(
     key: &Key,
     mods: ModifiersState,
 ) -> Option<EditorInput> {
-    if mods.control_key() || mods.alt_key() || mods.super_key() {
+    if mods.super_key() {
+        return None;
+    }
+    if let Some(input) = modified_command_editor_input(key, mods) {
+        return Some(input);
+    }
+    if mods.control_key() || mods.alt_key() {
         return None;
     }
     match key {
@@ -595,6 +601,66 @@ fn command_editor_input(
         Key::Named(NamedKey::ArrowDown) if !mods.shift_key() => Some(EditorInput::HistoryNext),
         Key::Named(NamedKey::Tab) if !mods.shift_key() => Some(EditorInput::Complete),
         Key::Named(NamedKey::Escape) if !mods.shift_key() => Some(EditorInput::Cancel),
+        _ => None,
+    }
+}
+
+fn modified_command_editor_input(
+    key: &Key,
+    mods: ModifiersState,
+) -> Option<EditorInput> {
+    if mods.shift_key() {
+        return None;
+    }
+    match key {
+        Key::Character(text) if mods.control_key() && !mods.alt_key() => {
+            control_command_editor_input(text)
+        }
+        Key::Character(text) if mods.alt_key() && !mods.control_key() => {
+            alt_command_editor_input(text)
+        }
+        Key::Named(NamedKey::ArrowLeft) if mods.control_key() && !mods.alt_key() => {
+            Some(EditorInput::MoveWordLeft)
+        }
+        Key::Named(NamedKey::ArrowRight) if mods.control_key() && !mods.alt_key() => {
+            Some(EditorInput::MoveWordRight)
+        }
+        Key::Named(NamedKey::Backspace) if mods.control_key() && !mods.alt_key() => {
+            Some(EditorInput::DeleteWordLeft)
+        }
+        Key::Named(NamedKey::Delete) if mods.control_key() && !mods.alt_key() => {
+            Some(EditorInput::DeleteWordRight)
+        }
+        Key::Named(NamedKey::ArrowLeft) if mods.alt_key() && !mods.control_key() => {
+            Some(EditorInput::MoveWordLeft)
+        }
+        Key::Named(NamedKey::ArrowRight) if mods.alt_key() && !mods.control_key() => {
+            Some(EditorInput::MoveWordRight)
+        }
+        Key::Named(NamedKey::Backspace) if mods.alt_key() && !mods.control_key() => {
+            Some(EditorInput::DeleteWordLeft)
+        }
+        _ => None,
+    }
+}
+
+fn control_command_editor_input(text: &str) -> Option<EditorInput> {
+    match text {
+        "a" | "A" => Some(EditorInput::MoveHome),
+        "e" | "E" => Some(EditorInput::MoveEnd),
+        "k" | "K" => Some(EditorInput::KillToEnd),
+        "u" | "U" => Some(EditorInput::KillToStart),
+        "w" | "W" => Some(EditorInput::DeleteWordLeft),
+        "y" | "Y" => Some(EditorInput::Yank),
+        _ => None,
+    }
+}
+
+fn alt_command_editor_input(text: &str) -> Option<EditorInput> {
+    match text {
+        "b" | "B" => Some(EditorInput::MoveWordLeft),
+        "f" | "F" => Some(EditorInput::MoveWordRight),
+        "d" | "D" => Some(EditorInput::DeleteWordRight),
         _ => None,
     }
 }
