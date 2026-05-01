@@ -422,6 +422,32 @@ pub(crate) fn centered_ink_origin_x(
     region_x + (region_w - (ink_right - ink_left)) * 0.5 - ink_left
 }
 
+pub(crate) fn row_paintable_cols(row: &RowSnapshot) -> usize {
+    [
+        row.cells.len(),
+        row.attrs.len(),
+        row.fg.len(),
+        row.bg.len(),
+        row.underline_color.len(),
+        row.has_link.len(),
+    ]
+    .into_iter()
+    .min()
+    .unwrap_or(0)
+}
+
+pub(crate) fn visible_row_cols(
+    snap: &TermSnapshot,
+    row: &RowSnapshot,
+) -> u32 {
+    let display_cols = if matches!(row.line_attr, LineAttr::Normal) {
+        snap.viewport_cols
+    } else {
+        snap.viewport_cols / 2
+    };
+    display_cols.min(row_paintable_cols(row) as u32)
+}
+
 pub(crate) fn resolve_painted_cell(
     snap: &TermSnapshot,
     snap_row: &RowSnapshot,
@@ -701,6 +727,16 @@ mod tests {
 
         let painted = resolve_painted_cell(&snap, &row, 0, 0, Some((0, 0)), false);
         assert_eq!(painted.fg, Srgb::new(1, 2, 3));
+    }
+
+    #[test]
+    fn visible_row_cols_clamps_to_short_row_data() {
+        let dec = terminal41::dec_color_state_from_palette(&ColorPalette::default());
+        let mut snap = test_snapshot(dec);
+        snap.viewport_cols = 2;
+        let row = test_row(&snap.palette);
+
+        assert_eq!(visible_row_cols(&snap, &row), 1);
     }
 
     #[test]

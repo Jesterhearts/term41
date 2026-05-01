@@ -44,6 +44,7 @@ use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::centered_ink_origin_x;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
+use crate::renderer::paint::visible_row_cols;
 
 type StartupGlyphKey = (usize, u16, u8, bool, Option<font41::DrcsGeometryClass>);
 
@@ -216,11 +217,7 @@ impl StartupPresenter {
 
             let is_double_wide = !matches!(row.line_attr, LineAttr::Normal);
             let effective_cell_w = if is_double_wide { cell_w * 2 } else { cell_w };
-            let visible_cols = if is_double_wide {
-                frame.snap.viewport_cols / 2
-            } else {
-                frame.snap.viewport_cols
-            };
+            let visible_cols = visible_row_cols(&frame.snap, row);
 
             paint_row_backgrounds(
                 buffer.as_mut(),

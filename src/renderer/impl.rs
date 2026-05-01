@@ -44,8 +44,10 @@ use crate::renderer::paint::bold_glyph_enabled;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::centered_ink_origin_x;
 use crate::renderer::paint::resolve_painted_cell;
+use crate::renderer::paint::row_paintable_cols;
 use crate::renderer::paint::status_line_label_row;
 use crate::renderer::paint::underline_style_for_render;
+use crate::renderer::paint::visible_row_cols;
 
 pub const MAX_TAB_WIDTH: f32 = 30.0;
 pub const SUCCESS: [u8; 3] = [80, 200, 120];
@@ -183,7 +185,11 @@ pub(crate) fn collect_row_glyphs(
     rapid_blink_off: bool,
 ) -> Vec<CollectedGlyph> {
     let _drcs = font41::set_drcs_context(drcs_geometry_class(snap), Some(snap.drcs_glyphs.clone()));
-    let shaped = font_system.shape_row(&snap_row.cells, &snap_row.attrs);
+    let paintable_cols = row_paintable_cols(snap_row);
+    let shaped = font_system.shape_row(
+        &snap_row.cells[..paintable_cols],
+        &snap_row.attrs[..paintable_cols],
+    );
     let mut collected = Vec::with_capacity(shaped.len());
 
     for sg in shaped {
@@ -1216,6 +1222,14 @@ fn blank_cached_row(
     }
 }
 
+fn cached_rows_match_snapshot_shape(
+    rows: &[RowSnapshot],
+    snap: &TermSnapshot,
+) -> bool {
+    rows.iter()
+        .all(|row| row_paintable_cols(row) == snap.viewport_cols as usize)
+}
+
 pub struct Renderer {
     device: wgpu::Device,
     queue: wgpu::Queue,
@@ -1840,7 +1854,10 @@ impl Renderer {
         snap: &TermSnapshot,
     ) {
         let total_rows = snap.total_rows as usize;
-        if snap.reset_cached_rows || self.terminal_rows.len() != total_rows {
+        if snap.reset_cached_rows
+            || self.terminal_rows.len() != total_rows
+            || !cached_rows_match_snapshot_shape(&self.terminal_rows, snap)
+        {
             self.terminal_rows = (0..total_rows)
                 .map(|row| blank_cached_row(row as u32, snap.viewport_cols, &snap.palette))
                 .collect();
@@ -2326,11 +2343,7 @@ impl Renderer {
         } else {
             layout.cell_w
         };
-        let visible_cols = if is_double_wide {
-            snap.viewport_cols / 2
-        } else {
-            snap.viewport_cols
-        };
+        let visible_cols = visible_row_cols(snap, snap_row);
 
         append_gutter_marker(
             snap_row,

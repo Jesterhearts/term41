@@ -650,7 +650,7 @@ mod tests {
 
     #[test]
     fn visible_images_draw_in_row_major_order_within_z_index() {
-        let mut images = vec![
+        let mut images = [
             visible_image(1, 2, 10, 0),
             visible_image(2, 3, 0, 0),
             visible_image(3, 2, 5, 0),
@@ -665,7 +665,7 @@ mod tests {
 
     #[test]
     fn visible_images_keep_protocol_z_index_primary() {
-        let mut images = vec![visible_image(1, 10, 0, 0), visible_image(2, 0, 0, 1)];
+        let mut images = [visible_image(1, 10, 0, 0), visible_image(2, 0, 0, 1)];
 
         images.sort_by_key(visible_image_draw_order);
 

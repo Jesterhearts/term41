@@ -271,7 +271,7 @@ fn snapshot_visible_row(
         terminal.viewport.cols
     };
 
-    RowSnapshot {
+    let mut snapshot = RowSnapshot {
         screen_row: row,
         generation,
         cells: grid_row.cells.clone(),
@@ -316,7 +316,9 @@ fn snapshot_visible_row(
             .collect(),
         prompt_start: grid_row.prompt_start,
         exit_status: grid_row.exit_status,
-    }
+    };
+    normalize_snapshot_row(&mut snapshot, terminal.viewport.cols, &terminal.palette);
+    snapshot
 }
 
 fn snapshot_status_line_row(
@@ -346,7 +348,7 @@ fn snapshot_status_line_row(
         ));
     }
     let grid_row = view::status_line_row(&terminal.active)?;
-    Some(RowSnapshot {
+    let mut snapshot = RowSnapshot {
         screen_row: terminal.viewport.rows,
         generation,
         cells: grid_row.cells.clone(),
@@ -361,7 +363,27 @@ fn snapshot_status_line_row(
         active_match: vec![false; vp_cols as usize],
         prompt_start: false,
         exit_status: None,
-    })
+    };
+    normalize_snapshot_row(&mut snapshot, vp_cols, &terminal.palette);
+    Some(snapshot)
+}
+
+fn normalize_snapshot_row(
+    row: &mut RowSnapshot,
+    cols: u32,
+    palette: &ColorPalette,
+) {
+    let cols = cols as usize;
+    row.cells.resize(cols, blank_cell());
+    row.attrs.resize(cols, CellAttrs::default());
+    row.fg.resize(cols, palette.fg);
+    row.bg.resize(cols, palette.bg);
+    row.underline_color.resize(cols, None);
+    row.has_link.resize(cols, false);
+}
+
+fn blank_cell() -> smol_str::SmolStr {
+    smol_str::SmolStr::new_inline(" ")
 }
 
 struct UdkIndicator {
@@ -592,6 +614,23 @@ mod tests {
         for row in 1..snap.rows.len() {
             assert_eq!(snap.rows[row].generation, first.rows[row].generation);
         }
+    }
+
+    #[test]
+    fn snapshot_rows_are_normalized_to_viewport_width() {
+        let mut terminal = terminal();
+        terminal.active.grid.rows[0].truncate(4);
+
+        let snap = snapshot_terminal(&mut terminal);
+        let row = &snap.rows[0];
+
+        assert_eq!(snap.viewport_cols, 5);
+        assert_eq!(row.cells.len(), 5);
+        assert_eq!(row.attrs.len(), 5);
+        assert_eq!(row.fg.len(), 5);
+        assert_eq!(row.bg.len(), 5);
+        assert_eq!(row.underline_color.len(), 5);
+        assert_eq!(row.has_link.len(), 5);
     }
 
     #[test]
