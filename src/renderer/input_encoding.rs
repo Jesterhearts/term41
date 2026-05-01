@@ -454,6 +454,7 @@ fn legacy_modifier_param(mods: ModifiersState) -> u8 {
     if bits == 0 { 0 } else { bits + 1 }
 }
 
+#[cfg(test)]
 mod kitty_encode_tests {
     use winit::keyboard::Key;
     use winit::keyboard::ModifiersState;
