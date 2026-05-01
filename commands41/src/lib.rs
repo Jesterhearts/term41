@@ -88,6 +88,7 @@ pub struct CommandEditor {
     history: Vec<String>,
     history_pos: Option<usize>,
     draft: String,
+    path_cycle: Option<PathCompletionCycle>,
 }
 
 impl CommandEditor {
@@ -107,7 +108,9 @@ impl CommandEditor {
             text: self.buffer.clone(),
             cursor: self.cursor,
             spans: highlight_shell(&self.buffer),
-            completion: completion_suffix(&self.buffer, self.cursor, settings, &self.history),
+            completion: self
+                .path_cycle_suffix()
+                .or_else(|| completion_suffix(&self.buffer, self.cursor, settings, &self.history)),
         }
     }
 
@@ -116,6 +119,15 @@ impl CommandEditor {
         self.cursor = 0;
         self.history_pos = None;
         self.draft.clear();
+        self.path_cycle = None;
+    }
+
+    fn path_cycle_suffix(&self) -> Option<String> {
+        let cycle = self.path_cycle.as_ref()?;
+        if cycle.cursor != self.cursor || cycle.base != self.buffer {
+            return None;
+        }
+        cycle.current_suffix()
     }
 }
 
@@ -129,6 +141,7 @@ pub fn apply_input(
             if text.is_empty() {
                 return EditOutcome::Ignored;
             }
+            editor.path_cycle = None;
             replace_history_edit_with_draft(editor);
             editor.buffer.insert_str(editor.cursor, &text);
             editor.cursor += text.len();
@@ -144,6 +157,7 @@ pub fn apply_input(
             let Some(prev) = previous_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
+            editor.path_cycle = None;
             replace_history_edit_with_draft(editor);
             editor.buffer.drain(prev..editor.cursor);
             editor.cursor = prev;
@@ -153,6 +167,7 @@ pub fn apply_input(
             let Some(next) = next_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
+            editor.path_cycle = None;
             replace_history_edit_with_draft(editor);
             editor.buffer.drain(editor.cursor..next);
             EditOutcome::Updated
@@ -161,13 +176,18 @@ pub fn apply_input(
             let Some(prev) = previous_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
+            editor.path_cycle = None;
             editor.cursor = prev;
             EditOutcome::Updated
         }
         EditorInput::MoveRight => {
+            if accept_path_cycle(editor) || accept_visible_path_completion(editor, settings) {
+                return EditOutcome::Updated;
+            }
             let Some(next) = next_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
+            editor.path_cycle = None;
             editor.cursor = next;
             EditOutcome::Updated
         }
@@ -175,6 +195,7 @@ pub fn apply_input(
             if editor.cursor == 0 {
                 EditOutcome::Ignored
             } else {
+                editor.path_cycle = None;
                 editor.cursor = 0;
                 EditOutcome::Updated
             }
@@ -183,6 +204,7 @@ pub fn apply_input(
             if editor.cursor == editor.buffer.len() {
                 EditOutcome::Ignored
             } else {
+                editor.path_cycle = None;
                 editor.cursor = editor.buffer.len();
                 EditOutcome::Updated
             }
@@ -332,6 +354,7 @@ fn history_previous(editor: &mut CommandEditor) -> EditOutcome {
     if editor.history.is_empty() {
         return EditOutcome::Ignored;
     }
+    editor.path_cycle = None;
     let pos = match editor.history_pos {
         Some(pos) if pos > 0 => pos - 1,
         Some(_) => return EditOutcome::Ignored,
@@ -350,6 +373,7 @@ fn history_next(editor: &mut CommandEditor) -> EditOutcome {
     let Some(pos) = editor.history_pos else {
         return EditOutcome::Ignored;
     };
+    editor.path_cycle = None;
     if pos + 1 < editor.history.len() {
         editor.history_pos = Some(pos + 1);
         editor.buffer = editor.history[pos + 1].clone();
@@ -366,10 +390,15 @@ fn complete_current_prefix(
     editor: &mut CommandEditor,
     settings: &EditorSettings,
 ) -> EditOutcome {
+    if cycle_path_completion(editor, settings) {
+        return EditOutcome::Updated;
+    }
+
     let Some(suffix) = completion_suffix(&editor.buffer, editor.cursor, settings, &editor.history)
     else {
         return EditOutcome::Ignored;
     };
+    editor.path_cycle = None;
     replace_history_edit_with_draft(editor);
     editor.buffer.insert_str(editor.cursor, &suffix);
     editor.cursor += suffix.len();
@@ -428,6 +457,18 @@ fn path_completion_suffix(
     cursor: usize,
     settings: &EditorSettings,
 ) -> Option<String> {
+    let (word, candidates) = path_completion_word_and_candidates(buffer, cursor, settings)?;
+    let candidate = candidates.into_iter().find(|candidate| {
+        candidate.completed_word != word && candidate.completed_word.starts_with(&word)
+    })?;
+    Some(path_completion_candidate_suffix(&word, &candidate).to_owned())
+}
+
+fn path_completion_word_and_candidates(
+    buffer: &str,
+    cursor: usize,
+    settings: &EditorSettings,
+) -> Option<(String, Vec<PathCompletionCandidate>)> {
     let current_dir = settings.current_dir.as_deref()?;
     let (word_start, word) = current_completion_word(buffer, cursor)?;
     if word.is_empty() || !path_completion_allowed(buffer, word_start, word) {
@@ -441,10 +482,7 @@ fn path_completion_suffix(
             .cmp(&a.is_dir)
             .then_with(|| a.completed_word.cmp(&b.completed_word))
     });
-    let candidate = candidates
-        .into_iter()
-        .find(|candidate| candidate.completed_word != word)?;
-    Some(candidate.completed_word[word.len()..].to_owned())
+    Some((word.to_owned(), candidates))
 }
 
 fn current_completion_prefix(
@@ -503,10 +541,112 @@ struct PathCompletionRequest {
     completed_prefix: String,
 }
 
-#[derive(Debug)]
+#[derive(Debug, Clone)]
 struct PathCompletionCandidate {
     completed_word: String,
     is_dir: bool,
+}
+
+#[derive(Debug, Clone)]
+struct PathCompletionCycle {
+    base: String,
+    cursor: usize,
+    word: String,
+    candidates: Vec<PathCompletionCandidate>,
+    index: usize,
+}
+
+impl PathCompletionCycle {
+    fn current_suffix(&self) -> Option<String> {
+        let candidate = self.candidates.get(self.index)?;
+        Some(candidate.completed_word[self.word.len()..].to_owned())
+    }
+}
+
+fn cycle_path_completion(
+    editor: &mut CommandEditor,
+    settings: &EditorSettings,
+) -> bool {
+    if let Some(cycle) = editor.path_cycle.as_mut()
+        && cycle.cursor == editor.cursor
+        && cycle.base == editor.buffer
+        && !cycle.candidates.is_empty()
+    {
+        cycle.index = (cycle.index + 1) % cycle.candidates.len();
+        return true;
+    }
+
+    let Some((word, candidates)) =
+        path_completion_word_and_candidates(&editor.buffer, editor.cursor, settings)
+    else {
+        editor.path_cycle = None;
+        return false;
+    };
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.completed_word != word && candidate.completed_word.starts_with(&word)
+        })
+        .collect::<Vec<_>>();
+
+    if candidates.len() <= 1 {
+        editor.path_cycle = None;
+        return false;
+    }
+
+    let active_suffix = path_completion_suffix(&editor.buffer, editor.cursor, settings);
+    let first_visible = candidates
+        .iter()
+        .position(|candidate| {
+            Some(path_completion_candidate_suffix(&word, candidate)) == active_suffix.as_deref()
+        })
+        .unwrap_or(0);
+    let index = (first_visible + 1) % candidates.len();
+    editor.path_cycle = Some(PathCompletionCycle {
+        base: editor.buffer.clone(),
+        cursor: editor.cursor,
+        word,
+        candidates,
+        index,
+    });
+    true
+}
+
+fn accept_path_cycle(editor: &mut CommandEditor) -> bool {
+    let Some(cycle) = editor.path_cycle.take() else {
+        return false;
+    };
+    if cycle.cursor != editor.cursor || cycle.base != editor.buffer {
+        return false;
+    }
+    let Some(suffix) = cycle.current_suffix() else {
+        return false;
+    };
+    replace_history_edit_with_draft(editor);
+    editor.buffer.insert_str(editor.cursor, &suffix);
+    editor.cursor += suffix.len();
+    true
+}
+
+fn accept_visible_path_completion(
+    editor: &mut CommandEditor,
+    settings: &EditorSettings,
+) -> bool {
+    let Some(suffix) = path_completion_suffix(&editor.buffer, editor.cursor, settings) else {
+        return false;
+    };
+    editor.path_cycle = None;
+    replace_history_edit_with_draft(editor);
+    editor.buffer.insert_str(editor.cursor, &suffix);
+    editor.cursor += suffix.len();
+    true
+}
+
+fn path_completion_candidate_suffix<'a>(
+    word: &str,
+    candidate: &'a PathCompletionCandidate,
+) -> &'a str {
+    &candidate.completed_word[word.len()..]
 }
 
 fn path_completion_allowed(
@@ -877,6 +1017,130 @@ mod tests {
         );
 
         assert_eq!(editor.view(&settings).completion.as_deref(), Some("in.rs"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tab_cycles_multiple_path_matches_without_inserting() {
+        let root = unique_test_dir("cycle");
+        fs::create_dir_all(&root).expect("create temp dir");
+        fs::write(root.join("food.txt"), "").expect("write temp file");
+        fs::write(root.join("foot.txt"), "").expect("write temp file");
+        let settings = path_settings(root.clone());
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cat foo".to_owned()),
+            &settings,
+        );
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
+
+        assert_eq!(
+            apply_input(&mut editor, EditorInput::Complete, &settings),
+            EditOutcome::Updated
+        );
+        assert_eq!(editor.view(&settings).text, "cat foo");
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("t.txt"));
+
+        apply_input(&mut editor, EditorInput::Complete, &settings);
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn right_arrow_accepts_active_path_cycle() {
+        let root = unique_test_dir("cycle-accept");
+        fs::create_dir_all(&root).expect("create temp dir");
+        fs::write(root.join("food.txt"), "").expect("write temp file");
+        fs::write(root.join("foot.txt"), "").expect("write temp file");
+        let settings = path_settings(root.clone());
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cat foo".to_owned()),
+            &settings,
+        );
+        apply_input(&mut editor, EditorInput::Complete, &settings);
+
+        assert_eq!(
+            apply_input(&mut editor, EditorInput::MoveRight, &settings),
+            EditOutcome::Updated
+        );
+        assert_eq!(editor.view(&settings).text, "cat foot.txt");
+        assert_eq!(editor.view(&settings).completion, None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn right_arrow_accepts_visible_path_completion_without_tab() {
+        let root = unique_test_dir("visible-accept");
+        fs::create_dir_all(&root).expect("create temp dir");
+        fs::write(root.join("food.txt"), "").expect("write temp file");
+        fs::write(root.join("foot.txt"), "").expect("write temp file");
+        let settings = path_settings(root.clone());
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cat foo".to_owned()),
+            &settings,
+        );
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
+
+        assert_eq!(
+            apply_input(&mut editor, EditorInput::MoveRight, &settings),
+            EditOutcome::Updated
+        );
+        assert_eq!(editor.view(&settings).text, "cat food.txt");
+        assert_eq!(editor.view(&settings).completion, None);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn typing_resets_active_path_cycle() {
+        let root = unique_test_dir("cycle-reset");
+        fs::create_dir_all(&root).expect("create temp dir");
+        fs::write(root.join("food.txt"), "").expect("write temp file");
+        fs::write(root.join("foot.txt"), "").expect("write temp file");
+        let settings = path_settings(root.clone());
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cat foo".to_owned()),
+            &settings,
+        );
+        apply_input(&mut editor, EditorInput::Complete, &settings);
+        apply_input(&mut editor, EditorInput::Insert("d".to_owned()), &settings);
+
+        assert_eq!(editor.view(&settings).text, "cat food");
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some(".txt"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn tab_cycle_skips_exact_file_match() {
+        let root = unique_test_dir("cycle-exact");
+        fs::create_dir_all(&root).expect("create temp dir");
+        fs::write(root.join("foo"), "").expect("write temp file");
+        fs::write(root.join("food.txt"), "").expect("write temp file");
+        fs::write(root.join("foot.txt"), "").expect("write temp file");
+        let settings = path_settings(root.clone());
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cat foo".to_owned()),
+            &settings,
+        );
+
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
+        apply_input(&mut editor, EditorInput::Complete, &settings);
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("t.txt"));
+        apply_input(&mut editor, EditorInput::Complete, &settings);
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
 
         let _ = fs::remove_dir_all(root);
     }

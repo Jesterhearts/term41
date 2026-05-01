@@ -410,7 +410,9 @@ Notes:
 - `[command_editor]` enables the terminal-local command editor layer. It keeps
   keyboard handling unchanged while disabled, uses Up/Down for its own command
   history while active, and completes prefixes from configured words plus recent
-  history and paths relative to the shell's OSC-reported current directory.
+  history and paths relative to the shell's OSC-reported current directory. When
+  a path has multiple matches, Tab cycles the ghost candidate and Right accepts
+  the active one.
   `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
   config.
 - Example scripts are available under `examples/`, including
