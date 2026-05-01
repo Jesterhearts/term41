@@ -12,6 +12,7 @@ use crate::HostMouse;
 use crate::MouseButton;
 use crate::MouseEventKind;
 use crate::MouseModifiers;
+use crate::PasteMode;
 use crate::Row;
 use crate::StatusDisplayKind;
 use crate::Terminal;
@@ -176,7 +177,27 @@ impl TestTerm {
         &mut self,
         text: &str,
     ) {
-        let effects = apply_host_input(&mut self.inner, HostInput::PasteText(text));
+        let effects = apply_host_input(
+            &mut self.inner,
+            HostInput::PasteText {
+                text,
+                mode: PasteMode::Terminal,
+            },
+        );
+        self.effects.host_bytes.extend(effects.host_bytes);
+    }
+
+    pub fn paste_text_bracketed(
+        &mut self,
+        text: &str,
+    ) {
+        let effects = apply_host_input(
+            &mut self.inner,
+            HostInput::PasteText {
+                text,
+                mode: PasteMode::Bracketed,
+            },
+        );
         self.effects.host_bytes.extend(effects.host_bytes);
     }
 

@@ -150,6 +150,24 @@ mod tests {
     }
 
     #[test]
+    fn forced_bracketed_paste_wraps_without_mode_2004() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        assert!(!term.modes.bracketed_paste);
+        term.paste_text_bracketed("hello\n");
+        assert_eq!(term.take_pending_output(), b"\x1b[200~hello\n\x1b[201~");
+    }
+
+    #[test]
+    fn forced_bracketed_paste_scrubs_embedded_end_marker() {
+        let mut term = TestTerm::new(80, 24, 100, 16, 8);
+        term.paste_text_bracketed("evil\x1b[201~injection");
+        assert_eq!(
+            term.take_pending_output(),
+            b"\x1b[200~evilinjection\x1b[201~"
+        );
+    }
+
+    #[test]
     fn paste_wraps_with_8bit_csi_after_s8c1t() {
         let mut term = TestTerm::new(80, 24, 100, 16, 8);
         term.process(b"\x1b[?2004h\x1b G");

@@ -38,6 +38,7 @@ use terminal41::KittyFileRequest;
 use terminal41::MouseButton as TermMouseButton;
 use terminal41::MouseEventKind;
 use terminal41::MouseModifiers;
+use terminal41::PasteMode;
 use terminal41::TermSnapshotOutput;
 use terminal41::Terminal;
 use terminal41::TerminalEffects;
@@ -2094,16 +2095,16 @@ impl WindowHost {
                     terminal.selection = None;
                     terminal.invalidate_snapshot_rows();
                     drop(guard);
-                    match cmd {
-                        PopupCommandText::Observed(cmd) => {
-                            let text = format!("{}\r", cmd.trim());
-                            Self::emit_host_input(target, HostInput::PasteText(&text), true);
-                        }
-                        PopupCommandText::Untrusted(cmd) => {
-                            Self::emit_host_input(target, HostInput::PasteText(&cmd), true);
-                            self.show_toast("Pasted command metadata; review before Enter");
-                        }
-                    }
+                    let text = popup_rerun_command_text(cmd);
+                    Self::emit_host_input(
+                        target,
+                        HostInput::PasteText {
+                            text: &text,
+                            mode: PasteMode::Bracketed,
+                        },
+                        true,
+                    );
+                    self.show_toast("Pasted command; review before Enter");
                 }
             }
             1 => {
@@ -2456,6 +2457,13 @@ fn popup_command_text(
     }
     untrusted_command_line_at(prompt_abs, command_metas)
         .map(|command| PopupCommandText::Untrusted(command.to_owned()))
+}
+
+fn popup_rerun_command_text(command: PopupCommandText) -> String {
+    match command {
+        PopupCommandText::Observed(command) => command.trim().to_owned(),
+        PopupCommandText::Untrusted(command) => command,
+    }
 }
 
 /// Maximum time between clicks that still count as part of a sequence.
@@ -3312,5 +3320,19 @@ mod popup_command_tests {
             Some(PopupCommandText::Untrusted(text)) => assert_eq!(text, "cargo test"),
             _ => panic!("expected untrusted command text"),
         }
+    }
+
+    #[test]
+    fn popup_rerun_text_trims_observed_command_without_enter() {
+        let text = popup_rerun_command_text(PopupCommandText::Observed(" cargo test \r".into()));
+        assert_eq!(text, "cargo test");
+    }
+
+    #[test]
+    fn popup_rerun_text_keeps_untrusted_metadata_for_bracketed_paste_review() {
+        let text = popup_rerun_command_text(PopupCommandText::Untrusted(
+            "cargo test\ncargo publish".into(),
+        ));
+        assert_eq!(text, "cargo test\ncargo publish");
     }
 }

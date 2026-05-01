@@ -51,6 +51,15 @@ pub struct HostMouse {
     pub mods: MouseModifiers,
 }
 
+/// How host-provided text should be pasted into the foreground program.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum PasteMode {
+    /// Follow the foreground program's negotiated mode 2004 state.
+    Terminal,
+    /// Always wrap the text in bracketed-paste markers.
+    Bracketed,
+}
+
 /// Host-originated input routed through the terminal engine boundary.
 #[derive(Debug, Clone, Copy)]
 pub enum HostInput<'a> {
@@ -62,7 +71,12 @@ pub enum HostInput<'a> {
     /// Mouse event occurred inside the terminal grid.
     Mouse(HostMouse),
     /// Paste the provided text.
-    PasteText(&'a str),
+    PasteText {
+        /// Text to paste.
+        text: &'a str,
+        /// Paste wrapping behavior.
+        mode: PasteMode,
+    },
     /// Paste text from the selected clipboard.
     PasteFromClipboard {
         /// Clipboard selection to read from.
@@ -100,12 +114,18 @@ pub fn apply_host_input(
                 mouse.mods,
             );
         }
-        HostInput::PasteText(text) => io::clipboard::paste(
-            &mut effects.host_bytes,
-            terminal.modes.c1_mode,
-            terminal.modes.bracketed_paste,
-            text,
-        ),
+        HostInput::PasteText { text, mode } => {
+            let bracketed_paste = match mode {
+                PasteMode::Terminal => terminal.modes.bracketed_paste,
+                PasteMode::Bracketed => true,
+            };
+            io::clipboard::paste(
+                &mut effects.host_bytes,
+                terminal.modes.c1_mode,
+                bracketed_paste,
+                text,
+            );
+        }
         HostInput::PasteFromClipboard { kind } => io::clipboard::paste_from_clipboard(
             &mut terminal.clipboard,
             &mut effects.host_bytes,

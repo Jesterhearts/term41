@@ -107,6 +107,7 @@ pub use crate::io::mouse::MouseTracking;
 pub use crate::processing::HostInput;
 pub use crate::processing::HostInputEffects;
 pub use crate::processing::HostMouse;
+pub use crate::processing::PasteMode;
 pub use crate::processing::TerminalProcessor;
 pub use crate::processing::apply_host_input;
 pub(crate) use crate::report::deccir_report;
