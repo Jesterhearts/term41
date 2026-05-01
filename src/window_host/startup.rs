@@ -163,20 +163,28 @@ impl WindowHost {
             return None;
         }
         let target = self.input_endpoints.get(&tab_id)?;
-        let command_phase = {
+        let (command_phase, current_dir) = {
             let terminal = target.terminal.lock();
-            terminal.metadata.shell_integration_phase == terminal41::ShellIntegrationPhase::Command
+            (
+                terminal.metadata.shell_integration_phase
+                    == terminal41::ShellIntegrationPhase::Command,
+                terminal.metadata.current_directory.clone(),
+            )
         };
         if !command_phase {
             return None;
         }
-        let settings = Self::command_editor_settings(&config);
+        let settings = Self::command_editor_settings(&config, current_dir);
         command_editor_view(&target.command_editor, &settings)
     }
 
-    pub(crate) fn command_editor_settings(config: &CommandEditorConfig) -> EditorSettings {
+    pub(crate) fn command_editor_settings(
+        config: &CommandEditorConfig,
+        current_dir: Option<PathBuf>,
+    ) -> EditorSettings {
         EditorSettings {
             completion_words: config.completions.clone(),
+            current_dir,
             max_history: config.max_history,
         }
     }

@@ -266,16 +266,18 @@ impl WindowHost {
         let Some(input) = command_editor_input(key, self.modifiers) else {
             return false;
         };
-        let settings = Self::command_editor_settings(&config);
         let mut cleared_inactive_editor = false;
         let handled = {
             let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
                 return false;
             };
-            let command_phase = {
+            let (command_phase, current_dir) = {
                 let terminal = target.terminal.lock();
-                terminal.metadata.shell_integration_phase
-                    == terminal41::ShellIntegrationPhase::Command
+                (
+                    terminal.metadata.shell_integration_phase
+                        == terminal41::ShellIntegrationPhase::Command,
+                    terminal.metadata.current_directory.clone(),
+                )
             };
             if !command_phase {
                 if !target.command_editor.is_empty() {
@@ -284,6 +286,7 @@ impl WindowHost {
                 }
                 (false, None)
             } else {
+                let settings = Self::command_editor_settings(&config, current_dir);
                 let outcome = apply_input(&mut target.command_editor, input.clone(), &settings);
                 match outcome {
                     EditOutcome::Submitted(command) => {

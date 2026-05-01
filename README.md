@@ -410,8 +410,9 @@ Notes:
 - `[command_editor]` enables the terminal-local command editor layer. It keeps
   keyboard handling unchanged while disabled, uses Up/Down for its own command
   history while active, and completes prefixes from configured words plus recent
-  history. `Ctrl+Shift+D` toggles it for the current runtime session without
-  rewriting config.
+  history and paths relative to the shell's OSC-reported current directory.
+  `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
+  config.
 - Example scripts are available under `examples/`, including
   `examples/sys_info.lua` for Linux CPU and memory status text.
 

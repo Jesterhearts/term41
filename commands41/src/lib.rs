@@ -5,6 +5,10 @@
 //! [`CommandEditor`], and render the returned [`CommandLineView`] however their
 //! UI needs.
 
+use std::fs;
+use std::path::Path;
+use std::path::PathBuf;
+
 use unicode_segmentation::UnicodeSegmentation;
 
 const DEFAULT_MAX_HISTORY: usize = 200;
@@ -12,6 +16,7 @@ const DEFAULT_MAX_HISTORY: usize = 200;
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditorSettings {
     pub completion_words: Vec<String>,
+    pub current_dir: Option<PathBuf>,
     pub max_history: usize,
 }
 
@@ -19,6 +24,7 @@ impl Default for EditorSettings {
     fn default() -> Self {
         Self {
             completion_words: Vec::new(),
+            current_dir: None,
             max_history: DEFAULT_MAX_HISTORY,
         }
     }
@@ -401,6 +407,10 @@ fn completion_suffix(
         }
     }
 
+    if let Some(suffix) = path_completion_suffix(buffer, cursor, settings) {
+        return Some(suffix);
+    }
+
     let prefix = current_completion_prefix(buffer, cursor)?;
     if prefix.is_empty() {
         return None;
@@ -413,10 +423,41 @@ fn completion_suffix(
     None
 }
 
+fn path_completion_suffix(
+    buffer: &str,
+    cursor: usize,
+    settings: &EditorSettings,
+) -> Option<String> {
+    let current_dir = settings.current_dir.as_deref()?;
+    let (word_start, word) = current_completion_word(buffer, cursor)?;
+    if word.is_empty() || !path_completion_allowed(buffer, word_start, word) {
+        return None;
+    }
+
+    let request = path_completion_request(current_dir, word)?;
+    let mut candidates = path_completion_candidates(&request)?;
+    candidates.sort_by(|a, b| {
+        b.is_dir
+            .cmp(&a.is_dir)
+            .then_with(|| a.completed_word.cmp(&b.completed_word))
+    });
+    let candidate = candidates
+        .into_iter()
+        .find(|candidate| candidate.completed_word != word)?;
+    Some(candidate.completed_word[word.len()..].to_owned())
+}
+
 fn current_completion_prefix(
     buffer: &str,
     cursor: usize,
 ) -> Option<&str> {
+    current_completion_word(buffer, cursor).map(|(_, word)| word)
+}
+
+fn current_completion_word(
+    buffer: &str,
+    cursor: usize,
+) -> Option<(usize, &str)> {
     if cursor > buffer.len() || !buffer.is_char_boundary(cursor) {
         return None;
     }
@@ -426,7 +467,7 @@ fn current_completion_prefix(
         .find(|(_, ch)| ch.is_whitespace() || is_operator_char(*ch))
         .map(|(idx, ch)| idx + ch.len_utf8())
         .unwrap_or(0);
-    Some(&buffer[start..cursor])
+    Some((start, &buffer[start..cursor]))
 }
 
 fn completion_candidates(
@@ -453,6 +494,117 @@ fn push_unique(
     if !value.is_empty() && !out.iter().any(|existing| existing == value) {
         out.push(value.to_owned());
     }
+}
+
+#[derive(Debug)]
+struct PathCompletionRequest {
+    directory: PathBuf,
+    entry_prefix: String,
+    completed_prefix: String,
+}
+
+#[derive(Debug)]
+struct PathCompletionCandidate {
+    completed_word: String,
+    is_dir: bool,
+}
+
+fn path_completion_allowed(
+    buffer: &str,
+    word_start: usize,
+    word: &str,
+) -> bool {
+    is_explicit_path(word) || !is_first_shell_word(buffer, word_start)
+}
+
+fn is_explicit_path(word: &str) -> bool {
+    word.contains('/')
+        || word.starts_with('.')
+        || word.starts_with('~')
+        || word.starts_with(std::path::MAIN_SEPARATOR)
+}
+
+fn is_first_shell_word(
+    buffer: &str,
+    word_start: usize,
+) -> bool {
+    buffer[..word_start]
+        .split(|ch: char| ch.is_whitespace() || is_operator_char(ch))
+        .all(str::is_empty)
+}
+
+fn path_completion_request(
+    current_dir: &Path,
+    word: &str,
+) -> Option<PathCompletionRequest> {
+    let (typed_dir, entry_prefix) = split_path_completion_word(word);
+    let directory = path_completion_directory(current_dir, typed_dir)?;
+    Some(PathCompletionRequest {
+        directory,
+        entry_prefix: entry_prefix.to_owned(),
+        completed_prefix: typed_dir.to_owned(),
+    })
+}
+
+fn split_path_completion_word(word: &str) -> (&str, &str) {
+    word.rsplit_once('/')
+        .map(|(dir, entry)| (&word[..dir.len() + 1], entry))
+        .unwrap_or(("", word))
+}
+
+fn path_completion_directory(
+    current_dir: &Path,
+    typed_dir: &str,
+) -> Option<PathBuf> {
+    if typed_dir.is_empty() {
+        return Some(current_dir.to_owned());
+    }
+    if typed_dir == "~/" {
+        return home_dir();
+    }
+    if let Some(rest) = typed_dir.strip_prefix("~/") {
+        return home_dir().map(|home| home.join(rest));
+    }
+    let typed_path = Path::new(typed_dir);
+    if typed_path.is_absolute() {
+        Some(typed_path.to_owned())
+    } else {
+        Some(current_dir.join(typed_path))
+    }
+}
+
+fn home_dir() -> Option<PathBuf> {
+    std::env::var_os("HOME").map(PathBuf::from)
+}
+
+fn path_completion_candidates(
+    request: &PathCompletionRequest
+) -> Option<Vec<PathCompletionCandidate>> {
+    let mut candidates = Vec::new();
+    for entry in fs::read_dir(&request.directory).ok()? {
+        let Ok(entry) = entry else {
+            continue;
+        };
+        let Ok(name) = entry.file_name().into_string() else {
+            continue;
+        };
+        if !name.starts_with(&request.entry_prefix) {
+            continue;
+        }
+        let Ok(file_type) = entry.file_type() else {
+            continue;
+        };
+        let is_dir = file_type.is_dir();
+        let mut completed_word = format!("{}{}", request.completed_prefix, name);
+        if is_dir {
+            completed_word.push('/');
+        }
+        candidates.push(PathCompletionCandidate {
+            completed_word,
+            is_dir,
+        });
+    }
+    Some(candidates)
 }
 
 fn quoted_span_end(
@@ -579,6 +731,15 @@ mod tests {
     fn settings(words: &[&str]) -> EditorSettings {
         EditorSettings {
             completion_words: words.iter().map(|word| (*word).to_owned()).collect(),
+            current_dir: None,
+            max_history: 20,
+        }
+    }
+
+    fn path_settings(current_dir: PathBuf) -> EditorSettings {
+        EditorSettings {
+            completion_words: Vec::new(),
+            current_dir: Some(current_dir),
             max_history: 20,
         }
     }
@@ -664,6 +825,68 @@ mod tests {
         );
 
         assert_eq!(editor.view(&settings).completion.as_deref(), Some("uild"));
+    }
+
+    #[test]
+    fn completion_matches_relative_file_path() {
+        let root = unique_test_dir("relative-file");
+        fs::create_dir_all(&root).expect("create temp dir");
+        fs::write(root.join("README.md"), "").expect("write temp file");
+        fs::write(root.join("ROADMAP.md"), "").expect("write temp file");
+        let settings = path_settings(root.clone());
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cat REA".to_owned()),
+            &settings,
+        );
+
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("DME.md"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn completion_marks_directory_with_trailing_slash() {
+        let root = unique_test_dir("directory");
+        fs::create_dir_all(root.join("src")).expect("create temp dir");
+        let settings = path_settings(root.clone());
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("cd sr".to_owned()),
+            &settings,
+        );
+
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("c/"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn completion_matches_nested_path_prefix() {
+        let root = unique_test_dir("nested");
+        fs::create_dir_all(root.join("src")).expect("create temp dir");
+        fs::write(root.join("src/main.rs"), "").expect("write temp file");
+        let settings = path_settings(root.clone());
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("vim src/ma".to_owned()),
+            &settings,
+        );
+
+        assert_eq!(editor.view(&settings).completion.as_deref(), Some("in.rs"));
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("commands41-{label}-{nonce}"))
     }
 
     #[test]
