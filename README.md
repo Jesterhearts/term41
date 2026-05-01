@@ -416,8 +416,10 @@ Notes:
   completion. When a path has multiple matches, Tab cycles the ghost candidate
   and Right accepts the active one; ambiguous completions show up to five ranked
   matches near the editor, and Up/Down rotates the active match while the list
-  is visible. Alternate-screen applications always receive normal terminal
-  input; the command editor only intercepts keys on the primary screen.
+  is visible. Path completion understands single- and double-quoted arguments
+  and escapes spaces for unquoted paths. Alternate-screen applications always
+  receive normal terminal input; the command editor only intercepts keys on the
+  primary screen.
   It supports common readline-style editing keys: `Ctrl+A/E`,
   `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
   `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted.

@@ -1,0 +1,615 @@
+
+use super::*;
+
+fn settings(words: &[&str]) -> EditorSettings {
+    EditorSettings {
+        completion_words: words.iter().map(|word| (*word).to_owned()).collect(),
+        command_words: Vec::new(),
+        current_dir: None,
+        max_history: 20,
+    }
+}
+
+fn command_settings(words: &[&str]) -> EditorSettings {
+    EditorSettings {
+        completion_words: Vec::new(),
+        command_words: words.iter().map(|word| (*word).to_owned()).collect(),
+        current_dir: None,
+        max_history: 20,
+    }
+}
+
+fn path_settings(current_dir: PathBuf) -> EditorSettings {
+    EditorSettings {
+        completion_words: Vec::new(),
+        command_words: Vec::new(),
+        current_dir: Some(current_dir),
+        max_history: 20,
+    }
+}
+
+#[test]
+fn inserts_and_submits_command() {
+    let mut editor = CommandEditor::new();
+    let outcome = apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo test".to_owned()),
+        &EditorSettings::default(),
+    );
+    assert_eq!(outcome, EditOutcome::Updated);
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Enter, &EditorSettings::default()),
+        EditOutcome::Submitted("cargo test".to_owned())
+    );
+    assert!(editor.is_empty());
+}
+
+#[test]
+fn history_arrows_restore_draft() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::Enter, &settings);
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("two".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::Enter, &settings);
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("draft".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "two");
+    apply_input(&mut editor, EditorInput::HistoryPrevious, &settings);
+    assert_eq!(editor.view(&settings).text, "one");
+    apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+    apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+    assert_eq!(editor.view(&settings).text, "draft");
+}
+
+#[test]
+fn word_motion_skips_shell_words_and_separators() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo test | rg foo".to_owned()),
+        &settings,
+    );
+
+    apply_input(&mut editor, EditorInput::MoveWordLeft, &settings);
+    assert_eq!(editor.view(&settings).cursor, "cargo test | rg ".len());
+
+    apply_input(&mut editor, EditorInput::MoveWordLeft, &settings);
+    assert_eq!(editor.view(&settings).cursor, "cargo test | ".len());
+
+    apply_input(&mut editor, EditorInput::MoveWordRight, &settings);
+    assert_eq!(editor.view(&settings).cursor, "cargo test | rg".len());
+}
+
+#[test]
+fn word_delete_updates_kill_buffer_for_yank() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo test".to_owned()),
+        &settings,
+    );
+
+    apply_input(&mut editor, EditorInput::DeleteWordLeft, &settings);
+    assert_eq!(editor.view(&settings).text, "cargo ");
+    apply_input(&mut editor, EditorInput::Yank, &settings);
+    assert_eq!(editor.view(&settings).text, "cargo test");
+}
+
+#[test]
+fn line_kill_to_start_and_end_can_yank() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo test --all".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::MoveWordLeft, &settings);
+
+    apply_input(&mut editor, EditorInput::KillToStart, &settings);
+    assert_eq!(editor.view(&settings).text, "--all");
+    apply_input(&mut editor, EditorInput::Yank, &settings);
+    assert_eq!(editor.view(&settings).text, "cargo test --all");
+
+    apply_input(&mut editor, EditorInput::KillToEnd, &settings);
+    assert_eq!(editor.view(&settings).text, "cargo test ");
+    apply_input(&mut editor, EditorInput::Yank, &settings);
+    assert_eq!(editor.view(&settings).text, "cargo test --all");
+}
+
+#[test]
+fn tab_completion_uses_prefix_match() {
+    let mut editor = CommandEditor::new();
+    let settings = settings(&["cargo", "cat"]);
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("car".to_owned()),
+        &settings,
+    );
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+    assert_eq!(editor.view(&settings).text, "cargo");
+}
+
+#[test]
+fn completion_matches_whole_command_prefix_from_history() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo build".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::Enter, &settings);
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo b".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("uild"));
+}
+
+#[test]
+fn command_words_complete_initial_command() {
+    let settings = command_settings(&["cargo", "cat"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("car".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
+}
+
+#[test]
+fn command_words_prefer_shortest_matching_command() {
+    let settings = command_settings(&["cargo-audit", "cargo"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("car".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
+}
+
+#[test]
+fn command_view_shows_top_five_ambiguous_candidates() {
+    let settings = command_settings(&[
+        "cargo-audit",
+        "cargo",
+        "cargo-edit",
+        "cargo-nextest",
+        "cargo-watch",
+        "cargo-zigbuild",
+    ]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("car".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        editor.view(&settings).candidates,
+        [
+            "cargo",
+            "cargo-edit",
+            "cargo-audit",
+            "cargo-watch",
+            "cargo-nextest"
+        ]
+    );
+    assert_eq!(editor.view(&settings).candidate_index, 0);
+}
+
+#[test]
+fn command_view_hides_single_candidate_list() {
+    let settings = command_settings(&["cargo"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("car".to_owned()),
+        &settings,
+    );
+
+    assert!(editor.view(&settings).candidates.is_empty());
+}
+
+#[test]
+fn history_arrows_cycle_ambiguous_completion_selection() {
+    let settings = command_settings(&["cargo", "cargo-audit", "cargo-edit"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("car".to_owned()),
+        &settings,
+    );
+
+    apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+    let view = editor.view(&settings);
+    assert_eq!(view.candidate_index, 1);
+    assert_eq!(view.completion.as_deref(), Some("go-edit"));
+
+    apply_input(&mut editor, EditorInput::HistoryPrevious, &settings);
+    let view = editor.view(&settings);
+    assert_eq!(view.candidate_index, 0);
+    assert_eq!(view.completion.as_deref(), Some("go"));
+}
+
+#[test]
+fn tab_accepts_selected_completion_candidate() {
+    let settings = command_settings(&["cargo", "cargo-audit", "cargo-edit"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("car".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+
+    assert_eq!(editor.view(&settings).text, "cargo-edit");
+    assert!(editor.view(&settings).candidates.is_empty());
+}
+
+#[test]
+fn history_arrows_fall_back_without_ambiguous_completion() {
+    let settings = command_settings(&["cargo"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("git status".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::Enter, &settings);
+
+    apply_input(&mut editor, EditorInput::HistoryPrevious, &settings);
+
+    assert_eq!(editor.view(&settings).text, "git status");
+}
+
+#[test]
+fn history_first_words_win_before_command_words() {
+    let settings = command_settings(&["cargo"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat README.md".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::Enter, &settings);
+    apply_input(&mut editor, EditorInput::Insert("ca".to_owned()), &settings);
+
+    assert_eq!(
+        editor.view(&settings).completion.as_deref(),
+        Some("t README.md")
+    );
+}
+
+#[test]
+fn command_words_do_not_complete_argument_words() {
+    let settings = command_settings(&["cargo"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("echo car".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion, None);
+}
+
+#[test]
+fn command_words_complete_after_shell_separator() {
+    let settings = command_settings(&["cargo"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("echo ok | car".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
+}
+
+#[test]
+fn completion_matches_relative_file_path() {
+    let root = unique_test_dir("relative-file");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("README.md"), "").expect("write temp file");
+    fs::write(root.join("ROADMAP.md"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat REA".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("DME.md"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_marks_directory_with_trailing_slash() {
+    let root = unique_test_dir("directory");
+    fs::create_dir_all(root.join("src")).expect("create temp dir");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cd sr".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("c/"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_matches_nested_path_prefix() {
+    let root = unique_test_dir("nested");
+    fs::create_dir_all(root.join("src")).expect("create temp dir");
+    fs::write(root.join("src/main.rs"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("vim src/ma".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("in.rs"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_matches_path_inside_double_quotes() {
+    let root = unique_test_dir("double-quoted-path");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("foo bar.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat \"foo b".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("ar.txt"));
+    apply_input(&mut editor, EditorInput::MoveRight, &settings);
+    assert_eq!(editor.view(&settings).text, "cat \"foo bar.txt");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_matches_path_inside_single_quotes() {
+    let root = unique_test_dir("single-quoted-path");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("foo bar.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat 'foo b".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("ar.txt"));
+    apply_input(&mut editor, EditorInput::MoveRight, &settings);
+    assert_eq!(editor.view(&settings).text, "cat 'foo bar.txt");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_escapes_spaces_in_unquoted_paths() {
+    let root = unique_test_dir("unquoted-space-path");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("foo bar.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        editor.view(&settings).completion.as_deref(),
+        Some("\\ bar.txt")
+    );
+    apply_input(&mut editor, EditorInput::MoveRight, &settings);
+    assert_eq!(editor.view(&settings).text, "cat foo\\ bar.txt");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_unescapes_typed_unquoted_path_prefix() {
+    let root = unique_test_dir("unescaped-prefix-path");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("foo bar.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo\\ b".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("ar.txt"));
+    apply_input(&mut editor, EditorInput::MoveRight, &settings);
+    assert_eq!(editor.view(&settings).text, "cat foo\\ bar.txt");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn tab_cycles_multiple_path_matches_without_inserting() {
+    let root = unique_test_dir("cycle");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("food.txt"), "").expect("write temp file");
+    fs::write(root.join("foot.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo".to_owned()),
+        &settings,
+    );
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Complete, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cat foo");
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("t.txt"));
+
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn right_arrow_accepts_active_path_cycle() {
+    let root = unique_test_dir("cycle-accept");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("food.txt"), "").expect("write temp file");
+    fs::write(root.join("foot.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::MoveRight, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cat foot.txt");
+    assert_eq!(editor.view(&settings).completion, None);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn right_arrow_accepts_visible_path_completion_without_tab() {
+    let root = unique_test_dir("visible-accept");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("food.txt"), "").expect("write temp file");
+    fs::write(root.join("foot.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo".to_owned()),
+        &settings,
+    );
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::MoveRight, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cat food.txt");
+    assert_eq!(editor.view(&settings).completion, None);
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn typing_resets_active_path_cycle() {
+    let root = unique_test_dir("cycle-reset");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("food.txt"), "").expect("write temp file");
+    fs::write(root.join("foot.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+    apply_input(&mut editor, EditorInput::Insert("d".to_owned()), &settings);
+
+    assert_eq!(editor.view(&settings).text, "cat food");
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some(".txt"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn tab_cycle_skips_exact_file_match() {
+    let root = unique_test_dir("cycle-exact");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("foo"), "").expect("write temp file");
+    fs::write(root.join("food.txt"), "").expect("write temp file");
+    fs::write(root.join("foot.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("t.txt"));
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("d.txt"));
+
+    let _ = fs::remove_dir_all(root);
+}
+
+fn unique_test_dir(label: &str) -> PathBuf {
+    let nonce = std::time::SystemTime::now()
+        .duration_since(std::time::UNIX_EPOCH)
+        .expect("system time after epoch")
+        .as_nanos();
+    std::env::temp_dir().join(format!("commands41-{label}-{nonce}"))
+}
+
+#[test]
+fn highlights_shell_constructs() {
+    let spans = highlight_shell("if echo \"$HOME\" # comment");
+    assert!(spans.iter().any(|span| span.kind == HighlightKind::Keyword));
+    assert!(spans.iter().any(|span| span.kind == HighlightKind::Builtin));
+    assert!(spans.iter().any(|span| span.kind == HighlightKind::String));
+    assert!(spans.iter().any(|span| span.kind == HighlightKind::Comment));
+}
