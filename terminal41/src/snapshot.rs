@@ -73,6 +73,7 @@ pub struct TermSnapshot {
     /// DECSCNM — screen-wide reverse video. When true, default fg/bg are
     /// swapped and per-cell REVERSE is XORed with this.
     pub screen_reverse: bool,
+    pub on_alt_screen: bool,
     pub synchronized_update_active: bool,
     pub current_title: Option<String>,
     /// True when the consumer should discard any cached rows before applying
@@ -233,6 +234,7 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
         cursor,
         cursor_style: terminal.cursor_style,
         screen_reverse: terminal.modes.screen_reverse,
+        on_alt_screen: terminal.on_alt_screen,
         synchronized_update_active: host::synchronized_update_active(
             terminal.modes.synchronized_update_since,
         ),

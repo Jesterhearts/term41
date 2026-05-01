@@ -292,6 +292,23 @@ struct InputEndpoint {
     command_editor: CommandEditor,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct CommandEditorContext {
+    current_dir: Option<PathBuf>,
+}
+
+fn command_editor_context(terminal: &Terminal) -> Option<CommandEditorContext> {
+    if terminal.on_alt_screen {
+        return None;
+    }
+    if terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Command {
+        return None;
+    }
+    Some(CommandEditorContext {
+        current_dir: terminal.metadata.current_directory.clone(),
+    })
+}
+
 fn reset_viewport_and_invalidate(terminal: &mut Terminal) {
     let offset = terminal.active.offset;
     view::reset_viewport(&mut terminal.active);

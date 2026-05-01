@@ -105,6 +105,42 @@ mod permission_tests {
 }
 
 #[cfg(test)]
+mod command_editor_context_tests {
+    use terminal41::ShellIntegrationPhase;
+    use terminal41::test_support::TestTerm;
+
+    use super::*;
+
+    #[test]
+    fn command_editor_context_requires_shell_command_phase() {
+        let mut term = TestTerm::new_80x24();
+
+        assert_eq!(command_editor_context(&term), None);
+
+        term.process(b"\x1b]133;B\x07");
+
+        assert_eq!(
+            command_editor_context(&term),
+            Some(CommandEditorContext { current_dir: None })
+        );
+    }
+
+    #[test]
+    fn command_editor_context_is_disabled_on_alt_screen() {
+        let mut term = TestTerm::new_80x24();
+        term.process(b"\x1b]133;B\x07");
+        term.process(b"\x1b[?1049h");
+
+        assert_eq!(
+            term.metadata.shell_integration_phase,
+            ShellIntegrationPhase::Command
+        );
+        assert!(term.on_alt_screen);
+        assert_eq!(command_editor_context(&term), None);
+    }
+}
+
+#[cfg(test)]
 mod popup_command_tests {
     use terminal41::test_support::TestTerm;
 

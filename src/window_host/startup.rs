@@ -163,18 +163,11 @@ impl WindowHost {
             return None;
         }
         let target = self.input_endpoints.get(&tab_id)?;
-        let (command_phase, current_dir) = {
+        let context = {
             let terminal = target.terminal.lock();
-            (
-                terminal.metadata.shell_integration_phase
-                    == terminal41::ShellIntegrationPhase::Command,
-                terminal.metadata.current_directory.clone(),
-            )
+            command_editor_context(&terminal)
         };
-        if !command_phase {
-            return None;
-        }
-        let settings = Self::command_editor_settings(&config, current_dir);
+        let settings = Self::command_editor_settings(&config, context?.current_dir);
         command_editor_view(&target.command_editor, &settings)
     }
 

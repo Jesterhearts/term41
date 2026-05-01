@@ -612,6 +612,7 @@ mod tests {
             cursor: None,
             cursor_style: CursorStyle::default(),
             screen_reverse: false,
+            on_alt_screen: false,
             synchronized_update_active: false,
             current_title: None,
             reset_cached_rows: true,

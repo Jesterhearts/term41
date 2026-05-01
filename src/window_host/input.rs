@@ -271,22 +271,12 @@ impl WindowHost {
             let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
                 return false;
             };
-            let (command_phase, current_dir) = {
+            let editor_context = {
                 let terminal = target.terminal.lock();
-                (
-                    terminal.metadata.shell_integration_phase
-                        == terminal41::ShellIntegrationPhase::Command,
-                    terminal.metadata.current_directory.clone(),
-                )
+                command_editor_context(&terminal)
             };
-            if !command_phase {
-                if !target.command_editor.is_empty() {
-                    target.command_editor.clear();
-                    cleared_inactive_editor = true;
-                }
-                (false, None)
-            } else {
-                let settings = Self::command_editor_settings(&config, current_dir);
+            if let Some(context) = editor_context {
+                let settings = Self::command_editor_settings(&config, context.current_dir);
                 let outcome = apply_input(&mut target.command_editor, input.clone(), &settings);
                 match outcome {
                     EditOutcome::Submitted(command) => {
@@ -309,6 +299,12 @@ impl WindowHost {
                         }
                     }
                 }
+            } else {
+                if !target.command_editor.is_empty() {
+                    target.command_editor.clear();
+                    cleared_inactive_editor = true;
+                }
+                (false, None)
             }
         };
         if cleared_inactive_editor {

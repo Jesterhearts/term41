@@ -1751,6 +1751,7 @@ impl Renderer {
         suspend_terminal_area: bool,
     ) {
         let layout = self.frame_layout(font_system, tabs);
+        let command_editor = command_editor.filter(|_| !snap.on_alt_screen);
         self.image_atlas.begin_frame();
         let under_text_image_geometry = self.build_image_geometry(visible_images, &layout, true);
         let over_text_image_geometry = self.build_image_geometry(visible_images, &layout, false);

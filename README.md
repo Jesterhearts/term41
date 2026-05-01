@@ -412,7 +412,8 @@ Notes:
   history while active, and completes prefixes from configured words plus recent
   history and paths relative to the shell's OSC-reported current directory. When
   a path has multiple matches, Tab cycles the ghost candidate and Right accepts
-  the active one.
+  the active one. Alternate-screen applications always receive normal terminal
+  input; the command editor only intercepts keys on the primary screen.
   `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
   config.
 - Example scripts are available under `examples/`, including
