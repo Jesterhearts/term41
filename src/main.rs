@@ -670,7 +670,8 @@ fn command_editor_view(
     settings: &EditorSettings,
 ) -> Option<CommandLineView> {
     let view = editor.view(settings);
-    (!view.text.is_empty() || view.completion.is_some()).then_some(view)
+    (!view.text.is_empty() || view.completion.is_some() || !view.candidates.is_empty())
+        .then_some(view)
 }
 
 fn dec_local_function_key_selector(

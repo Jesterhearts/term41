@@ -1532,7 +1532,7 @@ impl Renderer {
         let Some((cursor_row, cursor_col)) = snap.cursor else {
             return;
         };
-        if editor.text.is_empty() && editor.completion.is_none() {
+        if editor.text.is_empty() && editor.completion.is_none() && editor.candidates.is_empty() {
             return;
         }
 
@@ -1629,6 +1629,69 @@ impl Renderer {
             bg_vertices,
             bg_indices,
         );
+
+        if editor.candidates.is_empty() {
+            return;
+        }
+
+        let list_cells = editor
+            .candidates
+            .iter()
+            .map(|candidate| candidate.graphemes(true).count() + 2)
+            .max()
+            .unwrap_or(1)
+            .min(remaining_cols)
+            .max(1);
+        let list_w = list_cells as f32 * cell_w;
+        let list_h = editor.candidates.len() as f32 * cell_h;
+        let below_row = cursor_row + 1;
+        let list_y = if below_row + editor.candidates.len() as u32 <= snap.viewport_rows {
+            origin_y + cell_h
+        } else {
+            let rows_up = editor.candidates.len().min(cursor_row as usize);
+            origin_y - rows_up as f32 * cell_h
+        };
+
+        push_rect(
+            origin_x,
+            list_y,
+            list_w,
+            list_h,
+            pack_color(&Srgb::new(22, 25, 34), 245),
+            bg_vertices,
+            bg_indices,
+        );
+        for (idx, candidate) in editor.candidates.iter().enumerate() {
+            let row_y = list_y + idx as f32 * cell_h;
+            let active = idx == editor.candidate_index;
+            if active {
+                push_rect(
+                    origin_x,
+                    row_y,
+                    list_w,
+                    cell_h,
+                    pack_color(&Srgb::new(42, 55, 78), 245),
+                    bg_vertices,
+                    bg_indices,
+                );
+            }
+            let label = truncate_graphemes(candidate, list_cells.saturating_sub(1));
+            self.shape_and_render_label(
+                font_system,
+                &label,
+                origin_x + cell_w,
+                row_y,
+                baseline,
+                cell_w,
+                None,
+                if active {
+                    pack_color(&Srgb::new(225, 232, 255), 255)
+                } else {
+                    pack_color(&Srgb::new(170, 180, 200), 255)
+                },
+                fg,
+            );
+        }
     }
 
     /// Resolve "is the cursor visible right now and what does it look like"
@@ -1658,4 +1721,27 @@ impl Renderer {
             shape: style.shape,
         }
     }
+}
+
+fn truncate_graphemes(
+    text: &str,
+    max_cells: usize,
+) -> String {
+    let mut graphemes = text.graphemes(true);
+    let mut out = String::new();
+    for _ in 0..max_cells {
+        let Some(grapheme) = graphemes.next() else {
+            return out;
+        };
+        out.push_str(grapheme);
+    }
+    if graphemes.next().is_some() && max_cells >= 3 {
+        out.truncate(
+            out.grapheme_indices(true)
+                .nth(max_cells - 3)
+                .map_or(0, |(idx, _)| idx),
+        );
+        out.push_str("...");
+    }
+    out
 }

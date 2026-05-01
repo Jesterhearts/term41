@@ -12,6 +12,7 @@ use std::path::PathBuf;
 use unicode_segmentation::UnicodeSegmentation;
 
 const DEFAULT_MAX_HISTORY: usize = 200;
+const MAX_COMPLETION_CANDIDATES: usize = 5;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct EditorSettings {
@@ -57,6 +58,8 @@ pub struct CommandLineView {
     pub cursor: usize,
     pub spans: Vec<HighlightSpan>,
     pub completion: Option<String>,
+    pub candidates: Vec<String>,
+    pub candidate_index: usize,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -99,6 +102,7 @@ pub struct CommandEditor {
     draft: String,
     kill_buffer: String,
     path_cycle: Option<PathCompletionCycle>,
+    completion_selection: Option<CompletionSelection>,
 }
 
 impl CommandEditor {
@@ -114,13 +118,19 @@ impl CommandEditor {
         &self,
         settings: &EditorSettings,
     ) -> CommandLineView {
+        let selection = self.valid_completion_selection();
+        let completion = selection
+            .and_then(CompletionSelection::current_suffix)
+            .or_else(|| self.path_cycle_suffix())
+            .or_else(|| completion_suffix(&self.buffer, self.cursor, settings, &self.history));
+        let (candidates, candidate_index) = completion_candidate_view(self, settings);
         CommandLineView {
             text: self.buffer.clone(),
             cursor: self.cursor,
             spans: highlight_shell(&self.buffer),
-            completion: self
-                .path_cycle_suffix()
-                .or_else(|| completion_suffix(&self.buffer, self.cursor, settings, &self.history)),
+            completion,
+            candidates,
+            candidate_index,
         }
     }
 
@@ -130,6 +140,7 @@ impl CommandEditor {
         self.history_pos = None;
         self.draft.clear();
         self.path_cycle = None;
+        self.completion_selection = None;
     }
 
     fn path_cycle_suffix(&self) -> Option<String> {
@@ -138,6 +149,15 @@ impl CommandEditor {
             return None;
         }
         cycle.current_suffix()
+    }
+
+    fn valid_completion_selection(&self) -> Option<&CompletionSelection> {
+        let selection = self.completion_selection.as_ref()?;
+        if selection.cursor == self.cursor && selection.base == self.buffer {
+            Some(selection)
+        } else {
+            None
+        }
     }
 }
 
@@ -151,7 +171,7 @@ pub fn apply_input(
             if text.is_empty() {
                 return EditOutcome::Ignored;
             }
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
             editor.buffer.insert_str(editor.cursor, &text);
             editor.cursor += text.len();
@@ -167,7 +187,7 @@ pub fn apply_input(
             let Some(prev) = previous_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
             editor.buffer.drain(prev..editor.cursor);
             editor.cursor = prev;
@@ -177,7 +197,7 @@ pub fn apply_input(
             let Some(next) = next_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
             editor.buffer.drain(editor.cursor..next);
             EditOutcome::Updated
@@ -186,18 +206,21 @@ pub fn apply_input(
             let Some(prev) = previous_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             editor.cursor = prev;
             EditOutcome::Updated
         }
         EditorInput::MoveRight => {
-            if accept_path_cycle(editor) || accept_visible_path_completion(editor, settings) {
+            if accept_selected_completion(editor)
+                || accept_path_cycle(editor)
+                || accept_visible_path_completion(editor, settings)
+            {
                 return EditOutcome::Updated;
             }
             let Some(next) = next_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             editor.cursor = next;
             EditOutcome::Updated
         }
@@ -205,7 +228,7 @@ pub fn apply_input(
             let Some(prev) = previous_word_start(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             editor.cursor = prev;
             EditOutcome::Updated
         }
@@ -213,7 +236,7 @@ pub fn apply_input(
             let Some(next) = next_word_end(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             editor.cursor = next;
             EditOutcome::Updated
         }
@@ -221,7 +244,7 @@ pub fn apply_input(
             if editor.cursor == 0 {
                 EditOutcome::Ignored
             } else {
-                editor.path_cycle = None;
+                clear_completion_state(editor);
                 editor.cursor = 0;
                 EditOutcome::Updated
             }
@@ -230,7 +253,7 @@ pub fn apply_input(
             if editor.cursor == editor.buffer.len() {
                 EditOutcome::Ignored
             } else {
-                editor.path_cycle = None;
+                clear_completion_state(editor);
                 editor.cursor = editor.buffer.len();
                 EditOutcome::Updated
             }
@@ -239,7 +262,7 @@ pub fn apply_input(
             let Some(prev) = previous_word_start(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
             editor.kill_buffer = editor.buffer[prev..editor.cursor].to_owned();
             editor.buffer.drain(prev..editor.cursor);
@@ -250,7 +273,7 @@ pub fn apply_input(
             let Some(next) = next_word_end(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
             editor.kill_buffer = editor.buffer[editor.cursor..next].to_owned();
             editor.buffer.drain(editor.cursor..next);
@@ -260,7 +283,7 @@ pub fn apply_input(
             if editor.cursor == 0 {
                 return EditOutcome::Ignored;
             }
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
             editor.kill_buffer = editor.buffer[..editor.cursor].to_owned();
             editor.buffer.drain(..editor.cursor);
@@ -271,7 +294,7 @@ pub fn apply_input(
             if editor.cursor == editor.buffer.len() {
                 return EditOutcome::Ignored;
             }
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
             editor.kill_buffer = editor.buffer[editor.cursor..].to_owned();
             editor.buffer.truncate(editor.cursor);
@@ -281,14 +304,20 @@ pub fn apply_input(
             if editor.kill_buffer.is_empty() {
                 return EditOutcome::Ignored;
             }
-            editor.path_cycle = None;
+            clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
             editor.buffer.insert_str(editor.cursor, &editor.kill_buffer);
             editor.cursor += editor.kill_buffer.len();
             EditOutcome::Updated
         }
-        EditorInput::HistoryPrevious => history_previous(editor),
-        EditorInput::HistoryNext => history_next(editor),
+        EditorInput::HistoryPrevious => {
+            cycle_completion_selection(editor, settings, CompletionDirection::Previous)
+                .unwrap_or_else(|| history_previous(editor))
+        }
+        EditorInput::HistoryNext => {
+            cycle_completion_selection(editor, settings, CompletionDirection::Next)
+                .unwrap_or_else(|| history_next(editor))
+        }
         EditorInput::Complete => complete_current_prefix(editor, settings),
         EditorInput::Cancel => {
             if editor.buffer.is_empty() {
@@ -485,11 +514,16 @@ fn replace_history_edit_with_draft(editor: &mut CommandEditor) {
     }
 }
 
+fn clear_completion_state(editor: &mut CommandEditor) {
+    editor.path_cycle = None;
+    editor.completion_selection = None;
+}
+
 fn history_previous(editor: &mut CommandEditor) -> EditOutcome {
     if editor.history.is_empty() {
         return EditOutcome::Ignored;
     }
-    editor.path_cycle = None;
+    clear_completion_state(editor);
     let pos = match editor.history_pos {
         Some(pos) if pos > 0 => pos - 1,
         Some(_) => return EditOutcome::Ignored,
@@ -508,7 +542,7 @@ fn history_next(editor: &mut CommandEditor) -> EditOutcome {
     let Some(pos) = editor.history_pos else {
         return EditOutcome::Ignored;
     };
-    editor.path_cycle = None;
+    clear_completion_state(editor);
     if pos + 1 < editor.history.len() {
         editor.history_pos = Some(pos + 1);
         editor.buffer = editor.history[pos + 1].clone();
@@ -525,6 +559,10 @@ fn complete_current_prefix(
     editor: &mut CommandEditor,
     settings: &EditorSettings,
 ) -> EditOutcome {
+    if accept_selected_completion(editor) {
+        return EditOutcome::Updated;
+    }
+
     if cycle_path_completion(editor, settings) {
         return EditOutcome::Updated;
     }
@@ -533,7 +571,7 @@ fn complete_current_prefix(
     else {
         return EditOutcome::Ignored;
     };
-    editor.path_cycle = None;
+    clear_completion_state(editor);
     replace_history_edit_with_draft(editor);
     editor.buffer.insert_str(editor.cursor, &suffix);
     editor.cursor += suffix.len();
@@ -592,6 +630,101 @@ fn completion_suffix(
     None
 }
 
+fn completion_candidate_view(
+    editor: &CommandEditor,
+    settings: &EditorSettings,
+) -> (Vec<String>, usize) {
+    if let Some(selection) = editor.valid_completion_selection() {
+        let candidates = top_ambiguous_candidates(selection.candidates.clone());
+        let index = selection.index.min(candidates.len().saturating_sub(1));
+        return (candidates, index);
+    }
+
+    if let Some(cycle) = editor.path_cycle.as_ref()
+        && cycle.cursor == editor.cursor
+        && cycle.base == editor.buffer
+    {
+        let candidates = top_ambiguous_candidates(
+            cycle
+                .candidates
+                .iter()
+                .map(|candidate| candidate.completed_word.clone())
+                .collect(),
+        );
+        let index = cycle.index.min(candidates.len().saturating_sub(1));
+        return (candidates, index);
+    }
+
+    let matches = completion_matches(&editor.buffer, editor.cursor, settings, &editor.history);
+    let candidates = matches
+        .map(|matches| top_ambiguous_candidates(matches.candidates))
+        .unwrap_or_default();
+    (candidates, 0)
+}
+
+fn completion_matches(
+    buffer: &str,
+    cursor: usize,
+    settings: &EditorSettings,
+    history: &[String],
+) -> Option<CompletionMatches> {
+    if cursor == buffer.len() && !buffer.is_empty() {
+        let candidates = history_command_candidates(history)
+            .into_iter()
+            .filter(|candidate| candidate != buffer && candidate.starts_with(buffer))
+            .collect::<Vec<_>>();
+        if !candidates.is_empty() {
+            return Some(CompletionMatches {
+                prefix: buffer.to_owned(),
+                candidates,
+            });
+        }
+    }
+
+    if let Some(matches) = path_completion_matches(buffer, cursor, settings)
+        && !matches.candidates.is_empty()
+    {
+        return Some(matches);
+    }
+
+    let (word_start, prefix) = current_completion_word(buffer, cursor)?;
+    if prefix.is_empty() {
+        return None;
+    }
+    let candidates = if is_command_completion_word(buffer, word_start) {
+        command_completion_candidates(settings, history)
+    } else {
+        word_completion_candidates(settings, history)
+    };
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| candidate != prefix && candidate.starts_with(prefix))
+        .collect::<Vec<_>>();
+    Some(CompletionMatches {
+        prefix: prefix.to_owned(),
+        candidates,
+    })
+}
+
+fn top_ambiguous_candidates(candidates: Vec<String>) -> Vec<String> {
+    let candidates = dedupe_candidates(candidates);
+    if candidates.len() <= 1 {
+        return Vec::new();
+    }
+    candidates
+        .into_iter()
+        .take(MAX_COMPLETION_CANDIDATES)
+        .collect()
+}
+
+fn dedupe_candidates(candidates: Vec<String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for candidate in candidates {
+        push_unique(&mut out, &candidate);
+    }
+    out
+}
+
 fn path_completion_suffix(
     buffer: &str,
     cursor: usize,
@@ -602,6 +735,25 @@ fn path_completion_suffix(
         candidate.completed_word != word && candidate.completed_word.starts_with(&word)
     })?;
     Some(path_completion_candidate_suffix(&word, &candidate).to_owned())
+}
+
+fn path_completion_matches(
+    buffer: &str,
+    cursor: usize,
+    settings: &EditorSettings,
+) -> Option<CompletionMatches> {
+    let (word, candidates) = path_completion_word_and_candidates(buffer, cursor, settings)?;
+    let candidates = candidates
+        .into_iter()
+        .filter(|candidate| {
+            candidate.completed_word != word && candidate.completed_word.starts_with(&word)
+        })
+        .map(|candidate| candidate.completed_word)
+        .collect();
+    Some(CompletionMatches {
+        prefix: word,
+        candidates,
+    })
 }
 
 fn path_completion_word_and_candidates(
@@ -711,6 +863,36 @@ struct PathCompletionCandidate {
 }
 
 #[derive(Debug, Clone)]
+struct CompletionMatches {
+    prefix: String,
+    candidates: Vec<String>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionDirection {
+    Previous,
+    Next,
+}
+
+#[derive(Debug, Clone)]
+struct CompletionSelection {
+    base: String,
+    cursor: usize,
+    prefix: String,
+    candidates: Vec<String>,
+    index: usize,
+}
+
+impl CompletionSelection {
+    fn current_suffix(&self) -> Option<String> {
+        let candidate = self.candidates.get(self.index)?;
+        candidate
+            .starts_with(&self.prefix)
+            .then(|| candidate[self.prefix.len()..].to_owned())
+    }
+}
+
+#[derive(Debug, Clone)]
 struct PathCompletionCycle {
     base: String,
     cursor: usize,
@@ -730,6 +912,7 @@ fn cycle_path_completion(
     editor: &mut CommandEditor,
     settings: &EditorSettings,
 ) -> bool {
+    editor.completion_selection = None;
     if let Some(cycle) = editor.path_cycle.as_mut()
         && cycle.cursor == editor.cursor
         && cycle.base == editor.buffer
@@ -742,7 +925,7 @@ fn cycle_path_completion(
     let Some((word, candidates)) =
         path_completion_word_and_candidates(&editor.buffer, editor.cursor, settings)
     else {
-        editor.path_cycle = None;
+        clear_completion_state(editor);
         return false;
     };
     let candidates = candidates
@@ -753,7 +936,7 @@ fn cycle_path_completion(
         .collect::<Vec<_>>();
 
     if candidates.len() <= 1 {
-        editor.path_cycle = None;
+        clear_completion_state(editor);
         return false;
     }
 
@@ -775,10 +958,64 @@ fn cycle_path_completion(
     true
 }
 
+fn cycle_completion_selection(
+    editor: &mut CommandEditor,
+    settings: &EditorSettings,
+    direction: CompletionDirection,
+) -> Option<EditOutcome> {
+    let selection = if let Some(selection) = editor.completion_selection.as_mut()
+        && selection.cursor == editor.cursor
+        && selection.base == editor.buffer
+    {
+        selection
+    } else {
+        let matches = completion_matches(&editor.buffer, editor.cursor, settings, &editor.history)?;
+        let candidates = top_ambiguous_candidates(matches.candidates);
+        if candidates.len() <= 1 {
+            return None;
+        }
+        editor.path_cycle = None;
+        editor.completion_selection = Some(CompletionSelection {
+            base: editor.buffer.clone(),
+            cursor: editor.cursor,
+            prefix: matches.prefix,
+            candidates,
+            index: 0,
+        });
+        editor.completion_selection.as_mut().expect("selection set")
+    };
+
+    selection.index = match direction {
+        CompletionDirection::Previous => {
+            (selection.index + selection.candidates.len() - 1) % selection.candidates.len()
+        }
+        CompletionDirection::Next => (selection.index + 1) % selection.candidates.len(),
+    };
+    Some(EditOutcome::Updated)
+}
+
+fn accept_selected_completion(editor: &mut CommandEditor) -> bool {
+    let Some(selection) = editor.completion_selection.take() else {
+        return false;
+    };
+    if selection.cursor != editor.cursor || selection.base != editor.buffer {
+        return false;
+    }
+    let Some(suffix) = selection.current_suffix() else {
+        return false;
+    };
+    editor.path_cycle = None;
+    replace_history_edit_with_draft(editor);
+    editor.buffer.insert_str(editor.cursor, &suffix);
+    editor.cursor += suffix.len();
+    true
+}
+
 fn accept_path_cycle(editor: &mut CommandEditor) -> bool {
     let Some(cycle) = editor.path_cycle.take() else {
         return false;
     };
+    editor.completion_selection = None;
     if cycle.cursor != editor.cursor || cycle.base != editor.buffer {
         return false;
     }
@@ -798,7 +1035,7 @@ fn accept_visible_path_completion(
     let Some(suffix) = path_completion_suffix(&editor.buffer, editor.cursor, settings) else {
         return false;
     };
-    editor.path_cycle = None;
+    clear_completion_state(editor);
     replace_history_edit_with_draft(editor);
     editor.buffer.insert_str(editor.cursor, &suffix);
     editor.cursor += suffix.len();
@@ -1235,6 +1472,103 @@ mod tests {
         );
 
         assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn command_view_shows_top_five_ambiguous_candidates() {
+        let settings = command_settings(&[
+            "cargo-audit",
+            "cargo",
+            "cargo-edit",
+            "cargo-nextest",
+            "cargo-watch",
+            "cargo-zigbuild",
+        ]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("car".to_owned()),
+            &settings,
+        );
+
+        assert_eq!(
+            editor.view(&settings).candidates,
+            [
+                "cargo",
+                "cargo-edit",
+                "cargo-audit",
+                "cargo-watch",
+                "cargo-nextest"
+            ]
+        );
+        assert_eq!(editor.view(&settings).candidate_index, 0);
+    }
+
+    #[test]
+    fn command_view_hides_single_candidate_list() {
+        let settings = command_settings(&["cargo"]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("car".to_owned()),
+            &settings,
+        );
+
+        assert!(editor.view(&settings).candidates.is_empty());
+    }
+
+    #[test]
+    fn history_arrows_cycle_ambiguous_completion_selection() {
+        let settings = command_settings(&["cargo", "cargo-audit", "cargo-edit"]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("car".to_owned()),
+            &settings,
+        );
+
+        apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+        let view = editor.view(&settings);
+        assert_eq!(view.candidate_index, 1);
+        assert_eq!(view.completion.as_deref(), Some("go-edit"));
+
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings);
+        let view = editor.view(&settings);
+        assert_eq!(view.candidate_index, 0);
+        assert_eq!(view.completion.as_deref(), Some("go"));
+    }
+
+    #[test]
+    fn tab_accepts_selected_completion_candidate() {
+        let settings = command_settings(&["cargo", "cargo-audit", "cargo-edit"]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("car".to_owned()),
+            &settings,
+        );
+        apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+
+        apply_input(&mut editor, EditorInput::Complete, &settings);
+
+        assert_eq!(editor.view(&settings).text, "cargo-edit");
+        assert!(editor.view(&settings).candidates.is_empty());
+    }
+
+    #[test]
+    fn history_arrows_fall_back_without_ambiguous_completion() {
+        let settings = command_settings(&["cargo"]);
+        let mut editor = CommandEditor::new();
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("git status".to_owned()),
+            &settings,
+        );
+        apply_input(&mut editor, EditorInput::Enter, &settings);
+
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings);
+
+        assert_eq!(editor.view(&settings).text, "git status");
     }
 
     #[test]

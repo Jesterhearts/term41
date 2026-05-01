@@ -414,9 +414,11 @@ Notes:
   shell's OSC-reported current directory. Discovered `PATH` commands are offered
   only where a shell command can start, so they do not pollute normal argument
   completion. When a path has multiple matches, Tab cycles the ghost candidate
-  and Right accepts the active one. Alternate-screen applications always receive
-  normal terminal input; the command editor only intercepts keys on the primary
-  screen. It supports common readline-style editing keys: `Ctrl+A/E`,
+  and Right accepts the active one; ambiguous completions show up to five ranked
+  matches near the editor, and Up/Down rotates the active match while the list
+  is visible. Alternate-screen applications always receive normal terminal
+  input; the command editor only intercepts keys on the primary screen.
+  It supports common readline-style editing keys: `Ctrl+A/E`,
   `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
   `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted.
   `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
