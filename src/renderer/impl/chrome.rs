@@ -1684,6 +1684,7 @@ impl Renderer {
                 baseline,
                 cell_w,
                 None,
+                None,
                 if active {
                     pack_color(&Srgb::new(225, 232, 255), 255)
                 } else {
