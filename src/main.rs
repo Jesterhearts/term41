@@ -2092,19 +2092,22 @@ impl WindowHost {
                     &terminal.metadata.command_metas,
                     &terminal.active,
                 ) {
+                    let bracketed_paste_enabled = terminal.modes.bracketed_paste;
                     terminal.selection = None;
                     terminal.invalidate_snapshot_rows();
                     drop(guard);
-                    let text = popup_rerun_command_text(cmd);
-                    Self::emit_host_input(
-                        target,
-                        HostInput::PasteText {
-                            text: &text,
-                            mode: PasteMode::Bracketed,
-                        },
-                        true,
-                    );
-                    self.show_toast("Pasted command; review before Enter");
+                    if let Some((text, mode)) = popup_rerun_paste(cmd, bracketed_paste_enabled) {
+                        Self::emit_host_input(
+                            target,
+                            HostInput::PasteText { text: &text, mode },
+                            true,
+                        );
+                        self.show_toast("Pasted command; review before Enter");
+                    } else {
+                        self.show_toast(
+                            "Multiline command needs bracketed paste; use Copy Command",
+                        );
+                    }
                 }
             }
             1 => {
@@ -2464,6 +2467,23 @@ fn popup_rerun_command_text(command: PopupCommandText) -> String {
         PopupCommandText::Observed(command) => command.trim().to_owned(),
         PopupCommandText::Untrusted(command) => command,
     }
+}
+
+fn popup_rerun_paste(
+    command: PopupCommandText,
+    bracketed_paste_enabled: bool,
+) -> Option<(String, PasteMode)> {
+    let text = popup_rerun_command_text(command);
+
+    if bracketed_paste_enabled {
+        return Some((text, PasteMode::Bracketed));
+    }
+
+    if text.contains(['\r', '\n']) {
+        return None;
+    }
+
+    Some((text, PasteMode::Terminal))
 }
 
 /// Maximum time between clicks that still count as part of a sequence.
@@ -3334,5 +3354,26 @@ mod popup_command_tests {
             "cargo test\ncargo publish".into(),
         ));
         assert_eq!(text, "cargo test\ncargo publish");
+    }
+
+    #[test]
+    fn popup_rerun_pastes_single_line_raw_without_bracketed_mode() {
+        let paste = popup_rerun_paste(PopupCommandText::Observed(" cargo test \r".into()), false);
+        assert!(matches!(paste, Some((text, PasteMode::Terminal)) if text == "cargo test"));
+    }
+
+    #[test]
+    fn popup_rerun_pastes_bracketed_when_mode_is_enabled() {
+        let paste = popup_rerun_paste(PopupCommandText::Observed("cargo test".into()), true);
+        assert!(matches!(paste, Some((text, PasteMode::Bracketed)) if text == "cargo test"));
+    }
+
+    #[test]
+    fn popup_rerun_rejects_multiline_without_bracketed_mode() {
+        let paste = popup_rerun_paste(
+            PopupCommandText::Untrusted("cargo test\ncargo publish".into()),
+            false,
+        );
+        assert!(paste.is_none());
     }
 }
