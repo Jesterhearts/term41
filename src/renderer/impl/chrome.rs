@@ -88,6 +88,7 @@ impl Renderer {
                 baseline,
                 cell_w,
                 None,
+                Some(cell_h),
                 label_fg,
                 fg,
             );
@@ -112,6 +113,7 @@ impl Renderer {
             baseline,
             cell_w,
             Some(plan.new_tab_button.width),
+            Some(cell_h),
             label_fg,
             fg,
         );
@@ -136,6 +138,7 @@ impl Renderer {
                 baseline,
                 cell_w,
                 Some(button.width),
+                Some(cell_h),
                 label_fg,
                 fg,
             );
@@ -209,6 +212,7 @@ impl Renderer {
                     baseline,
                     cell_w,
                     None,
+                    Some(cell_h),
                     normal_fg,
                     overlay_fg,
                 );
@@ -255,6 +259,7 @@ impl Renderer {
         baseline: f32,
         cell_w: f32,
         centered_width: Option<f32>,
+        fitted_height: Option<f32>,
         color: u32,
         fg: &mut FgGeometry,
     ) {
@@ -299,6 +304,10 @@ impl Renderer {
         let x = match (centered_width, label_ink_bounds(&glyphs, cell_w)) {
             (Some(width), Some((left, right))) => centered_ink_origin_x(x, width, left, right),
             _ => x,
+        };
+        let y = match (fitted_height, label_ink_y_bounds(&glyphs, baseline)) {
+            (Some(height), Some((top, bottom))) => fitted_ink_origin_y(y, height, top, bottom),
+            _ => y,
         };
 
         for glyph in glyphs {

@@ -135,6 +135,52 @@ fn label_ink_bounds(
     left.is_finite().then_some((left, right))
 }
 
+fn label_ink_y_bounds(
+    glyphs: &[LabelGlyph],
+    baseline: f32,
+) -> Option<(f32, f32)> {
+    let mut top = f32::INFINITY;
+    let mut bottom = f32::NEG_INFINITY;
+
+    for glyph in glyphs {
+        let glyph_top = baseline - glyph.slot.bearing_y as f32 - glyph.y_offset;
+        let glyph_bottom = glyph_top + glyph.slot.height() as f32;
+        top = top.min(glyph_top);
+        bottom = bottom.max(glyph_bottom);
+    }
+
+    top.is_finite().then_some((top, bottom))
+}
+
+fn fitted_ink_origin_y(
+    origin_y: f32,
+    region_h: f32,
+    ink_top: f32,
+    ink_bottom: f32,
+) -> f32 {
+    const EDGE_INSET: f32 = 1.0;
+
+    if region_h <= EDGE_INSET * 2.0 || ink_bottom <= ink_top {
+        return origin_y;
+    }
+
+    let target_top = EDGE_INSET;
+    let target_bottom = region_h - EDGE_INSET;
+    let mut offset = 0.0;
+
+    if ink_top < target_top {
+        offset = target_top - ink_top;
+    }
+    if ink_bottom + offset > target_bottom {
+        offset -= ink_bottom + offset - target_bottom;
+    }
+    if ink_top + offset < target_top {
+        offset = target_top - ink_top;
+    }
+
+    origin_y + offset
+}
+
 /// Emit background-pass quads for the given underline style. `uy` is the
 /// baseline Y position for a single underline; `cell_w` and `cell_h` set
 /// the horizontal span and vertical budget for multi-line / patterned

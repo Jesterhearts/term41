@@ -53,6 +53,7 @@ mod geometry_tests {
     use super::clip_image_quad;
     use super::drcs_geometry_class;
     use super::fg_batch_for_page;
+    use super::fitted_ink_origin_y;
     use super::gutter_marker_color;
     use super::image_batch_for_page;
     use super::image_render_order;
@@ -283,6 +284,16 @@ mod geometry_tests {
             .map(|batch| batch.page_index)
             .collect();
         assert_eq!(pages, vec![0, 1, 0]);
+    }
+
+    #[test]
+    fn label_fit_moves_top_edge_inside_row() {
+        assert_eq!(fitted_ink_origin_y(0.0, 28.0, -0.5, 18.0), 1.5);
+    }
+
+    #[test]
+    fn label_fit_prefers_top_inset_when_ink_is_taller_than_row() {
+        assert_eq!(fitted_ink_origin_y(0.0, 10.0, -3.0, 12.0), 4.0);
     }
 
     #[test]

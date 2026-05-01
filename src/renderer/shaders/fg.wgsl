@@ -32,8 +32,10 @@ fn vs_main(in: VsInput) -> VsOutput {
     var out: VsOutput;
     let ndc = (2.0 * in.pos / screen_size.xy - 1.0) * vec2<f32>(1.0, -1.0);
     out.position = vec4<f32>(ndc, 0.0, 1.0);
-    // Normalize UV to atlas texture coordinates.
-    out.uv = in.uv / atlas_size;
+    // Keep UVs in atlas pixel coordinates. Glyph quads are already emitted in
+    // physical pixels, so loading by integer texel avoids normalized sampler
+    // boundary decisions that can shimmer on fractional-DPI compositors.
+    out.uv = in.uv;
     out.color = in.color;
     out.flags = in.flags;
     return out;
@@ -41,7 +43,7 @@ fn vs_main(in: VsInput) -> VsOutput {
 
 @fragment
 fn fs_main(in: VsOutput) -> @location(0) vec4<f32> {
-    let sampled = textureSample(atlas_tex, atlas_sampler, in.uv);
+    let sampled = textureLoad(atlas_tex, vec2<i32>(floor(in.uv)), 0);
     let fg = unpack_color(in.color);
     let is_color = (in.flags & 1u) != 0u;
 
