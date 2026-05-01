@@ -272,7 +272,7 @@ fn resize_tab_to_grid(
     let pty_rows = {
         let mut terminal = tab.terminal.lock();
         terminal.resize(cols, rows);
-        tab.terminal_thread.thread_handle.get().unwrap().unpark();
+        crate::unpark_thread_if_started(&tab.terminal_thread.thread_handle);
         terminal.viewport.rows
     };
     tab.pty.resize(cols as u16, pty_rows as u16);
@@ -1259,7 +1259,7 @@ impl RenderHost {
                 cfg.palette.clone(),
             );
             terminal.invalidate_snapshot_rows();
-            tab.terminal_thread.thread_handle.get().unwrap().unpark();
+            crate::unpark_thread_if_started(&tab.terminal_thread.thread_handle);
         }
         self.config.keybindings = cfg.keybindings;
         self.sync_input_state();

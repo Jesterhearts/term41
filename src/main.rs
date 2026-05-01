@@ -125,6 +125,12 @@ use crate::renderer::paint::build_tab_bar_layout;
 #[macro_use]
 extern crate log;
 
+pub(crate) fn unpark_thread_if_started(thread_handle: &OnceLock<Thread>) {
+    if let Some(thread) = thread_handle.get() {
+        thread.unpark();
+    }
+}
+
 static APP_START_TIME: OnceLock<Instant> = OnceLock::new();
 static LOG_TOAST_TX: OnceLock<mpsc::Sender<String>> = OnceLock::new();
 

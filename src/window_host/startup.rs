@@ -417,7 +417,7 @@ impl WindowHost {
         let Some(target) = self.input_endpoints.get(&tab_id) else {
             return;
         };
-        target.terminal_thread.get().unwrap().unpark();
+        unpark_thread_if_started(&target.terminal_thread);
     }
 
     pub(crate) fn schedule_startup_redraw(

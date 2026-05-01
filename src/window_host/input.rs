@@ -64,7 +64,7 @@ impl WindowHost {
         if reset_viewport {
             let mut terminal = target.terminal.lock();
             reset_viewport_and_invalidate(&mut terminal);
-            target.terminal_thread.get().unwrap().unpark();
+            unpark_thread_if_started(&target.terminal_thread);
         }
     }
 
@@ -77,7 +77,7 @@ impl WindowHost {
             let mut terminal = target.terminal.lock();
             apply_host_input(&mut terminal, input)
         };
-        target.terminal_thread.get().unwrap().unpark();
+        unpark_thread_if_started(&target.terminal_thread);
         Self::write_host_bytes(target, effects.host_bytes, reset_viewport);
     }
 
@@ -147,7 +147,7 @@ impl WindowHost {
             let mut terminal = target.terminal.lock();
             terminal41::io::clipboard::apply_clipboard_request(&mut terminal.clipboard, request)
         };
-        target.terminal_thread.get().unwrap().unpark();
+        unpark_thread_if_started(&target.terminal_thread);
         Self::write_host_bytes(target, host_bytes, false);
     }
 
@@ -185,7 +185,7 @@ impl WindowHost {
                 PermissionDecision::Deny => terminal.deny_kitty_file_request(request),
             }
         };
-        target.terminal_thread.get().unwrap().unpark();
+        unpark_thread_if_started(&target.terminal_thread);
         Self::write_host_bytes(target, effects.host_bytes, false);
     }
 
