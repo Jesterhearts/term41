@@ -8,6 +8,7 @@ license      = "Unlicense"
 [workspace]
 members = [
   "clip41",
+  "commands41",
   "config41",
   "font41",
   "image41",
@@ -23,6 +24,7 @@ members = [
 base64               = "0.22.1"
 bitflags             = "2.11.1"
 clip41               = { path = "clip41" }
+commands41           = { path = "commands41" }
 config41             = { path = "config41" }
 cueue                = "0.6.0"
 dirs                 = "6.0.0"
@@ -63,6 +65,7 @@ bytemuck                       = { version = "1.25.0", features = [
   "extern_crate_alloc"
 ] }
 clip41.workspace               = true
+commands41.workspace           = true
 config41.workspace             = true
 cueue.workspace                = true
 dirs.workspace                 = true

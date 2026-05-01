@@ -804,7 +804,9 @@ impl RenderHost {
             Action::ClearPastedBackground => {
                 self.handle_clear_pasted_background();
             }
-            Action::ToggleOutputRecording | Action::CycleEmojiCompatibility => {}
+            Action::ToggleOutputRecording
+            | Action::CycleEmojiCompatibility
+            | Action::ToggleCommandEditor => {}
         }
     }
 
@@ -1281,6 +1283,7 @@ impl RenderHost {
         self.applied_title = None;
         self.config.script_permissions = cfg.script_permissions.clone();
         self.config.compatibility = cfg.compatibility;
+        self.config.command_editor = cfg.command_editor.clone();
 
         if cfg.gutter != self.config.gutter {
             self.config.gutter = cfg.gutter;
@@ -1435,6 +1438,7 @@ impl RenderHost {
             permission_modal,
             toast,
             preedit,
+            command_editor,
         ) = {
             let input_state = self.input_state.lock();
             (
@@ -1445,6 +1449,7 @@ impl RenderHost {
                 input_state.permission_modal.clone(),
                 input_state.toast.clone(),
                 input_state.preedit.clone(),
+                input_state.command_editor_view.clone(),
             )
         };
         let recording_popup = recording_popup.map(|popup| RecordingPopup { lines: popup.lines });
@@ -1503,6 +1508,7 @@ impl RenderHost {
             permission_modal.as_ref(),
             toast.as_ref(),
             preedit.as_ref(),
+            command_editor.as_ref(),
             suspend_terminal_area,
         );
     }
@@ -1619,6 +1625,10 @@ impl RenderHost {
     fn sync_input_state(&mut self) {
         let mut input_state = self.input_state.lock();
         input_state.keybindings = self.config.keybindings.clone();
+        input_state.command_editor_config = self.config.command_editor.clone();
+        if !self.config.command_editor.enabled {
+            input_state.command_editor_view = None;
+        }
         if !self.tabs.is_empty() {
             input_state.tab_count = self.tabs.len();
             input_state.tab_order = self.tabs.iter().map(|tab| tab.id).collect();

@@ -1514,6 +1514,123 @@ impl Renderer {
         }
     }
 
+    #[allow(clippy::too_many_arguments)]
+    pub(super) fn render_command_editor(
+        &mut self,
+        font_system: &mut FontSystem,
+        snap: &TermSnapshot,
+        editor: &commands41::CommandLineView,
+        gutter_px: f32,
+        cell_w: f32,
+        cell_h: f32,
+        baseline: f32,
+        tab_bar_h: f32,
+        bg_vertices: &mut Vec<BgVertex>,
+        bg_indices: &mut Vec<u32>,
+        fg: &mut FgGeometry,
+    ) {
+        let Some((cursor_row, cursor_col)) = snap.cursor else {
+            return;
+        };
+        if editor.text.is_empty() && editor.completion.is_none() {
+            return;
+        }
+
+        let origin_x = cursor_col as f32 * cell_w + gutter_px;
+        let origin_y = cursor_row as f32 * cell_h + tab_bar_h;
+        let text_cells = editor.text.graphemes(true).count();
+        let completion_cells = editor
+            .completion
+            .as_deref()
+            .map(|text| text.graphemes(true).count())
+            .unwrap_or(0);
+        let panel_cells = (text_cells + completion_cells + 1).max(1);
+        let remaining_cols = snap.viewport_cols.saturating_sub(cursor_col).max(1) as usize;
+        let panel_cells = panel_cells.min(remaining_cols);
+        let panel_w = panel_cells as f32 * cell_w;
+
+        push_rect(
+            origin_x,
+            origin_y,
+            panel_w,
+            cell_h,
+            pack_color(&Srgb::new(28, 32, 42), 245),
+            bg_vertices,
+            bg_indices,
+        );
+        push_rect(
+            origin_x,
+            origin_y + cell_h - 2.0,
+            panel_w,
+            2.0,
+            pack_color(&Srgb::new(88, 150, 255), 255),
+            bg_vertices,
+            bg_indices,
+        );
+
+        for span in &editor.spans {
+            if span.start >= span.end || span.end > editor.text.len() {
+                continue;
+            }
+            let segment = &editor.text[span.start..span.end];
+            if segment.trim().is_empty() {
+                continue;
+            }
+            let col = editor.text[..span.start].graphemes(true).count();
+            if col >= remaining_cols {
+                continue;
+            }
+            self.shape_and_render_label(
+                font_system,
+                segment,
+                origin_x + col as f32 * cell_w,
+                origin_y,
+                baseline,
+                cell_w,
+                None,
+                Some(cell_h),
+                command_highlight_color(span.kind),
+                fg,
+            );
+        }
+
+        if let Some(completion) = editor.completion.as_deref() {
+            let col = text_cells;
+            if col < remaining_cols {
+                self.shape_and_render_label(
+                    font_system,
+                    completion,
+                    origin_x + col as f32 * cell_w,
+                    origin_y,
+                    baseline,
+                    cell_w,
+                    None,
+                    Some(cell_h),
+                    pack_color(&Srgb::new(125, 136, 155), 255),
+                    fg,
+                );
+            }
+        }
+
+        let cursor = editor.cursor.min(editor.text.len());
+        if !editor.text.is_char_boundary(cursor) {
+            return;
+        }
+        let cursor_cell = editor.text[..cursor]
+            .graphemes(true)
+            .count()
+            .min(remaining_cols - 1);
+        push_rect(
+            origin_x + cursor_cell as f32 * cell_w,
+            origin_y + 2.0,
+            2.0,
+            cell_h - 4.0,
+            pack_color(&Srgb::new(230, 235, 255), 255),
+            bg_vertices,
+            bg_indices,
+        );
+    }
+
     /// Resolve "is the cursor visible right now and what does it look like"
     /// once per frame. Hidden cases — scrolled away from live or in the
     /// blink-off phase — collapse to [`CursorRenderState::Hidden`] so the

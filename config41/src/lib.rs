@@ -451,6 +451,38 @@ struct CompatibilitySettings {
     emoji: Option<EmojiCompatibilityMode>,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandEditorConfig {
+    pub enabled: bool,
+    pub completions: Vec<String>,
+    pub max_history: usize,
+}
+
+impl Default for CommandEditorConfig {
+    fn default() -> Self {
+        Self {
+            enabled: false,
+            completions: Vec::new(),
+            max_history: 200,
+        }
+    }
+}
+
+#[derive(Deserialize, Default)]
+struct CommandEditorSettings {
+    /// Enable the terminal-local command editor. Disabled by default so the
+    /// normal keyboard path remains unchanged unless the user opts in.
+    #[serde(default)]
+    enabled: Option<bool>,
+    /// Static completion candidates. Recent command history is always added
+    /// at runtime by the editor.
+    #[serde(default)]
+    completions: Option<Vec<String>>,
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    max_history: Option<usize>,
+}
+
 #[derive(Deserialize, Default)]
 struct LimitSettings {
     #[serde(deserialize_with = "usize_opt")]
@@ -726,6 +758,8 @@ struct ConfigFile {
     security: Option<SecuritySettings>,
     #[serde(default)]
     compatibility: Option<CompatibilitySettings>,
+    #[serde(default)]
+    command_editor: Option<CommandEditorSettings>,
 }
 
 #[derive(Debug, Clone)]
@@ -759,6 +793,7 @@ pub struct Config {
     pub limits: TerminalLimits,
     pub script_permissions: BTreeMap<String, ScriptPermissions>,
     pub compatibility: CompatibilityConfig,
+    pub command_editor: CommandEditorConfig,
 }
 
 impl Default for Config {
@@ -785,6 +820,7 @@ impl Default for Config {
             limits: TerminalLimits::default(),
             script_permissions: BTreeMap::new(),
             compatibility: CompatibilityConfig::default(),
+            command_editor: CommandEditorConfig::default(),
         }
     }
 }
@@ -833,6 +869,7 @@ fn parse_config(
     let kitty_graphics = kitty_graphics.unwrap_or_default();
     let limits = build_limits(limits);
     let compatibility = build_compatibility(file.compatibility);
+    let command_editor = build_command_editor(file.command_editor);
     let new_tab_text = file.new_tab_text.unwrap_or('⮒'.to_smolstr());
 
     Config {
@@ -864,6 +901,7 @@ fn parse_config(
         limits,
         script_permissions: scripts.unwrap_or_default(),
         compatibility,
+        command_editor,
         new_tab_text,
     }
 }
@@ -906,6 +944,16 @@ fn build_compatibility(raw: Option<CompatibilitySettings>) -> CompatibilityConfi
     let settings = raw.unwrap_or_default();
     CompatibilityConfig {
         emoji: settings.emoji.unwrap_or_default(),
+    }
+}
+
+fn build_command_editor(raw: Option<CommandEditorSettings>) -> CommandEditorConfig {
+    let settings = raw.unwrap_or_default();
+    let defaults = CommandEditorConfig::default();
+    CommandEditorConfig {
+        enabled: settings.enabled.unwrap_or(defaults.enabled),
+        completions: settings.completions.unwrap_or_default(),
+        max_history: settings.max_history.unwrap_or(defaults.max_history).max(1),
     }
 }
 
@@ -1589,6 +1637,29 @@ process_info = true
                 .emoji,
             EmojiCompatibilityMode::Auto
         );
+    }
+
+    #[test]
+    fn command_editor_defaults_disabled() {
+        let cfg = parse("");
+        assert!(!cfg.command_editor.enabled);
+        assert!(cfg.command_editor.completions.is_empty());
+        assert_eq!(cfg.command_editor.max_history, 200);
+    }
+
+    #[test]
+    fn command_editor_parses_settings() {
+        let cfg = parse(
+            r#"
+[command_editor]
+enabled = true
+completions = ["cargo", "git"]
+max_history = 25
+"#,
+        );
+        assert!(cfg.command_editor.enabled);
+        assert_eq!(cfg.command_editor.completions, ["cargo", "git"]);
+        assert_eq!(cfg.command_editor.max_history, 25);
     }
 
     #[test]

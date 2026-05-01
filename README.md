@@ -352,6 +352,13 @@ vsync = "auto"
 # process_info = false
 # resource_usage = false
 
+[command_editor]
+# Off by default. When enabled, it is active only while OSC 133 / OSC 633 shell
+# integration reports that the shell is editing a command.
+# enabled = true
+# completions = ["cargo", "git", "rg"]
+# max_history = 200
+
 [colors.status_line]
 # foreground = "#d8dee9"
 # background = "#3b4252"
@@ -369,6 +376,7 @@ keybindings = [
   { keys = "Shift+PageDown", action = "ScrollPageDown" },
   { keys = "Ctrl+Shift+C", action = "Copy" },
   { keys = "Ctrl+Shift+V", action = "Paste" },
+  { keys = "Ctrl+Shift+D", action = "ToggleCommandEditor" },
   { keys = "Alt+Shift+L", action = "CycleEmojiCompatibility" },
 ]
 ```
@@ -399,6 +407,11 @@ Notes:
 - `[security.scripts.<script_name>]` controls which optional libraries a script
   receives. The default sandbox has only basic string/table/math/utf8 support
   plus `require("terminal")`.
+- `[command_editor]` enables the terminal-local command editor layer. It keeps
+  keyboard handling unchanged while disabled, uses Up/Down for its own command
+  history while active, and completes prefixes from configured words plus recent
+  history. `Ctrl+Shift+D` toggles it for the current runtime session without
+  rewriting config.
 - Example scripts are available under `examples/`, including
   `examples/sys_info.lua` for Linux CPU and memory status text.
 

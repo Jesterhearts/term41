@@ -1747,6 +1747,7 @@ impl Renderer {
         permission_modal: Option<&crate::renderer::PermissionModal>,
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
+        command_editor: Option<&commands41::CommandLineView>,
         suspend_terminal_area: bool,
     ) {
         let layout = self.frame_layout(font_system, tabs);
@@ -1769,6 +1770,7 @@ impl Renderer {
             permission_modal,
             toast,
             preedit,
+            command_editor,
             &layout,
             suspend_terminal_area,
         );
@@ -1939,6 +1941,20 @@ fn gutter_marker_color(exit_status: Option<i32>) -> u32 {
         None => RUNNING,
     };
     u32::from_be_bytes([rgb[0], rgb[1], rgb[2], 255])
+}
+
+fn command_highlight_color(kind: commands41::HighlightKind) -> u32 {
+    let rgb = match kind {
+        commands41::HighlightKind::Plain => Srgb::new(224, 228, 236),
+        commands41::HighlightKind::Command => Srgb::new(132, 210, 255),
+        commands41::HighlightKind::Keyword => Srgb::new(255, 196, 112),
+        commands41::HighlightKind::Builtin => Srgb::new(140, 230, 170),
+        commands41::HighlightKind::String => Srgb::new(232, 214, 128),
+        commands41::HighlightKind::Variable => Srgb::new(198, 170, 255),
+        commands41::HighlightKind::Operator => Srgb::new(255, 145, 145),
+        commands41::HighlightKind::Comment => Srgb::new(128, 140, 156),
+    };
+    pack_color(&rgb, 255)
 }
 
 /// Convert a byte-indexed `(start, end)` range on `text` to a character-index

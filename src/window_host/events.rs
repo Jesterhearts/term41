@@ -61,6 +61,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                         writer,
                         recorder,
                         terminal_thread,
+                        command_editor: CommandEditor::new(),
                     },
                 );
             }
@@ -73,6 +74,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 if let Some(tab_id) = tab_id {
                     self.request_window_size_for_tab(tab_id);
                 }
+                self.refresh_command_editor_view();
             }
             AppEvent::ResolveClipboardRequest {
                 tab_id,

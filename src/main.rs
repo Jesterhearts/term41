@@ -32,6 +32,13 @@ use std::time::Duration;
 use std::time::Instant;
 
 use clip41::ClipboardKind;
+use commands41::CommandEditor;
+use commands41::CommandLineView;
+use commands41::EditOutcome;
+use commands41::EditorInput;
+use commands41::EditorSettings;
+use commands41::apply_input;
+use config41::CommandEditorConfig;
 use config41::StatusLineMode;
 use config41::keybindings::Action;
 use config41::keybindings::Keybindings;
@@ -276,6 +283,7 @@ struct InputEndpoint {
     terminal_thread: Arc<OnceLock<Thread>>,
     writer: PtyWriter,
     recorder: RecorderControl,
+    command_editor: CommandEditor,
 }
 
 fn reset_viewport_and_invalidate(terminal: &mut Terminal) {
@@ -318,6 +326,8 @@ enum RecordingPopupState {
 
 pub(crate) struct InputState {
     keybindings: Keybindings,
+    command_editor_config: CommandEditorConfig,
+    command_editor_view: Option<CommandLineView>,
     tab_count: usize,
     tab_order: Vec<TabId>,
     cell_width: u32,
@@ -538,6 +548,39 @@ fn dec_udk_selector(
     }
 }
 
+fn command_editor_input(
+    key: &Key,
+    mods: ModifiersState,
+) -> Option<EditorInput> {
+    if mods.control_key() || mods.alt_key() || mods.super_key() {
+        return None;
+    }
+    match key {
+        Key::Character(text) => Some(EditorInput::Insert(text.to_string())),
+        Key::Named(NamedKey::Space) => Some(EditorInput::Insert(" ".to_owned())),
+        Key::Named(NamedKey::Enter) if !mods.shift_key() => Some(EditorInput::Enter),
+        Key::Named(NamedKey::Backspace) if !mods.shift_key() => Some(EditorInput::Backspace),
+        Key::Named(NamedKey::Delete) if !mods.shift_key() => Some(EditorInput::Delete),
+        Key::Named(NamedKey::ArrowLeft) if !mods.shift_key() => Some(EditorInput::MoveLeft),
+        Key::Named(NamedKey::ArrowRight) if !mods.shift_key() => Some(EditorInput::MoveRight),
+        Key::Named(NamedKey::Home) if !mods.shift_key() => Some(EditorInput::MoveHome),
+        Key::Named(NamedKey::End) if !mods.shift_key() => Some(EditorInput::MoveEnd),
+        Key::Named(NamedKey::ArrowUp) if !mods.shift_key() => Some(EditorInput::HistoryPrevious),
+        Key::Named(NamedKey::ArrowDown) if !mods.shift_key() => Some(EditorInput::HistoryNext),
+        Key::Named(NamedKey::Tab) if !mods.shift_key() => Some(EditorInput::Complete),
+        Key::Named(NamedKey::Escape) if !mods.shift_key() => Some(EditorInput::Cancel),
+        _ => None,
+    }
+}
+
+fn command_editor_view(
+    editor: &CommandEditor,
+    settings: &EditorSettings,
+) -> Option<CommandLineView> {
+    let view = editor.view(settings);
+    (!view.text.is_empty() || view.completion.is_some()).then_some(view)
+}
+
 fn dec_local_function_key_selector(
     key: &Key,
     mods: ModifiersState,
@@ -706,6 +749,7 @@ fn main() {
     let startup_dpi_scale = config.dpi_scale;
     let startup_gutter = config.gutter;
     let startup_keybindings = config.keybindings.clone();
+    let startup_command_editor = config.command_editor.clone();
 
     // Create the terminal thread handle before spawning the PTY so the PTY
     // reader can unpark the terminal thread once it starts.
@@ -785,6 +829,8 @@ fn main() {
 
     let input_state = Arc::new(Mutex::new(InputState {
         keybindings: startup_keybindings,
+        command_editor_config: startup_command_editor,
+        command_editor_view: None,
         tab_count: 1,
         tab_order: vec![TabId(0)],
         cell_width,
@@ -851,6 +897,7 @@ fn main() {
                 terminal_thread: term_thread_handle,
                 writer: pty_writer,
                 recorder: initial_recorder,
+                command_editor: CommandEditor::new(),
             },
         )]),
         active_input_tab: Some(TabId(0)),

@@ -161,6 +161,7 @@ impl Renderer {
         permission_modal: Option<&crate::renderer::PermissionModal>,
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
+        command_editor: Option<&commands41::CommandLineView>,
         layout: &FrameLayout,
         suspend_terminal_area: bool,
     ) -> RenderGeometry {
@@ -179,6 +180,7 @@ impl Renderer {
                 permission_modal,
                 toast,
                 preedit,
+                command_editor,
                 layout,
                 suspend_terminal_area,
             );
@@ -206,6 +208,7 @@ impl Renderer {
             permission_modal,
             toast,
             preedit,
+            command_editor,
             layout,
             suspend_terminal_area,
         )
@@ -224,11 +227,16 @@ impl Renderer {
         permission_modal: Option<&crate::renderer::PermissionModal>,
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
+        command_editor: Option<&commands41::CommandLineView>,
         layout: &FrameLayout,
         suspend_terminal_area: bool,
     ) -> RenderGeometry {
         let mut geometry = RenderGeometry::default();
-        let cursor_state = self.cursor_state_from_snapshot(snap);
+        let cursor_state = if command_editor.is_some() {
+            CursorRenderState::Hidden
+        } else {
+            self.cursor_state_from_snapshot(snap)
+        };
         let popup_clip = self.popup_clip(gutter_popup, layout);
         let blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 500) & 1 == 1;
         let rapid_blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 250) & 1 == 1;
@@ -392,6 +400,7 @@ impl Renderer {
 
         if let Some(preedit) = preedit
             && !snap.search_active
+            && command_editor.is_none()
         {
             self.render_preedit(
                 font_system,
@@ -405,6 +414,23 @@ impl Renderer {
                 &mut geometry.bg_vertices,
                 &mut geometry.bg_indices,
                 &mut geometry.fg,
+            );
+        }
+        if let Some(command_editor) = command_editor
+            && !snap.search_active
+        {
+            self.render_command_editor(
+                font_system,
+                snap,
+                command_editor,
+                layout.gutter_px,
+                layout.cell_w,
+                layout.cell_h,
+                layout.baseline,
+                layout.tab_bar_h,
+                &mut geometry.overlay_bg_vertices,
+                &mut geometry.overlay_bg_indices,
+                &mut geometry.overlay_fg,
             );
         }
 

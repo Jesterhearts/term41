@@ -254,6 +254,69 @@ impl WindowHost {
         terminal.invalidate_snapshot_rows();
     }
 
+    pub(crate) fn handle_command_editor_key(
+        &mut self,
+        tab_id: TabId,
+        key: &Key,
+    ) -> bool {
+        let config = self.command_editor_config();
+        if !config.enabled {
+            return false;
+        }
+        let Some(input) = command_editor_input(key, self.modifiers) else {
+            return false;
+        };
+        let settings = Self::command_editor_settings(&config);
+        let mut cleared_inactive_editor = false;
+        let handled = {
+            let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+                return false;
+            };
+            let command_phase = {
+                let terminal = target.terminal.lock();
+                terminal.metadata.shell_integration_phase
+                    == terminal41::ShellIntegrationPhase::Command
+            };
+            if !command_phase {
+                if !target.command_editor.is_empty() {
+                    target.command_editor.clear();
+                    cleared_inactive_editor = true;
+                }
+                (false, None)
+            } else {
+                let outcome = apply_input(&mut target.command_editor, input.clone(), &settings);
+                match outcome {
+                    EditOutcome::Submitted(command) => {
+                        let mut bytes = command.into_bytes();
+                        bytes.push(b'\r');
+                        Self::write_host_bytes(target, bytes, true);
+                        (true, None)
+                    }
+                    EditOutcome::Updated => {
+                        let view = command_editor_view(&target.command_editor, &settings);
+                        (true, view)
+                    }
+                    EditOutcome::Canceled => (true, None),
+                    EditOutcome::Ignored => {
+                        if input == EditorInput::Cancel {
+                            (false, None)
+                        } else {
+                            let view = command_editor_view(&target.command_editor, &settings);
+                            (true, view)
+                        }
+                    }
+                }
+            }
+        };
+        if cleared_inactive_editor {
+            self.set_command_editor_view(None);
+        }
+        if handled.0 {
+            self.set_command_editor_view(handled.1);
+        }
+        handled.0
+    }
+
     pub(crate) fn run_local_action(
         &mut self,
         action: Action,
@@ -261,6 +324,10 @@ impl WindowHost {
     ) -> bool {
         if matches!(action, Action::Copy) {
             self.stop_selection_drag();
+        }
+        if action == Action::ToggleCommandEditor {
+            self.toggle_command_editor();
+            return true;
         }
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return true;
@@ -354,7 +421,8 @@ impl WindowHost {
             | Action::NextTab
             | Action::PrevTab
             | Action::PasteAsBackground
-            | Action::ClearPastedBackground => false,
+            | Action::ClearPastedBackground
+            | Action::ToggleCommandEditor => false,
         }
     }
 
@@ -390,6 +458,10 @@ impl WindowHost {
             let target = &self.input_endpoints[&active_tab_id];
             self.handle_search_key(target, &key);
             self.notify_interaction_changed();
+            return;
+        }
+
+        if self.handle_command_editor_key(active_tab_id, &key) {
             return;
         }
 

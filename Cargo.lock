@@ -620,6 +620,13 @@ dependencies = [
 ]
 
 [[package]]
+name = "commands41"
+version = "0.1.1"
+dependencies = [
+ "unicode-segmentation",
+]
+
+[[package]]
 name = "compact_str"
 version = "0.9.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4060,6 +4067,7 @@ dependencies = [
  "bitflags 2.11.1",
  "bytemuck",
  "clip41",
+ "commands41",
  "config41",
  "criterion",
  "cueue",

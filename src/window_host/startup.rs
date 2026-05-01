@@ -135,6 +135,65 @@ impl WindowHost {
         self.input_state.lock().keybindings.clone()
     }
 
+    pub(crate) fn command_editor_config(&self) -> CommandEditorConfig {
+        self.input_state.lock().command_editor_config.clone()
+    }
+
+    pub(crate) fn set_command_editor_view(
+        &mut self,
+        view: Option<CommandLineView>,
+    ) {
+        self.input_state.lock().command_editor_view = view;
+        self.notify_interaction_changed();
+    }
+
+    pub(crate) fn refresh_command_editor_view(&mut self) {
+        let view = self
+            .active_input_tab
+            .and_then(|tab_id| self.command_editor_view_for_tab(tab_id));
+        self.set_command_editor_view(view);
+    }
+
+    pub(crate) fn command_editor_view_for_tab(
+        &self,
+        tab_id: TabId,
+    ) -> Option<CommandLineView> {
+        let config = self.command_editor_config();
+        if !config.enabled {
+            return None;
+        }
+        let target = self.input_endpoints.get(&tab_id)?;
+        let command_phase = {
+            let terminal = target.terminal.lock();
+            terminal.metadata.shell_integration_phase == terminal41::ShellIntegrationPhase::Command
+        };
+        if !command_phase {
+            return None;
+        }
+        let settings = Self::command_editor_settings(&config);
+        command_editor_view(&target.command_editor, &settings)
+    }
+
+    pub(crate) fn command_editor_settings(config: &CommandEditorConfig) -> EditorSettings {
+        EditorSettings {
+            completion_words: config.completions.clone(),
+            max_history: config.max_history,
+        }
+    }
+
+    pub(crate) fn toggle_command_editor(&mut self) {
+        let enabled = {
+            let mut state = self.input_state.lock();
+            state.command_editor_config.enabled = !state.command_editor_config.enabled;
+            state.command_editor_config.enabled
+        };
+        self.refresh_command_editor_view();
+        self.show_toast(format!(
+            "Command editor: {}",
+            if enabled { "on" } else { "off" }
+        ));
+    }
+
     pub(crate) fn request_window_grid_size(
         &self,
         cols: u32,

@@ -68,6 +68,9 @@ pub enum Action {
     ToggleOutputRecording,
     /// Cycle legacy emoji compatibility handling: auto -> off -> on -> auto.
     CycleEmojiCompatibility,
+    /// Toggle the terminal-local command editor for the current runtime
+    /// session. Does not rewrite config.
+    ToggleCommandEditor,
 }
 
 /// One key, identified either by its winit `NamedKey` (Enter, F1, …) or by
@@ -185,6 +188,11 @@ impl Keybindings {
                     key: KeySpec::Char('l'),
                     mods: ModifiersState::ALT | ModifiersState::SHIFT,
                     action: Action::CycleEmojiCompatibility,
+                },
+                Keybinding {
+                    key: KeySpec::Char('d'),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::ToggleCommandEditor,
                 },
             ],
         }
@@ -498,6 +506,17 @@ mod tests {
         assert_eq!(
             bindings.lookup(&key, mods),
             Some(Action::CycleEmojiCompatibility)
+        );
+    }
+
+    #[test]
+    fn defaults_bind_ctrl_shift_d_to_command_editor_toggle() {
+        let bindings = Keybindings::defaults();
+        let key = Key::Character(SmolStr::new_inline("d"));
+        let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            bindings.lookup(&key, mods),
+            Some(Action::ToggleCommandEditor)
         );
     }
 }
