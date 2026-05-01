@@ -163,10 +163,17 @@ pub struct CommandMeta {
     pub command_row: Option<u64>,
     /// Absolute row where OSC 133 `C` fired (command output starts).
     pub output_row: Option<u64>,
+    /// Column where command output begins (from OSC 133 `C`).
+    /// `None` when the shell doesn't emit `C`.
+    pub output_col: Option<u32>,
     /// When execution started (timestamped at `C`).
     pub started_at: Option<Instant>,
     /// When the command finished (timestamped at `D`).
     pub finished_at: Option<Instant>,
+    /// Absolute row where OSC 133 `D` fired (command output ends).
+    pub finished_row: Option<u64>,
+    /// Column where OSC 133 `D` fired (command output ends).
+    pub finished_col: Option<u32>,
     /// Command line reported by OSC 633 `E`. This is host-provided metadata,
     /// not terminal-observed text. Screen-extracted command text remains the
     /// preferred source; UI code may only display this as an annotation or
@@ -180,8 +187,11 @@ impl CommandMeta {
             command_col: None,
             command_row: None,
             output_row: None,
+            output_col: None,
             started_at: None,
             finished_at: None,
+            finished_row: None,
+            finished_col: None,
             untrusted_command_line: None,
         }
     }

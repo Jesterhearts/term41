@@ -745,6 +745,7 @@ fn apply_shell_integration_action(
                 && let Some(meta) = command_metas.get_mut(&prompt_abs)
             {
                 meta.output_row = Some(abs);
+                meta.output_col = Some(screen.cursor.col);
                 meta.started_at = Some(Instant::now());
             }
         }
@@ -758,6 +759,8 @@ fn apply_shell_integration_action(
             if let Some(prompt_abs) = *current_prompt_row
                 && let Some(meta) = command_metas.get_mut(&prompt_abs)
             {
+                meta.finished_row = Some(current_absolute_row(screen, viewport));
+                meta.finished_col = Some(screen.cursor.col);
                 meta.finished_at = Some(Instant::now());
             }
         }
@@ -1634,6 +1637,9 @@ mod tests {
         assert_eq!(meta.command_col, Some(2));
         assert_eq!(meta.command_row, Some(1));
         assert_eq!(meta.output_row, Some(2));
+        assert_eq!(meta.output_col, Some(0));
+        assert_eq!(meta.finished_row, Some(2));
+        assert_eq!(meta.finished_col, Some(0));
         assert!(meta.started_at.is_some());
         assert!(meta.finished_at.is_some());
     }

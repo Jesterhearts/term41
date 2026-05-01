@@ -105,6 +105,18 @@ fn find_next_prompt_after(
     None
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextPoint {
+    row: u64,
+    col: u32,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+struct TextRange {
+    start: TextPoint,
+    end: TextPoint,
+}
+
 /// Return the absolute row where the command block ends.
 pub fn command_end_abs(
     prompt_abs: u64,
@@ -117,15 +129,128 @@ pub fn command_end_abs(
     }
 }
 
-fn extract_rows_text(
+fn text_point_from_row_start(row: u64) -> TextPoint {
+    TextPoint { row, col: 0 }
+}
+
+fn text_point_from_row_end(
     screen: &Screen,
-    start_abs: u64,
-    start_col: u32,
-    end_abs: u64,
+    row_abs: u64,
+) -> TextPoint {
+    TextPoint {
+        row: row_abs,
+        col: selection::absolute_row_to_local(screen, row_abs)
+            .map(|local| screen.grid.rows[local].cells.len() as u32)
+            .unwrap_or(0),
+    }
+}
+
+fn command_start_point(
+    prompt_abs: u64,
+    meta: Option<&CommandMeta>,
+) -> TextPoint {
+    TextPoint {
+        row: meta.and_then(|m| m.command_row).unwrap_or(prompt_abs),
+        col: meta.and_then(|m| m.command_col).unwrap_or(0),
+    }
+}
+
+fn output_start_point(meta: Option<&CommandMeta>) -> Option<TextPoint> {
+    let meta = meta?;
+    Some(TextPoint {
+        row: meta.output_row?,
+        col: meta.output_col.unwrap_or(0),
+    })
+}
+
+fn command_finished_point(meta: Option<&CommandMeta>) -> Option<TextPoint> {
+    let meta = meta?;
+    Some(TextPoint {
+        row: meta.finished_row?,
+        col: meta.finished_col.unwrap_or(0),
+    })
+}
+
+fn command_block_end_point(
+    prompt_abs: u64,
+    meta: Option<&CommandMeta>,
+    screen: &Screen,
+) -> TextPoint {
+    if let Some(finished) = command_finished_point(meta) {
+        return finished;
+    }
+    if let Some(next_prompt) = find_next_prompt_after(screen, prompt_abs) {
+        return text_point_from_row_start(next_prompt);
+    }
+    text_point_from_row_end(screen, command_end_abs(prompt_abs, screen))
+}
+
+fn command_text_range(
+    prompt_abs: u64,
+    meta: Option<&CommandMeta>,
+    screen: &Screen,
+) -> Option<TextRange> {
+    let start = command_start_point(prompt_abs, meta);
+    let end = if let Some(output) = output_start_point(meta) {
+        output
+    } else if let Some(finished) = command_finished_point(meta) {
+        finished
+    } else if let Some(next_prompt) = find_next_prompt_after(screen, prompt_abs) {
+        text_point_from_row_start(next_prompt)
+    } else {
+        let end_row = prompt_abs.max(start.row);
+        text_point_from_row_end(screen, end_row)
+    };
+    text_range(start, end)
+}
+
+fn command_and_output_text_range(
+    prompt_abs: u64,
+    meta: Option<&CommandMeta>,
+    screen: &Screen,
+) -> Option<TextRange> {
+    let start = command_start_point(prompt_abs, meta);
+    let end = command_block_end_point(prompt_abs, meta, screen);
+    text_range(start, end)
+}
+
+fn output_text_range(
+    prompt_abs: u64,
+    meta: Option<&CommandMeta>,
+    screen: &Screen,
+) -> Option<TextRange> {
+    let start = output_start_point(meta)?;
+    let end = command_block_end_point(prompt_abs, meta, screen);
+    text_range(start, end)
+}
+
+fn text_range(
+    start: TextPoint,
+    end: TextPoint,
+) -> Option<TextRange> {
+    (start.row < end.row || (start.row == end.row && start.col < end.col))
+        .then_some(TextRange { start, end })
+}
+
+fn last_row_in_range(range: TextRange) -> Option<u64> {
+    if range.end.col == 0 {
+        range.end.row.checked_sub(1)
+    } else {
+        Some(range.end.row)
+    }
+    .filter(|&last| range.start.row <= last)
+}
+
+fn extract_range_text(
+    screen: &Screen,
+    range: TextRange,
 ) -> String {
+    let Some(end_abs) = last_row_in_range(range) else {
+        return String::new();
+    };
     let popped = screen.grid.total_popped as u64;
     let mut out = String::new();
-    for abs in start_abs..=end_abs {
+    for abs in range.start.row..=end_abs {
         let Some(local) = abs.checked_sub(popped).map(|l| l as usize) else {
             continue;
         };
@@ -133,12 +258,17 @@ fn extract_rows_text(
             break;
         }
         let row = &screen.grid.rows[local];
-        let cs = if abs == start_abs {
-            start_col as usize
+        let cs = if abs == range.start.row {
+            range.start.col as usize
         } else {
             0
         };
-        let ce = row.cells.len();
+        let ce = if abs == range.end.row {
+            range.end.col as usize
+        } else {
+            row.cells.len()
+        }
+        .min(row.cells.len());
         if cs >= ce {
             if abs < end_abs && !row.wrapped {
                 out.push('\n');
@@ -164,13 +294,7 @@ pub fn command_text_at(
     screen: &Screen,
 ) -> Option<String> {
     let meta = command_metas.get(&prompt_abs);
-    let start_col = meta.and_then(|m| m.command_col).unwrap_or(0);
-    let start_row = meta.and_then(|m| m.command_row).unwrap_or(prompt_abs);
-    let end_row = command_text_end(prompt_abs, meta, screen);
-    if start_row > end_row {
-        return None;
-    }
-    let text = extract_rows_text(screen, start_row, start_col, end_row);
+    let text = extract_range_text(screen, command_text_range(prompt_abs, meta, screen)?);
     if text.is_empty() { None } else { Some(text) }
 }
 
@@ -186,34 +310,14 @@ pub fn untrusted_command_line_at(
         .filter(|text| !text.is_empty())
 }
 
-fn command_text_end(
-    prompt_abs: u64,
-    meta: Option<&CommandMeta>,
-    screen: &Screen,
-) -> u64 {
-    if let Some(meta) = meta
-        && let Some(output) = meta.output_row
-    {
-        return output.saturating_sub(1);
-    }
-    if let Some(next) = find_next_prompt_after(screen, prompt_abs) {
-        return next.saturating_sub(1);
-    }
-    prompt_abs
-}
-
 /// Extract command output associated with a prompt row.
 pub fn output_text_at(
     prompt_abs: u64,
     command_metas: &HashMap<u64, CommandMeta>,
     screen: &Screen,
 ) -> Option<String> {
-    let output_row = command_metas.get(&prompt_abs)?.output_row?;
-    let end_row = command_end_abs(prompt_abs, screen);
-    if output_row > end_row {
-        return None;
-    }
-    let text = extract_rows_text(screen, output_row, 0, end_row);
+    let meta = command_metas.get(&prompt_abs);
+    let text = extract_range_text(screen, output_text_range(prompt_abs, meta, screen)?);
     if text.is_empty() { None } else { Some(text) }
 }
 
@@ -224,13 +328,10 @@ pub fn command_and_output_text_at(
     screen: &Screen,
 ) -> Option<String> {
     let meta = command_metas.get(&prompt_abs);
-    let start_col = meta.and_then(|m| m.command_col).unwrap_or(0);
-    let start_row = meta.and_then(|m| m.command_row).unwrap_or(prompt_abs);
-    let end_row = command_end_abs(prompt_abs, screen);
-    if start_row > end_row {
-        return None;
-    }
-    let text = extract_rows_text(screen, start_row, start_col, end_row);
+    let text = extract_range_text(
+        screen,
+        command_and_output_text_range(prompt_abs, meta, screen)?,
+    );
     if text.is_empty() { None } else { Some(text) }
 }
 
@@ -253,26 +354,23 @@ pub fn select_command_at(
     screen: &Screen,
 ) {
     let meta = command_metas.get(&prompt_abs);
-    let start_col = meta.and_then(|m| m.command_col).unwrap_or(0);
-    let start_row = meta.and_then(|m| m.command_row).unwrap_or(prompt_abs);
-    let end_row = command_text_end(prompt_abs, meta, screen);
-    if start_row > end_row {
+    let Some(range) = command_text_range(prompt_abs, meta, screen) else {
         return;
-    }
-    let text = extract_rows_text(screen, start_row, start_col, end_row);
+    };
+    let text = extract_range_text(screen, range);
     if text.trim().is_empty() {
         return;
     }
-    let end_col = selection::absolute_row_to_local(screen, end_row)
-        .map(|l| screen.grid.rows[l].content_len().saturating_sub(1))
-        .unwrap_or(0);
     let anchor = SelectionPoint {
-        row: start_row,
-        col: start_col,
+        row: range.start.row,
+        col: range.start.col,
+    };
+    let Some(head) = selection_head_for_range(screen, range) else {
+        return;
     };
     let head = SelectionPoint {
-        row: end_row,
-        col: end_col,
+        row: head.row,
+        col: head.col,
     };
     *selection = Some(Selection {
         anchor,
@@ -282,10 +380,40 @@ pub fn select_command_at(
     });
 }
 
+fn selection_head_for_range(
+    screen: &Screen,
+    range: TextRange,
+) -> Option<TextPoint> {
+    let end_abs = last_row_in_range(range)?;
+    if range.end.col > 0 && range.end.row == end_abs {
+        let col = selection::absolute_row_to_local(screen, end_abs)
+            .map(|local| range.end.col.min(screen.grid.rows[local].len()))
+            .unwrap_or(range.end.col);
+        if col == 0 {
+            return None;
+        }
+        return Some(TextPoint {
+            row: end_abs,
+            col: col - 1,
+        });
+    }
+    let end_col = selection::absolute_row_to_local(screen, end_abs)
+        .map(|local| screen.grid.rows[local].content_len().saturating_sub(1))
+        .unwrap_or(0);
+    Some(TextPoint {
+        row: end_abs,
+        col: end_col,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
+    use super::command_and_output_text_at;
+    use super::command_text_at;
+    use super::output_text_at;
+    use super::select_command_at;
     use crate::test_support::TestTerm;
     use crate::view;
 
@@ -356,6 +484,51 @@ mod tests {
             term.indicator_status_text().as_deref(),
             Some("/ > tmp > project > cargo test --workspace")
         );
+    }
+
+    #[test]
+    fn command_and_output_text_use_same_line_osc_133_columns() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]133;B\x07");
+        term.process(b"cargo");
+        term.process(b"\x1b]133;C\x07");
+        term.process(b"out");
+        term.process(b"\x1b]133;D;0\x07");
+
+        assert_eq!(
+            command_text_at(0, &term.metadata.command_metas, &term.active).as_deref(),
+            Some("cargo")
+        );
+        assert_eq!(
+            output_text_at(0, &term.metadata.command_metas, &term.active).as_deref(),
+            Some("out")
+        );
+        assert_eq!(
+            command_and_output_text_at(0, &term.metadata.command_metas, &term.active).as_deref(),
+            Some("cargoout")
+        );
+    }
+
+    #[test]
+    fn select_command_at_stops_at_same_line_output_column() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07cargo\x1b]133;C\x07out");
+
+        let mut selection = None;
+        select_command_at(
+            &mut selection,
+            0,
+            &term.metadata.command_metas,
+            &term.active,
+        );
+
+        let selection = selection.expect("command selected");
+        assert_eq!(selection.anchor.row, 0);
+        assert_eq!(selection.anchor.col, 2);
+        assert_eq!(selection.head.row, 0);
+        assert_eq!(selection.head.col, 6);
     }
 
     #[test]
