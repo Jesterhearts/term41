@@ -19,6 +19,7 @@ use std::time::Instant;
 
 use clip41::Clipboard;
 use config41::BellMode;
+use config41::CommandEditorConfig;
 use config41::Config;
 use config41::DEFAULT_SCROLLBACK;
 use config41::config;
@@ -81,6 +82,24 @@ pub(crate) const GUTTER_MENU_ITEMS: &[GutterMenuItem] = &[
 
 pub(crate) const POPUP_WIDTH_CELLS: f32 = 20.0;
 const FRAME_DURATION: Duration = Duration::from_millis(1000 / 60);
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CommandEditorConfigSync {
+    PreserveRuntimeEnabled,
+    ApplyConfiguredEnabled,
+}
+
+fn synced_command_editor_config(
+    configured: &CommandEditorConfig,
+    runtime: &CommandEditorConfig,
+    sync: CommandEditorConfigSync,
+) -> CommandEditorConfig {
+    let mut next = configured.clone();
+    if sync == CommandEditorConfigSync::PreserveRuntimeEnabled {
+        next.enabled = runtime.enabled;
+    }
+    next
+}
 
 /// State of the gutter popup while it is open.
 #[derive(Clone)]
@@ -1284,6 +1303,7 @@ impl RenderHost {
         self.config.script_permissions = cfg.script_permissions.clone();
         self.config.compatibility = cfg.compatibility;
         self.config.command_editor = cfg.command_editor.clone();
+        self.sync_input_state_from_config();
 
         if cfg.gutter != self.config.gutter {
             self.config.gutter = cfg.gutter;
@@ -1625,8 +1645,12 @@ impl RenderHost {
     fn sync_input_state(&mut self) {
         let mut input_state = self.input_state.lock();
         input_state.keybindings = self.config.keybindings.clone();
-        input_state.command_editor_config = self.config.command_editor.clone();
-        if !self.config.command_editor.enabled {
+        input_state.command_editor_config = synced_command_editor_config(
+            &self.config.command_editor,
+            &input_state.command_editor_config,
+            CommandEditorConfigSync::PreserveRuntimeEnabled,
+        );
+        if !input_state.command_editor_config.enabled {
             input_state.command_editor_view = None;
         }
         if !self.tabs.is_empty() {
@@ -1643,6 +1667,18 @@ impl RenderHost {
         } else {
             0
         };
+    }
+
+    fn sync_input_state_from_config(&mut self) {
+        let mut input_state = self.input_state.lock();
+        input_state.command_editor_config = synced_command_editor_config(
+            &self.config.command_editor,
+            &input_state.command_editor_config,
+            CommandEditorConfigSync::ApplyConfiguredEnabled,
+        );
+        if !input_state.command_editor_config.enabled {
+            input_state.command_editor_view = None;
+        }
     }
 
     fn apply_font_cell_dimensions_to_tabs(&self) {
@@ -1855,6 +1891,53 @@ fn should_suspend_terminal_area(
     reset_cached_rows: bool,
 ) -> bool {
     synchronized_update_active && !reset_cached_rows && last_rendered_tab_id == Some(active_tab_id)
+}
+
+#[cfg(test)]
+mod command_editor_config_sync_tests {
+    use super::*;
+
+    #[test]
+    fn normal_sync_preserves_runtime_enabled_state() {
+        let mut configured = CommandEditorConfig {
+            enabled: false,
+            ..CommandEditorConfig::default()
+        };
+        configured.vim_mode = true;
+        let runtime = CommandEditorConfig {
+            enabled: true,
+            ..CommandEditorConfig::default()
+        };
+
+        let synced = synced_command_editor_config(
+            &configured,
+            &runtime,
+            CommandEditorConfigSync::PreserveRuntimeEnabled,
+        );
+
+        assert!(synced.enabled);
+        assert!(synced.vim_mode);
+    }
+
+    #[test]
+    fn config_sync_applies_configured_enabled_state() {
+        let configured = CommandEditorConfig {
+            enabled: false,
+            ..CommandEditorConfig::default()
+        };
+        let runtime = CommandEditorConfig {
+            enabled: true,
+            ..CommandEditorConfig::default()
+        };
+
+        let synced = synced_command_editor_config(
+            &configured,
+            &runtime,
+            CommandEditorConfigSync::ApplyConfiguredEnabled,
+        );
+
+        assert!(!synced.enabled);
+    }
 }
 
 #[cfg(test)]
