@@ -431,6 +431,10 @@ Notes:
   the current prompt, with terminal history shifted upward by those three rows
   while the box is visible. Multi-line input scrolls inside that three-row box
   with a small scrollbar, and Up/Down move between input lines when possible.
+  Mouse drag selects editor text, release copies it to the primary selection,
+  right-click copies a selected editor range to the clipboard or pastes when no
+  editor selection is active, middle-click pastes the primary selection, and the
+  configured Copy/Paste actions operate on the editor while it is active.
   Path completion understands single- and double-quoted arguments and escapes
   spaces for unquoted paths.
   Alternate-screen applications always receive normal terminal input; the

@@ -300,6 +300,7 @@ impl WindowHost {
     pub(crate) fn current_selection_autoscroll_direction(&mut self) -> Option<SelectionAutoscroll> {
         if !self.left_drag_active
             || !self.selection_drag_moved
+            || self.command_editor_drag_anchor.is_some()
             || self.permission_modal.is_some()
             || self.recording_popup.is_some()
         {
@@ -331,6 +332,7 @@ impl WindowHost {
     pub(crate) fn stop_selection_drag(&mut self) {
         self.left_drag_active = false;
         self.selection_drag_moved = false;
+        self.command_editor_drag_anchor = None;
         self.clear_selection_autoscroll();
     }
 

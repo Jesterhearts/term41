@@ -319,6 +319,62 @@ impl WindowHost {
         handled.0
     }
 
+    pub(crate) fn handle_command_editor_clipboard_action(
+        &mut self,
+        tab_id: TabId,
+        action: Action,
+    ) -> bool {
+        let config = self.command_editor_config();
+        if !config.enabled || !matches!(action, Action::Copy | Action::Paste) {
+            return false;
+        }
+        self.command_catalog.refresh_for_config(&config);
+        let command_words = self.command_catalog.names().to_vec();
+        let (handled_action, view) = {
+            let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+                return false;
+            };
+            let context = {
+                let terminal = target.terminal.lock();
+                command_editor_context(&terminal)
+            };
+            let Some(context) = context else {
+                return false;
+            };
+            let settings =
+                Self::command_editor_settings(&config, context.current_dir, command_words);
+
+            match action {
+                Action::Copy => {
+                    if let Some(text) = selected_text(&target.command_editor) {
+                        let mut terminal = target.terminal.lock();
+                        terminal.clipboard.set(ClipboardKind::Clipboard, &text);
+                    }
+                    (true, command_editor_view(&target.command_editor, &settings))
+                }
+                Action::Paste => {
+                    let text = {
+                        let mut terminal = target.terminal.lock();
+                        terminal.clipboard.get(ClipboardKind::Clipboard)
+                    };
+                    if let Some(text) = text {
+                        apply_input(
+                            &mut target.command_editor,
+                            EditorInput::Insert(text),
+                            &settings,
+                        );
+                    }
+                    (true, command_editor_view(&target.command_editor, &settings))
+                }
+                _ => (false, None),
+            }
+        };
+        if handled_action {
+            self.set_command_editor_view(view);
+        }
+        handled_action
+    }
+
     pub(crate) fn run_local_action(
         &mut self,
         action: Action,
@@ -329,6 +385,9 @@ impl WindowHost {
         }
         if action == Action::ToggleCommandEditor {
             self.toggle_command_editor();
+            return true;
+        }
+        if self.handle_command_editor_clipboard_action(tab_id, action) {
             return true;
         }
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {

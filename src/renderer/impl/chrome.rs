@@ -1607,6 +1607,36 @@ impl Renderer {
             );
         }
 
+        if let Some(selection) = editor.selection {
+            let (selection_start, selection_end) = selection.ordered();
+            for (visible_idx, &(line_start, line_end)) in
+                lines[visible_start..visible_end].iter().enumerate()
+            {
+                let start = selection_start.max(line_start);
+                let end = selection_end.min(line_end);
+                if start >= end {
+                    continue;
+                }
+                let start_col = editor.text[line_start..start].graphemes(true).count();
+                let end_col = editor.text[line_start..end]
+                    .graphemes(true)
+                    .count()
+                    .min(content_cols);
+                if start_col >= end_col || start_col >= content_cols {
+                    continue;
+                }
+                push_rect(
+                    content_x + start_col as f32 * layout.cell_w,
+                    box_y + visible_idx as f32 * layout.cell_h,
+                    (end_col - start_col) as f32 * layout.cell_w,
+                    layout.cell_h,
+                    pack_color(&Srgb::new(55, 84, 132), 210),
+                    bg_vertices,
+                    bg_indices,
+                );
+            }
+        }
+
         for (visible_idx, &(line_start, line_end)) in
             lines[visible_start..visible_end].iter().enumerate()
         {

@@ -40,6 +40,10 @@ use commands41::EditOutcome;
 use commands41::EditorInput;
 use commands41::EditorSettings;
 use commands41::apply_input;
+use commands41::clear_selection as clear_editor_selection;
+use commands41::select_range;
+use commands41::selected_text;
+use commands41::set_cursor;
 use config41::CommandEditorConfig;
 use config41::StatusLineMode;
 use config41::keybindings::Action;
@@ -88,6 +92,7 @@ use terminal41::selection::search_step_prev;
 use terminal41::selection::start_selection;
 use terminal41::settings;
 use terminal41::view;
+use unicode_segmentation::UnicodeSegmentation;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
 use winit::event::Ime;
@@ -138,6 +143,7 @@ static LOG_TOAST_TX: OnceLock<mpsc::Sender<String>> = OnceLock::new();
 
 const INITIAL_COLS: u32 = 80;
 const INITIAL_ROWS: u32 = 24;
+const COMMAND_EDITOR_BOX_ROWS: u32 = 3;
 
 /// Size of the cueue ring buffer for window→renderer events (in elements).
 const EVENT_QUEUE_SIZE: usize = 4096;
@@ -392,6 +398,7 @@ struct WindowHost {
     click_count: u32,
     left_drag_active: bool,
     selection_drag_moved: bool,
+    command_editor_drag_anchor: Option<usize>,
     selection_autoscroll_direction: Option<SelectionAutoscroll>,
     selection_autoscroll_next: Option<Instant>,
     window_size: (u32, u32),
@@ -672,6 +679,67 @@ fn command_editor_view(
     settings: &EditorSettings,
 ) -> Option<CommandLineView> {
     Some(editor.view(settings))
+}
+
+fn command_editor_line_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            ranges.push((start, idx));
+            start = idx + ch.len_utf8();
+        }
+    }
+    ranges.push((start, text.len()));
+    ranges
+}
+
+fn command_editor_cursor_line(
+    lines: &[(usize, usize)],
+    cursor: usize,
+) -> usize {
+    for (idx, &(_, end)) in lines.iter().enumerate() {
+        if cursor <= end {
+            return idx;
+        }
+    }
+    lines.len().saturating_sub(1)
+}
+
+fn command_editor_visible_line_start(
+    line_count: usize,
+    cursor_line: usize,
+) -> usize {
+    let visible = COMMAND_EDITOR_BOX_ROWS as usize;
+    if line_count <= visible {
+        return 0;
+    }
+    cursor_line.saturating_add(1).saturating_sub(visible)
+}
+
+fn command_editor_byte_index_at_cell(
+    view: &CommandLineView,
+    viewport_cols: u32,
+    visible_row: u32,
+    col: u32,
+) -> usize {
+    let lines = command_editor_line_ranges(&view.text);
+    let cursor = view.cursor.min(view.text.len());
+    if !view.text.is_char_boundary(cursor) {
+        return view.text.len();
+    }
+    let cursor_line = command_editor_cursor_line(&lines, cursor);
+    let visible_start = command_editor_visible_line_start(lines.len(), cursor_line);
+    let line_idx = (visible_start + visible_row as usize).min(lines.len().saturating_sub(1));
+    let has_overflow = lines.len() > COMMAND_EDITOR_BOX_ROWS as usize;
+    let scrollbar_cols = u32::from(has_overflow);
+    let content_cols = viewport_cols.saturating_sub(2 + scrollbar_cols).max(1);
+    let text_col = col.saturating_sub(1).min(content_cols);
+    let (line_start, line_end) = lines[line_idx];
+    view.text[line_start..line_end]
+        .grapheme_indices(true)
+        .nth(text_col as usize)
+        .map_or(line_end, |(idx, _)| line_start + idx)
 }
 
 fn dec_local_function_key_selector(
@@ -1008,6 +1076,7 @@ fn main() {
         click_count: 0,
         left_drag_active: false,
         selection_drag_moved: false,
+        command_editor_drag_anchor: None,
         selection_autoscroll_direction: None,
         selection_autoscroll_next: None,
         window_size: (0, 0),

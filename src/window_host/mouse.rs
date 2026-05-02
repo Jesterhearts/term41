@@ -46,6 +46,14 @@ impl WindowHost {
             w.set_cursor(winit::window::CursorIcon::Default);
         }
 
+        if self.command_editor_drag_anchor.is_some() {
+            if self.extend_command_editor_selection_to_mouse() {
+                self.selection_drag_moved = true;
+                self.notify_interaction_changed();
+            }
+            return;
+        }
+
         let pos = self.mouse_report_position_at(x, y);
         if self.forward_mouse_to_app() {
             let motion_position = self.mouse_motion_position_key(pos);
@@ -83,6 +91,200 @@ impl WindowHost {
         }
 
         self.notify_interaction_changed();
+    }
+
+    pub(crate) fn command_editor_offset_at_mouse(
+        &mut self,
+        x: f64,
+        y: f64,
+    ) -> Option<usize> {
+        let (cell_w, cell_h, gutter_w, _) = self.layout_snapshot();
+        let cell_w = cell_w.max(1);
+        let cell_h = cell_h.max(1);
+        let raw_x = x.max(0.0) as u32;
+        let raw_y = y.max(0.0) as u32;
+        if raw_x < gutter_w || raw_y < cell_h {
+            return None;
+        }
+
+        let target = self.active_input_target()?;
+        let (cursor_row, viewport_cols) = {
+            let terminal = target.terminal.lock();
+            command_editor_context(&terminal)?;
+            (terminal.active.cursor.row, terminal.viewport.cols.max(1))
+        };
+        let view = self.input_state.lock().command_editor_view.clone()?;
+
+        let box_top = cursor_row as i32 + 1 - COMMAND_EDITOR_BOX_ROWS as i32;
+        let terminal_row = raw_y.saturating_sub(cell_h) / cell_h;
+        let visible_row = terminal_row as i32 - box_top;
+        if !(0..COMMAND_EDITOR_BOX_ROWS as i32).contains(&visible_row) {
+            return None;
+        }
+
+        let terminal_x = raw_x.saturating_sub(gutter_w);
+        let terminal_width = viewport_cols.saturating_mul(cell_w);
+        if terminal_x >= terminal_width {
+            return None;
+        }
+        let col = (terminal_x / cell_w).min(viewport_cols.saturating_sub(1));
+        Some(command_editor_byte_index_at_cell(
+            &view,
+            viewport_cols,
+            visible_row as u32,
+            col,
+        ))
+    }
+
+    pub(crate) fn command_editor_settings_for_mouse(
+        &mut self,
+        tab_id: TabId,
+    ) -> Option<EditorSettings> {
+        let config = self.command_editor_config();
+        if !config.enabled {
+            return None;
+        }
+        self.command_catalog.refresh_for_config(&config);
+        let command_words = self.command_catalog.names().to_vec();
+        let target = self.input_endpoints.get(&tab_id)?;
+        let context = {
+            let terminal = target.terminal.lock();
+            command_editor_context(&terminal)
+        }?;
+        Some(Self::command_editor_settings(
+            &config,
+            context.current_dir,
+            command_words,
+        ))
+    }
+
+    pub(crate) fn start_command_editor_selection(
+        &mut self,
+        offset: usize,
+    ) -> bool {
+        let Some(tab_id) = self.active_input_tab else {
+            return false;
+        };
+        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+            return false;
+        };
+        let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+            return false;
+        };
+        set_cursor(&mut target.command_editor, offset);
+        let view = command_editor_view(&target.command_editor, &settings);
+        self.command_editor_drag_anchor = Some(offset);
+        self.left_drag_active = true;
+        self.selection_drag_moved = false;
+        self.set_command_editor_view(view);
+        true
+    }
+
+    pub(crate) fn extend_command_editor_selection_to_mouse(&mut self) -> bool {
+        let Some(anchor) = self.command_editor_drag_anchor else {
+            return false;
+        };
+        let Some(offset) = self.command_editor_offset_at_mouse(self.mouse_pos.0, self.mouse_pos.1)
+        else {
+            return false;
+        };
+        let Some(tab_id) = self.active_input_tab else {
+            return false;
+        };
+        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+            return false;
+        };
+        let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+            return false;
+        };
+        select_range(&mut target.command_editor, anchor, offset);
+        let view = command_editor_view(&target.command_editor, &settings);
+        self.set_command_editor_view(view);
+        true
+    }
+
+    pub(crate) fn finish_command_editor_selection(&mut self) -> bool {
+        let Some(tab_id) = self.active_input_tab else {
+            return false;
+        };
+        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+            return false;
+        };
+        let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+            return false;
+        };
+        if let Some(text) = selected_text(&target.command_editor) {
+            let mut terminal = target.terminal.lock();
+            terminal.clipboard.set(ClipboardKind::Primary, &text);
+        }
+        let view = command_editor_view(&target.command_editor, &settings);
+        self.command_editor_drag_anchor = None;
+        self.left_drag_active = false;
+        self.selection_drag_moved = false;
+        self.set_command_editor_view(view);
+        true
+    }
+
+    pub(crate) fn right_click_command_editor(&mut self) -> bool {
+        let Some(tab_id) = self.active_input_tab else {
+            return false;
+        };
+        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+            return false;
+        };
+        let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+            return false;
+        };
+        if let Some(text) = selected_text(&target.command_editor) {
+            let mut terminal = target.terminal.lock();
+            terminal.clipboard.set(ClipboardKind::Clipboard, &text);
+            drop(terminal);
+            clear_editor_selection(&mut target.command_editor);
+        } else {
+            let text = {
+                let mut terminal = target.terminal.lock();
+                terminal.clipboard.get(ClipboardKind::Clipboard)
+            };
+            if let Some(text) = text {
+                apply_input(
+                    &mut target.command_editor,
+                    EditorInput::Insert(text),
+                    &settings,
+                );
+            }
+        }
+        let view = command_editor_view(&target.command_editor, &settings);
+        self.set_command_editor_view(view);
+        true
+    }
+
+    pub(crate) fn paste_command_editor_selection(
+        &mut self,
+        kind: ClipboardKind,
+    ) -> bool {
+        let Some(tab_id) = self.active_input_tab else {
+            return false;
+        };
+        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+            return false;
+        };
+        let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+            return false;
+        };
+        let text = {
+            let mut terminal = target.terminal.lock();
+            terminal.clipboard.get(kind)
+        };
+        if let Some(text) = text {
+            apply_input(
+                &mut target.command_editor,
+                EditorInput::Insert(text),
+                &settings,
+            );
+        }
+        let view = command_editor_view(&target.command_editor, &settings);
+        self.set_command_editor_view(view);
+        true
     }
 
     pub(crate) fn permission_choice_at(
@@ -267,6 +469,44 @@ impl WindowHost {
         if pressed && button == MouseButton::Left && self.is_in_gutter() {
             let (_, screen_row) = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
             self.open_gutter_popup(screen_row);
+            return;
+        }
+
+        if !pressed && button == MouseButton::Left && self.command_editor_drag_anchor.is_some() {
+            self.finish_command_editor_selection();
+            self.notify_interaction_changed();
+            return;
+        }
+
+        if pressed
+            && button == MouseButton::Left
+            && let Some(offset) =
+                self.command_editor_offset_at_mouse(self.mouse_pos.0, self.mouse_pos.1)
+        {
+            self.start_command_editor_selection(offset);
+            self.notify_interaction_changed();
+            return;
+        }
+
+        if pressed
+            && button == MouseButton::Right
+            && self
+                .command_editor_offset_at_mouse(self.mouse_pos.0, self.mouse_pos.1)
+                .is_some()
+        {
+            self.right_click_command_editor();
+            self.notify_interaction_changed();
+            return;
+        }
+
+        if pressed
+            && button == MouseButton::Middle
+            && self
+                .command_editor_offset_at_mouse(self.mouse_pos.0, self.mouse_pos.1)
+                .is_some()
+        {
+            self.paste_command_editor_selection(ClipboardKind::Primary);
+            self.notify_interaction_changed();
             return;
         }
 

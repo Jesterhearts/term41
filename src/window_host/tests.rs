@@ -212,6 +212,28 @@ mod command_editor_input_tests {
             Some(EditorInput::Insert("\n".into()))
         );
     }
+
+    #[test]
+    fn mouse_cell_maps_to_visible_multiline_editor_text() {
+        let view = CommandLineView {
+            text: "one\ntwo\nthree\nfour".to_owned(),
+            cursor: "one\ntwo\nthree\nfour".len(),
+            spans: Vec::new(),
+            selection: None,
+            completion: None,
+            candidates: Vec::new(),
+            candidate_index: 0,
+        };
+
+        assert_eq!(
+            command_editor_byte_index_at_cell(&view, 80, 0, 1),
+            "one\n".len()
+        );
+        assert_eq!(
+            command_editor_byte_index_at_cell(&view, 80, 2, 3),
+            "one\ntwo\nthree\nfo".len()
+        );
+    }
 }
 
 #[cfg(test)]

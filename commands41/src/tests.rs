@@ -60,6 +60,73 @@ fn submit_replaces_newlines_with_spaces() {
 }
 
 #[test]
+fn selection_replaces_on_insert_and_copies_text() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo test".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(select_range(&mut editor, 6, 10), EditOutcome::Updated);
+    assert_eq!(selected_text(&editor).as_deref(), Some("test"));
+    assert_eq!(
+        editor.view(&settings).selection,
+        Some(EditorSelection {
+            anchor: 6,
+            head: 10
+        })
+    );
+
+    assert_eq!(
+        apply_input(
+            &mut editor,
+            EditorInput::Insert("clippy".to_owned()),
+            &settings,
+        ),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo clippy");
+    assert_eq!(editor.view(&settings).selection, None);
+}
+
+#[test]
+fn selected_text_handles_reverse_selection() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one two three".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(select_range(&mut editor, 13, 4), EditOutcome::Updated);
+    assert_eq!(selected_text(&editor).as_deref(), Some("two three"));
+}
+
+#[test]
+fn delete_removes_selected_range() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo test".to_owned()),
+        &settings,
+    );
+    select_range(&mut editor, 5, 10);
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Backspace, &settings),
+        EditOutcome::Updated
+    );
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "cargo");
+    assert_eq!(view.cursor, 5);
+    assert_eq!(view.selection, None);
+}
+
+#[test]
 fn up_down_move_between_multiline_editor_rows() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings::default();

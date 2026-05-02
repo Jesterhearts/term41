@@ -52,11 +52,32 @@ pub struct HighlightSpan {
     pub kind: HighlightKind,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub struct EditorSelection {
+    pub anchor: usize,
+    pub head: usize,
+}
+
+impl EditorSelection {
+    pub fn ordered(self) -> (usize, usize) {
+        if self.anchor <= self.head {
+            (self.anchor, self.head)
+        } else {
+            (self.head, self.anchor)
+        }
+    }
+
+    pub fn is_empty(self) -> bool {
+        self.anchor == self.head
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandLineView {
     pub text: String,
     pub cursor: usize,
     pub spans: Vec<HighlightSpan>,
+    pub selection: Option<EditorSelection>,
     pub completion: Option<String>,
     pub candidates: Vec<String>,
     pub candidate_index: usize,
@@ -101,6 +122,7 @@ pub struct CommandEditor {
     history_pos: Option<usize>,
     draft: String,
     kill_buffer: String,
+    selection: Option<EditorSelection>,
     path_cycle: Option<PathCompletionCycle>,
     completion_selection: Option<CompletionSelection>,
 }
@@ -128,6 +150,7 @@ impl CommandEditor {
             text: self.buffer.clone(),
             cursor: self.cursor,
             spans: highlight_shell(&self.buffer),
+            selection: self.selection.filter(|selection| !selection.is_empty()),
             completion,
             candidates,
             candidate_index,
@@ -139,6 +162,7 @@ impl CommandEditor {
         self.cursor = 0;
         self.history_pos = None;
         self.draft.clear();
+        self.selection = None;
         self.path_cycle = None;
         self.completion_selection = None;
     }
@@ -161,6 +185,53 @@ impl CommandEditor {
     }
 }
 
+pub fn set_cursor(
+    editor: &mut CommandEditor,
+    cursor: usize,
+) -> EditOutcome {
+    let Some(cursor) = valid_boundary(&editor.buffer, cursor) else {
+        return EditOutcome::Ignored;
+    };
+    clear_completion_state(editor);
+    editor.cursor = cursor;
+    editor.selection = None;
+    EditOutcome::Updated
+}
+
+pub fn select_range(
+    editor: &mut CommandEditor,
+    anchor: usize,
+    head: usize,
+) -> EditOutcome {
+    let (Some(anchor), Some(head)) = (
+        valid_boundary(&editor.buffer, anchor),
+        valid_boundary(&editor.buffer, head),
+    ) else {
+        return EditOutcome::Ignored;
+    };
+    clear_completion_state(editor);
+    editor.cursor = head;
+    editor.selection = Some(EditorSelection { anchor, head });
+    EditOutcome::Updated
+}
+
+pub fn selected_text(editor: &CommandEditor) -> Option<String> {
+    let selection = editor.selection?;
+    if selection.is_empty() {
+        return None;
+    }
+    let (start, end) = selection.ordered();
+    Some(editor.buffer[start..end].to_owned())
+}
+
+pub fn clear_selection(editor: &mut CommandEditor) -> EditOutcome {
+    if editor.selection.take().is_some() {
+        EditOutcome::Updated
+    } else {
+        EditOutcome::Ignored
+    }
+}
+
 pub fn apply_input(
     editor: &mut CommandEditor,
     input: EditorInput,
@@ -173,8 +244,7 @@ pub fn apply_input(
             }
             clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
-            editor.buffer.insert_str(editor.cursor, &text);
-            editor.cursor += text.len();
+            replace_selection_or_insert(editor, &text);
             EditOutcome::Updated
         }
         EditorInput::Enter => {
@@ -184,6 +254,9 @@ pub fn apply_input(
             EditOutcome::Submitted(command)
         }
         EditorInput::Backspace => {
+            if delete_selection(editor).is_some() {
+                return EditOutcome::Updated;
+            }
             let Some(prev) = previous_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
@@ -194,6 +267,9 @@ pub fn apply_input(
             EditOutcome::Updated
         }
         EditorInput::Delete => {
+            if delete_selection(editor).is_some() {
+                return EditOutcome::Updated;
+            }
             let Some(next) = next_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
@@ -208,6 +284,7 @@ pub fn apply_input(
             };
             clear_completion_state(editor);
             editor.cursor = prev;
+            editor.selection = None;
             EditOutcome::Updated
         }
         EditorInput::MoveRight => {
@@ -222,6 +299,7 @@ pub fn apply_input(
             };
             clear_completion_state(editor);
             editor.cursor = next;
+            editor.selection = None;
             EditOutcome::Updated
         }
         EditorInput::MoveWordLeft => {
@@ -230,6 +308,7 @@ pub fn apply_input(
             };
             clear_completion_state(editor);
             editor.cursor = prev;
+            editor.selection = None;
             EditOutcome::Updated
         }
         EditorInput::MoveWordRight => {
@@ -238,6 +317,7 @@ pub fn apply_input(
             };
             clear_completion_state(editor);
             editor.cursor = next;
+            editor.selection = None;
             EditOutcome::Updated
         }
         EditorInput::MoveHome => {
@@ -246,6 +326,7 @@ pub fn apply_input(
             } else {
                 clear_completion_state(editor);
                 editor.cursor = 0;
+                editor.selection = None;
                 EditOutcome::Updated
             }
         }
@@ -255,10 +336,14 @@ pub fn apply_input(
             } else {
                 clear_completion_state(editor);
                 editor.cursor = editor.buffer.len();
+                editor.selection = None;
                 EditOutcome::Updated
             }
         }
         EditorInput::DeleteWordLeft => {
+            if delete_selection(editor).is_some() {
+                return EditOutcome::Updated;
+            }
             let Some(prev) = previous_word_start(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
@@ -270,6 +355,9 @@ pub fn apply_input(
             EditOutcome::Updated
         }
         EditorInput::DeleteWordRight => {
+            if delete_selection(editor).is_some() {
+                return EditOutcome::Updated;
+            }
             let Some(next) = next_word_end(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
@@ -288,6 +376,7 @@ pub fn apply_input(
             editor.kill_buffer = editor.buffer[..editor.cursor].to_owned();
             editor.buffer.drain(..editor.cursor);
             editor.cursor = 0;
+            editor.selection = None;
             EditOutcome::Updated
         }
         EditorInput::KillToEnd => {
@@ -298,6 +387,7 @@ pub fn apply_input(
             replace_history_edit_with_draft(editor);
             editor.kill_buffer = editor.buffer[editor.cursor..].to_owned();
             editor.buffer.truncate(editor.cursor);
+            editor.selection = None;
             EditOutcome::Updated
         }
         EditorInput::Yank => {
@@ -306,8 +396,8 @@ pub fn apply_input(
             }
             clear_completion_state(editor);
             replace_history_edit_with_draft(editor);
-            editor.buffer.insert_str(editor.cursor, &editor.kill_buffer);
-            editor.cursor += editor.kill_buffer.len();
+            let text = editor.kill_buffer.clone();
+            replace_selection_or_insert(editor, &text);
             EditOutcome::Updated
         }
         EditorInput::HistoryPrevious => {
@@ -516,6 +606,39 @@ fn replace_history_edit_with_draft(editor: &mut CommandEditor) {
     }
 }
 
+fn valid_boundary(
+    text: &str,
+    cursor: usize,
+) -> Option<usize> {
+    (cursor <= text.len() && text.is_char_boundary(cursor)).then_some(cursor)
+}
+
+fn replace_selection_or_insert(
+    editor: &mut CommandEditor,
+    text: &str,
+) {
+    if let Some((start, _)) = delete_selection(editor) {
+        editor.buffer.insert_str(start, text);
+        editor.cursor = start + text.len();
+    } else {
+        editor.buffer.insert_str(editor.cursor, text);
+        editor.cursor += text.len();
+    }
+}
+
+fn delete_selection(editor: &mut CommandEditor) -> Option<(usize, usize)> {
+    let selection = editor.selection.take()?;
+    if selection.is_empty() {
+        return None;
+    }
+    let (start, end) = selection.ordered();
+    clear_completion_state(editor);
+    replace_history_edit_with_draft(editor);
+    editor.buffer.drain(start..end);
+    editor.cursor = start;
+    Some((start, end))
+}
+
 fn clear_completion_state(editor: &mut CommandEditor) {
     editor.path_cycle = None;
     editor.completion_selection = None;
@@ -537,6 +660,7 @@ fn history_previous(editor: &mut CommandEditor) -> EditOutcome {
     editor.history_pos = Some(pos);
     editor.buffer = editor.history[pos].clone();
     editor.cursor = editor.buffer.len();
+    editor.selection = None;
     EditOutcome::Updated
 }
 
@@ -554,6 +678,7 @@ fn history_next(editor: &mut CommandEditor) -> EditOutcome {
         editor.draft.clear();
     }
     editor.cursor = editor.buffer.len();
+    editor.selection = None;
     EditOutcome::Updated
 }
 
@@ -585,6 +710,7 @@ fn move_cursor_line(
         byte_index_at_grapheme_col(&editor.buffer, target_start, target_end, cursor_col);
     clear_completion_state(editor);
     editor.cursor = target_cursor;
+    editor.selection = None;
     Some(EditOutcome::Updated)
 }
 
@@ -647,8 +773,7 @@ fn complete_current_prefix(
     };
     clear_completion_state(editor);
     replace_history_edit_with_draft(editor);
-    editor.buffer.insert_str(editor.cursor, &suffix);
-    editor.cursor += suffix.len();
+    replace_selection_or_insert(editor, &suffix);
     EditOutcome::Updated
 }
 
@@ -1184,8 +1309,7 @@ fn accept_selected_completion(editor: &mut CommandEditor) -> bool {
     };
     editor.path_cycle = None;
     replace_history_edit_with_draft(editor);
-    editor.buffer.insert_str(editor.cursor, &suffix);
-    editor.cursor += suffix.len();
+    replace_selection_or_insert(editor, &suffix);
     true
 }
 
@@ -1201,8 +1325,7 @@ fn accept_path_cycle(editor: &mut CommandEditor) -> bool {
         return false;
     };
     replace_history_edit_with_draft(editor);
-    editor.buffer.insert_str(editor.cursor, &suffix);
-    editor.cursor += suffix.len();
+    replace_selection_or_insert(editor, &suffix);
     true
 }
 
@@ -1215,8 +1338,7 @@ fn accept_visible_path_completion(
     };
     clear_completion_state(editor);
     replace_history_edit_with_draft(editor);
-    editor.buffer.insert_str(editor.cursor, &suffix);
-    editor.cursor += suffix.len();
+    replace_selection_or_insert(editor, &suffix);
     true
 }
 
