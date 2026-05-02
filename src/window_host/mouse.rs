@@ -494,26 +494,18 @@ impl WindowHost {
             return;
         }
 
-        if pressed
-            && button == MouseButton::Right
-            && self
-                .command_editor_offset_at_mouse(self.mouse_pos.0, self.mouse_pos.1)
-                .is_some()
-        {
-            self.right_click_command_editor();
-            self.notify_interaction_changed();
-            return;
-        }
-
-        if pressed
-            && button == MouseButton::Middle
-            && self
-                .command_editor_offset_at_mouse(self.mouse_pos.0, self.mouse_pos.1)
-                .is_some()
-        {
-            self.paste_command_editor_selection(ClipboardKind::Primary);
-            self.notify_interaction_changed();
-            return;
+        let command_editor_open = self.input_state.lock().command_editor_view.is_some();
+        if let Some(kind) = command_editor_mouse_paste_kind(command_editor_open, pressed, button) {
+            let handled = match kind {
+                ClipboardKind::Clipboard => self.right_click_command_editor(),
+                ClipboardKind::Primary => {
+                    self.paste_command_editor_selection(ClipboardKind::Primary)
+                }
+            };
+            if handled {
+                self.notify_interaction_changed();
+                return;
+            }
         }
 
         if pressed {

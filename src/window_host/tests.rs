@@ -52,6 +52,26 @@ mod selection_autoscroll_tests {
             }
         );
     }
+
+    #[test]
+    fn command_editor_mouse_paste_takes_over_when_open() {
+        assert_eq!(
+            command_editor_mouse_paste_kind(true, true, MouseButton::Right),
+            Some(ClipboardKind::Clipboard)
+        );
+        assert_eq!(
+            command_editor_mouse_paste_kind(true, true, MouseButton::Middle),
+            Some(ClipboardKind::Primary)
+        );
+        assert_eq!(
+            command_editor_mouse_paste_kind(false, true, MouseButton::Right),
+            None
+        );
+        assert_eq!(
+            command_editor_mouse_paste_kind(true, false, MouseButton::Right),
+            None
+        );
+    }
 }
 
 #[cfg(test)]

@@ -452,6 +452,8 @@ Notes:
   right-click copies a selected editor range to the clipboard or pastes when no
   editor selection is active, middle-click pastes the primary selection, and
   the configured Copy/Paste actions operate on the editor while it is active.
+  While the editor is open, right- and middle-click paste gestures target the
+  editor even when the pointer is over the terminal area.
   Path completion understands single- and double-quoted arguments and escapes
   spaces for unquoted paths.
 

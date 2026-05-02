@@ -631,6 +631,21 @@ fn mouse_report_position_from_pixels(
     }
 }
 
+fn command_editor_mouse_paste_kind(
+    command_editor_open: bool,
+    pressed: bool,
+    button: MouseButton,
+) -> Option<ClipboardKind> {
+    if !command_editor_open || !pressed {
+        return None;
+    }
+    match button {
+        MouseButton::Right => Some(ClipboardKind::Clipboard),
+        MouseButton::Middle => Some(ClipboardKind::Primary),
+        _ => None,
+    }
+}
+
 fn dec_udk_selector(
     key: &Key,
     mods: ModifiersState,
