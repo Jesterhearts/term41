@@ -40,6 +40,10 @@ pub(super) fn replace_edit_with_draft(
     }
 }
 
+pub(super) fn is_navigating(history: &EditorHistory) -> bool {
+    history.pos.is_some()
+}
+
 pub(super) fn previous(
     history: &mut EditorHistory,
     current_buffer: &str,

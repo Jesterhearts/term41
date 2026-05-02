@@ -607,6 +607,150 @@ fn history_arrows_restore_draft() {
 }
 
 #[test]
+fn history_arrows_keep_navigating_when_selected_entry_has_completions() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings {
+        history_entries: vec![
+            HistoryEntry::external("cargo check"),
+            HistoryEntry::external("cargo clippy"),
+            HistoryEntry::external("cargo"),
+        ],
+        ..EditorSettings::default()
+    };
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo clippy");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryNext, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo");
+}
+
+#[test]
+fn tab_completion_accepts_history_navigation_before_editing() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings {
+        history_entries: vec![
+            HistoryEntry::external("cargo check"),
+            HistoryEntry::external("cargo clippy"),
+            HistoryEntry::external("cargo"),
+        ],
+        ..EditorSettings::default()
+    };
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Complete, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo clippy");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryNext, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo clippy");
+}
+
+#[test]
+fn tab_completion_accepts_one_history_path_element() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings {
+        history_entries: vec![HistoryEntry::external("cat src/main.rs")],
+        ..EditorSettings::default()
+    };
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat s".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        editor.view(&settings).completion.as_deref(),
+        Some("rc/main.rs")
+    );
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Complete, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cat src/");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Complete, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cat src/main.rs");
+}
+
+#[test]
+fn right_arrow_accepts_full_visible_history_completion() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings {
+        history_entries: vec![HistoryEntry::external("cat src/main.rs")],
+        ..EditorSettings::default()
+    };
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat s".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::MoveRight, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cat src/main.rs");
+}
+
+#[test]
+fn typing_accepts_history_navigation_before_editing() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings {
+        history_entries: vec![
+            HistoryEntry::external("cargo check"),
+            HistoryEntry::external("cargo clippy"),
+            HistoryEntry::external("cargo"),
+        ],
+        ..EditorSettings::default()
+    };
+
+    apply_input(&mut editor, EditorInput::HistoryPrevious, &settings);
+    assert_eq!(editor.view(&settings).text, "cargo");
+    apply_input(
+        &mut editor,
+        EditorInput::Insert(" build".to_owned()),
+        &settings,
+    );
+    assert_eq!(editor.view(&settings).text, "cargo build");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryNext, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo build");
+}
+
+#[test]
 fn external_history_entries_participate_in_navigation() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings {

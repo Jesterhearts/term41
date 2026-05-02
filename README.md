@@ -431,8 +431,10 @@ Notes:
   PowerShell/PowerShell Core, and Atuin-backed history when Atuin is active.
   Discovered commands are offered
   only where a shell command can start, so they do not pollute normal argument
-  completion. When a path has multiple matches, Tab cycles the ghost candidate
-  and Right accepts the active one; ambiguous completions show up to five ranked
+  completion. For history completions, Tab accepts the next whitespace-delimited
+  token or path element, while Right accepts the full visible history item. When
+  a filesystem path has multiple matches, Tab cycles the ghost candidate and
+  Right accepts the active one; ambiguous completions show up to five ranked
   matches near the editor box, and Up/Down rotates the active match while the
   list is visible. While enabled, the editor is rendered in an outlined
   three-row box under the current prompt on the primary screen, with terminal

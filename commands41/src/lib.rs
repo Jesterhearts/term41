@@ -356,6 +356,7 @@ pub fn apply_input(
         EditorInput::MoveRight => {
             if accept_selected_completion(editor)
                 || accept_path_cycle(editor)
+                || accept_visible_history_completion(editor, settings)
                 || accept_visible_path_completion(editor, settings)
             {
                 return EditOutcome::Updated;
@@ -474,11 +475,17 @@ pub fn apply_input(
         EditorInput::Undo => undo_text_edit(editor),
         EditorInput::Redo => redo_text_edit(editor),
         EditorInput::HistoryPrevious => {
+            if history::is_navigating(&editor.history) {
+                return history_previous(editor, settings);
+            }
             cycle_completion_selection(editor, settings, CompletionDirection::Previous)
                 .or_else(|| move_cursor_line(editor, LineDirection::Previous))
                 .unwrap_or_else(|| history_previous(editor, settings))
         }
         EditorInput::HistoryNext => {
+            if history::is_navigating(&editor.history) {
+                return history_next(editor, settings);
+            }
             cycle_completion_selection(editor, settings, CompletionDirection::Next)
                 .or_else(|| move_cursor_line(editor, LineDirection::Next))
                 .unwrap_or_else(|| history_next(editor, settings))
@@ -892,6 +899,13 @@ fn complete_current_prefix(
     }
 
     if cycle_path_completion(editor, settings) {
+        replace_history_edit_with_draft(editor);
+        return EditOutcome::Updated;
+    }
+
+    if let Some(suffix) = history_completion_step_suffix(editor, settings) {
+        begin_text_edit(editor);
+        replace_selection_or_insert(editor, &suffix);
         return EditOutcome::Updated;
     }
 
@@ -928,12 +942,8 @@ fn completion_suffix(
 ) -> Option<String> {
     let buffer = &editor.buffer;
     let cursor = editor.cursor;
-    if cursor == buffer.len() && !buffer.is_empty() {
-        for candidate in history::command_candidates(&editor.history, &settings.history_entries) {
-            if candidate != *buffer && candidate.starts_with(buffer) {
-                return Some(candidate[buffer.len()..].to_owned());
-            }
-        }
+    if let Some(suffix) = history_completion_suffix(editor, settings) {
+        return Some(suffix);
     }
 
     if let Some(suffix) = path_completion_suffix(buffer, cursor, settings) {
@@ -955,6 +965,56 @@ fn completion_suffix(
         }
     }
     None
+}
+
+fn history_completion_suffix(
+    editor: &CommandEditor,
+    settings: &EditorSettings,
+) -> Option<String> {
+    let buffer = &editor.buffer;
+    let cursor = editor.cursor;
+    if cursor != buffer.len() || buffer.is_empty() {
+        return None;
+    }
+    history::command_candidates(&editor.history, &settings.history_entries)
+        .into_iter()
+        .find(|candidate| candidate != buffer && candidate.starts_with(buffer))
+        .map(|candidate| candidate[buffer.len()..].to_owned())
+}
+
+fn history_completion_step_suffix(
+    editor: &CommandEditor,
+    settings: &EditorSettings,
+) -> Option<String> {
+    let suffix = history_completion_suffix(editor, settings)?;
+    let end = next_history_completion_step_end(&suffix)?;
+    Some(suffix[..end].to_owned())
+}
+
+fn next_history_completion_step_end(text: &str) -> Option<usize> {
+    let mut saw_segment_text = false;
+    let mut end = 0;
+    for (idx, ch) in text.char_indices() {
+        if ch.is_whitespace() {
+            if saw_segment_text {
+                break;
+            }
+        } else if is_path_separator(ch) {
+            end = idx + ch.len_utf8();
+            if saw_segment_text {
+                return Some(end);
+            }
+            continue;
+        } else {
+            saw_segment_text = true;
+        }
+        end = idx + ch.len_utf8();
+    }
+    saw_segment_text.then_some(end)
+}
+
+fn is_path_separator(ch: char) -> bool {
+    matches!(ch, '/' | '\\')
 }
 
 fn completion_candidate_view(
@@ -1422,6 +1482,18 @@ fn accept_path_cycle(editor: &mut CommandEditor) -> bool {
         return false;
     }
     let Some(suffix) = cycle.current_suffix() else {
+        return false;
+    };
+    begin_text_edit(editor);
+    replace_selection_or_insert(editor, &suffix);
+    true
+}
+
+fn accept_visible_history_completion(
+    editor: &mut CommandEditor,
+    settings: &EditorSettings,
+) -> bool {
+    let Some(suffix) = history_completion_suffix(editor, settings) else {
         return false;
     };
     begin_text_edit(editor);
