@@ -52,6 +52,68 @@ impl WindowHost {
         self.settle_permission_modal(decision);
     }
 
+    pub(crate) fn handle_command_palette_key(
+        &mut self,
+        tab_id: TabId,
+        key: &Key,
+    ) -> bool {
+        if !self.command_palette_is_open() {
+            return false;
+        }
+
+        let action = match key {
+            Key::Named(NamedKey::Escape) => {
+                self.close_command_palette();
+                None
+            }
+            Key::Named(NamedKey::ArrowUp) => {
+                self.move_command_palette_selection(-1);
+                None
+            }
+            Key::Named(NamedKey::ArrowDown) => {
+                self.move_command_palette_selection(1);
+                None
+            }
+            Key::Named(NamedKey::Backspace) => {
+                self.update_command_palette_query(|query| {
+                    query.pop();
+                });
+                None
+            }
+            Key::Named(NamedKey::Enter) => self.accept_command_palette_selection(),
+            Key::Named(NamedKey::Space)
+                if !self.modifiers.control_key()
+                    && !self.modifiers.alt_key()
+                    && !self.modifiers.super_key() =>
+            {
+                self.update_command_palette_query(|query| {
+                    query.push(' ');
+                });
+                None
+            }
+            Key::Character(text)
+                if !self.modifiers.control_key()
+                    && !self.modifiers.alt_key()
+                    && !self.modifiers.super_key() =>
+            {
+                self.update_command_palette_query(|query| {
+                    query.push_str(text);
+                });
+                None
+            }
+            _ => None,
+        };
+
+        if let Some(action) = action {
+            if self.run_local_action(action, tab_id) {
+                self.notify_interaction_changed();
+            } else {
+                self.send(RenderEvent::Action(action));
+            }
+        }
+        true
+    }
+
     pub(crate) fn write_host_bytes(
         target: &mut InputEndpoint,
         host_bytes: Vec<u8>,
@@ -398,6 +460,10 @@ impl WindowHost {
         if matches!(action, Action::Copy) {
             self.stop_selection_drag();
         }
+        if action == Action::OpenCommandPalette {
+            self.open_command_palette();
+            return true;
+        }
         if action == Action::ToggleCommandEditor {
             self.toggle_command_editor();
             return true;
@@ -497,7 +563,8 @@ impl WindowHost {
             | Action::PrevTab
             | Action::PasteAsBackground
             | Action::ClearPastedBackground
-            | Action::ToggleCommandEditor => false,
+            | Action::ToggleCommandEditor
+            | Action::OpenCommandPalette => false,
         }
     }
 
@@ -519,6 +586,10 @@ impl WindowHost {
         let Some(active_tab_id) = self.active_input_tab else {
             return;
         };
+
+        if self.handle_command_palette_key(active_tab_id, &key) {
+            return;
+        }
 
         if self.recording_popup.is_some() {
             let _ = self.handle_recording_popup_key(&key);

@@ -139,6 +139,58 @@ impl WindowHost {
         self.input_state.lock().command_editor_config.clone()
     }
 
+    pub(crate) fn command_palette_is_open(&self) -> bool {
+        self.input_state.lock().command_palette.is_some()
+    }
+
+    pub(crate) fn open_command_palette(&mut self) {
+        self.input_state.lock().command_palette = Some(command_palette_view());
+        self.notify_interaction_changed();
+    }
+
+    pub(crate) fn close_command_palette(&mut self) {
+        self.input_state.lock().command_palette = None;
+        self.notify_interaction_changed();
+    }
+
+    pub(crate) fn move_command_palette_selection(
+        &mut self,
+        delta: isize,
+    ) {
+        let mut state = self.input_state.lock();
+        let Some(view) = state.command_palette.as_mut() else {
+            return;
+        };
+        move_command_palette_selection(view, delta);
+        drop(state);
+        self.notify_interaction_changed();
+    }
+
+    pub(crate) fn update_command_palette_query(
+        &mut self,
+        update: impl FnOnce(&mut String),
+    ) {
+        let mut state = self.input_state.lock();
+        let Some(view) = state.command_palette.as_mut() else {
+            return;
+        };
+        let mut query = view.query.clone();
+        update(&mut query);
+        set_command_palette_query(view, query);
+        drop(state);
+        self.notify_interaction_changed();
+    }
+
+    pub(crate) fn accept_command_palette_selection(&mut self) -> Option<Action> {
+        let action = {
+            let state = self.input_state.lock();
+            let view = state.command_palette.as_ref()?;
+            command_palette_selected_action(view)
+        }?;
+        self.close_command_palette();
+        Some(action)
+    }
+
     pub(crate) fn command_editor_is_open_for_tab(
         &self,
         tab_id: TabId,

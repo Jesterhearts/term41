@@ -71,6 +71,60 @@ pub enum Action {
     /// Toggle the terminal-local command editor for the current runtime
     /// session. Does not rewrite config.
     ToggleCommandEditor,
+    /// Open the command palette.
+    OpenCommandPalette,
+}
+
+impl Action {
+    /// Actions shown by the command palette. This intentionally excludes
+    /// [`Action::OpenCommandPalette`] because opening the palette from inside
+    /// itself is not a useful command.
+    pub fn command_palette_actions() -> &'static [Action] {
+        &[
+            Action::ScrollPageUp,
+            Action::ScrollPageDown,
+            Action::Copy,
+            Action::Paste,
+            Action::OpenSearch,
+            Action::ScrollPrevPrompt,
+            Action::ScrollNextPrompt,
+            Action::OpenNewWindow,
+            Action::NewTab,
+            Action::CloseActiveTab,
+            Action::CloseWindow,
+            Action::NextTab,
+            Action::PrevTab,
+            Action::PasteAsBackground,
+            Action::ClearPastedBackground,
+            Action::ToggleOutputRecording,
+            Action::CycleEmojiCompatibility,
+            Action::ToggleCommandEditor,
+        ]
+    }
+
+    pub fn palette_label(self) -> &'static str {
+        match self {
+            Action::ScrollPageUp => "Scroll page up",
+            Action::ScrollPageDown => "Scroll page down",
+            Action::Copy => "Copy",
+            Action::Paste => "Paste",
+            Action::OpenSearch => "Open search",
+            Action::ScrollPrevPrompt => "Scroll to previous prompt",
+            Action::ScrollNextPrompt => "Scroll to next prompt",
+            Action::OpenNewWindow => "Open new window",
+            Action::NewTab => "New tab",
+            Action::CloseActiveTab => "Close active tab",
+            Action::CloseWindow => "Close window",
+            Action::NextTab => "Next tab",
+            Action::PrevTab => "Previous tab",
+            Action::PasteAsBackground => "Paste as background",
+            Action::ClearPastedBackground => "Clear pasted background",
+            Action::ToggleOutputRecording => "Toggle output recording",
+            Action::CycleEmojiCompatibility => "Cycle emoji compatibility",
+            Action::ToggleCommandEditor => "Toggle command editor",
+            Action::OpenCommandPalette => "Open command palette",
+        }
+    }
 }
 
 /// One key, identified either by its winit `NamedKey` (Enter, F1, …) or by
@@ -193,6 +247,11 @@ impl Keybindings {
                     key: KeySpec::Char('d'),
                     mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
                     action: Action::ToggleCommandEditor,
+                },
+                Keybinding {
+                    key: KeySpec::Char('p'),
+                    mods: ModifiersState::CONTROL | ModifiersState::SHIFT,
+                    action: Action::OpenCommandPalette,
                 },
             ],
         }
@@ -518,5 +577,22 @@ mod tests {
             bindings.lookup(&key, mods),
             Some(Action::ToggleCommandEditor)
         );
+    }
+
+    #[test]
+    fn defaults_bind_ctrl_shift_p_to_command_palette() {
+        let bindings = Keybindings::defaults();
+        let key = Key::Character(SmolStr::new_inline("p"));
+        let mods = ModifiersState::CONTROL | ModifiersState::SHIFT;
+        assert_eq!(
+            bindings.lookup(&key, mods),
+            Some(Action::OpenCommandPalette)
+        );
+    }
+
+    #[test]
+    fn command_palette_actions_exclude_palette_open_action() {
+        assert!(!Action::command_palette_actions().contains(&Action::OpenCommandPalette));
+        assert!(Action::command_palette_actions().contains(&Action::ToggleCommandEditor));
     }
 }

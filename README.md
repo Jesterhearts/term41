@@ -385,6 +385,7 @@ keybindings = [
   { keys = "Ctrl+Shift+C", action = "Copy" },
   { keys = "Ctrl+Shift+V", action = "Paste" },
   { keys = "Ctrl+Shift+D", action = "ToggleCommandEditor" },
+  { keys = "Ctrl+Shift+P", action = "OpenCommandPalette" },
   { keys = "Alt+Shift+L", action = "CycleEmojiCompatibility" },
 ]
 ```

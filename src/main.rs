@@ -378,6 +378,76 @@ struct ToastView {
     text: String,
 }
 
+#[derive(Clone)]
+pub(crate) struct CommandPaletteItem {
+    pub(crate) label: String,
+    pub(crate) action: Action,
+}
+
+#[derive(Clone)]
+pub(crate) struct CommandPaletteView {
+    pub(crate) query: String,
+    pub(crate) items: Vec<CommandPaletteItem>,
+    pub(crate) selected: usize,
+}
+
+fn command_palette_view() -> CommandPaletteView {
+    CommandPaletteView {
+        query: String::new(),
+        items: command_palette_items(""),
+        selected: 0,
+    }
+}
+
+fn command_palette_items(query: &str) -> Vec<CommandPaletteItem> {
+    let normalized_query = query.to_ascii_lowercase();
+    let mut items: Vec<_> = Action::command_palette_actions()
+        .iter()
+        .map(|action| CommandPaletteItem {
+            label: action.palette_label().to_owned(),
+            action: *action,
+        })
+        .filter(|item| {
+            normalized_query.is_empty()
+                || item
+                    .label
+                    .to_ascii_lowercase()
+                    .starts_with(&normalized_query)
+        })
+        .collect();
+    items.sort_by_key(|item| item.label.to_ascii_lowercase());
+    items
+}
+
+fn move_command_palette_selection(
+    view: &mut CommandPaletteView,
+    delta: isize,
+) {
+    if view.items.is_empty() {
+        view.selected = 0;
+        return;
+    }
+    let len = view.items.len();
+    view.selected = if delta < 0 {
+        (view.selected + len - 1) % len
+    } else {
+        (view.selected + 1) % len
+    };
+}
+
+fn set_command_palette_query(
+    view: &mut CommandPaletteView,
+    query: String,
+) {
+    view.query = query;
+    view.items = command_palette_items(&view.query);
+    view.selected = 0;
+}
+
+fn command_palette_selected_action(view: &CommandPaletteView) -> Option<Action> {
+    view.items.get(view.selected).map(|item| item.action)
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PermissionDecision {
     Allow,
@@ -412,6 +482,7 @@ pub(crate) struct InputState {
     gutter_popup: Option<renderer::GutterPopup>,
     recording_popup: Option<RecordingPopupView>,
     permission_modal: Option<PermissionModal>,
+    command_palette: Option<CommandPaletteView>,
     toast: Option<ToastView>,
     preedit: Option<PreeditState>,
 }
@@ -1184,6 +1255,7 @@ fn main() {
         gutter_popup: None,
         recording_popup: None,
         permission_modal: None,
+        command_palette: None,
         toast: None,
         preedit: None,
     }));
@@ -1318,4 +1390,43 @@ fn parse_command_args() -> Option<Vec<String>> {
         rest.remove(0);
     }
     if rest.is_empty() { None } else { Some(rest) }
+}
+
+#[cfg(test)]
+mod command_palette_tests {
+    use super::*;
+
+    #[test]
+    fn command_palette_items_are_sorted_by_label() {
+        let items = command_palette_items("");
+        let labels: Vec<_> = items.iter().map(|item| item.label.as_str()).collect();
+        let mut sorted = labels.clone();
+        sorted.sort_by_key(|label| label.to_ascii_lowercase());
+        assert_eq!(labels, sorted);
+    }
+
+    #[test]
+    fn command_palette_query_prefix_matches_labels() {
+        let items = command_palette_items("close");
+        assert_eq!(
+            items
+                .iter()
+                .map(|item| item.action)
+                .collect::<Vec<Action>>(),
+            vec![Action::CloseActiveTab, Action::CloseWindow]
+        );
+    }
+
+    #[test]
+    fn command_palette_query_resets_selection() {
+        let mut view = command_palette_view();
+        move_command_palette_selection(&mut view, 1);
+        set_command_palette_query(&mut view, "toggle".to_owned());
+        assert_eq!(view.selected, 0);
+        assert!(
+            view.items
+                .iter()
+                .all(|item| item.label.to_ascii_lowercase().starts_with("toggle"))
+        );
+    }
 }

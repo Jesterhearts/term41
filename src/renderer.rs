@@ -826,7 +826,8 @@ impl RenderHost {
             }
             Action::ToggleOutputRecording
             | Action::CycleEmojiCompatibility
-            | Action::ToggleCommandEditor => {}
+            | Action::ToggleCommandEditor
+            | Action::OpenCommandPalette => {}
         }
     }
 
@@ -1457,6 +1458,7 @@ impl RenderHost {
             gutter_popup,
             recording_popup,
             permission_modal,
+            command_palette,
             toast,
             preedit,
             command_editor,
@@ -1468,6 +1470,7 @@ impl RenderHost {
                 input_state.gutter_popup.clone(),
                 input_state.recording_popup.clone(),
                 input_state.permission_modal.clone(),
+                input_state.command_palette.clone(),
                 input_state.toast.clone(),
                 input_state.preedit.clone(),
                 command_editor_view_for_input_tab(&input_state, active_tab_id).cloned(),
@@ -1527,6 +1530,7 @@ impl RenderHost {
             gutter_popup.as_ref(),
             recording_popup.as_ref(),
             permission_modal.as_ref(),
+            command_palette.as_ref(),
             toast.as_ref(),
             preedit.as_ref(),
             command_editor.as_ref(),
