@@ -1528,11 +1528,13 @@ impl Renderer {
         let Some((cursor_row, _cursor_col)) = snap.cursor else {
             return;
         };
+        let editor_x = 0.0;
         let box_x = layout.gutter_px;
         let box_y = terminal_row_y(cursor_row, layout) + layout.cell_h;
         let box_w = snap.viewport_cols.max(1) as f32 * layout.cell_w;
+        let editor_w = layout.gutter_px + box_w;
         let box_h = COMMAND_EDITOR_BOX_ROWS as f32 * layout.cell_h;
-        let content_x = box_x + layout.cell_w;
+        let content_x = box_x;
         let border = 2.0;
         let lines = command_editor_line_ranges(&editor.text);
         let cursor = editor.cursor.min(editor.text.len());
@@ -1544,49 +1546,22 @@ impl Renderer {
         let visible_end = (visible_start + COMMAND_EDITOR_BOX_ROWS as usize).min(lines.len());
         let has_overflow = lines.len() > COMMAND_EDITOR_BOX_ROWS as usize;
         let scrollbar_cols = u32::from(has_overflow);
-        let content_cols = snap.viewport_cols.saturating_sub(2 + scrollbar_cols).max(1) as usize;
+        let content_cols = snap.viewport_cols.saturating_sub(1 + scrollbar_cols).max(1) as usize;
 
         push_rect(
-            box_x,
+            editor_x,
             box_y,
-            box_w,
+            editor_w,
             box_h,
             pack_color(&Srgb::new(18, 21, 29), 248),
             bg_vertices,
             bg_indices,
         );
         push_rect(
-            box_x,
+            editor_x,
             box_y,
-            box_w,
+            editor_w,
             border,
-            pack_color(&Srgb::new(88, 150, 255), 255),
-            bg_vertices,
-            bg_indices,
-        );
-        push_rect(
-            box_x,
-            box_y + box_h - border,
-            box_w,
-            border,
-            pack_color(&Srgb::new(88, 150, 255), 255),
-            bg_vertices,
-            bg_indices,
-        );
-        push_rect(
-            box_x,
-            box_y,
-            border,
-            box_h,
-            pack_color(&Srgb::new(88, 150, 255), 255),
-            bg_vertices,
-            bg_indices,
-        );
-        push_rect(
-            box_x + box_w - border,
-            box_y,
-            border,
-            box_h,
             pack_color(&Srgb::new(88, 150, 255), 255),
             bg_vertices,
             bg_indices,
@@ -1870,7 +1845,7 @@ fn render_command_editor_scrollbar(
     if total_lines <= visible {
         return;
     }
-    let track_h = (box_h - border * 2.0).max(1.0);
+    let track_h = (box_h - border).max(1.0);
     let track_w = (layout.cell_w * 0.18).max(2.0);
     let track_x = box_x + box_w - layout.cell_w * 0.5 - track_w * 0.5;
     let track_y = box_y + border;
