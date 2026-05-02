@@ -126,6 +126,157 @@ fn delete_removes_selected_range() {
     assert_eq!(view.selection, None);
 }
 
+fn vim_text(
+    editor: &mut CommandEditor,
+    text: &str,
+) -> EditOutcome {
+    apply_input(
+        editor,
+        EditorInput::Vim(VimKey::Text(text.to_owned())),
+        &EditorSettings::default(),
+    )
+}
+
+fn vim_escape(editor: &mut CommandEditor) -> EditOutcome {
+    apply_input(
+        editor,
+        EditorInput::Vim(VimKey::Escape),
+        &EditorSettings::default(),
+    )
+}
+
+#[test]
+fn vim_i_a_and_escape_switch_between_normal_and_insert() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+
+    assert_eq!(
+        editor.view(&settings).cursor_style,
+        CommandEditorCursorStyle::Block
+    );
+    assert_eq!(vim_text(&mut editor, "i"), EditOutcome::Updated);
+    assert_eq!(
+        editor.view(&settings).cursor_style,
+        CommandEditorCursorStyle::Beam
+    );
+    assert_eq!(vim_text(&mut editor, "abc"), EditOutcome::Updated);
+    assert_eq!(vim_escape(&mut editor), EditOutcome::Updated);
+    assert_eq!(
+        editor.view(&settings).cursor_style,
+        CommandEditorCursorStyle::Block
+    );
+    assert_eq!(editor.view(&settings).cursor, "ab".len());
+
+    assert_eq!(vim_text(&mut editor, "a"), EditOutcome::Updated);
+    assert_eq!(vim_text(&mut editor, "d"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "abcd");
+}
+
+#[test]
+fn vim_hjkl_move_around_multiline_text() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one\ntwo\nthree".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "one\ntwo".len());
+
+    assert_eq!(vim_text(&mut editor, "h"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\ntw".len());
+    assert_eq!(vim_text(&mut editor, "j"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\ntwo\nth".len());
+    assert_eq!(vim_text(&mut editor, "k"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\ntw".len());
+    assert_eq!(vim_text(&mut editor, "l"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\ntwo".len());
+}
+
+#[test]
+fn vim_word_motions_distinguish_punctuation_and_whitespace_words() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("foo.bar baz".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, 0);
+
+    assert_eq!(vim_text(&mut editor, "w"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "foo".len());
+    assert_eq!(vim_text(&mut editor, "e"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "foo.".len());
+    assert_eq!(vim_text(&mut editor, "W"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "foo.bar ".len());
+    set_cursor(&mut editor, 0);
+    assert_eq!(vim_text(&mut editor, "E"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "foo.bar".len());
+}
+
+#[test]
+fn vim_paragraph_and_document_motions_move_by_blank_lines_and_edges() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one\n\nthree\nfour".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, 0);
+
+    assert_eq!(vim_text(&mut editor, "}"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\n\n".len());
+    assert_eq!(vim_text(&mut editor, "G"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\n\nthree\nfour".len());
+    assert_eq!(vim_text(&mut editor, "{"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\n\n".len());
+    assert_eq!(vim_text(&mut editor, "g"), EditOutcome::Updated);
+    assert_eq!(vim_text(&mut editor, "g"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, 0);
+}
+
+#[test]
+fn vim_delete_yank_and_paste_use_editor_clipboard() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("foo bar".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, 0);
+
+    assert_eq!(vim_text(&mut editor, "y"), EditOutcome::Updated);
+    assert_eq!(vim_text(&mut editor, "w"), EditOutcome::Updated);
+    set_cursor(&mut editor, "foo ".len());
+    assert_eq!(vim_text(&mut editor, "P"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "foo foo bar");
+
+    set_cursor(&mut editor, 0);
+    assert_eq!(vim_text(&mut editor, "d"), EditOutcome::Updated);
+    assert_eq!(vim_text(&mut editor, "w"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "foo bar");
+    assert_eq!(vim_text(&mut editor, "p"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "ffoo oo bar");
+}
+
+#[test]
+fn vim_d_deletes_current_line() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one two\nthree".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "one ".len());
+
+    assert_eq!(vim_text(&mut editor, "D"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "three");
+}
+
 #[test]
 fn up_down_move_between_multiline_editor_rows() {
     let mut editor = CommandEditor::new();

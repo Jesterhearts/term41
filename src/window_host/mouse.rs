@@ -139,11 +139,12 @@ impl WindowHost {
     pub(crate) fn command_editor_settings_for_mouse(
         &mut self,
         tab_id: TabId,
-    ) -> Option<EditorSettings> {
+    ) -> Option<(EditorSettings, bool)> {
         let config = self.command_editor_config();
         if !config.enabled {
             return None;
         }
+        let vim_mode = config.vim_mode;
         self.command_catalog.refresh_for_config(&config);
         let command_words = self.command_catalog.names().to_vec();
         let target = self.input_endpoints.get(&tab_id)?;
@@ -151,10 +152,9 @@ impl WindowHost {
             let terminal = target.terminal.lock();
             command_editor_context(&terminal)
         }?;
-        Some(Self::command_editor_settings(
-            &config,
-            context.current_dir,
-            command_words,
+        Some((
+            Self::command_editor_settings(&config, context.current_dir, command_words),
+            vim_mode,
         ))
     }
 
@@ -165,14 +165,14 @@ impl WindowHost {
         let Some(tab_id) = self.active_input_tab else {
             return false;
         };
-        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+        let Some((settings, vim_mode)) = self.command_editor_settings_for_mouse(tab_id) else {
             return false;
         };
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return false;
         };
         set_cursor(&mut target.command_editor, offset);
-        let view = command_editor_view(&target.command_editor, &settings);
+        let view = command_editor_view(&target.command_editor, &settings, vim_mode);
         self.command_editor_drag_anchor = Some(offset);
         self.left_drag_active = true;
         self.selection_drag_moved = false;
@@ -191,14 +191,14 @@ impl WindowHost {
         let Some(tab_id) = self.active_input_tab else {
             return false;
         };
-        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+        let Some((settings, vim_mode)) = self.command_editor_settings_for_mouse(tab_id) else {
             return false;
         };
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return false;
         };
         select_range(&mut target.command_editor, anchor, offset);
-        let view = command_editor_view(&target.command_editor, &settings);
+        let view = command_editor_view(&target.command_editor, &settings, vim_mode);
         self.set_command_editor_view(view);
         true
     }
@@ -207,7 +207,7 @@ impl WindowHost {
         let Some(tab_id) = self.active_input_tab else {
             return false;
         };
-        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+        let Some((settings, vim_mode)) = self.command_editor_settings_for_mouse(tab_id) else {
             return false;
         };
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
@@ -217,7 +217,7 @@ impl WindowHost {
             let mut terminal = target.terminal.lock();
             terminal.clipboard.set(ClipboardKind::Primary, &text);
         }
-        let view = command_editor_view(&target.command_editor, &settings);
+        let view = command_editor_view(&target.command_editor, &settings, vim_mode);
         self.command_editor_drag_anchor = None;
         self.left_drag_active = false;
         self.selection_drag_moved = false;
@@ -229,7 +229,7 @@ impl WindowHost {
         let Some(tab_id) = self.active_input_tab else {
             return false;
         };
-        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+        let Some((settings, vim_mode)) = self.command_editor_settings_for_mouse(tab_id) else {
             return false;
         };
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
@@ -253,7 +253,7 @@ impl WindowHost {
                 );
             }
         }
-        let view = command_editor_view(&target.command_editor, &settings);
+        let view = command_editor_view(&target.command_editor, &settings, vim_mode);
         self.set_command_editor_view(view);
         true
     }
@@ -265,7 +265,7 @@ impl WindowHost {
         let Some(tab_id) = self.active_input_tab else {
             return false;
         };
-        let Some(settings) = self.command_editor_settings_for_mouse(tab_id) else {
+        let Some((settings, vim_mode)) = self.command_editor_settings_for_mouse(tab_id) else {
             return false;
         };
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
@@ -282,7 +282,7 @@ impl WindowHost {
                 &settings,
             );
         }
-        let view = command_editor_view(&target.command_editor, &settings);
+        let view = command_editor_view(&target.command_editor, &settings, vim_mode);
         self.set_command_editor_view(view);
         true
     }

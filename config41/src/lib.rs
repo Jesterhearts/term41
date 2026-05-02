@@ -454,6 +454,7 @@ struct CompatibilitySettings {
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct CommandEditorConfig {
     pub enabled: bool,
+    pub vim_mode: bool,
     pub completions: Vec<String>,
     pub binary_dirs: Vec<PathBuf>,
     pub merge_extra_dirs: bool,
@@ -464,6 +465,7 @@ impl Default for CommandEditorConfig {
     fn default() -> Self {
         Self {
             enabled: false,
+            vim_mode: false,
             completions: Vec::new(),
             binary_dirs: default_binary_dirs(),
             merge_extra_dirs: true,
@@ -478,6 +480,10 @@ struct CommandEditorSettings {
     /// normal keyboard path remains unchanged unless the user opts in.
     #[serde(default)]
     enabled: Option<bool>,
+    /// Start the command editor in a vim-like normal mode and interpret
+    /// unmodified keys as modal editing commands.
+    #[serde(default)]
+    vim_mode: Option<bool>,
     /// Static completion candidates. Recent command history is always added
     /// at runtime by the editor.
     #[serde(default)]
@@ -971,6 +977,7 @@ fn build_command_editor(raw: Option<CommandEditorSettings>) -> CommandEditorConf
     );
     CommandEditorConfig {
         enabled: settings.enabled.unwrap_or(defaults.enabled),
+        vim_mode: settings.vim_mode.unwrap_or(defaults.vim_mode),
         completions: settings.completions.unwrap_or_default(),
         binary_dirs,
         merge_extra_dirs,
@@ -1736,6 +1743,7 @@ process_info = true
     fn command_editor_defaults_disabled() {
         let cfg = parse("");
         assert!(!cfg.command_editor.enabled);
+        assert!(!cfg.command_editor.vim_mode);
         assert!(cfg.command_editor.completions.is_empty());
         assert_eq!(
             cfg.command_editor.binary_dirs,
@@ -1751,6 +1759,7 @@ process_info = true
             r#"
 [command_editor]
 enabled = true
+vim_mode = true
 completions = ["cargo", "git"]
 binary_dirs = ["~/custom-bin"]
 merge_extra_dirs = false
@@ -1758,6 +1767,7 @@ max_history = 25
 "#,
         );
         assert!(cfg.command_editor.enabled);
+        assert!(cfg.command_editor.vim_mode);
         assert_eq!(cfg.command_editor.completions, ["cargo", "git"]);
         assert_eq!(
             cfg.command_editor.binary_dirs,

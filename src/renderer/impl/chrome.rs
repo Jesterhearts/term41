@@ -1700,15 +1700,30 @@ impl Renderer {
         }
 
         if cursor_line_visible {
-            push_rect(
-                content_x + cursor_cell as f32 * layout.cell_w,
-                box_y + visible_cursor_line as f32 * layout.cell_h + 2.0,
-                2.0,
-                layout.cell_h - 4.0,
-                pack_color(&Srgb::new(230, 235, 255), 255),
-                bg_vertices,
-                bg_indices,
-            );
+            match editor.cursor_style {
+                commands41::CommandEditorCursorStyle::Beam => {
+                    push_rect(
+                        content_x + cursor_cell as f32 * layout.cell_w,
+                        box_y + visible_cursor_line as f32 * layout.cell_h + 2.0,
+                        2.0,
+                        layout.cell_h - 4.0,
+                        pack_color(&Srgb::new(230, 235, 255), 255),
+                        bg_vertices,
+                        bg_indices,
+                    );
+                }
+                commands41::CommandEditorCursorStyle::Block => {
+                    push_rect(
+                        content_x + cursor_cell as f32 * layout.cell_w,
+                        box_y + visible_cursor_line as f32 * layout.cell_h + 1.0,
+                        layout.cell_w,
+                        layout.cell_h - 2.0,
+                        pack_color(&Srgb::new(230, 235, 255), 175),
+                        bg_vertices,
+                        bg_indices,
+                    );
+                }
+            }
         }
 
         if editor.candidates.is_empty() {

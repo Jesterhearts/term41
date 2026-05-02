@@ -35,10 +35,12 @@ use std::time::Instant;
 use clip41::ClipboardKind;
 use command_catalog::CommandCatalog;
 use commands41::CommandEditor;
+use commands41::CommandEditorCursorStyle;
 use commands41::CommandLineView;
 use commands41::EditOutcome;
 use commands41::EditorInput;
 use commands41::EditorSettings;
+use commands41::VimKey;
 use commands41::apply_input;
 use commands41::clear_selection as clear_editor_selection;
 use commands41::select_range;
@@ -584,7 +586,11 @@ fn dec_udk_selector(
 fn command_editor_input(
     key: &Key,
     mods: ModifiersState,
+    vim_mode: bool,
 ) -> Option<EditorInput> {
+    if vim_mode {
+        return vim_command_editor_input(key, mods);
+    }
     if mods.super_key() {
         return None;
     }
@@ -611,6 +617,35 @@ fn command_editor_input(
         Key::Named(NamedKey::Escape) if !mods.shift_key() => Some(EditorInput::Cancel),
         _ => None,
     }
+}
+
+fn vim_command_editor_input(
+    key: &Key,
+    mods: ModifiersState,
+) -> Option<EditorInput> {
+    if mods.super_key() || mods.control_key() || mods.alt_key() {
+        return None;
+    }
+    let key = match key {
+        Key::Character(text) if !mods.shift_key() || text.chars().count() == 1 => {
+            VimKey::Text(text.to_string())
+        }
+        Key::Named(NamedKey::Space) => VimKey::Text(" ".to_owned()),
+        Key::Named(NamedKey::Escape) => VimKey::Escape,
+        Key::Named(NamedKey::Enter) if mods.shift_key() => VimKey::ShiftEnter,
+        Key::Named(NamedKey::Enter) if !mods.shift_key() => VimKey::Enter,
+        Key::Named(NamedKey::Backspace) if !mods.shift_key() => VimKey::Backspace,
+        Key::Named(NamedKey::Delete) if !mods.shift_key() => VimKey::Delete,
+        Key::Named(NamedKey::ArrowLeft) if !mods.shift_key() => VimKey::ArrowLeft,
+        Key::Named(NamedKey::ArrowRight) if !mods.shift_key() => VimKey::ArrowRight,
+        Key::Named(NamedKey::ArrowUp) if !mods.shift_key() => VimKey::ArrowUp,
+        Key::Named(NamedKey::ArrowDown) if !mods.shift_key() => VimKey::ArrowDown,
+        Key::Named(NamedKey::Home) if !mods.shift_key() => VimKey::Home,
+        Key::Named(NamedKey::End) if !mods.shift_key() => VimKey::End,
+        Key::Named(NamedKey::Tab) if !mods.shift_key() => VimKey::Tab,
+        _ => return None,
+    };
+    Some(EditorInput::Vim(key))
 }
 
 fn modified_command_editor_input(
@@ -677,8 +712,13 @@ fn alt_command_editor_input(text: &str) -> Option<EditorInput> {
 fn command_editor_view(
     editor: &CommandEditor,
     settings: &EditorSettings,
+    vim_mode: bool,
 ) -> Option<CommandLineView> {
-    Some(editor.view(settings))
+    let mut view = editor.view(settings);
+    if !vim_mode {
+        view.cursor_style = CommandEditorCursorStyle::Beam;
+    }
+    Some(view)
 }
 
 fn command_editor_line_ranges(text: &str) -> Vec<(usize, usize)> {

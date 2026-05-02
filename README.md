@@ -356,6 +356,7 @@ vsync = "auto"
 # Off by default. When enabled, it is active only while OSC 133 / OSC 633 shell
 # integration reports that the shell is editing a command on the primary screen.
 # enabled = true
+# vim_mode = false
 # completions = ["cargo", "git", "rg"]
 # Extra binary directories to scan for command-name completion. By default,
 # these are merged with term41's platform/user tool directory list.
@@ -443,6 +444,10 @@ Notes:
   `Ctrl+D`, `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
   `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted. `Shift+Enter`
   inserts a newline for multi-line input; plain Enter submits the buffer.
+  Set `vim_mode = true` to start the editor in normal mode with `i`/`a` for
+  insert, `Esc` for normal mode, `hjkl`, `{`/`}`, `w`/`e`/`W`/`E`, `d`/`y`
+  plus motions, `D`, `p`/`P`, and `gg`/`G`; normal mode uses a block cursor
+  and insert mode uses the regular line cursor.
   `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
   config.
 - Example scripts are available under `examples/`, including

@@ -263,14 +263,14 @@ impl WindowHost {
         if !config.enabled {
             return false;
         }
-        let Some(input) = command_editor_input(key, self.modifiers) else {
-            return false;
-        };
         self.command_catalog.refresh_for_config(&config);
         let command_words = self.command_catalog.names().to_vec();
         let mut cleared_inactive_editor = false;
         let handled = {
             let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+                return false;
+            };
+            let Some(input) = command_editor_input(key, self.modifiers, config.vim_mode) else {
                 return false;
             };
             let editor_context = {
@@ -289,7 +289,8 @@ impl WindowHost {
                         (true, None)
                     }
                     EditOutcome::Updated => {
-                        let view = command_editor_view(&target.command_editor, &settings);
+                        let view =
+                            command_editor_view(&target.command_editor, &settings, config.vim_mode);
                         (true, view)
                     }
                     EditOutcome::Canceled => (true, None),
@@ -297,7 +298,11 @@ impl WindowHost {
                         if input == EditorInput::Cancel {
                             (false, None)
                         } else {
-                            let view = command_editor_view(&target.command_editor, &settings);
+                            let view = command_editor_view(
+                                &target.command_editor,
+                                &settings,
+                                config.vim_mode,
+                            );
                             (true, view)
                         }
                     }
@@ -350,7 +355,10 @@ impl WindowHost {
                         let mut terminal = target.terminal.lock();
                         terminal.clipboard.set(ClipboardKind::Clipboard, &text);
                     }
-                    (true, command_editor_view(&target.command_editor, &settings))
+                    (
+                        true,
+                        command_editor_view(&target.command_editor, &settings, config.vim_mode),
+                    )
                 }
                 Action::Paste => {
                     let text = {
@@ -364,7 +372,10 @@ impl WindowHost {
                             &settings,
                         );
                     }
-                    (true, command_editor_view(&target.command_editor, &settings))
+                    (
+                        true,
+                        command_editor_view(&target.command_editor, &settings, config.vim_mode),
+                    )
                 }
                 _ => (false, None),
             }

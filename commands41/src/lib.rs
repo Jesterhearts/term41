@@ -11,6 +11,10 @@ use std::path::PathBuf;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+mod vim;
+pub use vim::VimKey;
+pub use vim::VimMode;
+
 const DEFAULT_MAX_HISTORY: usize = 200;
 const MAX_COMPLETION_CANDIDATES: usize = 5;
 
@@ -76,6 +80,7 @@ impl EditorSelection {
 pub struct CommandLineView {
     pub text: String,
     pub cursor: usize,
+    pub cursor_style: CommandEditorCursorStyle,
     pub spans: Vec<HighlightSpan>,
     pub selection: Option<EditorSelection>,
     pub completion: Option<String>,
@@ -83,9 +88,16 @@ pub struct CommandLineView {
     pub candidate_index: usize,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum CommandEditorCursorStyle {
+    Beam,
+    Block,
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum EditorInput {
     Insert(String),
+    Vim(VimKey),
     Enter,
     Backspace,
     Delete,
@@ -114,7 +126,7 @@ pub enum EditOutcome {
     Canceled,
 }
 
-#[derive(Debug, Clone, Default)]
+#[derive(Debug, Clone)]
 pub struct CommandEditor {
     buffer: String,
     cursor: usize,
@@ -123,8 +135,28 @@ pub struct CommandEditor {
     draft: String,
     kill_buffer: String,
     selection: Option<EditorSelection>,
+    vim_mode: VimMode,
+    vim_pending: Option<vim::VimPending>,
     path_cycle: Option<PathCompletionCycle>,
     completion_selection: Option<CompletionSelection>,
+}
+
+impl Default for CommandEditor {
+    fn default() -> Self {
+        Self {
+            buffer: String::new(),
+            cursor: 0,
+            history: Vec::new(),
+            history_pos: None,
+            draft: String::new(),
+            kill_buffer: String::new(),
+            selection: None,
+            vim_mode: VimMode::Normal,
+            vim_pending: None,
+            path_cycle: None,
+            completion_selection: None,
+        }
+    }
 }
 
 impl CommandEditor {
@@ -149,6 +181,10 @@ impl CommandEditor {
         CommandLineView {
             text: self.buffer.clone(),
             cursor: self.cursor,
+            cursor_style: match self.vim_mode {
+                VimMode::Normal => CommandEditorCursorStyle::Block,
+                VimMode::Insert => CommandEditorCursorStyle::Beam,
+            },
             spans: highlight_shell(&self.buffer),
             selection: self.selection.filter(|selection| !selection.is_empty()),
             completion,
@@ -163,6 +199,8 @@ impl CommandEditor {
         self.history_pos = None;
         self.draft.clear();
         self.selection = None;
+        self.vim_mode = VimMode::Normal;
+        self.vim_pending = None;
         self.path_cycle = None;
         self.completion_selection = None;
     }
@@ -247,6 +285,7 @@ pub fn apply_input(
             replace_selection_or_insert(editor, &text);
             EditOutcome::Updated
         }
+        EditorInput::Vim(key) => vim::apply_vim_key(editor, key, settings),
         EditorInput::Enter => {
             let command = submitted_command(&editor.buffer);
             push_history(editor, &command, settings.max_history);

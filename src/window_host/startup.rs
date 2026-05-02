@@ -174,7 +174,7 @@ impl WindowHost {
             context?.current_dir,
             self.command_catalog.names().to_vec(),
         );
-        command_editor_view(&target.command_editor, &settings)
+        command_editor_view(&target.command_editor, &settings, config.vim_mode)
     }
 
     pub(crate) fn command_editor_settings(

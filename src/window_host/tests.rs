@@ -149,31 +149,31 @@ mod command_editor_input_tests {
     #[test]
     fn control_keys_map_to_line_editor_inputs() {
         assert_eq!(
-            command_editor_input(&Key::Character("a".into()), ModifiersState::CONTROL),
+            command_editor_input(&Key::Character("a".into()), ModifiersState::CONTROL, false),
             Some(EditorInput::MoveHome)
         );
         assert_eq!(
-            command_editor_input(&Key::Character("d".into()), ModifiersState::CONTROL),
+            command_editor_input(&Key::Character("d".into()), ModifiersState::CONTROL, false),
             Some(EditorInput::Delete)
         );
         assert_eq!(
-            command_editor_input(&Key::Character("e".into()), ModifiersState::CONTROL),
+            command_editor_input(&Key::Character("e".into()), ModifiersState::CONTROL, false),
             Some(EditorInput::MoveEnd)
         );
         assert_eq!(
-            command_editor_input(&Key::Character("k".into()), ModifiersState::CONTROL),
+            command_editor_input(&Key::Character("k".into()), ModifiersState::CONTROL, false),
             Some(EditorInput::KillToEnd)
         );
         assert_eq!(
-            command_editor_input(&Key::Character("u".into()), ModifiersState::CONTROL),
+            command_editor_input(&Key::Character("u".into()), ModifiersState::CONTROL, false),
             Some(EditorInput::KillToStart)
         );
         assert_eq!(
-            command_editor_input(&Key::Character("w".into()), ModifiersState::CONTROL),
+            command_editor_input(&Key::Character("w".into()), ModifiersState::CONTROL, false),
             Some(EditorInput::DeleteWordLeft)
         );
         assert_eq!(
-            command_editor_input(&Key::Character("y".into()), ModifiersState::CONTROL),
+            command_editor_input(&Key::Character("y".into()), ModifiersState::CONTROL, false),
             Some(EditorInput::Yank)
         );
     }
@@ -181,15 +181,15 @@ mod command_editor_input_tests {
     #[test]
     fn alt_keys_map_to_word_editor_inputs() {
         assert_eq!(
-            command_editor_input(&Key::Character("b".into()), ModifiersState::ALT),
+            command_editor_input(&Key::Character("b".into()), ModifiersState::ALT, false),
             Some(EditorInput::MoveWordLeft)
         );
         assert_eq!(
-            command_editor_input(&Key::Character("f".into()), ModifiersState::ALT),
+            command_editor_input(&Key::Character("f".into()), ModifiersState::ALT, false),
             Some(EditorInput::MoveWordRight)
         );
         assert_eq!(
-            command_editor_input(&Key::Character("d".into()), ModifiersState::ALT),
+            command_editor_input(&Key::Character("d".into()), ModifiersState::ALT, false),
             Some(EditorInput::DeleteWordRight)
         );
     }
@@ -200,6 +200,7 @@ mod command_editor_input_tests {
             command_editor_input(
                 &Key::Character("D".into()),
                 ModifiersState::CONTROL | ModifiersState::SHIFT,
+                false,
             ),
             None
         );
@@ -208,8 +209,55 @@ mod command_editor_input_tests {
     #[test]
     fn shift_enter_inserts_newline() {
         assert_eq!(
-            command_editor_input(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT),
+            command_editor_input(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, false),
             Some(EditorInput::Insert("\n".into()))
+        );
+    }
+
+    #[test]
+    fn vim_mode_maps_plain_keys_to_vim_inputs() {
+        assert_eq!(
+            command_editor_input(&Key::Character("i".into()), ModifiersState::empty(), true),
+            Some(EditorInput::Vim(VimKey::Text("i".into())))
+        );
+        assert_eq!(
+            command_editor_input(&Key::Named(NamedKey::Escape), ModifiersState::empty(), true),
+            Some(EditorInput::Vim(VimKey::Escape))
+        );
+        assert_eq!(
+            command_editor_input(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, true),
+            Some(EditorInput::Vim(VimKey::ShiftEnter))
+        );
+    }
+
+    #[test]
+    fn vim_mode_preserves_control_shift_keybindings() {
+        assert_eq!(
+            command_editor_input(
+                &Key::Character("V".into()),
+                ModifiersState::CONTROL | ModifiersState::SHIFT,
+                true,
+            ),
+            None
+        );
+    }
+
+    #[test]
+    fn non_vim_command_editor_view_forces_beam_cursor() {
+        let editor = CommandEditor::new();
+        let settings = EditorSettings::default();
+
+        assert_eq!(
+            command_editor_view(&editor, &settings, false)
+                .expect("view")
+                .cursor_style,
+            CommandEditorCursorStyle::Beam
+        );
+        assert_eq!(
+            command_editor_view(&editor, &settings, true)
+                .expect("view")
+                .cursor_style,
+            CommandEditorCursorStyle::Block
         );
     }
 
@@ -218,6 +266,7 @@ mod command_editor_input_tests {
         let view = CommandLineView {
             text: "one\ntwo\nthree\nfour".to_owned(),
             cursor: "one\ntwo\nthree\nfour".len(),
+            cursor_style: CommandEditorCursorStyle::Beam,
             spans: Vec::new(),
             selection: None,
             completion: None,
