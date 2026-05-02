@@ -176,6 +176,55 @@ fn vim_i_a_and_escape_switch_between_normal_and_insert() {
 }
 
 #[test]
+fn vim_a_appends_at_line_end_and_enters_insert() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one\ntwo".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, 1);
+
+    assert_eq!(vim_text(&mut editor, "A"), EditOutcome::Updated);
+    let view = editor.view(&settings);
+    assert_eq!(view.cursor, "one".len());
+    assert_eq!(view.cursor_style, CommandEditorCursorStyle::Beam);
+    assert_eq!(vim_text(&mut editor, "!"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "one!\ntwo");
+}
+
+#[test]
+fn vim_o_and_o_open_lines_and_enter_insert() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one\ntwo".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, 1);
+
+    assert_eq!(vim_text(&mut editor, "o"), EditOutcome::Updated);
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "one\n\ntwo");
+    assert_eq!(view.cursor, "one\n".len());
+    assert_eq!(view.cursor_style, CommandEditorCursorStyle::Beam);
+    assert_eq!(vim_text(&mut editor, "middle"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "one\nmiddle\ntwo");
+
+    assert_eq!(vim_escape(&mut editor), EditOutcome::Updated);
+    set_cursor(&mut editor, "one\nmiddle".len());
+    assert_eq!(vim_text(&mut editor, "O"), EditOutcome::Updated);
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "one\n\nmiddle\ntwo");
+    assert_eq!(view.cursor, "one\n".len());
+    assert_eq!(view.cursor_style, CommandEditorCursorStyle::Beam);
+    assert_eq!(vim_text(&mut editor, "above"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "one\nabove\nmiddle\ntwo");
+}
+
+#[test]
 fn vim_hjkl_move_around_multiline_text() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings::default();
@@ -233,18 +282,22 @@ fn vim_word_motions_distinguish_punctuation_and_whitespace_words() {
 }
 
 #[test]
-fn vim_zero_moves_to_current_line_start() {
+fn vim_line_start_and_end_motions_target_current_line_edges() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings::default();
     apply_input(
         &mut editor,
-        EditorInput::Insert("one\ntwo three".to_owned()),
+        EditorInput::Insert("one\n  two three".to_owned()),
         &settings,
     );
-    set_cursor(&mut editor, "one\ntwo ".len());
+    set_cursor(&mut editor, "one\n  two ".len());
 
     assert_eq!(vim_text(&mut editor, "0"), EditOutcome::Updated);
     assert_eq!(editor.view(&settings).cursor, "one\n".len());
+    assert_eq!(vim_text(&mut editor, "^"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\n  ".len());
+    assert_eq!(vim_text(&mut editor, "$"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\n  two three".len());
 }
 
 #[test]
@@ -292,6 +345,24 @@ fn vim_delete_yank_and_paste_use_editor_clipboard() {
     assert_eq!(editor.view(&settings).text, "foo bar");
     assert_eq!(vim_text(&mut editor, "p"), EditOutcome::Updated);
     assert_eq!(editor.view(&settings).text, "ffoo oo bar");
+}
+
+#[test]
+fn vim_yy_yanks_current_line() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one\ntwo\nthree".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "one\nt".len());
+
+    assert_eq!(vim_text(&mut editor, "y"), EditOutcome::Updated);
+    assert_eq!(vim_text(&mut editor, "y"), EditOutcome::Updated);
+    set_cursor(&mut editor, 0);
+    assert_eq!(vim_text(&mut editor, "P"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "twoone\ntwo\nthree");
 }
 
 #[test]

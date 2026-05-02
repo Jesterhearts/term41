@@ -132,6 +132,13 @@ fn apply_vim_normal_text(
             editor.vim_mode = VimMode::Insert;
             EditOutcome::Updated
         }
+        'A' => {
+            move_vim_cursor(editor, vim_motion_target(editor, VimMotion::LineEnd));
+            editor.vim_mode = VimMode::Insert;
+            EditOutcome::Updated
+        }
+        'o' => vim_open_line(editor, OpenLinePlacement::Below),
+        'O' => vim_open_line(editor, OpenLinePlacement::Above),
         'h' => apply_vim_motion(editor, VimMotion::Left),
         'j' => apply_vim_motion(editor, VimMotion::LineDown),
         'k' => apply_vim_motion(editor, VimMotion::LineUp),
@@ -145,6 +152,8 @@ fn apply_vim_normal_text(
         'B' => apply_vim_motion(editor, VimMotion::WhitespaceWordBack),
         'E' => apply_vim_motion(editor, VimMotion::WhitespaceWordEnd),
         '0' => apply_vim_motion(editor, VimMotion::LineStart),
+        '^' => apply_vim_motion(editor, VimMotion::LineFirstNonBlank),
+        '$' => apply_vim_motion(editor, VimMotion::LineEnd),
         'D' => vim_delete_current_line(editor),
         'd' => {
             editor.vim_pending = Some(VimPending::Operator(VimOperator::Delete));
@@ -219,6 +228,8 @@ enum VimMotion {
     WhitespaceWordBack,
     WhitespaceWordEnd,
     LineStart,
+    LineFirstNonBlank,
+    LineEnd,
     Start,
     End,
 }
@@ -227,6 +238,12 @@ enum VimMotion {
 enum PastePlacement {
     Before,
     After,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum OpenLinePlacement {
+    Above,
+    Below,
 }
 
 fn vim_motion_from_char(ch: char) -> Option<VimMotion> {
@@ -244,6 +261,8 @@ fn vim_motion_from_char(ch: char) -> Option<VimMotion> {
         'B' => Some(VimMotion::WhitespaceWordBack),
         'E' => Some(VimMotion::WhitespaceWordEnd),
         '0' => Some(VimMotion::LineStart),
+        '^' => Some(VimMotion::LineFirstNonBlank),
+        '$' => Some(VimMotion::LineEnd),
         'G' => Some(VimMotion::End),
         _ => None,
     }
@@ -319,6 +338,10 @@ fn vim_motion_target(
         }
         VimMotion::WhitespaceWordEnd => next_vim_word_end(&editor.buffer, editor.cursor, true),
         VimMotion::LineStart => Some(current_line_range(&editor.buffer, editor.cursor).0),
+        VimMotion::LineFirstNonBlank => {
+            Some(current_line_first_nonblank(&editor.buffer, editor.cursor))
+        }
+        VimMotion::LineEnd => Some(current_line_range(&editor.buffer, editor.cursor).1),
         VimMotion::Start => Some(0),
         VimMotion::End => Some(editor.buffer.len()),
     }
@@ -361,6 +384,31 @@ fn vim_yank_current_line(editor: &mut CommandEditor) -> EditOutcome {
         return EditOutcome::Ignored;
     }
     editor.kill_buffer = editor.buffer[start..end].to_owned();
+    EditOutcome::Updated
+}
+
+fn vim_open_line(
+    editor: &mut CommandEditor,
+    placement: OpenLinePlacement,
+) -> EditOutcome {
+    let (line_start, line_end) = current_line_range(&editor.buffer, editor.cursor);
+    let insert_at = match placement {
+        OpenLinePlacement::Above => line_start,
+        OpenLinePlacement::Below if line_end < editor.buffer.len() => line_end + '\n'.len_utf8(),
+        OpenLinePlacement::Below => line_end,
+    };
+    let cursor = match placement {
+        OpenLinePlacement::Above => insert_at,
+        OpenLinePlacement::Below if line_end < editor.buffer.len() => insert_at,
+        OpenLinePlacement::Below => insert_at + '\n'.len_utf8(),
+    };
+
+    clear_completion_state(editor);
+    replace_history_edit_with_draft(editor);
+    editor.selection = None;
+    editor.buffer.insert(insert_at, '\n');
+    editor.cursor = cursor;
+    editor.vim_mode = VimMode::Insert;
     EditOutcome::Updated
 }
 
@@ -429,6 +477,18 @@ fn current_line_range(
 ) -> (usize, usize) {
     let lines = line_ranges(text);
     lines[line_index_at_cursor(&lines, cursor)]
+}
+
+fn current_line_first_nonblank(
+    text: &str,
+    cursor: usize,
+) -> usize {
+    let (start, end) = current_line_range(text, cursor);
+    text[start..end]
+        .char_indices()
+        .find(|(_, ch)| !ch.is_whitespace())
+        .map(|(idx, _)| start + idx)
+        .unwrap_or(start)
 }
 
 fn current_line_delete_range(

@@ -450,10 +450,11 @@ Notes:
   `Ctrl+D`, `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
   `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted. `Shift+Enter`
   inserts a newline for multi-line input; plain Enter submits the buffer.
-  Set `vim_mode = true` to start the editor in normal mode with `i`/`a` for
-  insert, `Esc` for normal mode, `hjkl`, `0`, `{`/`}`, `w`/`b`/`e` and
-  `W`/`B`/`E`, `d`/`y` plus motions, `D`, `p`/`P`, and `gg`/`G`; normal mode
-  uses a block cursor and insert mode uses the regular line cursor.
+  Set `vim_mode = true` to start the editor in normal mode with `i`/`a`/`A`
+  and `o`/`O` for insert, `Esc` for normal mode, `hjkl`, `0`/`^`/`$`,
+  `{`/`}`, `w`/`b`/`e` and `W`/`B`/`E`, `d`/`y` plus motions, `D`, `yy`,
+  `p`/`P`, and `gg`/`G`; normal mode uses a block cursor and insert mode uses
+  the regular line cursor.
   `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
   config.
 - Example scripts are available under `examples/`, including

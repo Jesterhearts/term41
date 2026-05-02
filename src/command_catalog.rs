@@ -220,10 +220,14 @@ mod tests {
         write_executable(first_dir.join("first-tool"));
         write_executable(second_dir.join("second-tool"));
 
-        let mut first = CommandEditorConfig::default();
-        first.binary_dirs = vec![first_dir];
-        let mut second = CommandEditorConfig::default();
-        second.binary_dirs = vec![second_dir];
+        let first = CommandEditorConfig {
+            binary_dirs: vec![first_dir],
+            ..CommandEditorConfig::default()
+        };
+        let second = CommandEditorConfig {
+            binary_dirs: vec![second_dir],
+            ..CommandEditorConfig::default()
+        };
         let mut catalog = CommandCatalog::from_config(&first);
 
         assert!(catalog.names().contains(&"first-tool".to_owned()));
