@@ -178,6 +178,7 @@ impl WindowHost {
         let Some((settings, vim_mode)) = self.command_editor_settings_for_mouse(tab_id) else {
             return false;
         };
+        self.clear_terminal_selection_for_tab(tab_id);
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return false;
         };
@@ -204,6 +205,7 @@ impl WindowHost {
         let Some((settings, vim_mode)) = self.command_editor_settings_for_mouse(tab_id) else {
             return false;
         };
+        self.clear_terminal_selection_for_tab(tab_id);
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return false;
         };
@@ -239,31 +241,31 @@ impl WindowHost {
         let Some(tab_id) = self.active_input_tab else {
             return false;
         };
+        if self
+            .copy_active_selection_to_clipboard(tab_id, ClipboardKind::Clipboard, true, true)
+            .is_some()
+        {
+            return true;
+        }
         let Some((settings, vim_mode)) = self.command_editor_settings_for_mouse(tab_id) else {
             return false;
         };
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
             return false;
         };
-        if let Some(text) = selected_text(&target.command_editor) {
+        let text = {
             let mut terminal = target.terminal.lock();
-            terminal.clipboard.set(ClipboardKind::Clipboard, &text);
-            drop(terminal);
-            clear_editor_selection(&mut target.command_editor);
-        } else {
-            let text = {
-                let mut terminal = target.terminal.lock();
-                terminal.clipboard.get(ClipboardKind::Clipboard)
-            };
-            if let Some(text) = text {
-                apply_input(
-                    &mut target.command_editor,
-                    EditorInput::Insert(text),
-                    &settings,
-                );
-            }
+            terminal.clipboard.get(ClipboardKind::Clipboard)
+        };
+        if let Some(text) = text {
+            apply_input(
+                &mut target.command_editor,
+                EditorInput::Insert(text),
+                &settings,
+            );
         }
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
+        self.clear_terminal_selection_for_tab(tab_id);
         self.set_command_editor_view(tab_id, view);
         true
     }
@@ -293,6 +295,7 @@ impl WindowHost {
             );
         }
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
+        self.clear_terminal_selection_for_tab(tab_id);
         self.set_command_editor_view(tab_id, view);
         true
     }
@@ -586,6 +589,9 @@ impl WindowHost {
                         false
                     };
                     if extended {
+                        if let Some(tab_id) = self.active_input_tab {
+                            self.clear_command_editor_selection_for_tab(tab_id);
+                        }
                         self.left_drag_active = true;
                         self.selection_drag_moved = true;
                         self.refresh_selection_autoscroll_direction();
@@ -607,6 +613,9 @@ impl WindowHost {
                     target.selection =
                         start_selection(&target.active, &target.viewport, col, row, mode);
                     target.invalidate_snapshot_rows();
+                }
+                if let Some(tab_id) = self.active_input_tab {
+                    self.clear_command_editor_selection_for_tab(tab_id);
                 }
                 self.left_drag_active = true;
                 self.selection_drag_moved = false;
@@ -827,6 +836,9 @@ impl WindowHost {
         let duration_text =
             command_duration_at(prompt_abs, &terminal.metadata.command_metas).map(format_duration);
         drop(guard);
+        if let Some(tab_id) = self.active_input_tab {
+            self.clear_command_editor_selection_for_tab(tab_id);
+        }
         self.update_gutter_popup(Some(renderer::GutterPopup {
             prompt_abs_row: prompt_abs,
             screen_row,

@@ -139,6 +139,90 @@ impl WindowHost {
         self.input_state.lock().command_editor_config.clone()
     }
 
+    pub(crate) fn command_editor_is_open_for_tab(
+        &self,
+        tab_id: TabId,
+    ) -> bool {
+        let state = self.input_state.lock();
+        command_editor_view_open_for_input_tab(&state, Some(tab_id))
+    }
+
+    pub(crate) fn clear_terminal_selection_for_tab(
+        &mut self,
+        tab_id: TabId,
+    ) -> bool {
+        let Some(target) = self.input_endpoints.get(&tab_id) else {
+            return false;
+        };
+        let mut terminal = target.terminal.lock();
+        if terminal.selection.take().is_none() {
+            return false;
+        }
+        terminal.invalidate_snapshot_rows();
+        true
+    }
+
+    pub(crate) fn clear_command_editor_selection_for_tab(
+        &mut self,
+        tab_id: TabId,
+    ) -> bool {
+        let changed = {
+            let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+                return false;
+            };
+            clear_editor_selection(&mut target.command_editor) == EditOutcome::Updated
+        };
+        if changed && self.active_input_tab == Some(tab_id) {
+            self.refresh_command_editor_view();
+        }
+        changed
+    }
+
+    pub(crate) fn copy_active_selection_to_clipboard(
+        &mut self,
+        tab_id: TabId,
+        kind: ClipboardKind,
+        clear_after_copy: bool,
+        editor_open: bool,
+    ) -> Option<SelectionCopySource> {
+        let target = self.input_endpoints.get_mut(&tab_id)?;
+        let terminal_has_selection = target.terminal.lock().has_selection();
+        let editor_selection = selected_text(&target.command_editor);
+        let source = selection_copy_source(
+            terminal_has_selection,
+            editor_selection.is_some(),
+            editor_open,
+        )?;
+
+        match source {
+            SelectionCopySource::Terminal => {
+                let mut terminal = target.terminal.lock();
+                if let Some(text) = selection_text(terminal.selection.as_ref(), &terminal.active) {
+                    terminal.clipboard.set(kind, &text);
+                }
+                if clear_after_copy {
+                    terminal.selection = None;
+                    terminal.invalidate_snapshot_rows();
+                }
+            }
+            SelectionCopySource::Editor => {
+                let text = editor_selection.expect("source requires editor selection");
+                {
+                    let mut terminal = target.terminal.lock();
+                    terminal.clipboard.set(kind, &text);
+                }
+                if clear_after_copy {
+                    clear_editor_selection(&mut target.command_editor);
+                }
+            }
+        }
+
+        if clear_after_copy && source == SelectionCopySource::Editor {
+            self.refresh_command_editor_view();
+        }
+        Some(source)
+    }
+
     pub(crate) fn set_command_editor_view(
         &mut self,
         tab_id: TabId,
@@ -341,6 +425,10 @@ impl WindowHost {
         };
         terminal.selection = Some(new_sel);
         terminal.invalidate_snapshot_rows();
+        drop(guard);
+        if let Some(tab_id) = self.active_input_tab {
+            self.clear_command_editor_selection_for_tab(tab_id);
+        }
         true
     }
 

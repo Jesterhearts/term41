@@ -92,6 +92,7 @@ use terminal41::selection::search_append;
 use terminal41::selection::search_backspace;
 use terminal41::selection::search_step_next;
 use terminal41::selection::search_step_prev;
+use terminal41::selection::selection_text;
 use terminal41::selection::start_selection;
 use terminal41::settings;
 use terminal41::view;
@@ -595,6 +596,12 @@ enum SelectionAutoscroll {
     Down,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum SelectionCopySource {
+    Terminal,
+    Editor,
+}
+
 fn selection_autoscroll_direction(
     mouse_y: f64,
     cell_height: u32,
@@ -614,6 +621,20 @@ fn selection_autoscroll_direction(
         Some(SelectionAutoscroll::Up)
     } else if mouse_y >= bottom_edge {
         Some(SelectionAutoscroll::Down)
+    } else {
+        None
+    }
+}
+
+fn selection_copy_source(
+    terminal_has_selection: bool,
+    editor_has_selection: bool,
+    editor_open: bool,
+) -> Option<SelectionCopySource> {
+    if terminal_has_selection {
+        Some(SelectionCopySource::Terminal)
+    } else if editor_open && editor_has_selection {
+        Some(SelectionCopySource::Editor)
     } else {
         None
     }

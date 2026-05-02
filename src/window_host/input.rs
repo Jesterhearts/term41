@@ -324,6 +324,7 @@ impl WindowHost {
             }
         };
         if handled.0 {
+            self.clear_terminal_selection_for_tab(tab_id);
             self.set_command_editor_view(tab_id, handled.1);
         }
         handled.0
@@ -335,7 +336,7 @@ impl WindowHost {
         action: Action,
     ) -> bool {
         let config = self.command_editor_config();
-        if !config.enabled || !matches!(action, Action::Copy | Action::Paste) {
+        if !config.enabled || action != Action::Paste {
             return false;
         }
         self.command_catalog.refresh_for_config(&config);
@@ -363,16 +364,6 @@ impl WindowHost {
             );
 
             match action {
-                Action::Copy => {
-                    if let Some(text) = selected_text(&target.command_editor) {
-                        let mut terminal = target.terminal.lock();
-                        terminal.clipboard.set(ClipboardKind::Clipboard, &text);
-                    }
-                    (
-                        true,
-                        command_editor_view(&target.command_editor, &settings, config.vim_mode),
-                    )
-                }
                 Action::Paste => {
                     let text = {
                         let mut terminal = target.terminal.lock();
@@ -411,7 +402,18 @@ impl WindowHost {
             self.toggle_command_editor();
             return true;
         }
+        if action == Action::Copy {
+            let editor_open = self.command_editor_is_open_for_tab(tab_id);
+            self.copy_active_selection_to_clipboard(
+                tab_id,
+                ClipboardKind::Clipboard,
+                false,
+                editor_open,
+            );
+            return true;
+        }
         if self.handle_command_editor_clipboard_action(tab_id, action) {
+            self.clear_terminal_selection_for_tab(tab_id);
             return true;
         }
         let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
@@ -433,19 +435,7 @@ impl WindowHost {
                 terminal.invalidate_snapshot_rows();
                 true
             }
-            Action::Copy => {
-                let mut guard = target.terminal.lock();
-                let terminal = &mut *guard;
-                if terminal.has_selection() {
-                    copy_selection(
-                        &mut terminal.clipboard,
-                        terminal.selection.as_ref(),
-                        &terminal.active,
-                        ClipboardKind::Clipboard,
-                    );
-                }
-                true
-            }
+            Action::Copy => true,
             Action::Paste => {
                 Self::emit_host_input(
                     target,

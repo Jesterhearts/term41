@@ -72,6 +72,20 @@ mod selection_autoscroll_tests {
             None
         );
     }
+
+    #[test]
+    fn copy_source_prefers_terminal_selection_over_editor_selection() {
+        assert_eq!(
+            selection_copy_source(true, true, true),
+            Some(SelectionCopySource::Terminal)
+        );
+        assert_eq!(
+            selection_copy_source(false, true, true),
+            Some(SelectionCopySource::Editor)
+        );
+        assert_eq!(selection_copy_source(false, true, false), None);
+        assert_eq!(selection_copy_source(false, false, true), None);
+    }
 }
 
 #[cfg(test)]
