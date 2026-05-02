@@ -827,6 +827,9 @@ mod integration_tests {
     use super::StatusDisplayKind;
     use crate::MouseTracking;
     use crate::Terminal;
+    use crate::selection::SelectionMode;
+    use crate::selection::extend_selection;
+    use crate::selection::start_selection;
     use crate::test_support::TestTerm;
     use crate::view;
 
@@ -892,6 +895,41 @@ mod integration_tests {
         assert!(visible_text(&term).contains("hello"));
         assert_eq!(term.active.cursor.col, 5);
         assert_eq!(term.active.cursor.row, 0);
+    }
+
+    #[test]
+    fn screen_switch_clears_selection() {
+        let mut term = TestTerm::new(8, 4, 100, 16, 8);
+        term.process(b"primary");
+        term.selection = start_selection(&term.active, &term.viewport, 0, 0, SelectionMode::Char);
+        term.selection = extend_selection(
+            term.selection.as_ref().unwrap(),
+            &term.active,
+            &term.viewport,
+            6,
+            0,
+        );
+
+        term.process(b"\x1b[?1049h");
+
+        assert!(term.on_alt_screen);
+        assert!(term.selection.is_none());
+
+        term.process(b"alt");
+        term.selection = start_selection(&term.active, &term.viewport, 0, 0, SelectionMode::Char);
+        term.selection = extend_selection(
+            term.selection.as_ref().unwrap(),
+            &term.active,
+            &term.viewport,
+            2,
+            0,
+        );
+        assert!(term.has_selection());
+
+        term.process(b"\x1b[?1049l");
+
+        assert!(!term.on_alt_screen);
+        assert!(term.selection.is_none());
     }
 
     #[test]

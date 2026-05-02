@@ -854,6 +854,7 @@ impl Terminal {
         trace!("Classified action: {:?}", action);
         let dirty_before = self.snapshot_dirty_baseline();
         let dirty_scope = self.snapshot_dirty_scope(&action, dirty_before);
+        let was_on_alt_screen = self.on_alt_screen;
         let pending = match action {
             TerminalAction::Ignore => dispatch::PendingApplication::None,
             TerminalAction::Basic(action) => {
@@ -991,6 +992,9 @@ impl Terminal {
                 dispatch::PendingApplication::None
             }
         };
+        if self.on_alt_screen != was_on_alt_screen {
+            self.selection = None;
+        }
         self.mark_snapshot_dirty_after(dirty_before, dirty_scope);
         pending
     }
