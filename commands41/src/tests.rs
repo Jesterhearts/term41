@@ -129,6 +129,102 @@ fn delete_removes_selected_range() {
     assert_eq!(view.selection, None);
 }
 
+#[test]
+fn undo_and_redo_restore_recent_text_edits() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo".to_owned()),
+        &settings,
+    );
+    apply_input(
+        &mut editor,
+        EditorInput::Insert(" test".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Undo, &settings),
+        EditOutcome::Updated
+    );
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "cargo");
+    assert_eq!(view.cursor, "cargo".len());
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Redo, &settings),
+        EditOutcome::Updated
+    );
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "cargo test");
+    assert_eq!(view.cursor, "cargo test".len());
+}
+
+#[test]
+fn undo_restores_selection_replacement_and_new_edit_clears_redo() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo test".to_owned()),
+        &settings,
+    );
+    select_range(&mut editor, "cargo ".len(), "cargo test".len());
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("clippy".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Undo, &settings),
+        EditOutcome::Updated
+    );
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "cargo test");
+    assert_eq!(
+        view.selection,
+        Some(EditorSelection {
+            anchor: "cargo ".len(),
+            head: "cargo test".len()
+        })
+    );
+
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("check".to_owned()),
+        &settings,
+    );
+    assert_eq!(editor.view(&settings).text, "cargo check");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Redo, &settings),
+        EditOutcome::Ignored
+    );
+}
+
+#[test]
+fn undo_keeps_a_bounded_number_of_steps() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+
+    for _ in 0..35 {
+        apply_input(&mut editor, EditorInput::Insert("x".to_owned()), &settings);
+    }
+
+    for _ in 0..32 {
+        assert_eq!(
+            apply_input(&mut editor, EditorInput::Undo, &settings),
+            EditOutcome::Updated
+        );
+    }
+    assert_eq!(editor.view(&settings).text, "xxx");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Undo, &settings),
+        EditOutcome::Ignored
+    );
+}
+
 fn vim_text(
     editor: &mut CommandEditor,
     text: &str,
@@ -363,6 +459,28 @@ fn vim_yy_yanks_current_line() {
     set_cursor(&mut editor, 0);
     assert_eq!(vim_text(&mut editor, "P"), EditOutcome::Updated);
     assert_eq!(editor.view(&settings).text, "twoone\ntwo\nthree");
+}
+
+#[test]
+fn vim_u_undoes_and_redo_restores_normal_mode_edits() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one two".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "one ".len());
+
+    assert_eq!(vim_text(&mut editor, "D"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "");
+    assert_eq!(vim_text(&mut editor, "u"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "one two");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Redo, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "");
 }
 
 #[test]

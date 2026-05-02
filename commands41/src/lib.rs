@@ -117,6 +117,8 @@ pub enum EditorInput {
     KillToStart,
     KillToEnd,
     Yank,
+    Undo,
+    Redo,
     HistoryPrevious,
     HistoryNext,
     Complete,
@@ -131,12 +133,28 @@ pub enum EditOutcome {
     Canceled,
 }
 
+const MAX_UNDO_STEPS: usize = 32;
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+struct EditorSnapshot {
+    buffer: String,
+    cursor: usize,
+    selection: Option<EditorSelection>,
+}
+
+#[derive(Debug, Clone, Default)]
+struct UndoHistory {
+    undo: Vec<EditorSnapshot>,
+    redo: Vec<EditorSnapshot>,
+}
+
 #[derive(Debug, Clone)]
 pub struct CommandEditor {
     buffer: String,
     cursor: usize,
     history: history::EditorHistory,
     kill_buffer: String,
+    undo: UndoHistory,
     selection: Option<EditorSelection>,
     vim_mode: VimMode,
     vim_pending: Option<vim::VimPending>,
@@ -151,6 +169,7 @@ impl Default for CommandEditor {
             cursor: 0,
             history: history::EditorHistory::default(),
             kill_buffer: String::new(),
+            undo: UndoHistory::default(),
             selection: None,
             vim_mode: VimMode::Normal,
             vim_pending: None,
@@ -198,6 +217,7 @@ impl CommandEditor {
         self.buffer.clear();
         self.cursor = 0;
         history::clear(&mut self.history);
+        self.undo = UndoHistory::default();
         self.selection = None;
         self.vim_mode = VimMode::Normal;
         self.vim_pending = None;
@@ -280,8 +300,7 @@ pub fn apply_input(
             if text.is_empty() {
                 return EditOutcome::Ignored;
             }
-            clear_completion_state(editor);
-            replace_history_edit_with_draft(editor);
+            begin_text_edit(editor);
             replace_selection_or_insert(editor, &text);
             EditOutcome::Updated
         }
@@ -293,27 +312,35 @@ pub fn apply_input(
             EditOutcome::Submitted(command)
         }
         EditorInput::Backspace => {
-            if delete_selection(editor).is_some() {
+            if editor
+                .selection
+                .is_some_and(|selection| !selection.is_empty())
+            {
+                begin_text_edit(editor);
+                delete_selection_without_undo(editor);
                 return EditOutcome::Updated;
             }
             let Some(prev) = previous_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            clear_completion_state(editor);
-            replace_history_edit_with_draft(editor);
+            begin_text_edit(editor);
             editor.buffer.drain(prev..editor.cursor);
             editor.cursor = prev;
             EditOutcome::Updated
         }
         EditorInput::Delete => {
-            if delete_selection(editor).is_some() {
+            if editor
+                .selection
+                .is_some_and(|selection| !selection.is_empty())
+            {
+                begin_text_edit(editor);
+                delete_selection_without_undo(editor);
                 return EditOutcome::Updated;
             }
             let Some(next) = next_grapheme_boundary(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            clear_completion_state(editor);
-            replace_history_edit_with_draft(editor);
+            begin_text_edit(editor);
             editor.buffer.drain(editor.cursor..next);
             EditOutcome::Updated
         }
@@ -380,28 +407,36 @@ pub fn apply_input(
             }
         }
         EditorInput::DeleteWordLeft => {
-            if delete_selection(editor).is_some() {
+            if editor
+                .selection
+                .is_some_and(|selection| !selection.is_empty())
+            {
+                begin_text_edit(editor);
+                delete_selection_without_undo(editor);
                 return EditOutcome::Updated;
             }
             let Some(prev) = previous_word_start(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            clear_completion_state(editor);
-            replace_history_edit_with_draft(editor);
+            begin_text_edit(editor);
             editor.kill_buffer = editor.buffer[prev..editor.cursor].to_owned();
             editor.buffer.drain(prev..editor.cursor);
             editor.cursor = prev;
             EditOutcome::Updated
         }
         EditorInput::DeleteWordRight => {
-            if delete_selection(editor).is_some() {
+            if editor
+                .selection
+                .is_some_and(|selection| !selection.is_empty())
+            {
+                begin_text_edit(editor);
+                delete_selection_without_undo(editor);
                 return EditOutcome::Updated;
             }
             let Some(next) = next_word_end(&editor.buffer, editor.cursor) else {
                 return EditOutcome::Ignored;
             };
-            clear_completion_state(editor);
-            replace_history_edit_with_draft(editor);
+            begin_text_edit(editor);
             editor.kill_buffer = editor.buffer[editor.cursor..next].to_owned();
             editor.buffer.drain(editor.cursor..next);
             EditOutcome::Updated
@@ -410,8 +445,7 @@ pub fn apply_input(
             if editor.cursor == 0 {
                 return EditOutcome::Ignored;
             }
-            clear_completion_state(editor);
-            replace_history_edit_with_draft(editor);
+            begin_text_edit(editor);
             editor.kill_buffer = editor.buffer[..editor.cursor].to_owned();
             editor.buffer.drain(..editor.cursor);
             editor.cursor = 0;
@@ -422,8 +456,7 @@ pub fn apply_input(
             if editor.cursor == editor.buffer.len() {
                 return EditOutcome::Ignored;
             }
-            clear_completion_state(editor);
-            replace_history_edit_with_draft(editor);
+            begin_text_edit(editor);
             editor.kill_buffer = editor.buffer[editor.cursor..].to_owned();
             editor.buffer.truncate(editor.cursor);
             editor.selection = None;
@@ -433,12 +466,13 @@ pub fn apply_input(
             if editor.kill_buffer.is_empty() {
                 return EditOutcome::Ignored;
             }
-            clear_completion_state(editor);
-            replace_history_edit_with_draft(editor);
+            begin_text_edit(editor);
             let text = editor.kill_buffer.clone();
             replace_selection_or_insert(editor, &text);
             EditOutcome::Updated
         }
+        EditorInput::Undo => undo_text_edit(editor),
+        EditorInput::Redo => redo_text_edit(editor),
         EditorInput::HistoryPrevious => {
             cycle_completion_selection(editor, settings, CompletionDirection::Previous)
                 .or_else(|| move_cursor_line(editor, LineDirection::Previous))
@@ -642,6 +676,70 @@ fn replace_history_edit_with_draft(editor: &mut CommandEditor) {
     history::replace_edit_with_draft(&mut editor.history, &editor.buffer);
 }
 
+fn begin_text_edit(editor: &mut CommandEditor) {
+    push_undo_snapshot(editor);
+    clear_completion_state(editor);
+    replace_history_edit_with_draft(editor);
+}
+
+fn push_undo_snapshot(editor: &mut CommandEditor) {
+    let snapshot = editor_snapshot(editor);
+    if editor.undo.undo.last() == Some(&snapshot) {
+        editor.undo.redo.clear();
+        return;
+    }
+    editor.undo.undo.push(snapshot);
+    trim_snapshot_stack(&mut editor.undo.undo);
+    editor.undo.redo.clear();
+}
+
+fn editor_snapshot(editor: &CommandEditor) -> EditorSnapshot {
+    EditorSnapshot {
+        buffer: editor.buffer.clone(),
+        cursor: editor.cursor,
+        selection: editor.selection,
+    }
+}
+
+fn trim_snapshot_stack(stack: &mut Vec<EditorSnapshot>) {
+    let overflow = stack.len().saturating_sub(MAX_UNDO_STEPS);
+    if overflow > 0 {
+        stack.drain(..overflow);
+    }
+}
+
+fn undo_text_edit(editor: &mut CommandEditor) -> EditOutcome {
+    let Some(snapshot) = editor.undo.undo.pop() else {
+        return EditOutcome::Ignored;
+    };
+    editor.undo.redo.push(editor_snapshot(editor));
+    trim_snapshot_stack(&mut editor.undo.redo);
+    restore_editor_snapshot(editor, snapshot);
+    EditOutcome::Updated
+}
+
+fn redo_text_edit(editor: &mut CommandEditor) -> EditOutcome {
+    let Some(snapshot) = editor.undo.redo.pop() else {
+        return EditOutcome::Ignored;
+    };
+    editor.undo.undo.push(editor_snapshot(editor));
+    trim_snapshot_stack(&mut editor.undo.undo);
+    restore_editor_snapshot(editor, snapshot);
+    EditOutcome::Updated
+}
+
+fn restore_editor_snapshot(
+    editor: &mut CommandEditor,
+    snapshot: EditorSnapshot,
+) {
+    clear_completion_state(editor);
+    editor.buffer = snapshot.buffer;
+    editor.cursor = snapshot.cursor;
+    editor.selection = snapshot.selection;
+    editor.vim_pending = None;
+    replace_history_edit_with_draft(editor);
+}
+
 fn valid_boundary(
     text: &str,
     cursor: usize,
@@ -653,7 +751,7 @@ fn replace_selection_or_insert(
     editor: &mut CommandEditor,
     text: &str,
 ) {
-    if let Some((start, _)) = delete_selection(editor) {
+    if let Some((start, _)) = delete_selection_without_undo(editor) {
         editor.buffer.insert_str(start, text);
         editor.cursor = start + text.len();
     } else {
@@ -662,14 +760,12 @@ fn replace_selection_or_insert(
     }
 }
 
-fn delete_selection(editor: &mut CommandEditor) -> Option<(usize, usize)> {
+fn delete_selection_without_undo(editor: &mut CommandEditor) -> Option<(usize, usize)> {
     let selection = editor.selection.take()?;
     if selection.is_empty() {
         return None;
     }
     let (start, end) = selection.ordered();
-    clear_completion_state(editor);
-    replace_history_edit_with_draft(editor);
     editor.buffer.drain(start..end);
     editor.cursor = start;
     Some((start, end))
@@ -692,6 +788,7 @@ fn history_previous(
         return EditOutcome::Ignored;
     };
     clear_completion_state(editor);
+    editor.undo = UndoHistory::default();
     editor.buffer = command;
     editor.cursor = editor.buffer.len();
     editor.selection = None;
@@ -706,6 +803,7 @@ fn history_next(
         return EditOutcome::Ignored;
     };
     clear_completion_state(editor);
+    editor.undo = UndoHistory::default();
     editor.buffer = command;
     editor.cursor = editor.buffer.len();
     editor.selection = None;
@@ -800,8 +898,7 @@ fn complete_current_prefix(
     let Some(suffix) = completion_suffix(editor, settings) else {
         return EditOutcome::Ignored;
     };
-    clear_completion_state(editor);
-    replace_history_edit_with_draft(editor);
+    begin_text_edit(editor);
     replace_selection_or_insert(editor, &suffix);
     EditOutcome::Updated
 }
@@ -1311,8 +1408,7 @@ fn accept_selected_completion(editor: &mut CommandEditor) -> bool {
     let Some(suffix) = selection.current_suffix() else {
         return false;
     };
-    editor.path_cycle = None;
-    replace_history_edit_with_draft(editor);
+    begin_text_edit(editor);
     replace_selection_or_insert(editor, &suffix);
     true
 }
@@ -1328,7 +1424,7 @@ fn accept_path_cycle(editor: &mut CommandEditor) -> bool {
     let Some(suffix) = cycle.current_suffix() else {
         return false;
     };
-    replace_history_edit_with_draft(editor);
+    begin_text_edit(editor);
     replace_selection_or_insert(editor, &suffix);
     true
 }
@@ -1340,8 +1436,7 @@ fn accept_visible_path_completion(
     let Some(suffix) = path_completion_suffix(&editor.buffer, editor.cursor, settings) else {
         return false;
     };
-    clear_completion_state(editor);
-    replace_history_edit_with_draft(editor);
+    begin_text_edit(editor);
     replace_selection_or_insert(editor, &suffix);
     true
 }

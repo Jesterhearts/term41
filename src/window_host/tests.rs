@@ -176,6 +176,10 @@ mod command_editor_input_tests {
             command_editor_input(&Key::Character("y".into()), ModifiersState::CONTROL, false),
             Some(EditorInput::Yank)
         );
+        assert_eq!(
+            command_editor_input(&Key::Character("r".into()), ModifiersState::CONTROL, false),
+            Some(EditorInput::Redo)
+        );
     }
 
     #[test]
@@ -227,6 +231,10 @@ mod command_editor_input_tests {
         assert_eq!(
             command_editor_input(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT, true),
             Some(EditorInput::Vim(VimKey::ShiftEnter))
+        );
+        assert_eq!(
+            command_editor_input(&Key::Character("r".into()), ModifiersState::CONTROL, true),
+            Some(EditorInput::Redo)
         );
     }
 

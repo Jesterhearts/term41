@@ -453,8 +453,8 @@ Notes:
   Set `vim_mode = true` to start the editor in normal mode with `i`/`a`/`A`
   and `o`/`O` for insert, `Esc` for normal mode, `hjkl`, `0`/`^`/`$`,
   `{`/`}`, `w`/`b`/`e` and `W`/`B`/`E`, `d`/`y` plus motions, `D`, `yy`,
-  `p`/`P`, and `gg`/`G`; normal mode uses a block cursor and insert mode uses
-  the regular line cursor.
+  `p`/`P`, `u` for undo, `Ctrl+R` for redo, and `gg`/`G`; normal mode uses a
+  block cursor and insert mode uses the regular line cursor.
   `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
   config.
 - Example scripts are available under `examples/`, including

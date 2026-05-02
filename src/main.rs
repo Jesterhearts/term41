@@ -627,6 +627,14 @@ fn vim_command_editor_input(
     key: &Key,
     mods: ModifiersState,
 ) -> Option<EditorInput> {
+    if !mods.shift_key()
+        && mods.control_key()
+        && !mods.alt_key()
+        && !mods.super_key()
+        && matches!(key, Key::Character(text) if text.eq_ignore_ascii_case("r"))
+    {
+        return Some(EditorInput::Redo);
+    }
     if mods.super_key() || mods.control_key() || mods.alt_key() {
         return None;
     }
@@ -700,6 +708,7 @@ fn control_command_editor_input(text: &str) -> Option<EditorInput> {
         "u" | "U" => Some(EditorInput::KillToStart),
         "w" | "W" => Some(EditorInput::DeleteWordLeft),
         "y" | "Y" => Some(EditorInput::Yank),
+        "r" | "R" => Some(EditorInput::Redo),
         _ => None,
     }
 }

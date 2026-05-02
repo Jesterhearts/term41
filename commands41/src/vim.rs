@@ -154,6 +154,7 @@ fn apply_vim_normal_text(
         '0' => apply_vim_motion(editor, VimMotion::LineStart),
         '^' => apply_vim_motion(editor, VimMotion::LineFirstNonBlank),
         '$' => apply_vim_motion(editor, VimMotion::LineEnd),
+        'u' => undo_text_edit(editor),
         'D' => vim_delete_current_line(editor),
         'd' => {
             editor.vim_pending = Some(VimPending::Operator(VimOperator::Delete));
@@ -292,8 +293,7 @@ fn apply_vim_operator_motion(
     match operator {
         VimOperator::Yank => EditOutcome::Updated,
         VimOperator::Delete => {
-            clear_completion_state(editor);
-            replace_history_edit_with_draft(editor);
+            begin_text_edit(editor);
             editor.buffer.drain(start..end);
             editor.cursor = start.min(editor.buffer.len());
             normalize_vim_normal_cursor(editor);
@@ -403,8 +403,7 @@ fn vim_open_line(
         OpenLinePlacement::Below => insert_at + '\n'.len_utf8(),
     };
 
-    clear_completion_state(editor);
-    replace_history_edit_with_draft(editor);
+    begin_text_edit(editor);
     editor.selection = None;
     editor.buffer.insert(insert_at, '\n');
     editor.cursor = cursor;
@@ -420,8 +419,7 @@ fn vim_delete_range(
     if start == end {
         return EditOutcome::Ignored;
     }
-    clear_completion_state(editor);
-    replace_history_edit_with_draft(editor);
+    begin_text_edit(editor);
     editor.kill_buffer = editor.buffer[start..end].to_owned();
     editor.buffer.drain(start..end);
     editor.cursor = start.min(editor.buffer.len());
@@ -443,8 +441,7 @@ fn vim_paste(
             next_grapheme_boundary(&editor.buffer, editor.cursor).unwrap_or(editor.buffer.len())
         }
     };
-    clear_completion_state(editor);
-    replace_history_edit_with_draft(editor);
+    begin_text_edit(editor);
     editor.cursor = cursor;
     replace_selection_or_insert(editor, &text);
     normalize_vim_normal_cursor(editor);
