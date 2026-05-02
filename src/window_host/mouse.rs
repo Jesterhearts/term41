@@ -110,7 +110,7 @@ impl WindowHost {
         let target = self.active_input_target()?;
         let (cursor_row, viewport_cols) = {
             let terminal = target.terminal.lock();
-            command_editor_context(&terminal)?;
+            command_editor_view_context(&terminal)?;
             (terminal.active.cursor.row, terminal.viewport.cols.max(1))
         };
         let view = self.input_state.lock().command_editor_view.clone()?;
@@ -150,7 +150,7 @@ impl WindowHost {
         let target = self.input_endpoints.get(&tab_id)?;
         let context = {
             let terminal = target.terminal.lock();
-            command_editor_context(&terminal)
+            command_editor_view_context(&terminal)
         }?;
         let history_entries = self.command_editor_history_entries(&config);
         Some((

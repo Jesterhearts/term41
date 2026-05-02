@@ -308,16 +308,20 @@ struct CommandEditorContext {
     current_dir: Option<PathBuf>,
 }
 
-fn command_editor_context(terminal: &Terminal) -> Option<CommandEditorContext> {
+fn command_editor_view_context(terminal: &Terminal) -> Option<CommandEditorContext> {
     if terminal.on_alt_screen {
-        return None;
-    }
-    if terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Command {
         return None;
     }
     Some(CommandEditorContext {
         current_dir: terminal.metadata.current_directory.clone(),
     })
+}
+
+fn command_editor_input_context(terminal: &Terminal) -> Option<CommandEditorContext> {
+    if terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Command {
+        return None;
+    }
+    command_editor_view_context(terminal)
 }
 
 fn reset_viewport_and_invalidate(terminal: &mut Terminal) {

@@ -273,16 +273,9 @@ impl WindowHost {
                 return false;
             };
             let terminal = target.terminal.lock();
-            command_editor_context(&terminal)
+            command_editor_input_context(&terminal)
         };
         let Some(context) = editor_context else {
-            let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
-                return false;
-            };
-            if !target.command_editor.is_empty() {
-                target.command_editor.clear();
-                self.set_command_editor_view(None);
-            }
             return false;
         };
         let history_entries = self.command_editor_history_entries(&config);
@@ -302,14 +295,20 @@ impl WindowHost {
                     let mut bytes = command.into_bytes();
                     bytes.push(b'\r');
                     Self::write_host_bytes(target, bytes, true);
-                    (true, None)
+                    let view =
+                        command_editor_view(&target.command_editor, &settings, config.vim_mode);
+                    (true, view)
                 }
                 EditOutcome::Updated => {
                     let view =
                         command_editor_view(&target.command_editor, &settings, config.vim_mode);
                     (true, view)
                 }
-                EditOutcome::Canceled => (true, None),
+                EditOutcome::Canceled => {
+                    let view =
+                        command_editor_view(&target.command_editor, &settings, config.vim_mode);
+                    (true, view)
+                }
                 EditOutcome::Ignored => {
                     if input == EditorInput::Cancel {
                         (false, None)
@@ -343,7 +342,7 @@ impl WindowHost {
                 return false;
             };
             let terminal = target.terminal.lock();
-            command_editor_context(&terminal)
+            command_editor_input_context(&terminal)
         };
         let Some(context) = context else {
             return false;

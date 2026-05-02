@@ -167,7 +167,7 @@ impl WindowHost {
         let context = {
             let target = self.input_endpoints.get(&tab_id)?;
             let terminal = target.terminal.lock();
-            command_editor_context(&terminal)
+            command_editor_view_context(&terminal)
         }?;
         let history_entries = self.command_editor_history_entries(&config);
         let target = self.input_endpoints.get(&tab_id)?;

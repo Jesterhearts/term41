@@ -112,21 +112,29 @@ mod command_editor_context_tests {
     use super::*;
 
     #[test]
-    fn command_editor_context_requires_shell_command_phase() {
+    fn command_editor_view_context_requires_primary_screen_only() {
         let mut term = TestTerm::new_80x24();
 
-        assert_eq!(command_editor_context(&term), None);
+        assert_eq!(
+            command_editor_view_context(&term),
+            Some(CommandEditorContext { current_dir: None })
+        );
+        assert_eq!(command_editor_input_context(&term), None);
 
         term.process(b"\x1b]133;B\x07");
 
         assert_eq!(
-            command_editor_context(&term),
+            command_editor_view_context(&term),
+            Some(CommandEditorContext { current_dir: None })
+        );
+        assert_eq!(
+            command_editor_input_context(&term),
             Some(CommandEditorContext { current_dir: None })
         );
     }
 
     #[test]
-    fn command_editor_context_is_disabled_on_alt_screen() {
+    fn command_editor_contexts_are_disabled_on_alt_screen() {
         let mut term = TestTerm::new_80x24();
         term.process(b"\x1b]133;B\x07");
         term.process(b"\x1b[?1049h");
@@ -136,7 +144,8 @@ mod command_editor_context_tests {
             ShellIntegrationPhase::Command
         );
         assert!(term.on_alt_screen);
-        assert_eq!(command_editor_context(&term), None);
+        assert_eq!(command_editor_view_context(&term), None);
+        assert_eq!(command_editor_input_context(&term), None);
     }
 }
 
