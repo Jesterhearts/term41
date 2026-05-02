@@ -58,6 +58,7 @@ mod geometry_tests {
     use super::image_batch_for_page;
     use super::image_render_order;
     use super::image_vertex_z;
+    use super::terminal_row_y;
 
     fn blank_row(cols: usize) -> RowSnapshot {
         RowSnapshot {
@@ -239,6 +240,20 @@ mod geometry_tests {
 
         let ids: Vec<u64> = images.iter().map(|image| image.id).collect();
         assert_eq!(ids, vec![1, 3, 4, 2]);
+    }
+
+    #[test]
+    fn terminal_row_y_includes_editor_offset_for_chrome_alignment() {
+        let layout = FrameLayout {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            baseline: 14.0,
+            gutter_px: 0.0,
+            tab_bar_h: 20.0,
+            terminal_y_offset: -60.0,
+        };
+
+        assert_eq!(terminal_row_y(5, &layout), 60.0);
     }
 
     fn visible_image(

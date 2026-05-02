@@ -558,7 +558,7 @@ impl Renderer {
         let Some(row) = snap.status_line_row else {
             return;
         };
-        let y = layout.tab_bar_h + row as f32 * layout.cell_h;
+        let y = terminal_row_y(row, layout);
         let border = pack_color(&snap.palette.status_line_fg, 255);
         let left = 0.0;
         let width = layout.gutter_px + snap.viewport_cols as f32 * layout.cell_w;

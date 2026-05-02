@@ -141,18 +141,22 @@ impl WindowHost {
 
     pub(crate) fn set_command_editor_view(
         &mut self,
+        tab_id: TabId,
         view: Option<CommandLineView>,
     ) {
-        self.input_state.lock().command_editor_view = view;
+        self.input_state.lock().command_editor_view =
+            view.map(|view| CommandEditorViewState { tab_id, view });
         self.notify_interaction_changed();
     }
 
     pub(crate) fn refresh_command_editor_view(&mut self) {
-        let view = match self.active_input_tab {
-            Some(tab_id) => self.command_editor_view_for_tab(tab_id),
-            None => None,
+        let Some(tab_id) = self.active_input_tab else {
+            self.input_state.lock().command_editor_view = None;
+            self.notify_interaction_changed();
+            return;
         };
-        self.set_command_editor_view(view);
+        let view = self.command_editor_view_for_tab(tab_id);
+        self.set_command_editor_view(tab_id, view);
     }
 
     pub(crate) fn command_editor_view_for_tab(
@@ -351,7 +355,10 @@ impl WindowHost {
         }
         let mouse_y = self.mouse_pos.1;
         let (_, cell_height, _, _) = self.layout_snapshot();
-        let command_editor_view_present = self.input_state.lock().command_editor_view.is_some();
+        let command_editor_view_present = {
+            let state = self.input_state.lock();
+            command_editor_view_open_for_input_tab(&state, self.active_input_tab)
+        };
         let target = self.active_input_target()?;
         let terminal = target.terminal.lock();
         terminal.selection.as_ref()?;

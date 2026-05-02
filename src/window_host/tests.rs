@@ -238,6 +238,27 @@ mod command_editor_context_tests {
         term.process(b"\x1b[?1049h");
         assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
     }
+
+    #[test]
+    fn command_editor_view_state_is_scoped_to_its_tab() {
+        let view = CommandLineView {
+            text: "cargo test".to_owned(),
+            cursor: "cargo test".len(),
+            cursor_style: CommandEditorCursorStyle::Beam,
+            spans: Vec::new(),
+            selection: None,
+            completion: None,
+            candidates: Vec::new(),
+            candidate_index: 0,
+        };
+        let state = Some(CommandEditorViewState {
+            tab_id: TabId(7),
+            view,
+        });
+
+        assert!(command_editor_view_for_tab_state(&state, TabId(7)).is_some());
+        assert!(command_editor_view_for_tab_state(&state, TabId(8)).is_none());
+    }
 }
 
 #[cfg(test)]

@@ -317,6 +317,32 @@ fn command_editor_view_context(terminal: &Terminal) -> Option<CommandEditorConte
     })
 }
 
+fn command_editor_view_for_input_tab(
+    input_state: &InputState,
+    tab_id: TabId,
+) -> Option<&CommandLineView> {
+    command_editor_view_for_tab_state(&input_state.command_editor_view, tab_id)
+}
+
+fn command_editor_view_for_tab_state(
+    view_state: &Option<CommandEditorViewState>,
+    tab_id: TabId,
+) -> Option<&CommandLineView> {
+    view_state
+        .as_ref()
+        .filter(|state| state.tab_id == tab_id)
+        .map(|state| &state.view)
+}
+
+fn command_editor_view_open_for_input_tab(
+    input_state: &InputState,
+    tab_id: Option<TabId>,
+) -> bool {
+    tab_id
+        .and_then(|tab_id| command_editor_view_for_input_tab(input_state, tab_id))
+        .is_some()
+}
+
 fn command_editor_hidden_by_foreground_app(terminal: &Terminal) -> bool {
     if terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Output {
         return false;
@@ -374,7 +400,7 @@ enum RecordingPopupState {
 pub(crate) struct InputState {
     keybindings: Keybindings,
     command_editor_config: CommandEditorConfig,
-    command_editor_view: Option<CommandLineView>,
+    command_editor_view: Option<CommandEditorViewState>,
     tab_count: usize,
     tab_order: Vec<TabId>,
     cell_width: u32,
@@ -387,6 +413,12 @@ pub(crate) struct InputState {
     permission_modal: Option<PermissionModal>,
     toast: Option<ToastView>,
     preedit: Option<PreeditState>,
+}
+
+#[derive(Clone)]
+struct CommandEditorViewState {
+    tab_id: TabId,
+    view: CommandLineView,
 }
 
 struct WindowHost {

@@ -64,6 +64,9 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                         command_editor: CommandEditor::new(),
                     },
                 );
+                if self.active_input_tab == Some(tab_id) {
+                    self.refresh_command_editor_view();
+                }
             }
             AppEvent::RemoveInputEndpoint(tab_id) => {
                 self.input_endpoints.remove(&tab_id);
@@ -194,6 +197,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
             WindowEvent::Resized(size) => {
                 self.window_size = (size.width, size.height);
+                self.refresh_command_editor_view();
                 RenderEvent::Resized {
                     width: size.width,
                     height: size.height,

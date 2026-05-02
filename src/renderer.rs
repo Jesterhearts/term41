@@ -44,6 +44,7 @@ use crate::INITIAL_ROWS;
 use crate::InputState;
 use crate::Tab;
 use crate::TabId;
+use crate::command_editor_view_for_input_tab;
 use crate::output_recording::RecorderControl;
 use crate::renderer::r#impl::Renderer;
 pub(crate) use crate::renderer::r#impl::TabInfo;
@@ -1469,7 +1470,7 @@ impl RenderHost {
                 input_state.permission_modal.clone(),
                 input_state.toast.clone(),
                 input_state.preedit.clone(),
-                input_state.command_editor_view.clone(),
+                command_editor_view_for_input_tab(&input_state, active_tab_id).cloned(),
             )
         };
         let recording_popup = recording_popup.map(|popup| RecordingPopup { lines: popup.lines });

@@ -324,7 +324,7 @@ impl WindowHost {
             }
         };
         if handled.0 {
-            self.set_command_editor_view(handled.1);
+            self.set_command_editor_view(tab_id, handled.1);
         }
         handled.0
     }
@@ -394,7 +394,7 @@ impl WindowHost {
             }
         };
         if handled_action {
-            self.set_command_editor_view(view);
+            self.set_command_editor_view(tab_id, view);
         }
         handled_action
     }

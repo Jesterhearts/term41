@@ -107,13 +107,17 @@ impl WindowHost {
             return None;
         }
 
-        let target = self.active_input_target()?;
+        let tab_id = self.active_input_tab?;
+        let target = self.input_endpoints.get(&tab_id)?;
         let (cursor_row, viewport_cols) = {
             let terminal = target.terminal.lock();
             command_editor_view_context(&terminal)?;
             (terminal.active.cursor.row, terminal.viewport.cols.max(1))
         };
-        let view = self.input_state.lock().command_editor_view.clone()?;
+        let view = {
+            let state = self.input_state.lock();
+            command_editor_view_for_input_tab(&state, tab_id).cloned()
+        }?;
 
         let box_top = cursor_row as i32 + 1 - COMMAND_EDITOR_BOX_ROWS as i32;
         let terminal_row = raw_y.saturating_sub(cell_h) / cell_h;
@@ -182,7 +186,7 @@ impl WindowHost {
         self.command_editor_drag_anchor = Some(offset);
         self.left_drag_active = true;
         self.selection_drag_moved = false;
-        self.set_command_editor_view(view);
+        self.set_command_editor_view(tab_id, view);
         true
     }
 
@@ -205,7 +209,7 @@ impl WindowHost {
         };
         select_range(&mut target.command_editor, anchor, offset);
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
-        self.set_command_editor_view(view);
+        self.set_command_editor_view(tab_id, view);
         true
     }
 
@@ -227,7 +231,7 @@ impl WindowHost {
         self.command_editor_drag_anchor = None;
         self.left_drag_active = false;
         self.selection_drag_moved = false;
-        self.set_command_editor_view(view);
+        self.set_command_editor_view(tab_id, view);
         true
     }
 
@@ -260,7 +264,7 @@ impl WindowHost {
             }
         }
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
-        self.set_command_editor_view(view);
+        self.set_command_editor_view(tab_id, view);
         true
     }
 
@@ -289,7 +293,7 @@ impl WindowHost {
             );
         }
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
-        self.set_command_editor_view(view);
+        self.set_command_editor_view(tab_id, view);
         true
     }
 
@@ -494,7 +498,10 @@ impl WindowHost {
             return;
         }
 
-        let command_editor_open = self.input_state.lock().command_editor_view.is_some();
+        let command_editor_open = {
+            let state = self.input_state.lock();
+            command_editor_view_open_for_input_tab(&state, self.active_input_tab)
+        };
         if let Some(kind) = command_editor_mouse_paste_kind(command_editor_open, pressed, button) {
             let handled = match kind {
                 ClipboardKind::Clipboard => self.right_click_command_editor(),
@@ -960,7 +967,10 @@ impl WindowHost {
         let (cell_w, cell_h, gutter_w, _) = self.layout_snapshot();
         let raw_x = x.max(0.0) as u32;
         let raw_y = y.max(0.0) as u32;
-        let command_editor_view_present = self.input_state.lock().command_editor_view.is_some();
+        let command_editor_view_present = {
+            let state = self.input_state.lock();
+            command_editor_view_open_for_input_tab(&state, self.active_input_tab)
+        };
         let Some(target) = self.active_input_target() else {
             return MouseReportPosition {
                 col: 0,
