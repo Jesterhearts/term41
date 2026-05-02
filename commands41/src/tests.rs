@@ -213,6 +213,35 @@ fn vim_word_motions_distinguish_punctuation_and_whitespace_words() {
     set_cursor(&mut editor, 0);
     assert_eq!(vim_text(&mut editor, "E"), EditOutcome::Updated);
     assert_eq!(editor.view(&settings).cursor, "foo.bar".len());
+
+    set_cursor(&mut editor, "foo.bar baz".len());
+    assert_eq!(vim_text(&mut editor, "b"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "foo.bar ".len());
+    assert_eq!(vim_text(&mut editor, "b"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "foo.".len());
+    assert_eq!(vim_text(&mut editor, "b"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "foo".len());
+
+    set_cursor(&mut editor, "foo.bar baz".len());
+    assert_eq!(vim_text(&mut editor, "B"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "foo.bar ".len());
+    assert_eq!(vim_text(&mut editor, "B"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, 0);
+}
+
+#[test]
+fn vim_zero_moves_to_current_line_start() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one\ntwo three".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "one\ntwo ".len());
+
+    assert_eq!(vim_text(&mut editor, "0"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).cursor, "one\n".len());
 }
 
 #[test]
@@ -260,6 +289,29 @@ fn vim_delete_yank_and_paste_use_editor_clipboard() {
     assert_eq!(editor.view(&settings).text, "foo bar");
     assert_eq!(vim_text(&mut editor, "p"), EditOutcome::Updated);
     assert_eq!(editor.view(&settings).text, "ffoo oo bar");
+}
+
+#[test]
+fn vim_backward_motions_work_with_delete_and_yank() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("foo.bar baz".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "foo.bar baz".len());
+
+    assert_eq!(vim_text(&mut editor, "y"), EditOutcome::Updated);
+    assert_eq!(vim_text(&mut editor, "b"), EditOutcome::Updated);
+    set_cursor(&mut editor, 0);
+    assert_eq!(vim_text(&mut editor, "P"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "bazfoo.bar baz");
+
+    set_cursor(&mut editor, "bazfoo.bar".len());
+    assert_eq!(vim_text(&mut editor, "d"), EditOutcome::Updated);
+    assert_eq!(vim_text(&mut editor, "B"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, " baz");
 }
 
 #[test]

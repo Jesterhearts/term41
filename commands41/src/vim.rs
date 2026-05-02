@@ -139,9 +139,12 @@ fn apply_vim_normal_text(
         '{' => apply_vim_motion(editor, VimMotion::ParagraphPrevious),
         '}' => apply_vim_motion(editor, VimMotion::ParagraphNext),
         'w' => apply_vim_motion(editor, VimMotion::WordStart),
+        'b' => apply_vim_motion(editor, VimMotion::WordBack),
         'e' => apply_vim_motion(editor, VimMotion::WordEnd),
         'W' => apply_vim_motion(editor, VimMotion::WhitespaceWordStart),
+        'B' => apply_vim_motion(editor, VimMotion::WhitespaceWordBack),
         'E' => apply_vim_motion(editor, VimMotion::WhitespaceWordEnd),
+        '0' => apply_vim_motion(editor, VimMotion::LineStart),
         'D' => vim_delete_current_line(editor),
         'd' => {
             editor.vim_pending = Some(VimPending::Operator(VimOperator::Delete));
@@ -210,9 +213,12 @@ enum VimMotion {
     ParagraphPrevious,
     ParagraphNext,
     WordStart,
+    WordBack,
     WordEnd,
     WhitespaceWordStart,
+    WhitespaceWordBack,
     WhitespaceWordEnd,
+    LineStart,
     Start,
     End,
 }
@@ -232,9 +238,12 @@ fn vim_motion_from_char(ch: char) -> Option<VimMotion> {
         '{' => Some(VimMotion::ParagraphPrevious),
         '}' => Some(VimMotion::ParagraphNext),
         'w' => Some(VimMotion::WordStart),
+        'b' => Some(VimMotion::WordBack),
         'e' => Some(VimMotion::WordEnd),
         'W' => Some(VimMotion::WhitespaceWordStart),
+        'B' => Some(VimMotion::WhitespaceWordBack),
         'E' => Some(VimMotion::WhitespaceWordEnd),
+        '0' => Some(VimMotion::LineStart),
         'G' => Some(VimMotion::End),
         _ => None,
     }
@@ -302,9 +311,14 @@ fn vim_motion_target(
         VimMotion::ParagraphPrevious => previous_paragraph_start(&editor.buffer, editor.cursor),
         VimMotion::ParagraphNext => next_paragraph_start(&editor.buffer, editor.cursor),
         VimMotion::WordStart => next_vim_word_start(&editor.buffer, editor.cursor, false),
+        VimMotion::WordBack => previous_vim_word_start(&editor.buffer, editor.cursor, false),
         VimMotion::WordEnd => next_vim_word_end(&editor.buffer, editor.cursor, false),
         VimMotion::WhitespaceWordStart => next_vim_word_start(&editor.buffer, editor.cursor, true),
+        VimMotion::WhitespaceWordBack => {
+            previous_vim_word_start(&editor.buffer, editor.cursor, true)
+        }
         VimMotion::WhitespaceWordEnd => next_vim_word_end(&editor.buffer, editor.cursor, true),
+        VimMotion::LineStart => Some(current_line_range(&editor.buffer, editor.cursor).0),
         VimMotion::Start => Some(0),
         VimMotion::End => Some(editor.buffer.len()),
     }
@@ -459,6 +473,18 @@ fn next_vim_word_end(
         .into_iter()
         .map(|(_, end)| end)
         .find(|end| *end > cursor)
+}
+
+fn previous_vim_word_start(
+    text: &str,
+    cursor: usize,
+    whitespace_delimited: bool,
+) -> Option<usize> {
+    vim_word_spans(text, whitespace_delimited)
+        .into_iter()
+        .map(|(start, _)| start)
+        .take_while(|start| *start < cursor)
+        .last()
 }
 
 fn vim_word_spans(
