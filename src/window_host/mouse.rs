@@ -109,20 +109,26 @@ impl WindowHost {
 
         let tab_id = self.active_input_tab?;
         let target = self.input_endpoints.get(&tab_id)?;
-        let (cursor_row, viewport_cols) = {
+        let (cursor_row, viewport_rows, viewport_cols) = {
             let terminal = target.terminal.lock();
             command_editor_view_context(&terminal)?;
-            (terminal.active.cursor.row, terminal.viewport.cols.max(1))
+            (
+                terminal.active.cursor.row,
+                terminal.viewport.rows.max(1),
+                terminal.viewport.cols.max(1),
+            )
         };
         let view = {
             let state = self.input_state.lock();
             command_editor_view_for_input_tab(&state, tab_id).cloned()
         }?;
 
-        let box_top = cursor_row as i32 + 1 - COMMAND_EDITOR_BOX_ROWS as i32;
+        let placement = command_editor_placement_for_cursor(cursor_row, viewport_rows);
+        let visible_rows = placement.rows;
+        let box_top = placement.top_row as i32;
         let terminal_row = raw_y.saturating_sub(cell_h) / cell_h;
         let visible_row = terminal_row as i32 - box_top;
-        if !(0..COMMAND_EDITOR_BOX_ROWS as i32).contains(&visible_row) {
+        if !(0..visible_rows as i32).contains(&visible_row) {
             return None;
         }
 
@@ -135,6 +141,7 @@ impl WindowHost {
         Some(command_editor_byte_index_at_cell(
             &view,
             viewport_cols,
+            visible_rows,
             visible_row as u32,
             col,
         ))

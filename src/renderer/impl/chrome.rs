@@ -1705,12 +1705,14 @@ impl Renderer {
         let Some((cursor_row, _cursor_col)) = snap.cursor else {
             return;
         };
+        let placement = command_editor_placement_for_cursor(cursor_row, snap.viewport_rows);
         let editor_x = 0.0;
         let box_x = layout.gutter_px;
         let box_y = terminal_row_y(cursor_row, layout) + layout.cell_h;
         let box_w = snap.viewport_cols.max(1) as f32 * layout.cell_w;
         let editor_w = layout.gutter_px + box_w;
-        let box_h = COMMAND_EDITOR_BOX_ROWS as f32 * layout.cell_h;
+        let editor_rows = placement.rows.max(1) as usize;
+        let box_h = editor_rows as f32 * layout.cell_h;
         let content_x = box_x;
         let border = 2.0;
         let lines = command_editor_line_ranges(&editor.text);
@@ -1719,9 +1721,10 @@ impl Renderer {
             return;
         }
         let (cursor_line, cursor_line_start) = command_editor_cursor_line(&lines, cursor);
-        let visible_start = command_editor_visible_line_start(lines.len(), cursor_line);
-        let visible_end = (visible_start + COMMAND_EDITOR_BOX_ROWS as usize).min(lines.len());
-        let has_overflow = lines.len() > COMMAND_EDITOR_BOX_ROWS as usize;
+        let visible_start =
+            command_editor_visible_line_start(lines.len(), cursor_line, editor_rows);
+        let visible_end = (visible_start + editor_rows).min(lines.len());
+        let has_overflow = lines.len() > editor_rows;
         let scrollbar_cols = u32::from(has_overflow);
         let content_cols = snap.viewport_cols.saturating_sub(1 + scrollbar_cols).max(1) as usize;
 
@@ -1753,6 +1756,7 @@ impl Renderer {
                 border,
                 layout,
                 visible_start,
+                editor_rows,
                 lines.len(),
                 bg_vertices,
                 bg_indices,
@@ -1892,7 +1896,18 @@ impl Renderer {
             .max(1);
         let list_w = list_cells as f32 * layout.cell_w;
         let list_h = editor.candidates.len() as f32 * layout.cell_h;
-        let list_y = (box_y - list_h).max(layout.tab_bar_h);
+        let cursor_y = box_y + visible_cursor_line as f32 * layout.cell_h;
+        let editor_cursor_screen_row = placement.top_row + visible_cursor_line as u32;
+        let list_y =
+            match command_editor_popup_side_for_row(editor_cursor_screen_row, snap.viewport_rows) {
+                CommandEditorPopupSide::Below => {
+                    let preferred = cursor_y + layout.cell_h;
+                    preferred
+                        .min(layout.tab_bar_h + snap.viewport_rows as f32 * layout.cell_h - list_h)
+                        .max(layout.tab_bar_h)
+                }
+                CommandEditorPopupSide::Above => (cursor_y - list_h).max(layout.tab_bar_h),
+            };
 
         push_rect(
             content_x,
@@ -1997,8 +2012,9 @@ fn command_editor_cursor_line(
 fn command_editor_visible_line_start(
     line_count: usize,
     cursor_line: usize,
+    visible_rows: usize,
 ) -> usize {
-    let visible = COMMAND_EDITOR_BOX_ROWS as usize;
+    let visible = visible_rows.max(1);
     if line_count <= visible {
         return 0;
     }
@@ -2014,11 +2030,12 @@ fn render_command_editor_scrollbar(
     border: f32,
     layout: &FrameLayout,
     visible_start: usize,
+    visible_rows: usize,
     total_lines: usize,
     bg_vertices: &mut Vec<BgVertex>,
     bg_indices: &mut Vec<u32>,
 ) {
-    let visible = COMMAND_EDITOR_BOX_ROWS as usize;
+    let visible = visible_rows.max(1);
     if total_lines <= visible {
         return;
     }

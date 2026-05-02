@@ -240,10 +240,19 @@ mod command_editor_context_tests {
         let mut term = TestTerm::new_80x24();
 
         assert_eq!(command_editor_terminal_row_offset(&term, false), 0);
+        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
+
+        term.active.cursor.row = 23;
         assert_eq!(
             command_editor_terminal_row_offset(&term, true),
             COMMAND_EDITOR_BOX_ROWS
         );
+
+        term.active.cursor.row = 21;
+        assert_eq!(command_editor_terminal_row_offset(&term, true), 1);
+
+        term.active.cursor.row = 20;
+        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
 
         open_search(&mut term.search);
         assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
@@ -251,6 +260,48 @@ mod command_editor_context_tests {
         let mut term = TestTerm::new_80x24();
         term.process(b"\x1b[?1049h");
         assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
+    }
+
+    #[test]
+    fn command_editor_placement_stays_below_prompt_and_expands_to_available_rows() {
+        assert_eq!(
+            command_editor_placement_for_cursor(0, 24),
+            CommandEditorPlacement {
+                top_row: 1,
+                rows: 23,
+                terminal_row_offset: 0,
+            }
+        );
+
+        assert_eq!(
+            command_editor_placement_for_cursor(20, 24),
+            CommandEditorPlacement {
+                top_row: 21,
+                rows: 3,
+                terminal_row_offset: 0,
+            }
+        );
+
+        assert_eq!(
+            command_editor_placement_for_cursor(23, 24),
+            CommandEditorPlacement {
+                top_row: 21,
+                rows: 3,
+                terminal_row_offset: 3,
+            }
+        );
+    }
+
+    #[test]
+    fn command_editor_popup_side_chooses_from_editor_cursor_position() {
+        assert_eq!(
+            command_editor_popup_side_for_row(3, 24),
+            CommandEditorPopupSide::Below
+        );
+        assert_eq!(
+            command_editor_popup_side_for_row(12, 24),
+            CommandEditorPopupSide::Above
+        );
     }
 
     #[test]
@@ -418,11 +469,11 @@ mod command_editor_input_tests {
         };
 
         assert_eq!(
-            command_editor_byte_index_at_cell(&view, 80, 0, 0),
+            command_editor_byte_index_at_cell(&view, 80, 3, 0, 0),
             "one\n".len()
         );
         assert_eq!(
-            command_editor_byte_index_at_cell(&view, 80, 2, 2),
+            command_editor_byte_index_at_cell(&view, 80, 3, 2, 2),
             "one\ntwo\nthree\nfo".len()
         );
     }

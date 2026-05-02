@@ -29,6 +29,9 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
+use crate::CommandEditorPopupSide;
+use crate::command_editor_placement_for_cursor;
+use crate::command_editor_popup_side_for_row;
 use crate::renderer::GUTTER_MENU_ITEMS;
 use crate::renderer::GutterPopup;
 use crate::renderer::POPUP_WIDTH_CELLS;
@@ -72,7 +75,6 @@ pub const MAX_TAB_WIDTH: f32 = 30.0;
 pub const SUCCESS: [u8; 3] = [80, 200, 120];
 pub const FAILURE: [u8; 3] = [220, 80, 80];
 pub const RUNNING: [u8; 3] = [140, 140, 140];
-const COMMAND_EDITOR_BOX_ROWS: u32 = 3;
 const IMAGE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Packed vertex for background quads: position + color.
@@ -1803,7 +1805,9 @@ impl Renderer {
         let mut layout = self.frame_layout(font_system, tabs);
         let command_editor = visible_command_editor(command_editor, snap);
         if command_editor.is_some() {
-            layout.terminal_y_offset = -(COMMAND_EDITOR_BOX_ROWS as f32) * layout.cell_h;
+            let cursor_row = snap.cursor.map_or(0, |(row, _)| row);
+            let placement = command_editor_placement_for_cursor(cursor_row, snap.viewport_rows);
+            layout.terminal_y_offset = -(placement.terminal_row_offset as f32) * layout.cell_h;
         }
         self.image_atlas.begin_frame();
         let under_text_image_geometry = self.build_image_geometry(visible_images, &layout, true);

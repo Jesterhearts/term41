@@ -719,10 +719,68 @@ fn command_editor_terminal_row_offset(
         && !search_active(&terminal.search)
         && command_editor_view_context(terminal).is_some()
     {
-        COMMAND_EDITOR_BOX_ROWS
+        command_editor_terminal_row_offset_for_cursor(
+            terminal.active.cursor.row,
+            terminal.viewport.rows,
+        )
     } else {
         0
     }
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) enum CommandEditorPopupSide {
+    Above,
+    Below,
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct CommandEditorPlacement {
+    pub(crate) top_row: u32,
+    pub(crate) rows: u32,
+    pub(crate) terminal_row_offset: u32,
+}
+
+pub(crate) fn command_editor_placement_for_cursor(
+    cursor_row: u32,
+    viewport_rows: u32,
+) -> CommandEditorPlacement {
+    let viewport_rows = viewport_rows.max(1);
+    let cursor_row = cursor_row.min(viewport_rows - 1);
+    let terminal_row_offset =
+        command_editor_terminal_row_offset_for_cursor(cursor_row, viewport_rows);
+    let screen_cursor_row = cursor_row.saturating_sub(terminal_row_offset);
+    let top_row = screen_cursor_row.saturating_add(1).min(viewport_rows - 1);
+    CommandEditorPlacement {
+        top_row,
+        rows: viewport_rows.saturating_sub(top_row).max(1),
+        terminal_row_offset,
+    }
+}
+
+pub(crate) fn command_editor_popup_side_for_row(
+    screen_row: u32,
+    viewport_rows: u32,
+) -> CommandEditorPopupSide {
+    if screen_row < viewport_rows.max(1) / 2 {
+        CommandEditorPopupSide::Below
+    } else {
+        CommandEditorPopupSide::Above
+    }
+}
+
+fn command_editor_terminal_row_offset_for_cursor(
+    cursor_row: u32,
+    viewport_rows: u32,
+) -> u32 {
+    let viewport_rows = viewport_rows.max(1);
+    let cursor_row = cursor_row.min(viewport_rows - 1);
+    let desired_rows = COMMAND_EDITOR_BOX_ROWS.min(viewport_rows.saturating_sub(1));
+    cursor_row
+        .saturating_add(1)
+        .saturating_add(desired_rows)
+        .saturating_sub(viewport_rows)
+        .min(desired_rows)
 }
 
 fn mouse_report_position_from_pixels(
@@ -958,8 +1016,9 @@ fn command_editor_cursor_line(
 fn command_editor_visible_line_start(
     line_count: usize,
     cursor_line: usize,
+    visible_rows: usize,
 ) -> usize {
-    let visible = COMMAND_EDITOR_BOX_ROWS as usize;
+    let visible = visible_rows.max(1);
     if line_count <= visible {
         return 0;
     }
@@ -969,6 +1028,7 @@ fn command_editor_visible_line_start(
 fn command_editor_byte_index_at_cell(
     view: &CommandLineView,
     viewport_cols: u32,
+    visible_rows: u32,
     visible_row: u32,
     col: u32,
 ) -> usize {
@@ -978,9 +1038,12 @@ fn command_editor_byte_index_at_cell(
         return view.text.len();
     }
     let cursor_line = command_editor_cursor_line(&lines, cursor);
-    let visible_start = command_editor_visible_line_start(lines.len(), cursor_line);
-    let line_idx = (visible_start + visible_row as usize).min(lines.len().saturating_sub(1));
-    let has_overflow = lines.len() > COMMAND_EDITOR_BOX_ROWS as usize;
+    let visible_rows = visible_rows.max(1) as usize;
+    let visible_start = command_editor_visible_line_start(lines.len(), cursor_line, visible_rows);
+    let line_idx = (visible_start
+        + visible_row.min(visible_rows.saturating_sub(1) as u32) as usize)
+        .min(lines.len().saturating_sub(1));
+    let has_overflow = lines.len() > visible_rows;
     let scrollbar_cols = u32::from(has_overflow);
     let content_cols = viewport_cols.saturating_sub(1 + scrollbar_cols).max(1);
     let text_col = col.min(content_cols);
