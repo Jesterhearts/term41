@@ -415,54 +415,57 @@ Notes:
 - `[security.scripts.<script_name>]` controls which optional libraries a script
   receives. The default sandbox has only basic string/table/math/utf8 support
   plus `require("terminal")`.
-- `[command_editor]` enables the terminal-local command editor layer. It keeps
-  keyboard handling unchanged while disabled, uses Up/Down for its own command
-  history while active, and completes prefixes from recent history, configured
-  words, executable commands discovered from `PATH` plus `[command_editor]`
-  `binary_dirs`, and paths relative to the shell's OSC-reported current
-  directory. The default binary-dir list is platform-based and includes common
-  user tool directories such as `~/.cargo/bin` and the `dirs` crate's
-  per-user executable directory, usually `~/.local/bin` on Linux. User-supplied
-  `binary_dirs` are merged into that list by default; set
+- `[command_editor]` enables the terminal-local command editor layer.
+  `Ctrl+Shift+D` toggles the editor for the current runtime session without
+  rewriting the config file.
+
+  It keeps keyboard handling unchanged while disabled, uses Up/Down for its own
+  command history while active, and completes prefixes from recent history,
+  configured words, executable commands discovered from `PATH` plus
+  `[command_editor]` `binary_dirs`, and paths relative to the shell's
+  OSC-reported current directory. The default binary-dir list is platform-based
+  and includes common user tool directories such as `~/.cargo/bin` and the
+  `dirs` crate's per-user executable directory, usually `~/.local/bin` on
+  Linux. User-supplied `binary_dirs` are merged into that list by default; set
   `merge_extra_dirs = false` to make `binary_dirs` replace the default list.
   Set `deep_history_integration = true` to let `shellhist41` attempt read-only
   discovery of the active shell history and merge those entries into editor
   history navigation and completion. It currently supports bash, zsh, fish,
   PowerShell/PowerShell Core, and Atuin-backed history when Atuin is active.
-  Discovered commands are offered
-  only where a shell command can start, so they do not pollute normal argument
-  completion. For history completions, Tab accepts the next whitespace-delimited
-  token or path element, while Right accepts the full visible history item. When
-  a filesystem path has multiple matches, Tab cycles the ghost candidate and
-  Right accepts the active one; ambiguous completions show up to five ranked
-  matches near the editor box, and Up/Down rotates the active match while the
-  list is visible. While enabled, the editor is rendered in an outlined
-  three-row box under the current prompt on the primary screen, with terminal
-  history shifted upward by those three rows. It stays visible through ordinary
-  command output but hides when a foreground command advertises stronger
-  interactive terminal modes such as mouse tracking, app cursor, or app keypad.
-  Multi-line input scrolls inside that three-row box with a small scrollbar,
-  and Up/Down move between input lines when possible.
+  Discovered commands are offered only where a shell command can start, so they
+  do not pollute normal argument completion. For history completions, Tab
+  accepts the next whitespace-delimited token or path element, while Right
+  accepts the full visible history item. When a filesystem path has multiple
+  matches, Tab cycles the ghost candidate and Right accepts the active one;
+  ambiguous completions show up to five ranked matches near the editor box, and
+  Up/Down rotates the active match while the list is visible. While enabled,
+  the editor is rendered in an outlined three-row box under the current prompt
+  on the primary screen, with terminal history shifted upward by those three
+  rows. It stays visible through ordinary command output but hides when a
+  foreground command advertises stronger interactive terminal modes such as
+  mouse tracking, app cursor, or app keypad. Multi-line input scrolls inside
+  that three-row box with a small scrollbar, and Up/Down move between input
+  lines when possible.
+
   Mouse drag selects editor text, release copies it to the primary selection,
   right-click copies a selected editor range to the clipboard or pastes when no
-  editor selection is active, middle-click pastes the primary selection, and the
-  configured Copy/Paste actions operate on the editor while it is active.
+  editor selection is active, middle-click pastes the primary selection, and
+  the configured Copy/Paste actions operate on the editor while it is active.
   Path completion understands single- and double-quoted arguments and escapes
   spaces for unquoted paths.
+
   Alternate-screen applications always receive normal terminal input; the
   command editor only intercepts keys while the shell reports command-line
   input through shell integration.
-  It supports common readline-style editing keys: `Ctrl+A/E`,
-  `Ctrl+D`, `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
-  `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted. `Shift+Enter`
-  inserts a newline for multi-line input; plain Enter submits the buffer.
-  Set `vim_mode = true` to start the editor in normal mode with `i`/`a`/`A`
-  and `o`/`O` for insert, `Esc` for normal mode, `hjkl`, `0`/`^`/`$`,
-  `{`/`}`, `w`/`b`/`e` and `W`/`B`/`E`, `d`/`y` plus motions, `D`, `yy`,
-  `p`/`P`, `u` for undo, `Ctrl+R` for redo, and `gg`/`G`; normal mode uses a
-  block cursor and insert mode uses the regular line cursor.
-  `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
-  config.
+
+  It supports common readline-style editing keys: `Ctrl+A/E`, `Ctrl+D`,
+  `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
+  `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted.
+  `Shift+Enter` inserts a newline for multi-line input; plain Enter submits the
+  buffer. Set `vim_mode = true` to start the editor in normal mode with
+  mostly-vim emulation. I've probably missed just enough commands you use to
+  annoy you, but it's everything I use so I don't know it. File a bug if you
+  want more emulation!
 - Example scripts are available under `examples/`, including
   `examples/sys_info.lua` for Linux CPU and memory status text.
 
