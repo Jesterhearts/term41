@@ -25,6 +25,11 @@ use crate::screen::hyperlink::HyperlinkId;
 use crate::screen::row::LineAttr;
 use crate::screen::row::Row;
 
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ResizeScreenOutcome {
+    pub prepended_rows: u64,
+}
+
 /// Snapshot of cursor position and active colors, used by DECSC/DECRC
 /// (ESC 7 / ESC 8) and the `?1048`/`?1049` private modes.
 #[derive(Debug, Clone, Copy)]
@@ -706,12 +711,13 @@ pub(super) fn resize_screen(
     old_rows: u32,
     new_cols: u32,
     new_rows: u32,
-) {
+) -> ResizeScreenOutcome {
     resize_status_line(screen, new_cols);
 
     let grid = &mut screen.grid;
     let cursor = &mut screen.cursor;
     let images = &mut screen.images;
+    let mut outcome = ResizeScreenOutcome::default();
 
     let effective_old_rows = (old_rows as usize).min(grid.rows.len());
     let visible_start = grid.rows.len().saturating_sub(effective_old_rows);
@@ -748,12 +754,11 @@ pub(super) fn resize_screen(
 
         restore_images(&grid.rows, &anchors, images);
 
-        let new_abs = grid.rows.len().saturating_sub(old_distance_from_bottom + 1);
+        let mut new_abs = grid.rows.len().saturating_sub(old_distance_from_bottom + 1);
 
-        while grid.rows.len() < new_rows as usize {
-            grid.rows
-                .push_back(Row::new(new_cols, grid.default_fg, grid.default_bg));
-        }
+        let prepended = pad_short_history_to_live_bottom(grid, images, new_rows, new_cols);
+        outcome.prepended_rows = prepended as u64;
+        new_abs = new_abs.saturating_add(prepended);
 
         let visible_start = grid.rows.len().saturating_sub(new_rows as usize);
         cursor.row = new_abs
@@ -770,11 +775,6 @@ pub(super) fn resize_screen(
 
         let popped = old_len - grid.rows.len();
 
-        while grid.rows.len() < new_rows as usize {
-            grid.rows
-                .push_back(Row::new(new_cols, grid.default_fg, grid.default_bg));
-        }
-
         if popped > 0 {
             images.retain(|_, img| img.row >= popped);
             for img in images.values_mut() {
@@ -782,7 +782,11 @@ pub(super) fn resize_screen(
             }
         }
 
-        let new_abs = old_abs.saturating_sub(popped);
+        let mut new_abs = old_abs.saturating_sub(popped);
+        let prepended = pad_short_history_to_live_bottom(grid, images, new_rows, new_cols);
+        outcome.prepended_rows = prepended as u64;
+        new_abs = new_abs.saturating_add(prepended);
+
         let visible_start = grid.rows.len().saturating_sub(new_rows as usize);
         cursor.row = new_abs
             .saturating_sub(visible_start)
@@ -798,6 +802,24 @@ pub(super) fn resize_screen(
         top: 0,
     });
     screen.offset = screen.offset.min(scrollback);
+    outcome
+}
+
+fn pad_short_history_to_live_bottom(
+    grid: &mut Grid,
+    images: &mut BTreeMap<u64, PlacedImage>,
+    viewport_rows: u32,
+    viewport_cols: u32,
+) -> usize {
+    let missing = (viewport_rows as usize).saturating_sub(grid.rows.len());
+    for _ in 0..missing {
+        grid.rows
+            .push_front(Row::new(viewport_cols, grid.default_fg, grid.default_bg));
+    }
+    for image in images.values_mut() {
+        image.row += missing;
+    }
+    missing
 }
 
 #[cfg(test)]
@@ -920,6 +942,22 @@ mod integration_tests {
             text.contains("33333333"),
             "visible text should include the live bottom row: {text:?}"
         );
+    }
+
+    #[test]
+    fn resize_taller_bottom_aligns_short_history() {
+        let mut term = TestTerm::new(5, 3, 100, 16, 8);
+        term.process(b"abc\r\ndef");
+
+        term.resize(5, 5);
+
+        assert_eq!(visible_row_text(&term, 0), "     ");
+        assert_eq!(visible_row_text(&term, 1), "     ");
+        assert_eq!(visible_row_text(&term, 2), "     ");
+        assert_eq!(visible_row_text(&term, 3), "abc  ");
+        assert_eq!(visible_row_text(&term, 4), "def  ");
+        assert_eq!(term.active.cursor.row, 4);
+        assert_eq!(term.active.cursor.col, 3);
     }
 
     #[test]

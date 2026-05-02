@@ -14,6 +14,7 @@ use crate::feature;
 use crate::image::KITTY_UNICODE_PLACEHOLDER;
 use crate::resize_screen;
 use crate::screen;
+use crate::screen::ResizeScreenOutcome;
 use crate::selection;
 
 pub(crate) fn total_rows(
@@ -565,7 +566,7 @@ pub(crate) fn resize(
     viewport: &mut Viewport,
     cols: u32,
     rows: u32,
-) {
+) -> ResizeOutcome {
     let old_cols = viewport.cols;
     let old_active_rows = viewport.rows;
     let old_total_rows = old_active_rows + screen::status_line_rows(active);
@@ -573,7 +574,7 @@ pub(crate) fn resize(
     let new_active_rows = rows.saturating_sub(screen::status_line_rows(active));
     let new_stash_rows = rows.saturating_sub(screen::status_line_rows(stash));
 
-    resize_screen(active, old_cols, old_active_rows, cols, new_active_rows);
+    let active_outcome = resize_screen(active, old_cols, old_active_rows, cols, new_active_rows);
     if screen::page_memory_active(active)
         && let Some(page_rows) = screen::page_rows(active)
     {
@@ -588,7 +589,7 @@ pub(crate) fn resize(
         );
     }
 
-    resize_screen(stash, old_cols, old_stash_rows, cols, new_stash_rows);
+    let stash_outcome = resize_screen(stash, old_cols, old_stash_rows, cols, new_stash_rows);
     if screen::page_memory_active(stash)
         && let Some(page_rows) = screen::page_rows(stash)
     {
@@ -605,6 +606,17 @@ pub(crate) fn resize(
 
     viewport.cols = cols;
     viewport.rows = new_active_rows;
+
+    ResizeOutcome {
+        active: active_outcome,
+        stash: stash_outcome,
+    }
+}
+
+#[derive(Debug, Default, Clone, Copy)]
+pub(crate) struct ResizeOutcome {
+    pub active: ResizeScreenOutcome,
+    pub stash: ResizeScreenOutcome,
 }
 
 pub(crate) fn track_scroll(

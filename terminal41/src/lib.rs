@@ -258,6 +258,54 @@ pub struct TerminalMetadata {
     pub shell_integration_phase: ShellIntegrationPhase,
 }
 
+fn shift_visible_absolute_rows(
+    selection: &mut Option<Selection>,
+    search: &mut SearchState,
+    delta: u64,
+) {
+    if delta == 0 {
+        return;
+    }
+    if let Some(selection) = selection {
+        selection.anchor.row = selection.anchor.row.saturating_add(delta);
+        selection.head.row = selection.head.row.saturating_add(delta);
+        selection.origin.row = selection.origin.row.saturating_add(delta);
+    }
+    for span in &mut search.matches {
+        span.row = span.row.saturating_add(delta);
+    }
+}
+
+fn shift_terminal_metadata_rows(
+    metadata: &mut TerminalMetadata,
+    delta: u64,
+) {
+    if delta == 0 {
+        return;
+    }
+    metadata.current_prompt_row = metadata
+        .current_prompt_row
+        .map(|row| row.saturating_add(delta));
+
+    metadata.command_metas = metadata
+        .command_metas
+        .drain()
+        .map(|(row, mut meta)| {
+            shift_command_meta_rows(&mut meta, delta);
+            (row.saturating_add(delta), meta)
+        })
+        .collect();
+}
+
+fn shift_command_meta_rows(
+    meta: &mut CommandMeta,
+    delta: u64,
+) {
+    meta.command_row = meta.command_row.map(|row| row.saturating_add(delta));
+    meta.output_row = meta.output_row.map(|row| row.saturating_add(delta));
+    meta.finished_row = meta.finished_row.map(|row| row.saturating_add(delta));
+}
+
 /// Security-sensitive protocol state and VT extension storage.
 #[derive(Debug, Default)]
 pub struct TerminalProtocolState {
@@ -763,13 +811,24 @@ impl Terminal {
         cols: u32,
         rows: u32,
     ) {
-        lifecycle_ops::resize(
+        let outcome = lifecycle_ops::resize(
             &mut self.active,
             &mut self.stash,
             &mut self.viewport,
             cols,
             rows,
         );
+        shift_visible_absolute_rows(
+            &mut self.selection,
+            &mut self.search,
+            outcome.active.prepended_rows,
+        );
+        let primary_prepend = if self.on_alt_screen {
+            outcome.stash.prepended_rows
+        } else {
+            outcome.active.prepended_rows
+        };
+        shift_terminal_metadata_rows(&mut self.metadata, primary_prepend);
         self.snapshot.mark_all();
     }
 
