@@ -964,9 +964,11 @@ struct RendererUploads {
     terminal_bg: GeometryUpload,
     bg: GeometryUpload,
     overlay_bg: GeometryUpload,
+    top_overlay_bg: GeometryUpload,
     terminal_fg: PageGeometryUpload<FgVertex>,
     fg: PageGeometryUpload<FgVertex>,
     overlay_fg: PageGeometryUpload<FgVertex>,
+    top_overlay_fg: PageGeometryUpload<FgVertex>,
     under_image: PageGeometryUpload<ImageVertex>,
     over_image: PageGeometryUpload<ImageVertex>,
 }
@@ -1026,6 +1028,25 @@ fn push_terminal_dirty_rect(
     geometry.terminal_dirty_rects.push(DirtyLayerRect {
         x: 0.0,
         y: top,
+        w: surface_width as f32,
+        h,
+    });
+}
+
+fn push_terminal_area_dirty_rect(
+    geometry: &mut RenderGeometry,
+    layout: &FrameLayout,
+    surface_width: u32,
+    surface_height: u32,
+) {
+    let y = layout.tab_bar_h.max(0.0);
+    let h = (surface_height as f32 - y).max(0.0);
+    if h <= 0.0 {
+        return;
+    }
+    geometry.terminal_dirty_rects.push(DirtyLayerRect {
+        x: 0.0,
+        y,
         w: surface_width as f32,
         h,
     });
@@ -1141,6 +1162,9 @@ struct RenderGeometry {
     overlay_bg_vertices: Vec<BgVertex>,
     overlay_bg_indices: Vec<u32>,
     overlay_fg: FgGeometry,
+    top_overlay_bg_vertices: Vec<BgVertex>,
+    top_overlay_bg_indices: Vec<u32>,
+    top_overlay_fg: FgGeometry,
 }
 
 fn blank_cached_row(

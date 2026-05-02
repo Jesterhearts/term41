@@ -244,8 +244,17 @@ impl Renderer {
         let blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 500) & 1 == 1;
         let rapid_blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 250) & 1 == 1;
         let font_generation = font_system.font_generation();
+        let force_terminal_layer_repaint = layout.terminal_y_offset != 0.0;
 
         if !suspend_terminal_area {
+            if force_terminal_layer_repaint {
+                push_terminal_area_dirty_rect(
+                    &mut geometry,
+                    layout,
+                    self.surface_config.width,
+                    self.surface_config.height,
+                );
+            }
             for snap_row in rows {
                 let row = snap_row.screen_row;
                 if snap.search_active && row == snap.viewport_rows - 1 {
@@ -277,17 +286,20 @@ impl Renderer {
                     .get(row as usize)
                     .and_then(Option::as_ref)
                     && cached.key == cache_key
+                    && !force_terminal_layer_repaint
                 {
                     continue;
                 }
 
-                push_terminal_dirty_rect(
-                    &mut geometry,
-                    row,
-                    layout,
-                    self.surface_config.width,
-                    self.surface_config.height,
-                );
+                if !force_terminal_layer_repaint {
+                    push_terminal_dirty_rect(
+                        &mut geometry,
+                        row,
+                        layout,
+                        self.surface_config.width,
+                        self.surface_config.height,
+                    );
+                }
                 let mut row_geometry = RowGeometry::default();
                 self.append_row_geometry(
                     font_system,
@@ -384,9 +396,9 @@ impl Renderer {
                 font_system,
                 toast,
                 layout,
-                &mut geometry.overlay_bg_vertices,
-                &mut geometry.overlay_bg_indices,
-                &mut geometry.overlay_fg,
+                &mut geometry.top_overlay_bg_vertices,
+                &mut geometry.top_overlay_bg_indices,
+                &mut geometry.top_overlay_fg,
             );
         }
 
@@ -931,6 +943,14 @@ impl Renderer {
             &geometry.overlay_bg_vertices,
             &geometry.overlay_bg_indices,
         );
+        self.uploads.top_overlay_bg.upload(
+            device,
+            queue,
+            "top_overlay_bg_verts",
+            "top_overlay_bg_idx",
+            &geometry.top_overlay_bg_vertices,
+            &geometry.top_overlay_bg_indices,
+        );
         upload_fg_geometry(
             device,
             queue,
@@ -943,6 +963,12 @@ impl Renderer {
             queue,
             &mut self.uploads.overlay_fg,
             &geometry.overlay_fg,
+        );
+        upload_fg_geometry(
+            device,
+            queue,
+            &mut self.uploads.top_overlay_fg,
+            &geometry.top_overlay_fg,
         );
         upload_image_geometry(
             device,
@@ -1078,6 +1104,51 @@ impl Renderer {
             &view,
             &self.uploads.overlay_fg,
             "overlay_fg_pass",
+        );
+
+        if self.uploads.top_overlay_bg.has_indices {
+            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
+                label: Some("top_overlay_bg_pass"),
+                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
+                    view: &view,
+                    resolve_target: None,
+                    ops: wgpu::Operations {
+                        load: wgpu::LoadOp::Load,
+                        store: wgpu::StoreOp::Store,
+                    },
+                    depth_slice: None,
+                })],
+                ..Default::default()
+            });
+
+            pass.set_pipeline(&self.bg_pipeline);
+            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
+            pass.set_vertex_buffer(
+                0,
+                self.uploads
+                    .top_overlay_bg
+                    .vertex_buffer
+                    .buffer()
+                    .unwrap()
+                    .slice(..),
+            );
+            pass.set_index_buffer(
+                self.uploads
+                    .top_overlay_bg
+                    .index_buffer
+                    .buffer()
+                    .unwrap()
+                    .slice(..),
+                wgpu::IndexFormat::Uint32,
+            );
+            pass.draw_indexed(0..geometry.top_overlay_bg_indices.len() as u32, 0, 0..1);
+        }
+
+        self.submit_fg_pass(
+            &mut encoder,
+            &view,
+            &self.uploads.top_overlay_fg,
+            "top_overlay_fg_pass",
         );
 
         self.queue.submit(Some(encoder.finish()));
