@@ -357,6 +357,11 @@ vsync = "auto"
 # integration reports that the shell is editing a command on the primary screen.
 # enabled = true
 # completions = ["cargo", "git", "rg"]
+# Extra binary directories to scan for command-name completion. By default,
+# these are merged with term41's platform/user tool directory list.
+# binary_dirs = ["~/project/bin"]
+# Set merge_extra_dirs = false to replace the default binary_dirs list instead.
+# merge_extra_dirs = true
 # max_history = 200
 
 [colors.status_line]
@@ -410,8 +415,14 @@ Notes:
 - `[command_editor]` enables the terminal-local command editor layer. It keeps
   keyboard handling unchanged while disabled, uses Up/Down for its own command
   history while active, and completes prefixes from recent history, configured
-  words, executable commands discovered from `PATH`, and paths relative to the
-  shell's OSC-reported current directory. Discovered `PATH` commands are offered
+  words, executable commands discovered from `PATH` plus `[command_editor]`
+  `binary_dirs`, and paths relative to the shell's OSC-reported current
+  directory. The default binary-dir list is platform-based and includes common
+  user tool directories such as `~/.cargo/bin` and the `dirs` crate's
+  per-user executable directory, usually `~/.local/bin` on Linux. User-supplied
+  `binary_dirs` are merged into that list by default; set
+  `merge_extra_dirs = false` to make `binary_dirs` replace the default list.
+  Discovered commands are offered
   only where a shell command can start, so they do not pollute normal argument
   completion. When a path has multiple matches, Tab cycles the ghost candidate
   and Right accepts the active one; ambiguous completions show up to five ranked

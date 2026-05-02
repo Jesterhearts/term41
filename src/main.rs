@@ -923,7 +923,7 @@ fn main() {
 
     let input_state = Arc::new(Mutex::new(InputState {
         keybindings: startup_keybindings,
-        command_editor_config: startup_command_editor,
+        command_editor_config: startup_command_editor.clone(),
         command_editor_view: None,
         tab_count: 1,
         tab_order: vec![TabId(0)],
@@ -994,7 +994,7 @@ fn main() {
                 command_editor: CommandEditor::new(),
             },
         )]),
-        command_catalog: CommandCatalog::from_environment(),
+        command_catalog: CommandCatalog::from_config(&startup_command_editor),
         active_input_tab: Some(TabId(0)),
         input_state,
         event_tx,

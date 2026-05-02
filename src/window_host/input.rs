@@ -266,6 +266,7 @@ impl WindowHost {
         let Some(input) = command_editor_input(key, self.modifiers) else {
             return false;
         };
+        self.command_catalog.refresh_for_config(&config);
         let command_words = self.command_catalog.names().to_vec();
         let mut cleared_inactive_editor = false;
         let handled = {

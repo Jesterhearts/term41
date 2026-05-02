@@ -148,20 +148,22 @@ impl WindowHost {
     }
 
     pub(crate) fn refresh_command_editor_view(&mut self) {
-        let view = self
-            .active_input_tab
-            .and_then(|tab_id| self.command_editor_view_for_tab(tab_id));
+        let view = match self.active_input_tab {
+            Some(tab_id) => self.command_editor_view_for_tab(tab_id),
+            None => None,
+        };
         self.set_command_editor_view(view);
     }
 
     pub(crate) fn command_editor_view_for_tab(
-        &self,
+        &mut self,
         tab_id: TabId,
     ) -> Option<CommandLineView> {
         let config = self.command_editor_config();
         if !config.enabled {
             return None;
         }
+        self.command_catalog.refresh_for_config(&config);
         let target = self.input_endpoints.get(&tab_id)?;
         let context = {
             let terminal = target.terminal.lock();

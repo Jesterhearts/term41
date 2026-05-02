@@ -1,25 +1,59 @@
 use std::collections::BTreeSet;
+use std::ffi::OsStr;
 use std::fs;
 use std::path::Path;
+use std::path::PathBuf;
+
+use config41::CommandEditorConfig;
 
 #[derive(Debug, Clone, Default)]
 pub(crate) struct CommandCatalog {
+    binary_dirs: Vec<PathBuf>,
     names: Vec<String>,
 }
 
 impl CommandCatalog {
-    pub(crate) fn from_environment() -> Self {
-        let dirs = std::env::var_os("PATH")
-            .map(|path| std::env::split_paths(&path).collect::<Vec<_>>())
-            .unwrap_or_default();
+    pub(crate) fn from_config(config: &CommandEditorConfig) -> Self {
+        let binary_dirs = config.binary_dirs.clone();
         Self {
-            names: command_names_in_dirs(dirs),
+            names: command_names_in_dirs(command_dirs_from_environment(&binary_dirs)),
+            binary_dirs,
         }
     }
 
     pub(crate) fn names(&self) -> &[String] {
         &self.names
     }
+
+    pub(crate) fn refresh_for_config(
+        &mut self,
+        config: &CommandEditorConfig,
+    ) {
+        if self.binary_dirs == config.binary_dirs {
+            return;
+        }
+        *self = Self::from_config(config);
+    }
+}
+
+fn command_dirs_from_environment(binary_dirs: &[PathBuf]) -> Vec<PathBuf> {
+    command_dirs(std::env::var_os("PATH").as_deref(), binary_dirs)
+}
+
+fn command_dirs(
+    path: Option<&OsStr>,
+    binary_dirs: &[PathBuf],
+) -> Vec<PathBuf> {
+    let mut out = Vec::new();
+    if let Some(path) = path {
+        for dir in std::env::split_paths(path) {
+            push_unique_path(&mut out, dir);
+        }
+    }
+    for dir in binary_dirs {
+        push_unique_path(&mut out, dir.clone());
+    }
+    out
 }
 
 fn command_names_in_dirs<I, P>(dirs: I) -> Vec<String>
@@ -51,6 +85,15 @@ fn collect_command_names(
         if let Some(command) = command_name(&name) {
             names.insert(command.to_owned());
         }
+    }
+}
+
+fn push_unique_path(
+    out: &mut Vec<PathBuf>,
+    path: PathBuf,
+) {
+    if !path.as_os_str().is_empty() && !out.iter().any(|existing| existing == &path) {
+        out.push(path);
     }
 }
 
@@ -131,6 +174,63 @@ mod tests {
             command_names_in_dirs([root.join("a"), root.join("b")]),
             vec!["cargo", "git"]
         );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn command_dirs_merge_path_and_config_dirs() {
+        let root = unique_test_dir("config-binary-dirs");
+        let path_dir = root.join("path-bin");
+        let config_dir = root.join("config-bin");
+        let path = std::env::join_paths([path_dir.as_path()]).expect("join path");
+
+        assert_eq!(
+            command_dirs(
+                Some(path.as_os_str()),
+                &[path_dir.clone(), config_dir.clone()]
+            ),
+            vec![path_dir, config_dir]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn config_binary_dirs_contribute_command_names() {
+        let root = unique_test_dir("config-binary-dir-commands");
+        let binary_dir = root.join("home").join(".cargo").join("bin");
+        fs::create_dir_all(&binary_dir).expect("create binary dir");
+        write_executable(binary_dir.join("cargo"));
+
+        let dirs = command_dirs(None, &[binary_dir]);
+
+        assert_eq!(command_names_in_dirs(dirs), vec!["cargo"]);
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn catalog_refreshes_when_config_binary_dirs_change() {
+        let root = unique_test_dir("catalog-refresh");
+        let first_dir = root.join("first");
+        let second_dir = root.join("second");
+        fs::create_dir_all(&first_dir).expect("create first dir");
+        fs::create_dir_all(&second_dir).expect("create second dir");
+        write_executable(first_dir.join("first-tool"));
+        write_executable(second_dir.join("second-tool"));
+
+        let mut first = CommandEditorConfig::default();
+        first.binary_dirs = vec![first_dir];
+        let mut second = CommandEditorConfig::default();
+        second.binary_dirs = vec![second_dir];
+        let mut catalog = CommandCatalog::from_config(&first);
+
+        assert!(catalog.names().contains(&"first-tool".to_owned()));
+        assert!(!catalog.names().contains(&"second-tool".to_owned()));
+        catalog.refresh_for_config(&second);
+        assert!(!catalog.names().contains(&"first-tool".to_owned()));
+        assert!(catalog.names().contains(&"second-tool".to_owned()));
 
         let _ = fs::remove_dir_all(root);
     }
