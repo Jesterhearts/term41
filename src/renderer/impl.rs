@@ -453,6 +453,19 @@ fn terminal_row_y(
     row as f32 * layout.cell_h + layout.tab_bar_h + layout.terminal_y_offset
 }
 
+fn snapshot_row_y(
+    row: u32,
+    snap: &TermSnapshot,
+    layout: &FrameLayout,
+) -> f32 {
+    let terminal_offset = if snap.status_line_row == Some(row) {
+        0.0
+    } else {
+        layout.terminal_y_offset
+    };
+    row as f32 * layout.cell_h + layout.tab_bar_h + terminal_offset
+}
+
 fn image_page_x(
     image: &VisibleImage,
     layout: &FrameLayout,
@@ -1787,7 +1800,7 @@ impl Renderer {
         suspend_terminal_area: bool,
     ) {
         let mut layout = self.frame_layout(font_system, tabs);
-        let command_editor = command_editor.filter(|_| !snap.on_alt_screen && !snap.search_active);
+        let command_editor = visible_command_editor(command_editor, snap);
         if command_editor.is_some() {
             layout.terminal_y_offset = -(COMMAND_EDITOR_BOX_ROWS as f32) * layout.cell_h;
         }
@@ -1981,6 +1994,14 @@ fn gutter_marker_color(exit_status: Option<i32>) -> u32 {
         None => RUNNING,
     };
     u32::from_be_bytes([rgb[0], rgb[1], rgb[2], 255])
+}
+
+fn visible_command_editor<'a>(
+    command_editor: Option<&'a commands41::CommandLineView>,
+    snap: &TermSnapshot,
+) -> Option<&'a commands41::CommandLineView> {
+    command_editor
+        .filter(|_| !snap.on_alt_screen && !snap.search_active && snap.viewport_offset == 0)
 }
 
 fn command_highlight_color(kind: commands41::HighlightKind) -> u32 {

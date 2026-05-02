@@ -61,6 +61,8 @@ pub struct TermSnapshot {
     pub total_rows: u32,
     pub viewport_rows: u32,
     pub viewport_cols: u32,
+    /// Non-zero when the viewport is scrolled back from the live bottom.
+    pub viewport_offset: u32,
     pub status_line_row: Option<u32>,
     pub drcs_glyphs: font41::DrcsGlyphMap,
     pub dec_color: crate::DecColorState,
@@ -225,6 +227,7 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
         total_rows,
         viewport_rows: vp_rows,
         viewport_cols: vp_cols,
+        viewport_offset: terminal.active.offset,
         status_line_row,
         drcs_glyphs: terminal.drcs_render_glyphs(),
         dec_color: terminal.dec_color_state().clone(),

@@ -525,7 +525,7 @@ impl Renderer {
         layout: &FrameLayout,
         geometry: &mut RowGeometry,
     ) {
-        let y = terminal_row_y(row, layout);
+        let y = snapshot_row_y(row, snap, layout);
         let line_attr = snap_row.line_attr;
         let is_double_wide = !matches!(line_attr, LineAttr::Normal);
         let effective_cell_w = if is_double_wide {

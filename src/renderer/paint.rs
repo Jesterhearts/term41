@@ -603,6 +603,7 @@ mod tests {
             total_rows: 1,
             viewport_rows: 1,
             viewport_cols: 1,
+            viewport_offset: 0,
             status_line_row: None,
             drcs_glyphs: Default::default(),
             dec_color,

@@ -58,7 +58,9 @@ mod geometry_tests {
     use super::image_batch_for_page;
     use super::image_render_order;
     use super::image_vertex_z;
+    use super::snapshot_row_y;
     use super::terminal_row_y;
+    use super::visible_command_editor;
 
     fn blank_row(cols: usize) -> RowSnapshot {
         RowSnapshot {
@@ -96,6 +98,7 @@ mod geometry_tests {
             total_rows: rows,
             viewport_rows: rows,
             viewport_cols: cols,
+            viewport_offset: 0,
             status_line_row: None,
             drcs_glyphs: Arc::new(std::collections::HashMap::new()),
             dec_color: terminal41::dec_color_state_from_palette(&palette),
@@ -254,6 +257,43 @@ mod geometry_tests {
         };
 
         assert_eq!(terminal_row_y(5, &layout), 60.0);
+    }
+
+    #[test]
+    fn status_row_y_ignores_editor_offset() {
+        let mut snap = snapshot(80, 24);
+        snap.status_line_row = Some(24);
+        let layout = FrameLayout {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            baseline: 14.0,
+            gutter_px: 0.0,
+            tab_bar_h: 20.0,
+            terminal_y_offset: -60.0,
+        };
+
+        assert_eq!(snapshot_row_y(23, &snap, &layout), 420.0);
+        assert_eq!(snapshot_row_y(24, &snap, &layout), 500.0);
+    }
+
+    #[test]
+    fn command_editor_is_hidden_while_scrolled_back() {
+        let mut snap = snapshot(80, 24);
+        let view = commands41::CommandLineView {
+            text: String::new(),
+            cursor: 0,
+            cursor_style: commands41::CommandEditorCursorStyle::Beam,
+            spans: Vec::new(),
+            selection: None,
+            completion: None,
+            candidates: Vec::new(),
+            candidate_index: 0,
+        };
+
+        assert!(visible_command_editor(Some(&view), &snap).is_some());
+
+        snap.viewport_offset = 1;
+        assert!(visible_command_editor(Some(&view), &snap).is_none());
     }
 
     fn visible_image(
