@@ -153,6 +153,10 @@ mod command_editor_input_tests {
             Some(EditorInput::MoveHome)
         );
         assert_eq!(
+            command_editor_input(&Key::Character("d".into()), ModifiersState::CONTROL),
+            Some(EditorInput::Delete)
+        );
+        assert_eq!(
             command_editor_input(&Key::Character("e".into()), ModifiersState::CONTROL),
             Some(EditorInput::MoveEnd)
         );

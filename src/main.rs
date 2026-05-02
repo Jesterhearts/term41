@@ -647,6 +647,7 @@ fn modified_command_editor_input(
 fn control_command_editor_input(text: &str) -> Option<EditorInput> {
     match text {
         "a" | "A" => Some(EditorInput::MoveHome),
+        "d" | "D" => Some(EditorInput::Delete),
         "e" | "E" => Some(EditorInput::MoveEnd),
         "k" | "K" => Some(EditorInput::KillToEnd),
         "u" | "U" => Some(EditorInput::KillToStart),

@@ -421,7 +421,7 @@ Notes:
   receive normal terminal input; the command editor only intercepts keys on the
   primary screen.
   It supports common readline-style editing keys: `Ctrl+A/E`,
-  `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
+  `Ctrl+D`, `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
   `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted.
   `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
   config.

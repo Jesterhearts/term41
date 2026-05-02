@@ -114,6 +114,42 @@ fn word_delete_updates_kill_buffer_for_yank() {
 }
 
 #[test]
+fn delete_removes_grapheme_under_cursor() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("ab👍c".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::MoveLeft, &settings);
+    apply_input(&mut editor, EditorInput::MoveLeft, &settings);
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Delete, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "abc");
+}
+
+#[test]
+fn delete_at_end_is_ignored() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("abc".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Delete, &settings),
+        EditOutcome::Ignored
+    );
+    assert_eq!(editor.view(&settings).text, "abc");
+}
+
+#[test]
 fn line_kill_to_start_and_end_can_yank() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings::default();
