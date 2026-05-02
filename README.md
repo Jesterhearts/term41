@@ -429,8 +429,10 @@ Notes:
   matches near the editor box, and Up/Down rotates the active match while the
   list is visible. The editor is rendered in an outlined three-row box under
   the current prompt, with terminal history shifted upward by those three rows
-  while the box is visible. Path completion understands single- and
-  double-quoted arguments and escapes spaces for unquoted paths.
+  while the box is visible. Multi-line input scrolls inside that three-row box
+  with a small scrollbar, and Up/Down move between input lines when possible.
+  Path completion understands single- and double-quoted arguments and escapes
+  spaces for unquoted paths.
   Alternate-screen applications always receive normal terminal input; the
   command editor only intercepts keys on the primary screen.
   It supports common readline-style editing keys: `Ctrl+A/E`,

@@ -60,6 +60,57 @@ fn submit_replaces_newlines_with_spaces() {
 }
 
 #[test]
+fn up_down_move_between_multiline_editor_rows() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one\ntwo\nthree".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).cursor, "one\ntwo".len());
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).cursor, "one".len());
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryNext, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).cursor, "one\ntwo".len());
+}
+
+#[test]
+fn multiline_vertical_movement_falls_back_to_history_at_edges() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("history".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::Enter, &settings);
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("one\ntwo".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::MoveHome, &settings);
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "history");
+}
+
+#[test]
 fn history_arrows_restore_draft() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings::default();

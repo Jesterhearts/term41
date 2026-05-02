@@ -1533,8 +1533,18 @@ impl Renderer {
         let box_w = snap.viewport_cols.max(1) as f32 * layout.cell_w;
         let box_h = COMMAND_EDITOR_BOX_ROWS as f32 * layout.cell_h;
         let content_x = box_x + layout.cell_w;
-        let content_cols = snap.viewport_cols.saturating_sub(2).max(1) as usize;
         let border = 2.0;
+        let lines = command_editor_line_ranges(&editor.text);
+        let cursor = editor.cursor.min(editor.text.len());
+        if !editor.text.is_char_boundary(cursor) {
+            return;
+        }
+        let (cursor_line, cursor_line_start) = command_editor_cursor_line(&lines, cursor);
+        let visible_start = command_editor_visible_line_start(lines.len(), cursor_line);
+        let visible_end = (visible_start + COMMAND_EDITOR_BOX_ROWS as usize).min(lines.len());
+        let has_overflow = lines.len() > COMMAND_EDITOR_BOX_ROWS as usize;
+        let scrollbar_cols = u32::from(has_overflow);
+        let content_cols = snap.viewport_cols.saturating_sub(2 + scrollbar_cols).max(1) as usize;
 
         push_rect(
             box_x,
@@ -1582,10 +1592,25 @@ impl Renderer {
             bg_indices,
         );
 
-        let lines = command_editor_line_ranges(&editor.text);
-        let visible_lines = lines.len().min(COMMAND_EDITOR_BOX_ROWS as usize);
-        for (line_idx, &(line_start, line_end)) in lines.iter().take(visible_lines).enumerate() {
-            let line_y = box_y + line_idx as f32 * layout.cell_h;
+        if has_overflow {
+            render_command_editor_scrollbar(
+                box_x,
+                box_y,
+                box_w,
+                box_h,
+                border,
+                layout,
+                visible_start,
+                lines.len(),
+                bg_vertices,
+                bg_indices,
+            );
+        }
+
+        for (visible_idx, &(line_start, line_end)) in
+            lines[visible_start..visible_end].iter().enumerate()
+        {
+            let line_y = box_y + visible_idx as f32 * layout.cell_h;
             for span in &editor.spans {
                 if span.start >= span.end || span.end > editor.text.len() {
                     continue;
@@ -1619,12 +1644,8 @@ impl Renderer {
             }
         }
 
-        let cursor = editor.cursor.min(editor.text.len());
-        if !editor.text.is_char_boundary(cursor) {
-            return;
-        }
-        let (cursor_line, cursor_line_start) = command_editor_cursor_line(&lines, cursor);
-        let cursor_line_visible = cursor_line < COMMAND_EDITOR_BOX_ROWS as usize;
+        let cursor_line_visible = cursor_line >= visible_start && cursor_line < visible_end;
+        let visible_cursor_line = cursor_line.saturating_sub(visible_start);
         let cursor_cell = editor.text[cursor_line_start..cursor]
             .graphemes(true)
             .count()
@@ -1638,7 +1659,7 @@ impl Renderer {
                 font_system,
                 &truncate_graphemes(completion, content_cols - cursor_cell),
                 content_x + cursor_cell as f32 * layout.cell_w,
-                box_y + cursor_line as f32 * layout.cell_h,
+                box_y + visible_cursor_line as f32 * layout.cell_h,
                 layout.baseline,
                 layout.cell_w,
                 None,
@@ -1651,7 +1672,7 @@ impl Renderer {
         if cursor_line_visible {
             push_rect(
                 content_x + cursor_cell as f32 * layout.cell_w,
-                box_y + cursor_line as f32 * layout.cell_h + 2.0,
+                box_y + visible_cursor_line as f32 * layout.cell_h + 2.0,
                 2.0,
                 layout.cell_h - 4.0,
                 pack_color(&Srgb::new(230, 235, 255), 255),
@@ -1774,6 +1795,63 @@ fn command_editor_cursor_line(
         .last()
         .map(|&(start, _)| (lines.len().saturating_sub(1), start))
         .unwrap_or((0, 0))
+}
+
+fn command_editor_visible_line_start(
+    line_count: usize,
+    cursor_line: usize,
+) -> usize {
+    let visible = COMMAND_EDITOR_BOX_ROWS as usize;
+    if line_count <= visible {
+        return 0;
+    }
+    cursor_line.saturating_add(1).saturating_sub(visible)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn render_command_editor_scrollbar(
+    box_x: f32,
+    box_y: f32,
+    box_w: f32,
+    box_h: f32,
+    border: f32,
+    layout: &FrameLayout,
+    visible_start: usize,
+    total_lines: usize,
+    bg_vertices: &mut Vec<BgVertex>,
+    bg_indices: &mut Vec<u32>,
+) {
+    let visible = COMMAND_EDITOR_BOX_ROWS as usize;
+    if total_lines <= visible {
+        return;
+    }
+    let track_h = (box_h - border * 2.0).max(1.0);
+    let track_w = (layout.cell_w * 0.18).max(2.0);
+    let track_x = box_x + box_w - layout.cell_w * 0.5 - track_w * 0.5;
+    let track_y = box_y + border;
+    push_rect(
+        track_x,
+        track_y,
+        track_w,
+        track_h,
+        pack_color(&Srgb::new(54, 62, 78), 220),
+        bg_vertices,
+        bg_indices,
+    );
+
+    let thumb_h = (track_h * visible as f32 / total_lines as f32).max(layout.cell_h * 0.45);
+    let max_start = total_lines.saturating_sub(visible).max(1);
+    let scroll_ratio = visible_start as f32 / max_start as f32;
+    let thumb_y = track_y + (track_h - thumb_h).max(0.0) * scroll_ratio;
+    push_rect(
+        track_x,
+        thumb_y,
+        track_w,
+        thumb_h,
+        pack_color(&Srgb::new(145, 160, 190), 255),
+        bg_vertices,
+        bg_indices,
+    );
 }
 
 fn truncate_graphemes(

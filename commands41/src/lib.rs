@@ -312,10 +312,12 @@ pub fn apply_input(
         }
         EditorInput::HistoryPrevious => {
             cycle_completion_selection(editor, settings, CompletionDirection::Previous)
+                .or_else(|| move_cursor_line(editor, LineDirection::Previous))
                 .unwrap_or_else(|| history_previous(editor))
         }
         EditorInput::HistoryNext => {
             cycle_completion_selection(editor, settings, CompletionDirection::Next)
+                .or_else(|| move_cursor_line(editor, LineDirection::Next))
                 .unwrap_or_else(|| history_next(editor))
         }
         EditorInput::Complete => complete_current_prefix(editor, settings),
@@ -553,6 +555,78 @@ fn history_next(editor: &mut CommandEditor) -> EditOutcome {
     }
     editor.cursor = editor.buffer.len();
     EditOutcome::Updated
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum LineDirection {
+    Previous,
+    Next,
+}
+
+fn move_cursor_line(
+    editor: &mut CommandEditor,
+    direction: LineDirection,
+) -> Option<EditOutcome> {
+    let lines = line_ranges(&editor.buffer);
+    if lines.len() <= 1 {
+        return None;
+    }
+    let current = line_index_at_cursor(&lines, editor.cursor);
+    let target = match direction {
+        LineDirection::Previous => current.checked_sub(1)?,
+        LineDirection::Next => {
+            let next = current + 1;
+            (next < lines.len()).then_some(next)?
+        }
+    };
+    let cursor_col = grapheme_count(&editor.buffer[lines[current].0..editor.cursor]);
+    let (target_start, target_end) = lines[target];
+    let target_cursor =
+        byte_index_at_grapheme_col(&editor.buffer, target_start, target_end, cursor_col);
+    clear_completion_state(editor);
+    editor.cursor = target_cursor;
+    Some(EditOutcome::Updated)
+}
+
+fn line_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            ranges.push((start, idx));
+            start = idx + ch.len_utf8();
+        }
+    }
+    ranges.push((start, text.len()));
+    ranges
+}
+
+fn line_index_at_cursor(
+    lines: &[(usize, usize)],
+    cursor: usize,
+) -> usize {
+    for (idx, &(_, end)) in lines.iter().enumerate() {
+        if cursor <= end {
+            return idx;
+        }
+    }
+    lines.len().saturating_sub(1)
+}
+
+fn byte_index_at_grapheme_col(
+    text: &str,
+    start: usize,
+    end: usize,
+    col: usize,
+) -> usize {
+    text[start..end]
+        .grapheme_indices(true)
+        .nth(col)
+        .map_or(end, |(idx, _)| start + idx)
+}
+
+fn grapheme_count(text: &str) -> usize {
+    text.graphemes(true).count()
 }
 
 fn complete_current_prefix(
