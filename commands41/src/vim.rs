@@ -155,6 +155,7 @@ fn apply_vim_normal_text(
         '^' => apply_vim_motion(editor, VimMotion::LineFirstNonBlank),
         '$' => apply_vim_motion(editor, VimMotion::LineEnd),
         'u' => undo_text_edit(editor),
+        'x' => vim_delete_under_cursor(editor),
         'D' => vim_delete_current_line(editor),
         'd' => {
             editor.vim_pending = Some(VimPending::Operator(VimOperator::Delete));
@@ -376,6 +377,13 @@ fn line_motion_target(
 fn vim_delete_current_line(editor: &mut CommandEditor) -> EditOutcome {
     let (start, end) = current_line_delete_range(&editor.buffer, editor.cursor);
     vim_delete_range(editor, start, end)
+}
+
+fn vim_delete_under_cursor(editor: &mut CommandEditor) -> EditOutcome {
+    let Some(end) = next_grapheme_boundary(&editor.buffer, editor.cursor) else {
+        return EditOutcome::Ignored;
+    };
+    vim_delete_range(editor, editor.cursor, end)
 }
 
 fn vim_yank_current_line(editor: &mut CommandEditor) -> EditOutcome {

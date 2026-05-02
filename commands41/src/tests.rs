@@ -522,6 +522,32 @@ fn vim_d_deletes_current_line() {
 }
 
 #[test]
+fn vim_x_deletes_grapheme_under_cursor() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("ab👍cd".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "ab".len());
+
+    assert_eq!(vim_text(&mut editor, "x"), EditOutcome::Updated);
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "abcd");
+    assert_eq!(view.cursor, "ab".len());
+    assert_eq!(vim_text(&mut editor, "P"), EditOutcome::Updated);
+    assert_eq!(editor.view(&settings).text, "ab👍cd");
+}
+
+#[test]
+fn vim_x_ignores_empty_buffer() {
+    let mut editor = CommandEditor::new();
+
+    assert_eq!(vim_text(&mut editor, "x"), EditOutcome::Ignored);
+}
+
+#[test]
 fn up_down_move_between_multiline_editor_rows() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings::default();
