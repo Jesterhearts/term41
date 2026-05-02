@@ -966,12 +966,9 @@ impl WindowHost {
         y: f64,
     ) -> MouseReportPosition {
         let (cell_w, cell_h, gutter_w, _) = self.layout_snapshot();
-        let cell_w = cell_w.max(1);
-        let cell_h = cell_h.max(1);
         let raw_x = x.max(0.0) as u32;
         let raw_y = y.max(0.0) as u32;
-        let pixel_y = raw_y.saturating_sub(cell_h);
-        let pixel_x = raw_x.saturating_sub(gutter_w);
+        let command_editor_view_present = self.input_state.lock().command_editor_view.is_some();
         let Some(target) = self.active_input_target() else {
             return MouseReportPosition {
                 col: 0,
@@ -983,14 +980,10 @@ impl WindowHost {
         let terminal = target.terminal.lock();
         let cols = terminal.viewport.cols.max(1);
         let rows = terminal.viewport.rows.max(1);
-        let pixel_x = pixel_x.min(cols.saturating_mul(cell_w).saturating_sub(1));
-        let pixel_y = pixel_y.min(rows.saturating_mul(cell_h).saturating_sub(1));
-        MouseReportPosition {
-            col: (pixel_x / cell_w).min(cols.saturating_sub(1)),
-            row: (pixel_y / cell_h).min(rows.saturating_sub(1)),
-            pixel_x,
-            pixel_y,
-        }
+        let row_offset = command_editor_terminal_row_offset(&terminal, command_editor_view_present);
+        mouse_report_position_from_pixels(
+            raw_x, raw_y, cell_w, cell_h, gutter_w, cols, rows, row_offset,
+        )
     }
 
     pub(crate) fn mouse_motion_position_key(

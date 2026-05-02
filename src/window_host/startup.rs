@@ -351,10 +351,18 @@ impl WindowHost {
         }
         let mouse_y = self.mouse_pos.1;
         let (_, cell_height, _, _) = self.layout_snapshot();
+        let command_editor_view_present = self.input_state.lock().command_editor_view.is_some();
         let target = self.active_input_target()?;
         let terminal = target.terminal.lock();
         terminal.selection.as_ref()?;
-        let viewport_rows = terminal.viewport.rows;
+        let viewport_rows =
+            terminal
+                .viewport
+                .rows
+                .saturating_sub(command_editor_terminal_row_offset(
+                    &terminal,
+                    command_editor_view_present,
+                ));
         selection_autoscroll_direction(mouse_y, cell_height, viewport_rows)
     }
 

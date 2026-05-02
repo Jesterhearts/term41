@@ -587,6 +587,50 @@ fn selection_autoscroll_direction(
     }
 }
 
+fn command_editor_terminal_row_offset(
+    terminal: &Terminal,
+    command_editor_view_present: bool,
+) -> u32 {
+    if command_editor_view_present
+        && !search_active(&terminal.search)
+        && command_editor_view_context(terminal).is_some()
+    {
+        COMMAND_EDITOR_BOX_ROWS
+    } else {
+        0
+    }
+}
+
+fn mouse_report_position_from_pixels(
+    raw_x: u32,
+    raw_y: u32,
+    cell_w: u32,
+    cell_h: u32,
+    gutter_w: u32,
+    cols: u32,
+    rows: u32,
+    terminal_row_offset: u32,
+) -> MouseReportPosition {
+    let cell_w = cell_w.max(1);
+    let cell_h = cell_h.max(1);
+    let cols = cols.max(1);
+    let rows = rows.max(1);
+    let pixel_x = raw_x
+        .saturating_sub(gutter_w)
+        .min(cols.saturating_mul(cell_w).saturating_sub(1));
+    let pixel_y = raw_y
+        .saturating_sub(cell_h)
+        .saturating_add(terminal_row_offset.saturating_mul(cell_h))
+        .min(rows.saturating_mul(cell_h).saturating_sub(1));
+
+    MouseReportPosition {
+        col: (pixel_x / cell_w).min(cols.saturating_sub(1)),
+        row: (pixel_y / cell_h).min(rows.saturating_sub(1)),
+        pixel_x,
+        pixel_y,
+    }
+}
+
 fn dec_udk_selector(
     key: &Key,
     mods: ModifiersState,
@@ -799,8 +843,8 @@ fn command_editor_byte_index_at_cell(
     let line_idx = (visible_start + visible_row as usize).min(lines.len().saturating_sub(1));
     let has_overflow = lines.len() > COMMAND_EDITOR_BOX_ROWS as usize;
     let scrollbar_cols = u32::from(has_overflow);
-    let content_cols = viewport_cols.saturating_sub(2 + scrollbar_cols).max(1);
-    let text_col = col.saturating_sub(1).min(content_cols);
+    let content_cols = viewport_cols.saturating_sub(1 + scrollbar_cols).max(1);
+    let text_col = col.min(content_cols);
     let (line_start, line_end) = lines[line_idx];
     view.text[line_start..line_end]
         .grapheme_indices(true)

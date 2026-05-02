@@ -30,6 +30,28 @@ mod selection_autoscroll_tests {
         assert_eq!(selection_autoscroll_direction(0.0, 0, 5), None);
         assert_eq!(selection_autoscroll_direction(0.0, 20, 0), None);
     }
+
+    #[test]
+    fn mouse_position_adds_visible_terminal_row_offset() {
+        assert_eq!(
+            mouse_report_position_from_pixels(28, 20, 10, 20, 8, 80, 24, 0),
+            MouseReportPosition {
+                col: 2,
+                row: 0,
+                pixel_x: 20,
+                pixel_y: 0,
+            }
+        );
+        assert_eq!(
+            mouse_report_position_from_pixels(28, 20, 10, 20, 8, 80, 24, 3),
+            MouseReportPosition {
+                col: 2,
+                row: 3,
+                pixel_x: 20,
+                pixel_y: 60,
+            }
+        );
+    }
 }
 
 #[cfg(test)]
@@ -178,6 +200,24 @@ mod command_editor_context_tests {
         assert_eq!(command_editor_view_context(&term), None);
         assert_eq!(command_editor_input_context(&term), None);
     }
+
+    #[test]
+    fn command_editor_terminal_row_offset_requires_visible_editor() {
+        let mut term = TestTerm::new_80x24();
+
+        assert_eq!(command_editor_terminal_row_offset(&term, false), 0);
+        assert_eq!(
+            command_editor_terminal_row_offset(&term, true),
+            COMMAND_EDITOR_BOX_ROWS
+        );
+
+        open_search(&mut term.search);
+        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
+
+        let mut term = TestTerm::new_80x24();
+        term.process(b"\x1b[?1049h");
+        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
+    }
 }
 
 #[cfg(test)]
@@ -323,11 +363,11 @@ mod command_editor_input_tests {
         };
 
         assert_eq!(
-            command_editor_byte_index_at_cell(&view, 80, 0, 1),
+            command_editor_byte_index_at_cell(&view, 80, 0, 0),
             "one\n".len()
         );
         assert_eq!(
-            command_editor_byte_index_at_cell(&view, 80, 2, 3),
+            command_editor_byte_index_at_cell(&view, 80, 2, 2),
             "one\ntwo\nthree\nfo".len()
         );
     }
