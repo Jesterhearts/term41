@@ -426,14 +426,17 @@ Notes:
   only where a shell command can start, so they do not pollute normal argument
   completion. When a path has multiple matches, Tab cycles the ghost candidate
   and Right accepts the active one; ambiguous completions show up to five ranked
-  matches near the editor, and Up/Down rotates the active match while the list
-  is visible. Path completion understands single- and double-quoted arguments
-  and escapes spaces for unquoted paths. Alternate-screen applications always
-  receive normal terminal input; the command editor only intercepts keys on the
-  primary screen.
+  matches near the editor box, and Up/Down rotates the active match while the
+  list is visible. The editor is rendered in an outlined three-row box under
+  the current prompt, with terminal history shifted upward by those three rows
+  while the box is visible. Path completion understands single- and
+  double-quoted arguments and escapes spaces for unquoted paths.
+  Alternate-screen applications always receive normal terminal input; the
+  command editor only intercepts keys on the primary screen.
   It supports common readline-style editing keys: `Ctrl+A/E`,
   `Ctrl+D`, `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
-  `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted.
+  `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted. `Shift+Enter`
+  inserts a newline for multi-line input; plain Enter submits the buffer.
   `Ctrl+Shift+D` toggles it for the current runtime session without rewriting
   config.
 - Example scripts are available under `examples/`, including

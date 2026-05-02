@@ -1520,93 +1520,100 @@ impl Renderer {
         font_system: &mut FontSystem,
         snap: &TermSnapshot,
         editor: &commands41::CommandLineView,
-        gutter_px: f32,
-        cell_w: f32,
-        cell_h: f32,
-        baseline: f32,
-        tab_bar_h: f32,
+        layout: &FrameLayout,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
         fg: &mut FgGeometry,
     ) {
-        let Some((cursor_row, cursor_col)) = snap.cursor else {
+        let Some((cursor_row, _cursor_col)) = snap.cursor else {
             return;
         };
-        if editor.text.is_empty() && editor.completion.is_none() && editor.candidates.is_empty() {
-            return;
-        }
-
-        let origin_x = cursor_col as f32 * cell_w + gutter_px;
-        let origin_y = cursor_row as f32 * cell_h + tab_bar_h;
-        let text_cells = editor.text.graphemes(true).count();
-        let completion_cells = editor
-            .completion
-            .as_deref()
-            .map(|text| text.graphemes(true).count())
-            .unwrap_or(0);
-        let panel_cells = (text_cells + completion_cells + 1).max(1);
-        let remaining_cols = snap.viewport_cols.saturating_sub(cursor_col).max(1) as usize;
-        let panel_cells = panel_cells.min(remaining_cols);
-        let panel_w = panel_cells as f32 * cell_w;
+        let box_x = layout.gutter_px;
+        let box_y = terminal_row_y(cursor_row, layout) + layout.cell_h;
+        let box_w = snap.viewport_cols.max(1) as f32 * layout.cell_w;
+        let box_h = COMMAND_EDITOR_BOX_ROWS as f32 * layout.cell_h;
+        let content_x = box_x + layout.cell_w;
+        let content_cols = snap.viewport_cols.saturating_sub(2).max(1) as usize;
+        let border = 2.0;
 
         push_rect(
-            origin_x,
-            origin_y,
-            panel_w,
-            cell_h,
-            pack_color(&Srgb::new(28, 32, 42), 245),
+            box_x,
+            box_y,
+            box_w,
+            box_h,
+            pack_color(&Srgb::new(18, 21, 29), 248),
             bg_vertices,
             bg_indices,
         );
         push_rect(
-            origin_x,
-            origin_y + cell_h - 2.0,
-            panel_w,
-            2.0,
+            box_x,
+            box_y,
+            box_w,
+            border,
+            pack_color(&Srgb::new(88, 150, 255), 255),
+            bg_vertices,
+            bg_indices,
+        );
+        push_rect(
+            box_x,
+            box_y + box_h - border,
+            box_w,
+            border,
+            pack_color(&Srgb::new(88, 150, 255), 255),
+            bg_vertices,
+            bg_indices,
+        );
+        push_rect(
+            box_x,
+            box_y,
+            border,
+            box_h,
+            pack_color(&Srgb::new(88, 150, 255), 255),
+            bg_vertices,
+            bg_indices,
+        );
+        push_rect(
+            box_x + box_w - border,
+            box_y,
+            border,
+            box_h,
             pack_color(&Srgb::new(88, 150, 255), 255),
             bg_vertices,
             bg_indices,
         );
 
-        for span in &editor.spans {
-            if span.start >= span.end || span.end > editor.text.len() {
-                continue;
-            }
-            let segment = &editor.text[span.start..span.end];
-            if segment.trim().is_empty() {
-                continue;
-            }
-            let col = editor.text[..span.start].graphemes(true).count();
-            if col >= remaining_cols {
-                continue;
-            }
-            self.shape_and_render_label(
-                font_system,
-                segment,
-                origin_x + col as f32 * cell_w,
-                origin_y,
-                baseline,
-                cell_w,
-                None,
-                Some(cell_h),
-                command_highlight_color(span.kind),
-                fg,
-            );
-        }
-
-        if let Some(completion) = editor.completion.as_deref() {
-            let col = text_cells;
-            if col < remaining_cols {
+        let lines = command_editor_line_ranges(&editor.text);
+        let visible_lines = lines.len().min(COMMAND_EDITOR_BOX_ROWS as usize);
+        for (line_idx, &(line_start, line_end)) in lines.iter().take(visible_lines).enumerate() {
+            let line_y = box_y + line_idx as f32 * layout.cell_h;
+            for span in &editor.spans {
+                if span.start >= span.end || span.end > editor.text.len() {
+                    continue;
+                }
+                let start = span.start.max(line_start);
+                let end = span.end.min(line_end);
+                if start >= end {
+                    continue;
+                }
+                let segment = &editor.text[start..end];
+                if segment.trim().is_empty() {
+                    continue;
+                }
+                let col = editor.text[line_start..start].graphemes(true).count();
+                if col >= content_cols {
+                    continue;
+                }
+                let label = truncate_graphemes(segment, content_cols - col);
                 self.shape_and_render_label(
                     font_system,
-                    completion,
-                    origin_x + col as f32 * cell_w,
-                    origin_y,
-                    baseline,
-                    cell_w,
+                    &label,
+                    content_x + col as f32 * layout.cell_w,
+                    line_y,
+                    layout.baseline,
+                    layout.cell_w,
                     None,
-                    Some(cell_h),
-                    pack_color(&Srgb::new(125, 136, 155), 255),
+                    Some(layout.cell_h),
+                    command_highlight_color(span.kind),
                     fg,
                 );
             }
@@ -1616,19 +1623,42 @@ impl Renderer {
         if !editor.text.is_char_boundary(cursor) {
             return;
         }
-        let cursor_cell = editor.text[..cursor]
+        let (cursor_line, cursor_line_start) = command_editor_cursor_line(&lines, cursor);
+        let cursor_line_visible = cursor_line < COMMAND_EDITOR_BOX_ROWS as usize;
+        let cursor_cell = editor.text[cursor_line_start..cursor]
             .graphemes(true)
             .count()
-            .min(remaining_cols - 1);
-        push_rect(
-            origin_x + cursor_cell as f32 * cell_w,
-            origin_y + 2.0,
-            2.0,
-            cell_h - 4.0,
-            pack_color(&Srgb::new(230, 235, 255), 255),
-            bg_vertices,
-            bg_indices,
-        );
+            .min(content_cols - 1);
+
+        if let Some(completion) = editor.completion.as_deref()
+            && cursor_line_visible
+            && cursor_cell < content_cols
+        {
+            self.shape_and_render_label(
+                font_system,
+                &truncate_graphemes(completion, content_cols - cursor_cell),
+                content_x + cursor_cell as f32 * layout.cell_w,
+                box_y + cursor_line as f32 * layout.cell_h,
+                layout.baseline,
+                layout.cell_w,
+                None,
+                Some(layout.cell_h),
+                pack_color(&Srgb::new(125, 136, 155), 255),
+                fg,
+            );
+        }
+
+        if cursor_line_visible {
+            push_rect(
+                content_x + cursor_cell as f32 * layout.cell_w,
+                box_y + cursor_line as f32 * layout.cell_h + 2.0,
+                2.0,
+                layout.cell_h - 4.0,
+                pack_color(&Srgb::new(230, 235, 255), 255),
+                bg_vertices,
+                bg_indices,
+            );
+        }
 
         if editor.candidates.is_empty() {
             return;
@@ -1640,20 +1670,14 @@ impl Renderer {
             .map(|candidate| candidate.graphemes(true).count() + 2)
             .max()
             .unwrap_or(1)
-            .min(remaining_cols)
+            .min(content_cols)
             .max(1);
-        let list_w = list_cells as f32 * cell_w;
-        let list_h = editor.candidates.len() as f32 * cell_h;
-        let below_row = cursor_row + 1;
-        let list_y = if below_row + editor.candidates.len() as u32 <= snap.viewport_rows {
-            origin_y + cell_h
-        } else {
-            let rows_up = editor.candidates.len().min(cursor_row as usize);
-            origin_y - rows_up as f32 * cell_h
-        };
+        let list_w = list_cells as f32 * layout.cell_w;
+        let list_h = editor.candidates.len() as f32 * layout.cell_h;
+        let list_y = (box_y - list_h).max(layout.tab_bar_h);
 
         push_rect(
-            origin_x,
+            content_x,
             list_y,
             list_w,
             list_h,
@@ -1662,14 +1686,14 @@ impl Renderer {
             bg_indices,
         );
         for (idx, candidate) in editor.candidates.iter().enumerate() {
-            let row_y = list_y + idx as f32 * cell_h;
+            let row_y = list_y + idx as f32 * layout.cell_h;
             let active = idx == editor.candidate_index;
             if active {
                 push_rect(
-                    origin_x,
+                    content_x,
                     row_y,
                     list_w,
-                    cell_h,
+                    layout.cell_h,
                     pack_color(&Srgb::new(42, 55, 78), 245),
                     bg_vertices,
                     bg_indices,
@@ -1679,10 +1703,10 @@ impl Renderer {
             self.shape_and_render_label(
                 font_system,
                 &label,
-                origin_x + cell_w,
+                content_x + layout.cell_w,
                 row_y,
-                baseline,
-                cell_w,
+                layout.baseline,
+                layout.cell_w,
                 None,
                 None,
                 if active {
@@ -1722,6 +1746,34 @@ impl Renderer {
             shape: style.shape,
         }
     }
+}
+
+fn command_editor_line_ranges(text: &str) -> Vec<(usize, usize)> {
+    let mut ranges = Vec::new();
+    let mut start = 0;
+    for (idx, ch) in text.char_indices() {
+        if ch == '\n' {
+            ranges.push((start, idx));
+            start = idx + ch.len_utf8();
+        }
+    }
+    ranges.push((start, text.len()));
+    ranges
+}
+
+fn command_editor_cursor_line(
+    lines: &[(usize, usize)],
+    cursor: usize,
+) -> (usize, usize) {
+    for (idx, &(start, end)) in lines.iter().enumerate() {
+        if cursor <= end {
+            return (idx, start);
+        }
+    }
+    lines
+        .last()
+        .map(|&(start, _)| (lines.len().saturating_sub(1), start))
+        .unwrap_or((0, 0))
 }
 
 fn truncate_graphemes(

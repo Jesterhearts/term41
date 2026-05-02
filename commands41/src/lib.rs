@@ -178,7 +178,7 @@ pub fn apply_input(
             EditOutcome::Updated
         }
         EditorInput::Enter => {
-            let command = editor.buffer.clone();
+            let command = submitted_command(&editor.buffer);
             push_history(editor, &command, settings.max_history);
             editor.clear();
             EditOutcome::Submitted(command)
@@ -593,6 +593,17 @@ fn push_history(
     if excess > 0 {
         editor.history.drain(0..excess);
     }
+}
+
+fn submitted_command(buffer: &str) -> String {
+    buffer
+        .replace("\r\n", "\n")
+        .replace('\r', "\n")
+        .split('\n')
+        .map(str::trim)
+        .filter(|line| !line.is_empty())
+        .collect::<Vec<_>>()
+        .join(" ")
 }
 
 fn completion_suffix(

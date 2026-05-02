@@ -226,6 +226,7 @@ mod geometry_tests {
             baseline: 14.0,
             gutter_px: 0.0,
             tab_bar_h: 0.0,
+            terminal_y_offset: 0.0,
         };
         let mut images = [
             visible_image(1, 0, 8, 0, 0, 0),

@@ -204,6 +204,14 @@ mod command_editor_input_tests {
             None
         );
     }
+
+    #[test]
+    fn shift_enter_inserts_newline() {
+        assert_eq!(
+            command_editor_input(&Key::Named(NamedKey::Enter), ModifiersState::SHIFT),
+            Some(EditorInput::Insert("\n".into()))
+        );
+    }
 }
 
 #[cfg(test)]

@@ -72,6 +72,7 @@ pub const MAX_TAB_WIDTH: f32 = 30.0;
 pub const SUCCESS: [u8; 3] = [80, 200, 120];
 pub const FAILURE: [u8; 3] = [220, 80, 80];
 pub const RUNNING: [u8; 3] = [140, 140, 140];
+const COMMAND_EDITOR_BOX_ROWS: u32 = 3;
 const IMAGE_DEPTH_FORMAT: wgpu::TextureFormat = wgpu::TextureFormat::Depth32Float;
 
 /// Packed vertex for background quads: position + color.
@@ -315,6 +316,7 @@ struct FrameLayout {
     baseline: f32,
     gutter_px: f32,
     tab_bar_h: f32,
+    terminal_y_offset: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -441,7 +443,14 @@ fn image_page_y(
     image: &VisibleImage,
     layout: &FrameLayout,
 ) -> f32 {
-    image.screen_row as f32 * layout.cell_h + image.cell_y_offset as f32
+    image.screen_row as f32 * layout.cell_h + layout.terminal_y_offset + image.cell_y_offset as f32
+}
+
+fn terminal_row_y(
+    row: u32,
+    layout: &FrameLayout,
+) -> f32 {
+    row as f32 * layout.cell_h + layout.tab_bar_h + layout.terminal_y_offset
 }
 
 fn image_page_x(
@@ -543,6 +552,7 @@ struct RowLayoutKey {
     baseline: u32,
     gutter_px: u32,
     tab_bar_h: u32,
+    terminal_y_offset: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1006,14 +1016,16 @@ fn push_terminal_dirty_rect(
     surface_width: u32,
     surface_height: u32,
 ) {
-    let y = row as f32 * layout.cell_h + layout.tab_bar_h;
-    let h = layout.cell_h.min(surface_height as f32 - y).max(0.0);
+    let y = terminal_row_y(row, layout);
+    let top = y.max(0.0);
+    let bottom = (y + layout.cell_h).min(surface_height as f32);
+    let h = (bottom - top).max(0.0);
     if h <= 0.0 {
         return;
     }
     geometry.terminal_dirty_rects.push(DirtyLayerRect {
         x: 0.0,
-        y,
+        y: top,
         w: surface_width as f32,
         h,
     });
@@ -1104,7 +1116,7 @@ fn row_popup_clip_key(
     popup_clip: Option<&ClipRect>,
 ) -> Option<ClipRectKey> {
     let clip = popup_clip?;
-    let row_top = row as f32 * layout.cell_h + layout.tab_bar_h;
+    let row_top = terminal_row_y(row, layout);
     let row_bottom = row_top + layout.cell_h;
     if row_bottom <= clip.top || row_top >= clip.bottom {
         return None;
@@ -1750,8 +1762,11 @@ impl Renderer {
         command_editor: Option<&commands41::CommandLineView>,
         suspend_terminal_area: bool,
     ) {
-        let layout = self.frame_layout(font_system, tabs);
-        let command_editor = command_editor.filter(|_| !snap.on_alt_screen);
+        let mut layout = self.frame_layout(font_system, tabs);
+        let command_editor = command_editor.filter(|_| !snap.on_alt_screen && !snap.search_active);
+        if command_editor.is_some() {
+            layout.terminal_y_offset = -(COMMAND_EDITOR_BOX_ROWS as f32) * layout.cell_h;
+        }
         self.image_atlas.begin_frame();
         let under_text_image_geometry = self.build_image_geometry(visible_images, &layout, true);
         let over_text_image_geometry = self.build_image_geometry(visible_images, &layout, false);

@@ -590,6 +590,7 @@ fn command_editor_input(
     match key {
         Key::Character(text) => Some(EditorInput::Insert(text.to_string())),
         Key::Named(NamedKey::Space) => Some(EditorInput::Insert(" ".to_owned())),
+        Key::Named(NamedKey::Enter) if mods.shift_key() => Some(EditorInput::Insert("\n".into())),
         Key::Named(NamedKey::Enter) if !mods.shift_key() => Some(EditorInput::Enter),
         Key::Named(NamedKey::Backspace) if !mods.shift_key() => Some(EditorInput::Backspace),
         Key::Named(NamedKey::Delete) if !mods.shift_key() => Some(EditorInput::Delete),
@@ -670,9 +671,7 @@ fn command_editor_view(
     editor: &CommandEditor,
     settings: &EditorSettings,
 ) -> Option<CommandLineView> {
-    let view = editor.view(settings);
-    (!view.text.is_empty() || view.completion.is_some() || !view.candidates.is_empty())
-        .then_some(view)
+    Some(editor.view(settings))
 }
 
 fn dec_local_function_key_selector(

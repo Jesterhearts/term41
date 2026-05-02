@@ -44,6 +44,22 @@ fn inserts_and_submits_command() {
 }
 
 #[test]
+fn submit_replaces_newlines_with_spaces() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo\n test\r\n--workspace".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Enter, &settings),
+        EditOutcome::Submitted("cargo test --workspace".to_owned())
+    );
+}
+
+#[test]
 fn history_arrows_restore_draft() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings::default();

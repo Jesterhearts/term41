@@ -60,6 +60,7 @@ impl Renderer {
             baseline: font_system.baseline_offset(),
             gutter_px: self.gutter_width_px(font_system.cell_width) as f32,
             tab_bar_h: if tabs.is_empty() { 0.0 } else { cell_h },
+            terminal_y_offset: 0.0,
         }
     }
 
@@ -98,8 +99,10 @@ impl Renderer {
 
             let base_x =
                 vis.screen_col as f32 * layout.cell_w + layout.gutter_px + vis.cell_x_offset as f32;
-            let base_y =
-                vis.screen_row as f32 * layout.cell_h + layout.tab_bar_h + vis.cell_y_offset as f32;
+            let base_y = vis.screen_row as f32 * layout.cell_h
+                + layout.tab_bar_h
+                + layout.terminal_y_offset
+                + vis.cell_y_offset as f32;
             let scale_x = if vis.image.width > 0 {
                 vis.display_width as f32 / vis.image.width as f32
             } else {
@@ -423,11 +426,7 @@ impl Renderer {
                 font_system,
                 snap,
                 command_editor,
-                layout.gutter_px,
-                layout.cell_w,
-                layout.cell_h,
-                layout.baseline,
-                layout.tab_bar_h,
+                layout,
                 &mut geometry.overlay_bg_vertices,
                 &mut geometry.overlay_bg_indices,
                 &mut geometry.overlay_fg,
@@ -457,6 +456,7 @@ impl Renderer {
                 baseline: layout.baseline.to_bits(),
                 gutter_px: layout.gutter_px.to_bits(),
                 tab_bar_h: layout.tab_bar_h.to_bits(),
+                terminal_y_offset: layout.terminal_y_offset.to_bits(),
             },
             cursor: row_cursor_key(cursor_state, row),
             blink: row_blink_key(snap, snap_row, blink_off, rapid_blink_off),
@@ -488,7 +488,7 @@ impl Renderer {
             let height = total * layout.cell_h;
             let left = layout.gutter_px;
             let surface_h = self.surface_config.height as f32;
-            let top = (popup.screen_row as f32 * layout.cell_h + layout.tab_bar_h)
+            let top = terminal_row_y(popup.screen_row, layout)
                 .min(surface_h - height)
                 .max(layout.tab_bar_h);
             ClipRect {
@@ -513,7 +513,7 @@ impl Renderer {
         layout: &FrameLayout,
         geometry: &mut RowGeometry,
     ) {
-        let y = row as f32 * layout.cell_h + layout.tab_bar_h;
+        let y = terminal_row_y(row, layout);
         let line_attr = snap_row.line_attr;
         let is_double_wide = !matches!(line_attr, LineAttr::Normal);
         let effective_cell_w = if is_double_wide {
@@ -527,7 +527,7 @@ impl Renderer {
             snap_row,
             layout.gutter_px,
             layout.cell_h,
-            layout.tab_bar_h,
+            layout.tab_bar_h + layout.terminal_y_offset,
             geometry,
         );
 
@@ -652,7 +652,7 @@ impl Renderer {
             cursor_state.bar_overlay_at(row, &snap_row.fg, layout.cell_w, layout.cell_h)
         {
             let ox = overlay.x + layout.gutter_px;
-            let oy = overlay.y + layout.tab_bar_h;
+            let oy = overlay.y + layout.tab_bar_h + layout.terminal_y_offset;
             let bi = geometry.bg.vertices.len() as u32;
             geometry.bg.vertices.extend_from_slice(&[
                 BgVertex {
