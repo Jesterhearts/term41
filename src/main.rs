@@ -40,6 +40,7 @@ use commands41::CommandLineView;
 use commands41::EditOutcome;
 use commands41::EditorInput;
 use commands41::EditorSettings;
+use commands41::HistoryEntry;
 use commands41::VimKey;
 use commands41::apply_input;
 use commands41::clear_selection as clear_editor_selection;
@@ -383,6 +384,9 @@ struct WindowHost {
     startup_release_tx: Option<mpsc::SyncSender<Vec<Tab>>>,
     input_endpoints: HashMap<TabId, InputEndpoint>,
     command_catalog: CommandCatalog,
+    command_history_entries: Vec<HistoryEntry>,
+    command_history_loaded: bool,
+    command_history_enabled: bool,
     active_input_tab: Option<TabId>,
     input_state: Arc<Mutex<InputState>>,
     event_tx: cueue::Writer<RenderEvent>,
@@ -1102,6 +1106,9 @@ fn main() {
             },
         )]),
         command_catalog: CommandCatalog::from_config(&startup_command_editor),
+        command_history_entries: Vec::new(),
+        command_history_loaded: false,
+        command_history_enabled: startup_command_editor.deep_history_integration,
         active_input_tab: Some(TabId(0)),
         input_state,
         event_tx,

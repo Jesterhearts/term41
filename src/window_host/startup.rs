@@ -164,27 +164,70 @@ impl WindowHost {
             return None;
         }
         self.command_catalog.refresh_for_config(&config);
-        let target = self.input_endpoints.get(&tab_id)?;
         let context = {
+            let target = self.input_endpoints.get(&tab_id)?;
             let terminal = target.terminal.lock();
             command_editor_context(&terminal)
-        };
+        }?;
+        let history_entries = self.command_editor_history_entries(&config);
+        let target = self.input_endpoints.get(&tab_id)?;
         let settings = Self::command_editor_settings(
             &config,
-            context?.current_dir,
+            context.current_dir,
             self.command_catalog.names().to_vec(),
+            history_entries,
         );
         command_editor_view(&target.command_editor, &settings, config.vim_mode)
+    }
+
+    pub(crate) fn command_editor_history_entries(
+        &mut self,
+        config: &CommandEditorConfig,
+    ) -> Vec<HistoryEntry> {
+        if !config.deep_history_integration {
+            self.command_history_entries.clear();
+            self.command_history_loaded = false;
+            self.command_history_enabled = false;
+            return Vec::new();
+        }
+
+        if self.command_history_enabled != config.deep_history_integration {
+            self.command_history_entries.clear();
+            self.command_history_loaded = false;
+            self.command_history_enabled = config.deep_history_integration;
+        }
+
+        if !self.command_history_loaded {
+            self.command_history_entries =
+                match shellhist41::load_current_shell_history(&shellhist41::ShellHistoryOptions {
+                    max_entries: config.max_history,
+                    ..shellhist41::ShellHistoryOptions::default()
+                }) {
+                    Ok(entries) => entries
+                        .into_iter()
+                        .map(|entry| HistoryEntry::external(entry.command))
+                        .collect(),
+                    Err(error) => {
+                        log::debug!("command editor deep history unavailable: {error}");
+                        Vec::new()
+                    }
+                };
+            self.command_history_loaded = true;
+        }
+
+        self.command_history_entries.clone()
     }
 
     pub(crate) fn command_editor_settings(
         config: &CommandEditorConfig,
         current_dir: Option<PathBuf>,
         command_words: Vec<String>,
+        history_entries: Vec<HistoryEntry>,
     ) -> EditorSettings {
         EditorSettings {
             completion_words: config.completions.clone(),
             command_words,
+            history_entries,
             current_dir,
             max_history: config.max_history,
         }

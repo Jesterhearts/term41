@@ -152,8 +152,14 @@ impl WindowHost {
             let terminal = target.terminal.lock();
             command_editor_context(&terminal)
         }?;
+        let history_entries = self.command_editor_history_entries(&config);
         Some((
-            Self::command_editor_settings(&config, context.current_dir, command_words),
+            Self::command_editor_settings(
+                &config,
+                context.current_dir,
+                command_words,
+                history_entries,
+            ),
             vim_mode,
         ))
     }

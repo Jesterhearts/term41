@@ -14,6 +14,7 @@ pub struct CommandEditorConfig {
     pub completions: Vec<String>,
     pub binary_dirs: Vec<PathBuf>,
     pub merge_extra_dirs: bool,
+    pub deep_history_integration: bool,
     pub max_history: usize,
 }
 
@@ -25,6 +26,7 @@ impl Default for CommandEditorConfig {
             completions: Vec::new(),
             binary_dirs: default_binary_dirs(),
             merge_extra_dirs: true,
+            deep_history_integration: false,
             max_history: 200,
         }
     }
@@ -51,6 +53,10 @@ pub(crate) struct CommandEditorSettings {
     /// When false, `binary_dirs` replaces the default list.
     #[serde(default)]
     merge_extra_dirs: Option<bool>,
+    /// When true, attempt to discover the user's active shell history and
+    /// merge it into command editor history navigation/completion.
+    #[serde(default)]
+    deep_history_integration: Option<bool>,
     #[serde(deserialize_with = "usize_opt")]
     #[serde(default)]
     max_history: Option<usize>,
@@ -73,6 +79,9 @@ pub(crate) fn build_command_editor(raw: Option<CommandEditorSettings>) -> Comman
         completions: settings.completions.unwrap_or_default(),
         binary_dirs,
         merge_extra_dirs,
+        deep_history_integration: settings
+            .deep_history_integration
+            .unwrap_or(defaults.deep_history_integration),
         max_history: settings.max_history.unwrap_or(defaults.max_history).max(1),
     }
 }

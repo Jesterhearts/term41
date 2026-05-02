@@ -1622,6 +1622,7 @@ process_info = true
             CommandEditorConfig::default().binary_dirs
         );
         assert!(cfg.command_editor.merge_extra_dirs);
+        assert!(!cfg.command_editor.deep_history_integration);
         assert_eq!(cfg.command_editor.max_history, 200);
     }
 
@@ -1635,6 +1636,7 @@ vim_mode = true
 completions = ["cargo", "git"]
 binary_dirs = ["~/custom-bin"]
 merge_extra_dirs = false
+deep_history_integration = true
 max_history = 25
 "#,
         );
@@ -1646,6 +1648,7 @@ max_history = 25
             [expand_path(PathBuf::from("~/custom-bin"))]
         );
         assert!(!cfg.command_editor.merge_extra_dirs);
+        assert!(cfg.command_editor.deep_history_integration);
         assert_eq!(cfg.command_editor.max_history, 25);
     }
 

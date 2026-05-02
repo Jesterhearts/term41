@@ -265,59 +265,62 @@ impl WindowHost {
         }
         self.command_catalog.refresh_for_config(&config);
         let command_words = self.command_catalog.names().to_vec();
-        let mut cleared_inactive_editor = false;
+        let Some(input) = command_editor_input(key, self.modifiers, config.vim_mode) else {
+            return false;
+        };
+        let editor_context = {
+            let Some(target) = self.input_endpoints.get(&tab_id) else {
+                return false;
+            };
+            let terminal = target.terminal.lock();
+            command_editor_context(&terminal)
+        };
+        let Some(context) = editor_context else {
+            let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
+                return false;
+            };
+            if !target.command_editor.is_empty() {
+                target.command_editor.clear();
+                self.set_command_editor_view(None);
+            }
+            return false;
+        };
+        let history_entries = self.command_editor_history_entries(&config);
         let handled = {
             let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
                 return false;
             };
-            let Some(input) = command_editor_input(key, self.modifiers, config.vim_mode) else {
-                return false;
-            };
-            let editor_context = {
-                let terminal = target.terminal.lock();
-                command_editor_context(&terminal)
-            };
-            if let Some(context) = editor_context {
-                let settings =
-                    Self::command_editor_settings(&config, context.current_dir, command_words);
-                let outcome = apply_input(&mut target.command_editor, input.clone(), &settings);
-                match outcome {
-                    EditOutcome::Submitted(command) => {
-                        let mut bytes = command.into_bytes();
-                        bytes.push(b'\r');
-                        Self::write_host_bytes(target, bytes, true);
-                        (true, None)
-                    }
-                    EditOutcome::Updated => {
+            let settings = Self::command_editor_settings(
+                &config,
+                context.current_dir,
+                command_words,
+                history_entries,
+            );
+            let outcome = apply_input(&mut target.command_editor, input.clone(), &settings);
+            match outcome {
+                EditOutcome::Submitted(command) => {
+                    let mut bytes = command.into_bytes();
+                    bytes.push(b'\r');
+                    Self::write_host_bytes(target, bytes, true);
+                    (true, None)
+                }
+                EditOutcome::Updated => {
+                    let view =
+                        command_editor_view(&target.command_editor, &settings, config.vim_mode);
+                    (true, view)
+                }
+                EditOutcome::Canceled => (true, None),
+                EditOutcome::Ignored => {
+                    if input == EditorInput::Cancel {
+                        (false, None)
+                    } else {
                         let view =
                             command_editor_view(&target.command_editor, &settings, config.vim_mode);
                         (true, view)
                     }
-                    EditOutcome::Canceled => (true, None),
-                    EditOutcome::Ignored => {
-                        if input == EditorInput::Cancel {
-                            (false, None)
-                        } else {
-                            let view = command_editor_view(
-                                &target.command_editor,
-                                &settings,
-                                config.vim_mode,
-                            );
-                            (true, view)
-                        }
-                    }
                 }
-            } else {
-                if !target.command_editor.is_empty() {
-                    target.command_editor.clear();
-                    cleared_inactive_editor = true;
-                }
-                (false, None)
             }
         };
-        if cleared_inactive_editor {
-            self.set_command_editor_view(None);
-        }
         if handled.0 {
             self.set_command_editor_view(handled.1);
         }
@@ -335,19 +338,27 @@ impl WindowHost {
         }
         self.command_catalog.refresh_for_config(&config);
         let command_words = self.command_catalog.names().to_vec();
+        let context = {
+            let Some(target) = self.input_endpoints.get(&tab_id) else {
+                return false;
+            };
+            let terminal = target.terminal.lock();
+            command_editor_context(&terminal)
+        };
+        let Some(context) = context else {
+            return false;
+        };
+        let history_entries = self.command_editor_history_entries(&config);
         let (handled_action, view) = {
             let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
                 return false;
             };
-            let context = {
-                let terminal = target.terminal.lock();
-                command_editor_context(&terminal)
-            };
-            let Some(context) = context else {
-                return false;
-            };
-            let settings =
-                Self::command_editor_settings(&config, context.current_dir, command_words);
+            let settings = Self::command_editor_settings(
+                &config,
+                context.current_dir,
+                command_words,
+                history_entries,
+            );
 
             match action {
                 Action::Copy => {

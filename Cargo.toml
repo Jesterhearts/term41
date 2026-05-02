@@ -14,6 +14,7 @@ members = [
   "image41",
   "pty-pipe41",
   "selftest41",
+  "shellhist41",
   "terminal41",
   "utils41",
   "vte-mode41",
@@ -42,6 +43,7 @@ parking_lot          = { version = "0.12.5" }
 png                  = "0.18.1"
 pty-pipe41           = { path = "pty-pipe41" }
 serde                = { version = "1.0.228", features = ["derive"] }
+shellhist41          = { path = "shellhist41" }
 smol_str             = { version = "0.3.6", features = ["serde"] }
 tracing              = "0.1.44"
 triple_buffer        = "9.0.0"
@@ -88,6 +90,7 @@ png.workspace                  = true
 pollster                       = "0.4.0"
 pty-pipe41.workspace           = true
 serde.workspace                = true
+shellhist41.workspace          = true
 smol_str.workspace             = true
 softbuffer                     = "0.4.8"
 terminal41                     = { path = "terminal41" }

@@ -4,6 +4,7 @@ fn settings(words: &[&str]) -> EditorSettings {
     EditorSettings {
         completion_words: words.iter().map(|word| (*word).to_owned()).collect(),
         command_words: Vec::new(),
+        history_entries: Vec::new(),
         current_dir: None,
         max_history: 20,
     }
@@ -13,6 +14,7 @@ fn command_settings(words: &[&str]) -> EditorSettings {
     EditorSettings {
         completion_words: Vec::new(),
         command_words: words.iter().map(|word| (*word).to_owned()).collect(),
+        history_entries: Vec::new(),
         current_dir: None,
         max_history: 20,
     }
@@ -22,6 +24,7 @@ fn path_settings(current_dir: PathBuf) -> EditorSettings {
     EditorSettings {
         completion_words: Vec::new(),
         command_words: Vec::new(),
+        history_entries: Vec::new(),
         current_dir: Some(current_dir),
         max_history: 20,
     }
@@ -412,6 +415,29 @@ fn history_arrows_restore_draft() {
     apply_input(&mut editor, EditorInput::HistoryNext, &settings);
     apply_input(&mut editor, EditorInput::HistoryNext, &settings);
     assert_eq!(editor.view(&settings).text, "draft");
+}
+
+#[test]
+fn external_history_entries_participate_in_navigation() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings {
+        history_entries: vec![
+            HistoryEntry::external("cargo check"),
+            HistoryEntry::external("cargo test"),
+        ],
+        ..EditorSettings::default()
+    };
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo test");
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::HistoryPrevious, &settings),
+        EditOutcome::Updated
+    );
+    assert_eq!(editor.view(&settings).text, "cargo check");
 }
 
 #[test]

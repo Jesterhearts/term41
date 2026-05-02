@@ -3796,6 +3796,10 @@ dependencies = [
 ]
 
 [[package]]
+name = "shellhist41"
+version = "0.1.1"
+
+[[package]]
 name = "shlex"
 version = "1.3.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"
@@ -4090,6 +4094,7 @@ dependencies = [
  "pollster",
  "pty-pipe41",
  "serde",
+ "shellhist41",
  "smol_str 0.3.6",
  "softbuffer",
  "terminal41",

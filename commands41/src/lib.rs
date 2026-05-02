@@ -11,7 +11,10 @@ use std::path::PathBuf;
 
 use unicode_segmentation::UnicodeSegmentation;
 
+mod history;
 mod vim;
+pub use history::HistoryEntry;
+pub use history::HistorySource;
 pub use vim::VimKey;
 pub use vim::VimMode;
 
@@ -22,6 +25,7 @@ const MAX_COMPLETION_CANDIDATES: usize = 5;
 pub struct EditorSettings {
     pub completion_words: Vec<String>,
     pub command_words: Vec<String>,
+    pub history_entries: Vec<HistoryEntry>,
     pub current_dir: Option<PathBuf>,
     pub max_history: usize,
 }
@@ -31,6 +35,7 @@ impl Default for EditorSettings {
         Self {
             completion_words: Vec::new(),
             command_words: Vec::new(),
+            history_entries: Vec::new(),
             current_dir: None,
             max_history: DEFAULT_MAX_HISTORY,
         }
@@ -130,9 +135,7 @@ pub enum EditOutcome {
 pub struct CommandEditor {
     buffer: String,
     cursor: usize,
-    history: Vec<String>,
-    history_pos: Option<usize>,
-    draft: String,
+    history: history::EditorHistory,
     kill_buffer: String,
     selection: Option<EditorSelection>,
     vim_mode: VimMode,
@@ -146,9 +149,7 @@ impl Default for CommandEditor {
         Self {
             buffer: String::new(),
             cursor: 0,
-            history: Vec::new(),
-            history_pos: None,
-            draft: String::new(),
+            history: history::EditorHistory::default(),
             kill_buffer: String::new(),
             selection: None,
             vim_mode: VimMode::Normal,
@@ -176,7 +177,7 @@ impl CommandEditor {
         let completion = selection
             .and_then(CompletionSelection::current_suffix)
             .or_else(|| self.path_cycle_suffix())
-            .or_else(|| completion_suffix(&self.buffer, self.cursor, settings, &self.history));
+            .or_else(|| completion_suffix(self, settings));
         let (candidates, candidate_index) = completion_candidate_view(self, settings);
         CommandLineView {
             text: self.buffer.clone(),
@@ -196,8 +197,7 @@ impl CommandEditor {
     pub fn clear(&mut self) {
         self.buffer.clear();
         self.cursor = 0;
-        self.history_pos = None;
-        self.draft.clear();
+        history::clear(&mut self.history);
         self.selection = None;
         self.vim_mode = VimMode::Normal;
         self.vim_pending = None;
@@ -288,7 +288,7 @@ pub fn apply_input(
         EditorInput::Vim(key) => vim::apply_vim_key(editor, key, settings),
         EditorInput::Enter => {
             let command = submitted_command(&editor.buffer);
-            push_history(editor, &command, settings.max_history);
+            history::push(&mut editor.history, &command, settings.max_history);
             editor.clear();
             EditOutcome::Submitted(command)
         }
@@ -442,12 +442,12 @@ pub fn apply_input(
         EditorInput::HistoryPrevious => {
             cycle_completion_selection(editor, settings, CompletionDirection::Previous)
                 .or_else(|| move_cursor_line(editor, LineDirection::Previous))
-                .unwrap_or_else(|| history_previous(editor))
+                .unwrap_or_else(|| history_previous(editor, settings))
         }
         EditorInput::HistoryNext => {
             cycle_completion_selection(editor, settings, CompletionDirection::Next)
                 .or_else(|| move_cursor_line(editor, LineDirection::Next))
-                .unwrap_or_else(|| history_next(editor))
+                .unwrap_or_else(|| history_next(editor, settings))
         }
         EditorInput::Complete => complete_current_prefix(editor, settings),
         EditorInput::Cancel => {
@@ -639,10 +639,7 @@ fn is_word_separator(grapheme: &str) -> bool {
 }
 
 fn replace_history_edit_with_draft(editor: &mut CommandEditor) {
-    if editor.history_pos.is_some() {
-        editor.history_pos = None;
-        editor.draft = editor.buffer.clone();
-    }
+    history::replace_edit_with_draft(&mut editor.history, &editor.buffer);
 }
 
 fn valid_boundary(
@@ -683,39 +680,33 @@ fn clear_completion_state(editor: &mut CommandEditor) {
     editor.completion_selection = None;
 }
 
-fn history_previous(editor: &mut CommandEditor) -> EditOutcome {
-    if editor.history.is_empty() {
+fn history_previous(
+    editor: &mut CommandEditor,
+    settings: &EditorSettings,
+) -> EditOutcome {
+    let Some(command) = history::previous(
+        &mut editor.history,
+        &editor.buffer,
+        &settings.history_entries,
+    ) else {
         return EditOutcome::Ignored;
-    }
-    clear_completion_state(editor);
-    let pos = match editor.history_pos {
-        Some(pos) if pos > 0 => pos - 1,
-        Some(_) => return EditOutcome::Ignored,
-        None => {
-            editor.draft = editor.buffer.clone();
-            editor.history.len() - 1
-        }
     };
-    editor.history_pos = Some(pos);
-    editor.buffer = editor.history[pos].clone();
+    clear_completion_state(editor);
+    editor.buffer = command;
     editor.cursor = editor.buffer.len();
     editor.selection = None;
     EditOutcome::Updated
 }
 
-fn history_next(editor: &mut CommandEditor) -> EditOutcome {
-    let Some(pos) = editor.history_pos else {
+fn history_next(
+    editor: &mut CommandEditor,
+    settings: &EditorSettings,
+) -> EditOutcome {
+    let Some(command) = history::next(&mut editor.history, &settings.history_entries) else {
         return EditOutcome::Ignored;
     };
     clear_completion_state(editor);
-    if pos + 1 < editor.history.len() {
-        editor.history_pos = Some(pos + 1);
-        editor.buffer = editor.history[pos + 1].clone();
-    } else {
-        editor.history_pos = None;
-        editor.buffer = editor.draft.clone();
-        editor.draft.clear();
-    }
+    editor.buffer = command;
     editor.cursor = editor.buffer.len();
     editor.selection = None;
     EditOutcome::Updated
@@ -806,31 +797,13 @@ fn complete_current_prefix(
         return EditOutcome::Updated;
     }
 
-    let Some(suffix) = completion_suffix(&editor.buffer, editor.cursor, settings, &editor.history)
-    else {
+    let Some(suffix) = completion_suffix(editor, settings) else {
         return EditOutcome::Ignored;
     };
     clear_completion_state(editor);
     replace_history_edit_with_draft(editor);
     replace_selection_or_insert(editor, &suffix);
     EditOutcome::Updated
-}
-
-fn push_history(
-    editor: &mut CommandEditor,
-    command: &str,
-    max_history: usize,
-) {
-    let trimmed = command.trim();
-    if trimmed.is_empty() || editor.history.last().is_some_and(|last| last == command) {
-        return;
-    }
-    editor.history.push(command.to_owned());
-    let max_history = max_history.max(1);
-    let excess = editor.history.len().saturating_sub(max_history);
-    if excess > 0 {
-        editor.history.drain(0..excess);
-    }
 }
 
 fn submitted_command(buffer: &str) -> String {
@@ -844,15 +817,23 @@ fn submitted_command(buffer: &str) -> String {
         .join(" ")
 }
 
+fn push_history(
+    editor: &mut CommandEditor,
+    command: &str,
+    max_history: usize,
+) {
+    history::push(&mut editor.history, command, max_history);
+}
+
 fn completion_suffix(
-    buffer: &str,
-    cursor: usize,
+    editor: &CommandEditor,
     settings: &EditorSettings,
-    history: &[String],
 ) -> Option<String> {
+    let buffer = &editor.buffer;
+    let cursor = editor.cursor;
     if cursor == buffer.len() && !buffer.is_empty() {
-        for candidate in history_command_candidates(history) {
-            if candidate != buffer && candidate.starts_with(buffer) {
+        for candidate in history::command_candidates(&editor.history, &settings.history_entries) {
+            if candidate != *buffer && candidate.starts_with(buffer) {
                 return Some(candidate[buffer.len()..].to_owned());
             }
         }
@@ -867,9 +848,9 @@ fn completion_suffix(
         return None;
     }
     let candidates = if is_command_completion_word(buffer, word_start) {
-        command_completion_candidates(settings, history)
+        command_completion_candidates(&editor.history, settings)
     } else {
-        word_completion_candidates(settings, history)
+        word_completion_candidates(&editor.history, settings)
     };
     for candidate in candidates {
         if candidate != prefix && candidate.starts_with(prefix) {
@@ -904,7 +885,7 @@ fn completion_candidate_view(
         return (candidates, index);
     }
 
-    let matches = completion_matches(&editor.buffer, editor.cursor, settings, &editor.history);
+    let matches = completion_matches(editor, settings);
     let candidates = matches
         .map(|matches| top_ambiguous_candidates(matches.candidates))
         .unwrap_or_default();
@@ -912,13 +893,13 @@ fn completion_candidate_view(
 }
 
 fn completion_matches(
-    buffer: &str,
-    cursor: usize,
+    editor: &CommandEditor,
     settings: &EditorSettings,
-    history: &[String],
 ) -> Option<CompletionMatches> {
+    let buffer = &editor.buffer;
+    let cursor = editor.cursor;
     if cursor == buffer.len() && !buffer.is_empty() {
-        let candidates = history_command_candidates(history)
+        let candidates = history::command_candidates(&editor.history, &settings.history_entries)
             .into_iter()
             .filter(|candidate| candidate != buffer && candidate.starts_with(buffer))
             .collect::<Vec<_>>();
@@ -941,9 +922,9 @@ fn completion_matches(
         return None;
     }
     let candidates = if is_command_completion_word(buffer, word_start) {
-        command_completion_candidates(settings, history)
+        command_completion_candidates(&editor.history, settings)
     } else {
-        word_completion_candidates(settings, history)
+        word_completion_candidates(&editor.history, settings)
     };
     let candidates = candidates
         .into_iter()
@@ -1126,24 +1107,11 @@ fn unescape_unquoted_word(raw: &str) -> String {
     out
 }
 
-fn history_command_candidates(history: &[String]) -> Vec<String> {
-    let mut out = Vec::new();
-    for command in history.iter().rev() {
-        push_unique(&mut out, command);
-    }
-    out
-}
-
 fn command_completion_candidates(
+    history: &history::EditorHistory,
     settings: &EditorSettings,
-    history: &[String],
 ) -> Vec<String> {
-    let mut out = Vec::new();
-    for command in history.iter().rev() {
-        if let Some(first_word) = command.split_whitespace().next() {
-            push_unique(&mut out, first_word);
-        }
-    }
+    let mut out = history::command_word_candidates(history, &settings.history_entries);
     for word in &settings.completion_words {
         push_unique(&mut out, word);
     }
@@ -1154,13 +1122,10 @@ fn command_completion_candidates(
 }
 
 fn word_completion_candidates(
+    history: &history::EditorHistory,
     settings: &EditorSettings,
-    history: &[String],
 ) -> Vec<String> {
-    let mut out = Vec::new();
-    for command in history.iter().rev() {
-        push_unique(&mut out, command);
-    }
+    let mut out = history::word_candidates(history, &settings.history_entries);
     for word in &settings.completion_words {
         push_unique(&mut out, word);
     }
@@ -1311,7 +1276,7 @@ fn cycle_completion_selection(
     {
         selection
     } else {
-        let matches = completion_matches(&editor.buffer, editor.cursor, settings, &editor.history)?;
+        let matches = completion_matches(editor, settings)?;
         let candidates = top_ambiguous_candidates(matches.candidates);
         if candidates.len() <= 1 {
             return None;

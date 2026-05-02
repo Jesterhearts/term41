@@ -363,6 +363,8 @@ vsync = "auto"
 # binary_dirs = ["~/project/bin"]
 # Set merge_extra_dirs = false to replace the default binary_dirs list instead.
 # merge_extra_dirs = true
+# Opt in to read-only shell history discovery through shellhist41.
+# deep_history_integration = false
 # max_history = 200
 
 [colors.status_line]
@@ -423,6 +425,10 @@ Notes:
   per-user executable directory, usually `~/.local/bin` on Linux. User-supplied
   `binary_dirs` are merged into that list by default; set
   `merge_extra_dirs = false` to make `binary_dirs` replace the default list.
+  Set `deep_history_integration = true` to let `shellhist41` attempt read-only
+  discovery of the active shell history and merge those entries into editor
+  history navigation and completion. It currently supports bash, zsh, fish,
+  PowerShell/PowerShell Core, and Atuin-backed history when Atuin is active.
   Discovered commands are offered
   only where a shell command can start, so they do not pollute normal argument
   completion. When a path has multiple matches, Tab cycles the ghost candidate
