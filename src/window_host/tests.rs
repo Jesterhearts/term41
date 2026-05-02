@@ -134,6 +134,37 @@ mod command_editor_context_tests {
     }
 
     #[test]
+    fn command_editor_view_context_hides_primary_screen_interactive_apps() {
+        let mut term = TestTerm::new_80x24();
+        term.process(b"\x1b]133;C\x07");
+
+        assert_eq!(
+            term.metadata.shell_integration_phase,
+            ShellIntegrationPhase::Output
+        );
+        assert_eq!(
+            command_editor_view_context(&term),
+            Some(CommandEditorContext { current_dir: None })
+        );
+
+        term.process(b"\x1b[?1000h");
+
+        assert!(host::mouse_tracking_enabled(term.modes.mouse_tracking));
+        assert_eq!(command_editor_view_context(&term), None);
+
+        term.process(b"\x1b[?1000l\x1b]133;B\x07");
+
+        assert_eq!(
+            term.metadata.shell_integration_phase,
+            ShellIntegrationPhase::Command
+        );
+        assert_eq!(
+            command_editor_view_context(&term),
+            Some(CommandEditorContext { current_dir: None })
+        );
+    }
+
+    #[test]
     fn command_editor_contexts_are_disabled_on_alt_screen() {
         let mut term = TestTerm::new_80x24();
         term.process(b"\x1b]133;B\x07");

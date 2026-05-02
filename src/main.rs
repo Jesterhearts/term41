@@ -309,12 +309,21 @@ struct CommandEditorContext {
 }
 
 fn command_editor_view_context(terminal: &Terminal) -> Option<CommandEditorContext> {
-    if terminal.on_alt_screen {
+    if terminal.on_alt_screen || command_editor_hidden_by_foreground_app(terminal) {
         return None;
     }
     Some(CommandEditorContext {
         current_dir: terminal.metadata.current_directory.clone(),
     })
+}
+
+fn command_editor_hidden_by_foreground_app(terminal: &Terminal) -> bool {
+    if terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Output {
+        return false;
+    }
+    host::mouse_tracking_enabled(terminal.modes.mouse_tracking)
+        || terminal.active.app_cursor_keys
+        || terminal.active.app_keypad
 }
 
 fn command_editor_input_context(terminal: &Terminal) -> Option<CommandEditorContext> {

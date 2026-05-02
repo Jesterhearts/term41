@@ -111,6 +111,9 @@ impl WindowHost {
         for request in kitty_file_requests {
             self.request_kitty_file_permission(tab_id, request);
         }
+        if self.active_input_tab == Some(tab_id) {
+            self.refresh_command_editor_view();
+        }
     }
 
     pub(crate) fn request_clipboard_permission(

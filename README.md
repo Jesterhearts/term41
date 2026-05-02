@@ -436,9 +436,11 @@ Notes:
   matches near the editor box, and Up/Down rotates the active match while the
   list is visible. While enabled, the editor is rendered in an outlined
   three-row box under the current prompt on the primary screen, with terminal
-  history shifted upward by those three rows. Multi-line input scrolls inside
-  that three-row box with a small scrollbar, and Up/Down move between input
-  lines when possible.
+  history shifted upward by those three rows. It stays visible through ordinary
+  command output but hides when a foreground command advertises stronger
+  interactive terminal modes such as mouse tracking, app cursor, or app keypad.
+  Multi-line input scrolls inside that three-row box with a small scrollbar,
+  and Up/Down move between input lines when possible.
   Mouse drag selects editor text, release copies it to the primary selection,
   right-click copies a selected editor range to the clipboard or pastes when no
   editor selection is active, middle-click pastes the primary selection, and the
