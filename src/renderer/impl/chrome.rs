@@ -1667,7 +1667,7 @@ impl Renderer {
                     layout.baseline,
                     layout.cell_w,
                     None,
-                    Some(layout.cell_h),
+                    None,
                     command_highlight_color(span.kind),
                     fg,
                 );
@@ -1693,7 +1693,7 @@ impl Renderer {
                 layout.baseline,
                 layout.cell_w,
                 None,
-                Some(layout.cell_h),
+                None,
                 pack_color(&Srgb::new(125, 136, 155), 255),
                 fg,
             );
