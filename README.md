@@ -353,8 +353,10 @@ vsync = "auto"
 # resource_usage = false
 
 [command_editor]
-# Off by default. When enabled, it is active only while OSC 133 / OSC 633 shell
-# integration reports that the shell is editing a command on the primary screen.
+# Off by default. When enabled, it is active while OSC 133 / OSC 633 shell
+# integration reports command-line editing on the primary screen. If the editor
+# remains visible during command output, input keeps targeting the editor until
+# foreground-app heuristics hide it.
 # enabled = true
 # vim_mode = false
 # completions = ["cargo", "git", "rg"]
@@ -462,9 +464,10 @@ Notes:
   Path completion understands single- and double-quoted arguments and escapes
   spaces for unquoted paths.
 
-  Alternate-screen applications always receive normal terminal input; the
-  command editor only intercepts keys while the shell reports command-line
-  input through shell integration.
+  Alternate-screen applications always receive normal terminal input. While the
+  editor is visible on the primary screen, keyboard input targets the editor;
+  foreground-app heuristics hide the editor so interactive terminal programs
+  keep receiving normal terminal input.
 
   It supports common readline-style editing keys: `Ctrl+A/E`, `Ctrl+D`,
   `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;

@@ -175,7 +175,7 @@ mod command_editor_context_tests {
             command_editor_view_context(&term),
             Some(CommandEditorContext { current_dir: None })
         );
-        assert_eq!(command_editor_input_context(&term), None);
+        assert_eq!(command_editor_input_context(&term, false), None);
 
         term.process(b"\x1b]133;B\x07");
 
@@ -184,7 +184,28 @@ mod command_editor_context_tests {
             Some(CommandEditorContext { current_dir: None })
         );
         assert_eq!(
-            command_editor_input_context(&term),
+            command_editor_input_context(&term, false),
+            Some(CommandEditorContext { current_dir: None })
+        );
+    }
+
+    #[test]
+    fn command_editor_input_context_tracks_visible_open_editor_during_output() {
+        let mut term = TestTerm::new_80x24();
+        term.process(b"\x1b]133;B\x07");
+        term.process(b"\x1b]133;C\x07");
+
+        assert_eq!(
+            term.metadata.shell_integration_phase,
+            ShellIntegrationPhase::Output
+        );
+        assert_eq!(
+            command_editor_view_context(&term),
+            Some(CommandEditorContext { current_dir: None })
+        );
+        assert_eq!(command_editor_input_context(&term, false), None);
+        assert_eq!(
+            command_editor_input_context(&term, true),
             Some(CommandEditorContext { current_dir: None })
         );
     }
@@ -207,6 +228,7 @@ mod command_editor_context_tests {
 
         assert!(host::mouse_tracking_enabled(term.modes.mouse_tracking));
         assert_eq!(command_editor_view_context(&term), None);
+        assert_eq!(command_editor_input_context(&term, true), None);
 
         term.process(b"\x1b[?1000l\x1b]133;B\x07");
 
@@ -232,7 +254,7 @@ mod command_editor_context_tests {
         );
         assert!(term.on_alt_screen);
         assert_eq!(command_editor_view_context(&term), None);
-        assert_eq!(command_editor_input_context(&term), None);
+        assert_eq!(command_editor_input_context(&term, true), None);
     }
 
     #[test]

@@ -337,12 +337,13 @@ impl WindowHost {
         let Some(input) = command_editor_input(key, self.modifiers, config.vim_mode) else {
             return false;
         };
+        let command_editor_open = self.command_editor_is_open_for_tab(tab_id);
         let editor_context = {
             let Some(target) = self.input_endpoints.get(&tab_id) else {
                 return false;
             };
             let terminal = target.terminal.lock();
-            command_editor_input_context(&terminal)
+            command_editor_input_context(&terminal, command_editor_open)
         };
         let Some(context) = editor_context else {
             return false;
@@ -413,12 +414,13 @@ impl WindowHost {
         }
         self.command_catalog.refresh_for_config(&config);
         let command_words = self.command_catalog.names().to_vec();
+        let command_editor_open = self.command_editor_is_open_for_tab(tab_id);
         let context = {
             let Some(target) = self.input_endpoints.get(&tab_id) else {
                 return false;
             };
             let terminal = target.terminal.lock();
-            command_editor_input_context(&terminal)
+            command_editor_input_context(&terminal, command_editor_open)
         };
         let Some(context) = context else {
             return false;

@@ -363,11 +363,18 @@ fn command_editor_hidden_by_foreground_app(terminal: &Terminal) -> bool {
         || terminal.active.app_keypad
 }
 
-fn command_editor_input_context(terminal: &Terminal) -> Option<CommandEditorContext> {
-    if terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Command {
-        return None;
+fn command_editor_input_context(
+    terminal: &Terminal,
+    command_editor_open: bool,
+) -> Option<CommandEditorContext> {
+    let context = command_editor_view_context(terminal)?;
+    if command_editor_open
+        || terminal.metadata.shell_integration_phase == terminal41::ShellIntegrationPhase::Command
+    {
+        Some(context)
+    } else {
+        None
     }
-    command_editor_view_context(terminal)
 }
 
 fn reset_viewport_and_invalidate(terminal: &mut Terminal) {
