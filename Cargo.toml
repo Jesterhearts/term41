@@ -44,7 +44,7 @@ palette              = { version = "0.7.6", default-features = false, features =
 parking_lot          = { version = "0.12.5" }
 png                  = "0.18.1"
 pty-pipe41           = { path = "pty-pipe41" }
-redb                 = "4.1.0"
+rusqlite             = { version = "0.39.0", features = ["bundled"] }
 serde                = { version = "1.0.228", features = ["derive"] }
 shellhist41          = { path = "shellhist41" }
 smol_str             = { version = "0.3.6", features = ["serde"] }

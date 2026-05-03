@@ -89,7 +89,7 @@ pub(crate) fn spawn_history_writer(store: HistoryStore) -> Option<HistoryWriter>
 }
 
 pub(crate) fn history_db_path() -> Option<PathBuf> {
-    dirs::data_dir().map(|dir| dir.join("term41").join("history.redb"))
+    dirs::data_dir().map(|dir| dir.join("term41").join("history.sqlite3"))
 }
 
 pub(crate) fn store_request(

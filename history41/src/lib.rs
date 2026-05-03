@@ -13,37 +13,24 @@ use std::time::Duration;
 use std::time::SystemTime;
 use std::time::UNIX_EPOCH;
 
-use redb::Database;
-use redb::MultimapTableDefinition;
-use redb::ReadableDatabase;
-use redb::ReadableMultimapTable;
-use redb::TableDefinition;
+use rusqlite::Connection;
+use rusqlite::OpenFlags;
+use rusqlite::OptionalExtension;
+use rusqlite::Transaction;
+use rusqlite::params;
 use tether_map::LinkedHashMap;
 
 const SCHEMA_VERSION: u64 = 1;
 const MILLIS_PER_SEC: u64 = 1_000;
 const DEFAULT_MAX_ENTRIES_PER_CWD: usize = 200;
 const DEFAULT_MAX_GLOBAL_ENTRIES: usize = 4_000;
+const SQLITE_BUSY_TIMEOUT: Duration = Duration::from_millis(250);
 
-type CwdTimeKey<'a> = (&'a str, u64);
-type CwdRecord<'a> = (&'a str, &'a str, u64);
-type GlobalRecord<'a> = (&'a str, &'a str, &'a str, u64);
-type OwnedCwdTimeKey = (String, u64);
-type OwnedCwdRecord = (String, String, u64);
-type OwnedGlobalRecord = (String, String, String, u64);
-type CwdRemoval = (OwnedCwdTimeKey, OwnedCwdRecord);
-type GlobalRemoval = (u64, OwnedGlobalRecord);
 type HistoryEntryMap = LinkedHashMap<String, HistoryEntry>;
-
-const METADATA: TableDefinition<&str, u64> = TableDefinition::new("metadata");
-const COMMANDS_BY_CWD: MultimapTableDefinition<CwdTimeKey<'static>, CwdRecord<'static>> =
-    MultimapTableDefinition::new("commands_by_cwd");
-const COMMANDS_GLOBAL: MultimapTableDefinition<u64, GlobalRecord<'static>> =
-    MultimapTableDefinition::new("commands_global");
 
 #[derive(Debug, Clone)]
 pub struct HistoryStore {
-    db: Arc<Database>,
+    path: Arc<PathBuf>,
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -134,12 +121,8 @@ pub enum HistoryEntrySource {
 #[derive(Debug)]
 pub enum HistoryError {
     Io(std::io::Error),
-    Database(redb::Error),
-    DatabaseOpen(redb::DatabaseError),
-    Storage(redb::StorageError),
-    Table(redb::TableError),
-    Commit(redb::CommitError),
-    Transaction(redb::TransactionError),
+    Database(rusqlite::Error),
+    TimestampOutOfRange(u64),
 }
 
 impl fmt::Display for HistoryError {
@@ -150,11 +133,9 @@ impl fmt::Display for HistoryError {
         match self {
             Self::Io(error) => write!(f, "history I/O error: {error}"),
             Self::Database(error) => write!(f, "history database error: {error}"),
-            Self::DatabaseOpen(error) => write!(f, "history database open error: {error}"),
-            Self::Storage(error) => write!(f, "history storage error: {error}"),
-            Self::Table(error) => write!(f, "history table error: {error}"),
-            Self::Commit(error) => write!(f, "history commit error: {error}"),
-            Self::Transaction(error) => write!(f, "history transaction error: {error}"),
+            Self::TimestampOutOfRange(millis) => {
+                write!(f, "history timestamp out of SQLite INTEGER range: {millis}")
+            }
         }
     }
 }
@@ -167,39 +148,9 @@ impl From<std::io::Error> for HistoryError {
     }
 }
 
-impl From<redb::Error> for HistoryError {
-    fn from(error: redb::Error) -> Self {
+impl From<rusqlite::Error> for HistoryError {
+    fn from(error: rusqlite::Error) -> Self {
         Self::Database(error)
-    }
-}
-
-impl From<redb::DatabaseError> for HistoryError {
-    fn from(error: redb::DatabaseError) -> Self {
-        Self::DatabaseOpen(error)
-    }
-}
-
-impl From<redb::StorageError> for HistoryError {
-    fn from(error: redb::StorageError) -> Self {
-        Self::Storage(error)
-    }
-}
-
-impl From<redb::TableError> for HistoryError {
-    fn from(error: redb::TableError) -> Self {
-        Self::Table(error)
-    }
-}
-
-impl From<redb::CommitError> for HistoryError {
-    fn from(error: redb::CommitError) -> Self {
-        Self::Commit(error)
-    }
-}
-
-impl From<redb::TransactionError> for HistoryError {
-    fn from(error: redb::TransactionError) -> Self {
-        Self::Transaction(error)
     }
 }
 
@@ -207,9 +158,11 @@ pub fn open(path: &Path) -> Result<HistoryStore, HistoryError> {
     if let Some(parent) = path.parent() {
         fs::create_dir_all(parent)?;
     }
-    let db = Database::create(path)?;
-    let store = HistoryStore { db: Arc::new(db) };
-    initialize_schema(&store)?;
+    let store = HistoryStore {
+        path: Arc::new(path.to_owned()),
+    };
+    let conn = open_connection(path)?;
+    initialize_schema(&conn)?;
     Ok(store)
 }
 
@@ -223,42 +176,19 @@ pub fn store_command(
 
     let cwd = resolve_cwd(&request.cwd);
     let submitted_at_millis = system_time_to_millis(request.submitted_at);
-    let key_time = reverse_time(submitted_at_millis);
-    if most_recent_cwd_command(store, &cwd.key)? == Some(request.command.as_str().to_owned()) {
+    let submitted_at_sql = millis_to_sql(submitted_at_millis)?;
+    let mut conn = open_store_connection(store)?;
+    let tx = conn.transaction()?;
+    if most_recent_cwd_command(&tx, &cwd.key)? == Some(request.command.as_str().to_owned()) {
+        tx.commit()?;
         return Ok(());
     }
 
-    let write = store.db.begin_write()?;
-    {
-        let mut by_cwd = write.open_multimap_table(COMMANDS_BY_CWD)?;
-        by_cwd.insert(
-            &(cwd.key.as_str(), key_time),
-            &(
-                cwd.display.as_str(),
-                request.command.as_str(),
-                submitted_at_millis,
-            ),
-        )?;
-    }
-    {
-        let mut global = write.open_multimap_table(COMMANDS_GLOBAL)?;
-        global.insert(
-            &key_time,
-            &(
-                cwd.key.as_str(),
-                cwd.display.as_str(),
-                request.command.as_str(),
-                submitted_at_millis,
-            ),
-        )?;
-    }
-    trim_cwd_table(
-        &write,
-        &cwd.key,
-        request.retention.max_entries_per_cwd.max(1),
-    )?;
-    trim_global_table(&write, request.retention.max_global_entries.max(1))?;
-    write.commit()?;
+    insert_cwd_record(&tx, &cwd, &request.command, submitted_at_sql)?;
+    insert_global_record(&tx, &cwd, &request.command, submitted_at_sql)?;
+    trim_cwd_table(&tx, &cwd.key, request.retention.max_entries_per_cwd.max(1))?;
+    trim_global_table(&tx, request.retention.max_global_entries.max(1))?;
+    tx.commit()?;
     Ok(())
 }
 
@@ -271,29 +201,76 @@ pub fn recent_commands(
     }
 
     let cwd = resolve_cwd(&query.cwd);
-    let read = store.db.begin_read()?;
-    let by_cwd = read.open_multimap_table(COMMANDS_BY_CWD)?;
-    let mut entries = recent_cwd_entries(&by_cwd, &cwd.key, query.limit)?;
+    let conn = open_store_connection(store)?;
+    let mut entries = recent_cwd_entries(&conn, &cwd.key, query.limit)?;
     if query.include_global_fallback && entries.len() < query.limit {
-        let global = read.open_multimap_table(COMMANDS_GLOBAL)?;
-        append_global_fallback(&global, &cwd.key, query.limit, &mut entries)?;
+        append_global_fallback(&conn, &cwd.key, query.limit, &mut entries)?;
     }
     Ok(entries.into_iter().map(|(_, entry)| entry).collect())
 }
 
-fn initialize_schema(store: &HistoryStore) -> Result<(), HistoryError> {
-    let write = store.db.begin_write()?;
-    {
-        let mut metadata = write.open_table(METADATA)?;
-        metadata.insert("schema_version", SCHEMA_VERSION)?;
-    }
-    {
-        write.open_multimap_table(COMMANDS_BY_CWD)?;
-    }
-    {
-        write.open_multimap_table(COMMANDS_GLOBAL)?;
-    }
-    write.commit()?;
+fn open_store_connection(store: &HistoryStore) -> Result<Connection, HistoryError> {
+    open_connection(&store.path)
+}
+
+fn open_connection(path: &Path) -> Result<Connection, HistoryError> {
+    let conn = Connection::open_with_flags(
+        path,
+        OpenFlags::SQLITE_OPEN_READ_WRITE
+            | OpenFlags::SQLITE_OPEN_CREATE
+            | OpenFlags::SQLITE_OPEN_NO_MUTEX,
+    )?;
+    conn.busy_timeout(SQLITE_BUSY_TIMEOUT)?;
+    conn.execute_batch(
+        "\
+        PRAGMA synchronous = NORMAL;
+        PRAGMA foreign_keys = ON;
+        ",
+    )?;
+    Ok(conn)
+}
+
+fn initialize_schema(conn: &Connection) -> Result<(), HistoryError> {
+    conn.execute_batch(
+        "\
+        PRAGMA journal_mode = WAL;
+
+        CREATE TABLE IF NOT EXISTS metadata (
+            key TEXT PRIMARY KEY NOT NULL,
+            value INTEGER NOT NULL
+        );
+
+        CREATE TABLE IF NOT EXISTS commands_by_cwd (
+            id INTEGER PRIMARY KEY,
+            cwd_key TEXT NOT NULL,
+            display_cwd TEXT NOT NULL,
+            command TEXT NOT NULL,
+            submitted_millis INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS commands_by_cwd_recent
+            ON commands_by_cwd (cwd_key, submitted_millis DESC, id DESC);
+
+        CREATE TABLE IF NOT EXISTS commands_global (
+            id INTEGER PRIMARY KEY,
+            cwd_key TEXT NOT NULL,
+            display_cwd TEXT NOT NULL,
+            command TEXT NOT NULL,
+            submitted_millis INTEGER NOT NULL
+        );
+
+        CREATE INDEX IF NOT EXISTS commands_global_recent
+            ON commands_global (submitted_millis DESC, id DESC);
+        ",
+    )?;
+    conn.execute(
+        "\
+        INSERT INTO metadata (key, value)
+        VALUES ('schema_version', ?1)
+        ON CONFLICT(key) DO UPDATE SET value = excluded.value
+        ",
+        params![millis_to_sql(SCHEMA_VERSION)?],
+    )?;
     Ok(())
 }
 
@@ -321,83 +298,146 @@ fn path_to_string(path: &Path) -> String {
 }
 
 fn most_recent_cwd_command(
-    store: &HistoryStore,
+    tx: &Transaction<'_>,
     cwd_key: &str,
 ) -> Result<Option<String>, HistoryError> {
-    let read = store.db.begin_read()?;
-    let table = read.open_multimap_table(COMMANDS_BY_CWD)?;
-    let mut range = table.range::<CwdTimeKey<'_>>((cwd_key, 0)..=(cwd_key, u64::MAX))?;
-    let Some(item) = range.next() else {
-        return Ok(None);
-    };
-    let (_, values) = item?;
-    let Some(value) = values.into_iter().next() else {
-        return Ok(None);
-    };
-    let value = value?;
-    let (_, command, _) = value.value();
-    Ok(Some(command.to_owned()))
+    Ok(tx
+        .query_row(
+            "\
+            SELECT command
+            FROM commands_by_cwd
+            WHERE cwd_key = ?1
+            ORDER BY submitted_millis DESC, id DESC
+            LIMIT 1
+            ",
+            params![cwd_key],
+            |row| row.get(0),
+        )
+        .optional()?)
+}
+
+fn insert_cwd_record(
+    tx: &Transaction<'_>,
+    cwd: &ResolvedCwd,
+    command: &str,
+    submitted_millis: i64,
+) -> Result<(), HistoryError> {
+    tx.execute(
+        "\
+        INSERT INTO commands_by_cwd (cwd_key, display_cwd, command, submitted_millis)
+        VALUES (?1, ?2, ?3, ?4)
+        ",
+        params![
+            cwd.key.as_str(),
+            cwd.display.as_str(),
+            command,
+            submitted_millis
+        ],
+    )?;
+    Ok(())
+}
+
+fn insert_global_record(
+    tx: &Transaction<'_>,
+    cwd: &ResolvedCwd,
+    command: &str,
+    submitted_millis: i64,
+) -> Result<(), HistoryError> {
+    tx.execute(
+        "\
+        INSERT INTO commands_global (cwd_key, display_cwd, command, submitted_millis)
+        VALUES (?1, ?2, ?3, ?4)
+        ",
+        params![
+            cwd.key.as_str(),
+            cwd.display.as_str(),
+            command,
+            submitted_millis
+        ],
+    )?;
+    Ok(())
 }
 
 fn recent_cwd_entries(
-    table: &impl ReadableMultimapTable<CwdTimeKey<'static>, CwdRecord<'static>>,
+    conn: &Connection,
     cwd_key: &str,
     limit: usize,
 ) -> Result<HistoryEntryMap, HistoryError> {
     let mut out = HistoryEntryMap::with_capacity(limit);
-    let range = table.range::<CwdTimeKey<'_>>((cwd_key, 0)..=(cwd_key, u64::MAX))?;
-    for item in range {
-        let (_, values) = item?;
-        for value in values {
-            let value = value?;
-            let (display_cwd, command, submitted_at) = value.value();
-            push_unique_entry(
-                &mut out,
-                HistoryEntry {
-                    command: command.to_owned(),
-                    cwd: PathBuf::from(display_cwd),
-                    submitted_at: millis_to_system_time(submitted_at),
-                    source: HistoryEntrySource::Cwd,
-                },
-            );
-            if out.len() >= limit {
-                return Ok(out);
-            }
+    let mut stmt = conn.prepare(
+        "\
+        SELECT display_cwd, command, submitted_millis
+        FROM commands_by_cwd
+        WHERE cwd_key = ?1
+        ORDER BY submitted_millis DESC, id DESC
+        ",
+    )?;
+    let rows = stmt.query_map(params![cwd_key], |row| {
+        history_entry_from_row(row, HistoryEntrySource::Cwd)
+    })?;
+    for row in rows {
+        push_unique_entry(&mut out, row?);
+        if out.len() >= limit {
+            return Ok(out);
         }
     }
     Ok(out)
 }
 
 fn append_global_fallback(
-    table: &impl ReadableMultimapTable<u64, GlobalRecord<'static>>,
+    conn: &Connection,
     cwd_key: &str,
     limit: usize,
     out: &mut HistoryEntryMap,
 ) -> Result<(), HistoryError> {
-    let range = table.range::<u64>(..)?;
-    for item in range {
-        let (_, values) = item?;
-        for value in values {
-            let value = value?;
-            let (entry_cwd_key, display_cwd, command, submitted_at) = value.value();
-            if entry_cwd_key == cwd_key {
-                continue;
-            }
-            push_unique_entry(
-                out,
-                HistoryEntry {
-                    command: command.to_owned(),
-                    cwd: PathBuf::from(display_cwd),
-                    submitted_at: millis_to_system_time(submitted_at),
-                    source: HistoryEntrySource::GlobalFallback,
-                },
-            );
-            if out.len() >= limit {
-                return Ok(());
-            }
+    let mut stmt = conn.prepare(
+        "\
+        SELECT cwd_key, display_cwd, command, submitted_millis
+        FROM commands_global
+        ORDER BY submitted_millis DESC, id DESC
+        ",
+    )?;
+    let rows = stmt.query_map([], |row| {
+        let entry_cwd_key: String = row.get(0)?;
+        let display_cwd: String = row.get(1)?;
+        let command: String = row.get(2)?;
+        let submitted_millis: i64 = row.get(3)?;
+        Ok((
+            entry_cwd_key,
+            HistoryEntry {
+                command,
+                cwd: PathBuf::from(display_cwd),
+                submitted_at: sql_millis_to_system_time(submitted_millis),
+                source: HistoryEntrySource::GlobalFallback,
+            },
+        ))
+    })?;
+    for row in rows {
+        let (entry_cwd_key, entry) = row?;
+        if entry_cwd_key == cwd_key {
+            continue;
+        }
+        push_unique_entry(out, entry);
+        if out.len() >= limit {
+            return Ok(());
         }
     }
     Ok(())
+}
+
+fn history_entry_from_row(
+    row: &rusqlite::Row<'_>,
+    source: HistoryEntrySource,
+) -> rusqlite::Result<HistoryEntry> {
+    let display_cwd: String = row.get(0)?;
+    let command: String = row.get(1)?;
+    let submitted_millis: i64 = row.get(2)?;
+    Ok(HistoryEntry {
+        command,
+        cwd: PathBuf::from(display_cwd),
+        submitted_at: sql_millis_to_system_time(submitted_millis),
+        source,
+    })
 }
 
 fn push_unique_entry(
@@ -411,96 +451,47 @@ fn push_unique_entry(
 }
 
 fn trim_cwd_table(
-    write: &redb::WriteTransaction,
+    tx: &Transaction<'_>,
     cwd_key: &str,
     limit: usize,
 ) -> Result<(), HistoryError> {
-    let mut table = write.open_multimap_table(COMMANDS_BY_CWD)?;
-    let removals = cwd_retention_removals(&table, cwd_key, limit)?;
-    for (key, value) in removals {
-        let key = (key.0.as_str(), key.1);
-        let value = (value.0.as_str(), value.1.as_str(), value.2);
-        table.remove(&key, &value)?;
-    }
+    tx.execute(
+        "\
+        DELETE FROM commands_by_cwd
+        WHERE id IN (
+            SELECT id
+            FROM commands_by_cwd
+            WHERE cwd_key = ?1
+            ORDER BY submitted_millis DESC, id DESC
+            LIMIT -1 OFFSET ?2
+        )
+        ",
+        params![cwd_key, retention_offset(limit)],
+    )?;
     Ok(())
 }
 
 fn trim_global_table(
-    write: &redb::WriteTransaction,
+    tx: &Transaction<'_>,
     limit: usize,
 ) -> Result<(), HistoryError> {
-    let mut table = write.open_multimap_table(COMMANDS_GLOBAL)?;
-    let removals = global_retention_removals(&table, limit)?;
-    for (key, value) in removals {
-        let value = (
-            value.0.as_str(),
-            value.1.as_str(),
-            value.2.as_str(),
-            value.3,
-        );
-        table.remove(&key, &value)?;
-    }
+    tx.execute(
+        "\
+        DELETE FROM commands_global
+        WHERE id IN (
+            SELECT id
+            FROM commands_global
+            ORDER BY submitted_millis DESC, id DESC
+            LIMIT -1 OFFSET ?1
+        )
+        ",
+        params![retention_offset(limit)],
+    )?;
     Ok(())
 }
 
-fn cwd_retention_removals(
-    table: &impl ReadableMultimapTable<CwdTimeKey<'static>, CwdRecord<'static>>,
-    cwd_key: &str,
-    limit: usize,
-) -> Result<Vec<CwdRemoval>, HistoryError> {
-    let mut seen = 0;
-    let mut removals = Vec::new();
-    let range = table.range::<CwdTimeKey<'_>>((cwd_key, 0)..=(cwd_key, u64::MAX))?;
-    for item in range {
-        let (key, values) = item?;
-        let (stored_cwd, reverse_time) = key.value();
-        for value in values {
-            seen += 1;
-            let value = value?;
-            let (display_cwd, command, submitted_at) = value.value();
-            if seen > limit {
-                removals.push((
-                    (stored_cwd.to_owned(), reverse_time),
-                    (display_cwd.to_owned(), command.to_owned(), submitted_at),
-                ));
-            }
-        }
-    }
-    Ok(removals)
-}
-
-fn global_retention_removals(
-    table: &impl ReadableMultimapTable<u64, GlobalRecord<'static>>,
-    limit: usize,
-) -> Result<Vec<GlobalRemoval>, HistoryError> {
-    let mut seen = 0;
-    let mut removals = Vec::new();
-    let range = table.range::<u64>(..)?;
-    for item in range {
-        let (reverse_time, values) = item?;
-        let reverse_time = reverse_time.value();
-        for value in values {
-            seen += 1;
-            let value = value?;
-            let (cwd_key, display_cwd, command, submitted_at) = value.value();
-            if seen > limit {
-                removals.push((
-                    reverse_time,
-                    (
-                        cwd_key.to_owned(),
-                        display_cwd.to_owned(),
-                        command.to_owned(),
-                        submitted_at,
-                    ),
-                ));
-            }
-        }
-    }
-    Ok(removals)
-}
-
-fn reverse_time(millis: u64) -> u64 {
-    u64::MAX - millis
+fn retention_offset(limit: usize) -> i64 {
+    i64::try_from(limit).unwrap_or(i64::MAX)
 }
 
 fn system_time_to_millis(time: SystemTime) -> u64 {
@@ -511,10 +502,15 @@ fn system_time_to_millis(time: SystemTime) -> u64 {
         .saturating_add(u64::from(duration.subsec_millis()))
 }
 
-fn millis_to_system_time(millis: u64) -> SystemTime {
+fn millis_to_sql(millis: u64) -> Result<i64, HistoryError> {
+    i64::try_from(millis).map_err(|_| HistoryError::TimestampOutOfRange(millis))
+}
+
+fn sql_millis_to_system_time(millis: i64) -> SystemTime {
+    let millis = u64::try_from(millis).unwrap_or(0);
     let secs = millis / MILLIS_PER_SEC;
-    let submillis = (millis % MILLIS_PER_SEC) as u32;
-    UNIX_EPOCH + Duration::from_secs(secs) + Duration::from_millis(u64::from(submillis))
+    let submillis = millis % MILLIS_PER_SEC;
+    UNIX_EPOCH + Duration::from_secs(secs) + Duration::from_millis(submillis)
 }
 
 #[cfg(test)]
@@ -526,7 +522,7 @@ mod tests {
         let root = temp_root("stores_and_reads_cwd_history_before_global_fallback");
         fs::create_dir_all(root.join("a")).unwrap();
         fs::create_dir_all(root.join("b")).unwrap();
-        let store = open(&root.join("history.redb")).unwrap();
+        let store = open(&root.join("history.sqlite3")).unwrap();
 
         store_at(&store, "global only", root.join("b"), 1);
         store_at(&store, "cwd first", root.join("a"), 2);
@@ -553,7 +549,7 @@ mod tests {
     fn suppresses_adjacent_duplicate_for_same_cwd() {
         let root = temp_root("suppresses_adjacent_duplicate_for_same_cwd");
         fs::create_dir_all(root.join("a")).unwrap();
-        let store = open(&root.join("history.redb")).unwrap();
+        let store = open(&root.join("history.sqlite3")).unwrap();
 
         store_at(&store, "cargo test", root.join("a"), 1);
         store_at(&store, "cargo test", root.join("a"), 2);
@@ -569,7 +565,7 @@ mod tests {
         let root = temp_root("retention_is_local_to_each_table");
         fs::create_dir_all(root.join("a")).unwrap();
         fs::create_dir_all(root.join("b")).unwrap();
-        let store = open(&root.join("history.redb")).unwrap();
+        let store = open(&root.join("history.sqlite3")).unwrap();
 
         let retention = HistoryRetention {
             max_entries_per_cwd: 2,
@@ -601,7 +597,7 @@ mod tests {
     fn filters_empty_and_leading_space_commands() {
         let root = temp_root("filters_empty_and_leading_space_commands");
         fs::create_dir_all(root.join("a")).unwrap();
-        let store = open(&root.join("history.redb")).unwrap();
+        let store = open(&root.join("history.sqlite3")).unwrap();
 
         store_at(&store, "  ", root.join("a"), 1);
         store_at(&store, " secret", root.join("a"), 2);
@@ -610,6 +606,24 @@ mod tests {
         let entries = recent_commands(&store, HistoryQuery::cwd(root.join("a"), 10)).unwrap();
 
         assert_eq!(commands(entries), ["visible"]);
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn multiple_store_handles_can_use_the_same_database() {
+        let root = temp_root("multiple_store_handles_can_use_the_same_database");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        let db_path = root.join("history.sqlite3");
+        let first = open(&db_path).unwrap();
+        let second = open(&db_path).unwrap();
+
+        store_at(&first, "from first", root.join("a"), 1);
+        store_at(&second, "from second", root.join("b"), 2);
+
+        let entries = recent_commands(&first, HistoryQuery::cwd(root.join("a"), 10)).unwrap();
+
+        assert_eq!(commands(entries), ["from first", "from second"]);
         let _ = fs::remove_dir_all(root);
     }
 
