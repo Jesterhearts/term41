@@ -316,10 +316,8 @@ mod command_editor_context_tests {
             candidates: Vec::new(),
             candidate_index: 0,
         };
-        let state = Some(CommandEditorViewState {
-            tab_id: TabId(7),
-            view,
-        });
+        let mut state = HashMap::new();
+        state.insert(TabId(7), view);
 
         assert!(command_editor_view_for_tab_state(&state, TabId(7)).is_some());
         assert!(command_editor_view_for_tab_state(&state, TabId(8)).is_none());

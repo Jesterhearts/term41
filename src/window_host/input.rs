@@ -173,8 +173,12 @@ impl WindowHost {
         for request in kitty_file_requests {
             self.request_kitty_file_permission(tab_id, request);
         }
-        if self.active_input_tab == Some(tab_id) {
-            self.refresh_command_editor_view();
+        let has_cached_editor_view = {
+            let state = self.input_state.lock();
+            state.command_editor_views.contains_key(&tab_id)
+        };
+        if self.active_input_tab == Some(tab_id) || has_cached_editor_view {
+            self.refresh_command_editor_view_for_tab(tab_id);
         }
     }
 

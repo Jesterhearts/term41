@@ -280,17 +280,30 @@ impl WindowHost {
         tab_id: TabId,
         view: Option<CommandLineView>,
     ) {
-        self.input_state.lock().command_editor_view =
-            view.map(|view| CommandEditorViewState { tab_id, view });
+        {
+            let mut state = self.input_state.lock();
+            if let Some(view) = view {
+                state.command_editor_views.insert(tab_id, view);
+            } else {
+                state.command_editor_views.remove(&tab_id);
+            }
+        }
         self.notify_interaction_changed();
     }
 
     pub(crate) fn refresh_command_editor_view(&mut self) {
         let Some(tab_id) = self.active_input_tab else {
-            self.input_state.lock().command_editor_view = None;
+            self.input_state.lock().command_editor_views.clear();
             self.notify_interaction_changed();
             return;
         };
+        self.refresh_command_editor_view_for_tab(tab_id);
+    }
+
+    pub(crate) fn refresh_command_editor_view_for_tab(
+        &mut self,
+        tab_id: TabId,
+    ) {
         let view = self.command_editor_view_for_tab(tab_id);
         self.set_command_editor_view(tab_id, view);
     }
@@ -431,6 +444,9 @@ impl WindowHost {
         let enabled = {
             let mut state = self.input_state.lock();
             state.command_editor_config.enabled = !state.command_editor_config.enabled;
+            if !state.command_editor_config.enabled {
+                state.command_editor_views.clear();
+            }
             state.command_editor_config.enabled
         };
         self.refresh_command_editor_view();

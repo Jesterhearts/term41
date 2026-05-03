@@ -70,6 +70,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
             AppEvent::RemoveInputEndpoint(tab_id) => {
                 self.input_endpoints.remove(&tab_id);
+                self.input_state.lock().command_editor_views.remove(&tab_id);
                 self.startup_tabs.retain(|tab| tab.id != tab_id);
             }
             AppEvent::SetActiveInputTab(tab_id) => {

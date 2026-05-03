@@ -332,17 +332,17 @@ fn command_editor_view_for_input_tab(
     input_state: &InputState,
     tab_id: TabId,
 ) -> Option<&CommandLineView> {
-    command_editor_view_for_tab_state(&input_state.command_editor_view, tab_id)
+    if !input_state.command_editor_config.enabled {
+        return None;
+    }
+    command_editor_view_for_tab_state(&input_state.command_editor_views, tab_id)
 }
 
 fn command_editor_view_for_tab_state(
-    view_state: &Option<CommandEditorViewState>,
+    view_state: &HashMap<TabId, CommandLineView>,
     tab_id: TabId,
 ) -> Option<&CommandLineView> {
-    view_state
-        .as_ref()
-        .filter(|state| state.tab_id == tab_id)
-        .map(|state| &state.view)
+    view_state.get(&tab_id)
 }
 
 fn command_editor_view_open_for_input_tab(
@@ -547,7 +547,7 @@ enum RecordingPopupState {
 pub(crate) struct InputState {
     keybindings: Keybindings,
     command_editor_config: CommandEditorConfig,
-    command_editor_view: Option<CommandEditorViewState>,
+    command_editor_views: HashMap<TabId, CommandLineView>,
     tab_count: usize,
     tab_order: Vec<TabId>,
     cell_width: u32,
@@ -561,12 +561,6 @@ pub(crate) struct InputState {
     command_palette: Option<CommandPaletteView>,
     toast: Option<ToastView>,
     preedit: Option<PreeditState>,
-}
-
-#[derive(Clone)]
-struct CommandEditorViewState {
-    tab_id: TabId,
-    view: CommandLineView,
 }
 
 struct WindowHost {
@@ -1396,7 +1390,7 @@ fn main() {
     let input_state = Arc::new(Mutex::new(InputState {
         keybindings: startup_keybindings,
         command_editor_config: startup_command_editor.clone(),
-        command_editor_view: None,
+        command_editor_views: HashMap::new(),
         tab_count: 1,
         tab_order: vec![TabId(0)],
         cell_width,

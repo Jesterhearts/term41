@@ -1656,7 +1656,7 @@ impl RenderHost {
             CommandEditorConfigSync::PreserveRuntimeEnabled,
         );
         if !input_state.command_editor_config.enabled {
-            input_state.command_editor_view = None;
+            input_state.command_editor_views.clear();
         }
         if !self.tabs.is_empty() {
             input_state.tab_count = self.tabs.len();
@@ -1682,7 +1682,7 @@ impl RenderHost {
             CommandEditorConfigSync::ApplyConfiguredEnabled,
         );
         if !input_state.command_editor_config.enabled {
-            input_state.command_editor_view = None;
+            input_state.command_editor_views.clear();
         }
     }
 
