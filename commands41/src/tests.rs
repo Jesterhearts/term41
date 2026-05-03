@@ -996,6 +996,96 @@ fn command_view_hides_single_candidate_list() {
 }
 
 #[test]
+fn fuzzy_command_candidate_requires_explicit_selection() {
+    let settings = command_settings(&["cargo"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("crg".to_owned()),
+        &settings,
+    );
+
+    let view = editor.view(&settings);
+    assert_eq!(view.completion, None);
+    assert_eq!(view.candidates, ["cargo"]);
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Complete, &settings),
+        EditOutcome::Ignored
+    );
+    assert_eq!(editor.view(&settings).text, "crg");
+
+    apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+    assert_eq!(editor.view(&settings).completion, None);
+
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+    assert_eq!(editor.view(&settings).text, "cargo");
+}
+
+#[test]
+fn prefix_command_candidates_stay_ahead_of_fuzzy_candidates() {
+    let settings = command_settings(&["git-cargo", "cargo"]);
+    let mut editor = CommandEditor::new();
+    apply_input(&mut editor, EditorInput::Insert("ca".to_owned()), &settings);
+
+    let view = editor.view(&settings);
+    assert_eq!(view.completion.as_deref(), Some("rgo"));
+    assert_eq!(view.candidates, ["cargo", "git-cargo"]);
+
+    apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+    let view = editor.view(&settings);
+    assert_eq!(view.candidate_index, 1);
+    assert_eq!(view.completion, None);
+
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+    assert_eq!(editor.view(&settings).text, "git-cargo");
+}
+
+#[test]
+fn fuzzy_completion_does_not_match_argument_words() {
+    let settings = settings(&["workspace"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo ws".to_owned()),
+        &settings,
+    );
+
+    let view = editor.view(&settings);
+    assert_eq!(view.completion, None);
+    assert!(view.candidates.is_empty());
+}
+
+#[test]
+fn fuzzy_history_completion_requires_explicit_selection() {
+    let settings = EditorSettings {
+        history_entries: vec![HistoryEntry::external("cargo build --workspace")],
+        ..EditorSettings::default()
+    };
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cgb".to_owned()),
+        &settings,
+    );
+
+    let view = editor.view(&settings);
+    assert_eq!(view.completion, None);
+    assert_eq!(view.candidates, ["cargo build --workspace"]);
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Complete, &settings),
+        EditOutcome::Ignored
+    );
+    assert_eq!(editor.view(&settings).text, "cgb");
+
+    apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+
+    assert_eq!(editor.view(&settings).text, "cargo build --workspace");
+}
+
+#[test]
 fn history_arrows_cycle_ambiguous_completion_selection() {
     let settings = command_settings(&["cargo", "cargo-audit", "cargo-edit"]);
     let mut editor = CommandEditor::new();

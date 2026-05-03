@@ -9,6 +9,13 @@ use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
+use nucleo_matcher::Config as NucleoConfig;
+use nucleo_matcher::Matcher;
+use nucleo_matcher::Utf32Str;
+use nucleo_matcher::pattern::AtomKind;
+use nucleo_matcher::pattern::CaseMatching;
+use nucleo_matcher::pattern::Normalization;
+use nucleo_matcher::pattern::Pattern;
 use unicode_segmentation::UnicodeSegmentation;
 
 mod history;
@@ -193,10 +200,12 @@ impl CommandEditor {
         settings: &EditorSettings,
     ) -> CommandLineView {
         let selection = self.valid_completion_selection();
-        let completion = selection
-            .and_then(CompletionSelection::current_suffix)
-            .or_else(|| self.path_cycle_suffix())
-            .or_else(|| completion_suffix(self, settings));
+        let completion = if let Some(selection) = selection {
+            selection.current_suffix()
+        } else {
+            self.path_cycle_suffix()
+                .or_else(|| completion_suffix(self, settings))
+        };
         let (candidates, candidate_index) = completion_candidate_view(self, settings);
         CommandLineView {
             text: self.buffer.clone(),
@@ -1022,7 +1031,11 @@ fn completion_candidate_view(
     settings: &EditorSettings,
 ) -> (Vec<String>, usize) {
     if let Some(selection) = editor.valid_completion_selection() {
-        let candidates = top_ambiguous_candidates(selection.candidates.clone());
+        let candidates = selection
+            .candidates
+            .iter()
+            .map(|candidate| candidate.text.clone())
+            .collect::<Vec<_>>();
         let index = selection.index.min(candidates.len().saturating_sub(1));
         return (candidates, index);
     }
@@ -1044,7 +1057,12 @@ fn completion_candidate_view(
 
     let matches = completion_matches(editor, settings);
     let candidates = matches
-        .map(|matches| top_ambiguous_candidates(matches.candidates))
+        .map(|matches| {
+            visible_completion_candidates(matches)
+                .into_iter()
+                .map(|candidate| candidate.text)
+                .collect()
+        })
         .unwrap_or_default();
     (candidates, 0)
 }
@@ -1056,13 +1074,11 @@ fn completion_matches(
     let buffer = &editor.buffer;
     let cursor = editor.cursor;
     if cursor == buffer.len() && !buffer.is_empty() {
-        let candidates = history::command_candidates(&editor.history, &settings.history_entries)
-            .into_iter()
-            .filter(|candidate| candidate != buffer && candidate.starts_with(buffer))
-            .collect::<Vec<_>>();
+        let candidates = command_history_completion_candidates(editor, settings, buffer);
         if !candidates.is_empty() {
             return Some(CompletionMatches {
-                prefix: buffer.to_owned(),
+                replacement_start: 0,
+                query: buffer.to_owned(),
                 candidates,
             });
         }
@@ -1079,18 +1095,123 @@ fn completion_matches(
         return None;
     }
     let candidates = if is_command_completion_word(buffer, word_start) {
-        command_completion_candidates(&editor.history, settings)
+        command_word_completion_matches(&editor.history, settings, prefix)
     } else {
-        word_completion_candidates(&editor.history, settings)
+        word_completion_matches(&editor.history, settings, prefix)
     };
-    let candidates = candidates
-        .into_iter()
-        .filter(|candidate| candidate != prefix && candidate.starts_with(prefix))
-        .collect::<Vec<_>>();
     Some(CompletionMatches {
-        prefix: prefix.to_owned(),
+        replacement_start: word_start,
+        query: prefix.to_owned(),
         candidates,
     })
+}
+
+fn command_history_completion_candidates(
+    editor: &CommandEditor,
+    settings: &EditorSettings,
+    query: &str,
+) -> Vec<CompletionCandidate> {
+    prefix_then_fuzzy_completion_candidates(
+        query,
+        history::command_candidates(&editor.history, &settings.history_entries),
+    )
+}
+
+fn command_word_completion_matches(
+    history: &history::EditorHistory,
+    settings: &EditorSettings,
+    query: &str,
+) -> Vec<CompletionCandidate> {
+    prefix_then_fuzzy_completion_candidates(query, command_completion_candidates(history, settings))
+}
+
+fn word_completion_matches(
+    history: &history::EditorHistory,
+    settings: &EditorSettings,
+    query: &str,
+) -> Vec<CompletionCandidate> {
+    word_completion_candidates(history, settings)
+        .into_iter()
+        .filter(|candidate| candidate != query && candidate.starts_with(query))
+        .map(CompletionCandidate::prefix)
+        .collect()
+}
+
+fn prefix_then_fuzzy_completion_candidates(
+    query: &str,
+    candidates: Vec<String>,
+) -> Vec<CompletionCandidate> {
+    let mut out = candidates
+        .iter()
+        .filter(|candidate| candidate.as_str() != query && candidate.starts_with(query))
+        .map(|candidate| CompletionCandidate::prefix(candidate.clone()))
+        .collect::<Vec<_>>();
+    for candidate in fuzzy_completion_candidates(query, candidates) {
+        push_unique_completion_candidate(&mut out, candidate);
+    }
+    out
+}
+
+fn fuzzy_completion_candidates(
+    query: &str,
+    candidates: Vec<String>,
+) -> Vec<CompletionCandidate> {
+    if query.is_empty() {
+        return Vec::new();
+    }
+
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut matcher = fuzzy_completion_matcher();
+    let mut utf32_buf = Vec::new();
+    let mut matches = candidates
+        .into_iter()
+        .filter(|candidate| candidate != query && !candidate.starts_with(query))
+        .filter_map(|candidate| {
+            pattern
+                .score(
+                    Utf32Str::new(candidate.as_str(), &mut utf32_buf),
+                    &mut matcher,
+                )
+                .map(|score| ScoredCompletionCandidate { candidate, score })
+        })
+        .collect::<Vec<_>>();
+    matches.sort_by(fuzzy_completion_match_order);
+    matches
+        .into_iter()
+        .map(|matched| CompletionCandidate::fuzzy(matched.candidate))
+        .collect()
+}
+
+fn fuzzy_completion_matcher() -> Matcher {
+    let mut config = NucleoConfig::DEFAULT;
+    config.prefer_prefix = true;
+    Matcher::new(config)
+}
+
+fn fuzzy_completion_match_order(
+    left: &ScoredCompletionCandidate,
+    right: &ScoredCompletionCandidate,
+) -> std::cmp::Ordering {
+    right
+        .score
+        .cmp(&left.score)
+        .then_with(|| left.candidate.cmp(&right.candidate))
+}
+
+fn visible_completion_candidates(matches: CompletionMatches) -> Vec<CompletionCandidate> {
+    let candidates = dedupe_completion_candidates(matches.candidates);
+    if candidates.len() <= 1 && !candidates.iter().any(CompletionCandidate::is_fuzzy) {
+        return Vec::new();
+    }
+    candidates
+        .into_iter()
+        .take(MAX_COMPLETION_CANDIDATES)
+        .collect()
 }
 
 fn top_ambiguous_candidates(candidates: Vec<String>) -> Vec<String> {
@@ -1110,6 +1231,23 @@ fn dedupe_candidates(candidates: Vec<String>) -> Vec<String> {
         push_unique(&mut out, &candidate);
     }
     out
+}
+
+fn dedupe_completion_candidates(candidates: Vec<CompletionCandidate>) -> Vec<CompletionCandidate> {
+    let mut out = Vec::new();
+    for candidate in candidates {
+        push_unique_completion_candidate(&mut out, candidate);
+    }
+    out
+}
+
+fn push_unique_completion_candidate(
+    out: &mut Vec<CompletionCandidate>,
+    candidate: CompletionCandidate,
+) {
+    if !candidate.text.is_empty() && !out.iter().any(|existing| existing.text == candidate.text) {
+        out.push(candidate);
+    }
 }
 
 fn path_completion_suffix(
@@ -1136,10 +1274,14 @@ fn path_completion_matches(
             candidate.completed_word != word && candidate.completed_word.starts_with(&word)
         })
         .map(|candidate| candidate.completed_word)
-        .collect();
+        .collect::<Vec<_>>();
     Some(CompletionMatches {
-        prefix: word,
-        candidates,
+        replacement_start: cursor.saturating_sub(word.len()),
+        query: word,
+        candidates: candidates
+            .into_iter()
+            .map(CompletionCandidate::prefix)
+            .collect(),
     })
 }
 
@@ -1362,8 +1504,47 @@ struct PathCompletionWord {
 
 #[derive(Debug, Clone)]
 struct CompletionMatches {
-    prefix: String,
-    candidates: Vec<String>,
+    replacement_start: usize,
+    query: String,
+    candidates: Vec<CompletionCandidate>,
+}
+
+#[derive(Debug, Clone)]
+struct CompletionCandidate {
+    text: String,
+    kind: CompletionCandidateKind,
+}
+
+impl CompletionCandidate {
+    fn prefix(text: String) -> Self {
+        Self {
+            text,
+            kind: CompletionCandidateKind::Prefix,
+        }
+    }
+
+    fn fuzzy(text: String) -> Self {
+        Self {
+            text,
+            kind: CompletionCandidateKind::Fuzzy,
+        }
+    }
+
+    fn is_fuzzy(&self) -> bool {
+        self.kind == CompletionCandidateKind::Fuzzy
+    }
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+enum CompletionCandidateKind {
+    Prefix,
+    Fuzzy,
+}
+
+#[derive(Debug)]
+struct ScoredCompletionCandidate {
+    candidate: String,
+    score: u32,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -1376,17 +1557,28 @@ enum CompletionDirection {
 struct CompletionSelection {
     base: String,
     cursor: usize,
-    prefix: String,
-    candidates: Vec<String>,
+    replacement_start: usize,
+    query: String,
+    candidates: Vec<CompletionCandidate>,
     index: usize,
 }
 
 impl CompletionSelection {
     fn current_suffix(&self) -> Option<String> {
         let candidate = self.candidates.get(self.index)?;
+        if candidate.is_fuzzy() {
+            return None;
+        }
         candidate
-            .starts_with(&self.prefix)
-            .then(|| candidate[self.prefix.len()..].to_owned())
+            .text
+            .starts_with(&self.query)
+            .then(|| candidate.text[self.query.len()..].to_owned())
+    }
+
+    fn current_text(&self) -> Option<&str> {
+        self.candidates
+            .get(self.index)
+            .map(|candidate| candidate.text.as_str())
     }
 }
 
@@ -1468,15 +1660,16 @@ fn cycle_completion_selection(
         selection
     } else {
         let matches = completion_matches(editor, settings)?;
-        let candidates = top_ambiguous_candidates(matches.candidates);
-        if candidates.len() <= 1 {
+        let candidates = visible_completion_candidates(matches.clone());
+        if candidates.is_empty() {
             return None;
         }
         editor.path_cycle = None;
         editor.completion_selection = Some(CompletionSelection {
             base: editor.buffer.clone(),
             cursor: editor.cursor,
-            prefix: matches.prefix,
+            replacement_start: matches.replacement_start,
+            query: matches.query,
             candidates,
             index: 0,
         });
@@ -1499,11 +1692,11 @@ fn accept_selected_completion(editor: &mut CommandEditor) -> bool {
     if selection.cursor != editor.cursor || selection.base != editor.buffer {
         return false;
     }
-    let Some(suffix) = selection.current_suffix() else {
+    let Some(text) = selection.current_text() else {
         return false;
     };
     begin_text_edit(editor);
-    replace_selection_or_insert(editor, &suffix);
+    replace_completion_selection(editor, &selection, text);
     true
 }
 
@@ -1514,15 +1707,31 @@ fn accept_selected_completion_step(editor: &mut CommandEditor) -> bool {
     if selection.cursor != editor.cursor || selection.base != editor.buffer {
         return false;
     }
-    let Some(suffix) = selection.current_suffix() else {
-        return false;
-    };
-    let Some(end) = next_completion_step_end(&suffix) else {
+    if let Some(suffix) = selection.current_suffix()
+        && let Some(end) = next_completion_step_end(&suffix)
+    {
+        begin_text_edit(editor);
+        replace_selection_or_insert(editor, &suffix[..end]);
+        return true;
+    }
+    let Some(text) = selection.current_text() else {
         return false;
     };
     begin_text_edit(editor);
-    replace_selection_or_insert(editor, &suffix[..end]);
+    replace_completion_selection(editor, &selection, text);
     true
+}
+
+fn replace_completion_selection(
+    editor: &mut CommandEditor,
+    selection: &CompletionSelection,
+    text: &str,
+) {
+    editor.selection = None;
+    editor
+        .buffer
+        .replace_range(selection.replacement_start..selection.cursor, text);
+    editor.cursor = selection.replacement_start + text.len();
 }
 
 fn accept_path_cycle(editor: &mut CommandEditor) -> bool {

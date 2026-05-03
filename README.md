@@ -444,7 +444,10 @@ Notes:
   accepts the full visible history item. When a filesystem path has multiple
   matches, Tab cycles the ghost candidate and Right accepts the active one;
   ambiguous completions show up to five ranked matches near the editor area,
-  and Up/Down rotates the active match while the list is visible. While
+  and Up/Down rotates the active match while the list is visible. Command-name
+  and whole-command history candidates also include fuzzy matches after prefix
+  matches; fuzzy matches never create ghost text and require explicit Up/Down
+  selection before Tab or Right accepts them. While
   enabled, the editor is rendered in a three-row area with an edge-to-edge top
   border under the current prompt on the primary screen, with terminal history
   shifted upward by those three rows. It stays visible through ordinary command

@@ -623,6 +623,7 @@ dependencies = [
 name = "commands41"
 version = "0.1.1"
 dependencies = [
+ "nucleo-matcher",
  "unicode-segmentation",
 ]
 
