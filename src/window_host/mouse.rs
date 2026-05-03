@@ -192,6 +192,7 @@ impl WindowHost {
         };
         set_cursor(&mut target.command_editor, offset);
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
+        reset_viewport_and_invalidate(&mut target.terminal.lock());
         self.command_editor_drag_anchor = Some(offset);
         self.left_drag_active = true;
         self.selection_drag_moved = false;
@@ -219,6 +220,7 @@ impl WindowHost {
         };
         select_range(&mut target.command_editor, anchor, offset);
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
+        reset_viewport_and_invalidate(&mut target.terminal.lock());
         self.set_command_editor_view(tab_id, view);
         true
     }
@@ -238,6 +240,7 @@ impl WindowHost {
             terminal.clipboard.set(ClipboardKind::Primary, &text);
         }
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
+        reset_viewport_and_invalidate(&mut target.terminal.lock());
         self.command_editor_drag_anchor = None;
         self.left_drag_active = false;
         self.selection_drag_moved = false;
@@ -273,6 +276,7 @@ impl WindowHost {
             );
         }
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
+        reset_viewport_and_invalidate(&mut target.terminal.lock());
         self.clear_terminal_selection_for_tab(tab_id);
         self.set_command_editor_view(tab_id, view);
         true
@@ -303,6 +307,7 @@ impl WindowHost {
             );
         }
         let view = command_editor_view(&target.command_editor, &settings, vim_mode);
+        reset_viewport_and_invalidate(&mut target.terminal.lock());
         self.clear_terminal_selection_for_tab(tab_id);
         self.set_command_editor_view(tab_id, view);
         true

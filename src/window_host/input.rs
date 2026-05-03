@@ -391,6 +391,7 @@ impl WindowHost {
             if let (Some(command), Some(cwd)) = (submitted_command, history_cwd) {
                 self.enqueue_persistent_command_history(command, cwd, &config);
             }
+            reset_tab_viewport_and_invalidate(&self.input_endpoints, tab_id);
             self.clear_terminal_selection_for_tab(tab_id);
             self.set_command_editor_view(tab_id, view);
         }
@@ -453,6 +454,7 @@ impl WindowHost {
             }
         };
         if handled_action {
+            reset_tab_viewport_and_invalidate(&self.input_endpoints, tab_id);
             self.set_command_editor_view(tab_id, view);
         }
         handled_action

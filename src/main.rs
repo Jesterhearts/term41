@@ -371,6 +371,16 @@ fn reset_viewport_and_invalidate(terminal: &mut Terminal) {
     }
 }
 
+fn reset_tab_viewport_and_invalidate(
+    input_endpoints: &HashMap<TabId, InputEndpoint>,
+    tab_id: TabId,
+) {
+    let Some(target) = input_endpoints.get(&tab_id) else {
+        return;
+    };
+    reset_viewport_and_invalidate(&mut target.terminal.lock());
+}
+
 #[derive(Clone)]
 struct RecordingPopupView {
     lines: Vec<String>,
