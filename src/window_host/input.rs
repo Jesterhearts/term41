@@ -344,13 +344,19 @@ impl WindowHost {
             return false;
         };
         let command_editor_open = self.command_editor_is_open_for_tab(tab_id);
-        let editor_context = {
+        let (editor_context, terminal_has_selection) = {
             let Some(target) = self.input_endpoints.get(&tab_id) else {
                 return false;
             };
             let terminal = target.terminal.lock();
-            command_editor_input_context(&terminal, command_editor_open)
+            (
+                command_editor_input_context(&terminal, command_editor_open),
+                terminal.has_selection(),
+            )
         };
+        if terminal_has_selection && plain_control_character_key(key, self.modifiers, "c") {
+            return false;
+        }
         let Some(context) = editor_context else {
             return false;
         };
@@ -366,6 +372,7 @@ impl WindowHost {
                 command_words,
                 history_entries,
             );
+            let editor_was_empty = target.command_editor.is_empty();
             let outcome = apply_input(&mut target.command_editor, input.clone(), &settings);
             match outcome {
                 EditOutcome::Submitted(command) => {
@@ -388,7 +395,12 @@ impl WindowHost {
                     (true, view, None)
                 }
                 EditOutcome::Ignored => {
-                    if input == EditorInput::Cancel {
+                    if ignored_command_editor_input_falls_through(
+                        &input,
+                        key,
+                        self.modifiers,
+                        editor_was_empty,
+                    ) {
                         (false, None, None)
                     } else {
                         let view =

@@ -387,6 +387,10 @@ mod command_editor_input_tests {
             Some(EditorInput::MoveHome)
         );
         assert_eq!(
+            command_editor_input(&Key::Character("c".into()), ModifiersState::CONTROL, false),
+            Some(EditorInput::Cancel)
+        );
+        assert_eq!(
             command_editor_input(&Key::Character("d".into()), ModifiersState::CONTROL, false),
             Some(EditorInput::Delete)
         );
@@ -470,6 +474,10 @@ mod command_editor_input_tests {
             command_editor_input(&Key::Character("r".into()), ModifiersState::CONTROL, true),
             Some(EditorInput::Redo)
         );
+        assert_eq!(
+            command_editor_input(&Key::Character("c".into()), ModifiersState::CONTROL, true),
+            Some(EditorInput::Cancel)
+        );
     }
 
     #[test]
@@ -482,6 +490,59 @@ mod command_editor_input_tests {
             ),
             None
         );
+    }
+
+    #[test]
+    fn ignored_empty_editor_control_inputs_fall_through_to_pty() {
+        assert!(ignored_command_editor_input_falls_through(
+            &EditorInput::Cancel,
+            &Key::Character("c".into()),
+            ModifiersState::CONTROL,
+            true,
+        ));
+        assert!(ignored_command_editor_input_falls_through(
+            &EditorInput::Delete,
+            &Key::Character("d".into()),
+            ModifiersState::CONTROL,
+            true,
+        ));
+        assert!(!ignored_command_editor_input_falls_through(
+            &EditorInput::Delete,
+            &Key::Character("d".into()),
+            ModifiersState::CONTROL,
+            false,
+        ));
+        assert!(!ignored_command_editor_input_falls_through(
+            &EditorInput::Delete,
+            &Key::Named(NamedKey::Delete),
+            ModifiersState::empty(),
+            true,
+        ));
+    }
+
+    #[test]
+    fn plain_control_character_excludes_shift_alt_and_super() {
+        let key = Key::Character("c".into());
+        assert!(plain_control_character_key(
+            &key,
+            ModifiersState::CONTROL,
+            "c"
+        ));
+        assert!(!plain_control_character_key(
+            &key,
+            ModifiersState::CONTROL | ModifiersState::SHIFT,
+            "c"
+        ));
+        assert!(!plain_control_character_key(
+            &key,
+            ModifiersState::CONTROL | ModifiersState::ALT,
+            "c"
+        ));
+        assert!(!plain_control_character_key(
+            &key,
+            ModifiersState::CONTROL | ModifiersState::SUPER,
+            "c"
+        ));
     }
 
     #[test]

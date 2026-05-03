@@ -1077,6 +1077,9 @@ fn vim_command_editor_input(
     {
         return Some(EditorInput::Redo);
     }
+    if plain_control_character_key(key, mods, "c") {
+        return Some(EditorInput::Cancel);
+    }
     if mods.super_key() || mods.control_key() || mods.alt_key() {
         return None;
     }
@@ -1144,6 +1147,7 @@ fn modified_command_editor_input(
 fn control_command_editor_input(text: &str) -> Option<EditorInput> {
     match text {
         "a" | "A" => Some(EditorInput::MoveHome),
+        "c" | "C" => Some(EditorInput::Cancel),
         "d" | "D" => Some(EditorInput::Delete),
         "e" | "E" => Some(EditorInput::MoveEnd),
         "k" | "K" => Some(EditorInput::KillToEnd),
@@ -1153,6 +1157,30 @@ fn control_command_editor_input(text: &str) -> Option<EditorInput> {
         "r" | "R" => Some(EditorInput::Redo),
         _ => None,
     }
+}
+
+fn ignored_command_editor_input_falls_through(
+    input: &EditorInput,
+    key: &Key,
+    mods: ModifiersState,
+    editor_was_empty: bool,
+) -> bool {
+    *input == EditorInput::Cancel
+        || (editor_was_empty
+            && *input == EditorInput::Delete
+            && plain_control_character_key(key, mods, "d"))
+}
+
+fn plain_control_character_key(
+    key: &Key,
+    mods: ModifiersState,
+    text: &str,
+) -> bool {
+    !mods.shift_key()
+        && mods.control_key()
+        && !mods.alt_key()
+        && !mods.super_key()
+        && matches!(key, Key::Character(actual) if actual.eq_ignore_ascii_case(text))
 }
 
 fn alt_command_editor_input(text: &str) -> Option<EditorInput> {
