@@ -16,6 +16,10 @@ mod window_host {
     mod mouse;
     mod startup;
 
+    use input::*;
+    use mouse::*;
+    use startup::*;
+
     #[cfg(test)]
     mod tests;
 }
@@ -681,27 +685,55 @@ pub(crate) struct InputState {
 
 struct WindowHost {
     window: Option<Arc<Window>>,
-    startup_presenter: Option<StartupPresenter>,
-    startup_tabs: Vec<Tab>,
-    startup_next_redraw: Option<Instant>,
-    startup_release_tx: Option<mpsc::SyncSender<Vec<Tab>>>,
-    input_endpoints: HashMap<TabId, InputEndpoint>,
-    command_catalog: CommandCatalog,
-    command_history_store: Option<HistoryStore>,
-    command_history_writer: Option<HistoryWriter>,
+    startup: StartupState,
+    input: InputRuntime,
+    command: CommandRuntime,
+    render: RenderRuntime,
+    keyboard: KeyboardRuntime,
+    mouse: MouseRuntime,
+    metrics: WindowMetrics,
+    modals: ModalRuntime,
+}
+
+struct StartupState {
+    presenter: Option<StartupPresenter>,
+    tabs: Vec<Tab>,
+    next_redraw: Option<Instant>,
+    release_tx: Option<mpsc::SyncSender<Vec<Tab>>>,
+}
+
+struct InputRuntime {
+    endpoints: HashMap<TabId, InputEndpoint>,
+    active_tab: Option<TabId>,
+}
+
+struct CommandRuntime {
+    catalog: CommandCatalog,
+    history_store: Option<HistoryStore>,
+    history_writer: Option<HistoryWriter>,
     shell_history_entries: Vec<HistoryEntry>,
     shell_history_loaded: bool,
     shell_history_enabled: bool,
-    active_input_tab: Option<TabId>,
+}
+
+struct RenderRuntime {
     input_state: Arc<Mutex<InputState>>,
     event_tx: cueue::Writer<RenderEvent>,
     /// One-shot channel to deliver the window + display handle to the render
     /// thread after `resumed()` creates the window. Taken (set to `None`)
     /// after the first send.
     window_tx: Option<mpsc::SyncSender<(Arc<Window>, OwnedDisplayHandle)>>,
+    thread_handle: Arc<OnceLock<std::thread::Thread>>,
+    event_proxy: EventLoopProxy<AppEvent>,
+}
+
+struct KeyboardRuntime {
     modifiers: ModifiersState,
     ime_preedit_active: bool,
-    mouse_pos: (f64, f64),
+}
+
+struct MouseRuntime {
+    pos: (f64, f64),
     mouse_buttons: MouseButtonState,
     last_motion_position: Option<(u32, u32)>,
     last_click_time: Option<Instant>,
@@ -712,6 +744,9 @@ struct WindowHost {
     command_editor_drag_anchor: Option<usize>,
     selection_autoscroll_direction: Option<SelectionAutoscroll>,
     selection_autoscroll_next: Option<Instant>,
+}
+
+struct WindowMetrics {
     window_size: (u32, u32),
     new_tab_text: SmolStr,
     opacity: f32,
@@ -722,8 +757,9 @@ struct WindowHost {
     startup_supersampling: u32,
     startup_dpi_scale: Option<f32>,
     startup_gutter: bool,
-    render_thread_handle: Arc<OnceLock<std::thread::Thread>>,
-    event_proxy: EventLoopProxy<AppEvent>,
+}
+
+struct ModalRuntime {
     recording_popup: Option<RecordingPopupState>,
     permission_modal: Option<PermissionModalState>,
     queued_permission_requests: VecDeque<PermissionRequest>,
@@ -1591,60 +1627,76 @@ fn main() {
 
     let mut host = WindowHost {
         window: None,
-        startup_presenter: None,
-        startup_tabs: vec![tab],
-        startup_next_redraw: None,
-        startup_release_tx: Some(startup_release_tx),
-        input_endpoints: HashMap::from([(
-            TabId(0),
-            InputEndpoint {
-                terminal: terminal.clone(),
-                terminal_thread: term_thread_handle,
-                writer: pty_writer,
-                recorder: initial_recorder,
-                command_editor: CommandEditor::new(),
-            },
-        )]),
-        command_catalog: CommandCatalog::from_config(&startup_command_editor),
-        command_history_store,
-        command_history_writer,
-        shell_history_entries: Vec::new(),
-        shell_history_loaded: false,
-        shell_history_enabled: startup_command_editor.deep_history_integration,
-        active_input_tab: Some(TabId(0)),
-        input_state,
-        event_tx,
-        window_tx: Some(window_tx),
-        modifiers: ModifiersState::default(),
-        ime_preedit_active: false,
-        mouse_pos: (0.0, 0.0),
-        mouse_buttons: MouseButtonState::default(),
-        last_motion_position: None,
-        last_click_time: None,
-        last_click_cell: None,
-        click_count: 0,
-        left_drag_active: false,
-        selection_drag_moved: false,
-        command_editor_drag_anchor: None,
-        selection_autoscroll_direction: None,
-        selection_autoscroll_next: None,
-        window_size: (0, 0),
-        opacity,
-        cell_width,
-        cell_height,
-        startup_fonts,
-        startup_font_size,
-        startup_supersampling,
-        startup_dpi_scale,
-        startup_gutter,
-        render_thread_handle,
-        event_proxy: proxy,
-        recording_popup: None,
-        permission_modal: None,
-        queued_permission_requests: VecDeque::new(),
-        next_recording_popup_token: 1,
-        next_toast_token: 1,
-        new_tab_text,
+        startup: StartupState {
+            presenter: None,
+            tabs: vec![tab],
+            next_redraw: None,
+            release_tx: Some(startup_release_tx),
+        },
+        input: InputRuntime {
+            endpoints: HashMap::from([(
+                TabId(0),
+                InputEndpoint {
+                    terminal: terminal.clone(),
+                    terminal_thread: term_thread_handle,
+                    writer: pty_writer,
+                    recorder: initial_recorder,
+                    command_editor: CommandEditor::new(),
+                },
+            )]),
+            active_tab: Some(TabId(0)),
+        },
+        command: CommandRuntime {
+            catalog: CommandCatalog::from_config(&startup_command_editor),
+            history_store: command_history_store,
+            history_writer: command_history_writer,
+            shell_history_entries: Vec::new(),
+            shell_history_loaded: false,
+            shell_history_enabled: startup_command_editor.deep_history_integration,
+        },
+        render: RenderRuntime {
+            input_state,
+            event_tx,
+            window_tx: Some(window_tx),
+            thread_handle: render_thread_handle,
+            event_proxy: proxy,
+        },
+        keyboard: KeyboardRuntime {
+            modifiers: ModifiersState::default(),
+            ime_preedit_active: false,
+        },
+        mouse: MouseRuntime {
+            pos: (0.0, 0.0),
+            mouse_buttons: MouseButtonState::default(),
+            last_motion_position: None,
+            last_click_time: None,
+            last_click_cell: None,
+            click_count: 0,
+            left_drag_active: false,
+            selection_drag_moved: false,
+            command_editor_drag_anchor: None,
+            selection_autoscroll_direction: None,
+            selection_autoscroll_next: None,
+        },
+        metrics: WindowMetrics {
+            window_size: (0, 0),
+            new_tab_text,
+            opacity,
+            cell_width,
+            cell_height,
+            startup_fonts,
+            startup_font_size,
+            startup_supersampling,
+            startup_dpi_scale,
+            startup_gutter,
+        },
+        modals: ModalRuntime {
+            recording_popup: None,
+            permission_modal: None,
+            queued_permission_requests: VecDeque::new(),
+            next_recording_popup_token: 1,
+            next_toast_token: 1,
+        },
     };
     event_loop.run_app(&mut host).expect("run event loop");
 }

@@ -5,8 +5,8 @@ impl ApplicationHandler<AppEvent> for WindowHost {
         &mut self,
         event_loop: &ActiveEventLoop,
     ) {
-        self.request_due_startup_redraw(event_loop);
-        self.run_selection_autoscroll(event_loop);
+        request_due_startup_redraw(&mut self.startup, self.window.as_ref(), event_loop);
+        run_selection_autoscroll(self, event_loop);
     }
 
     fn user_event(
@@ -26,7 +26,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 }
             }
             AppEvent::RequestStartupRedraw => {
-                if self.startup_presenter.is_some()
+                if self.startup.presenter.is_some()
                     && let Some(window) = &self.window
                 {
                     window.request_redraw();
@@ -37,15 +37,15 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     "Releasing startup surface: {} ms",
                     APP_START_TIME.get().unwrap().elapsed().as_millis()
                 );
-                self.startup_presenter = None;
-                self.startup_next_redraw = None;
-                if let Some(tx) = self.startup_release_tx.take() {
-                    let _ = tx.send(std::mem::take(&mut self.startup_tabs));
+                self.startup.presenter = None;
+                self.startup.next_redraw = None;
+                if let Some(tx) = self.startup.release_tx.take() {
+                    let _ = tx.send(std::mem::take(&mut self.startup.tabs));
                 }
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
             AppEvent::ApplyTerminalEffects { tab_id, effects } => {
-                self.apply_terminal_effects(tab_id, effects);
+                apply_terminal_effects(self, tab_id, effects);
             }
             AppEvent::RegisterInputEndpoint {
                 tab_id,
@@ -54,7 +54,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 recorder,
                 terminal_thread,
             } => {
-                self.input_endpoints.insert(
+                self.input.endpoints.insert(
                     tab_id,
                     InputEndpoint {
                         terminal,
@@ -64,51 +64,61 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                         command_editor: CommandEditor::new(),
                     },
                 );
-                if self.active_input_tab == Some(tab_id) {
-                    self.refresh_command_editor_view();
+                if self.input.active_tab == Some(tab_id) {
+                    refresh_command_editor_view(self);
                 }
             }
             AppEvent::RemoveInputEndpoint(tab_id) => {
-                self.input_endpoints.remove(&tab_id);
-                self.input_state.lock().command_editor_views.remove(&tab_id);
-                self.startup_tabs.retain(|tab| tab.id != tab_id);
+                self.input.endpoints.remove(&tab_id);
+                self.render
+                    .input_state
+                    .lock()
+                    .command_editor_views
+                    .remove(&tab_id);
+                self.startup.tabs.retain(|tab| tab.id != tab_id);
             }
             AppEvent::SetActiveInputTab(tab_id) => {
-                self.active_input_tab = tab_id;
+                self.input.active_tab = tab_id;
                 if let Some(tab_id) = tab_id {
-                    self.request_window_size_for_tab(tab_id);
+                    request_window_size_for_tab(self, tab_id);
                 }
-                self.refresh_command_editor_view();
+                refresh_command_editor_view(self);
             }
             AppEvent::ResolveClipboardRequest {
                 tab_id,
                 request,
                 decision,
             } => {
-                self.resolve_clipboard_request(tab_id, request, decision);
+                resolve_clipboard_request(&mut self.input, tab_id, request, decision);
             }
             AppEvent::ResolveKittyFileRequest {
                 tab_id,
                 request,
                 decision,
             } => {
-                self.resolve_kitty_file_request(tab_id, request, decision);
+                resolve_kitty_file_request(&mut self.input, tab_id, request, decision);
             }
             AppEvent::DismissRecordingPopup(token) => {
                 let dismiss = matches!(
-                    self.recording_popup,
+                    self.modals.recording_popup,
                     Some(RecordingPopupState::Completed { token: current }) if current == token
                 );
                 if dismiss {
-                    self.dismiss_recording_popup();
+                    dismiss_recording_popup(
+                        &mut self.modals,
+                        &self.input,
+                        &mut self.render,
+                        &self.startup,
+                        self.window.as_ref(),
+                    );
                 }
             }
             AppEvent::ShowToast(message) => {
-                self.show_toast(message);
+                show_toast(self, message);
             }
             AppEvent::DismissToast(token) => {
-                if token + 1 == self.next_toast_token {
-                    self.update_toast_view(None);
+                if token + 1 == self.modals.next_toast_token {
+                    update_toast_view(self, None);
                 }
             }
         }
@@ -122,11 +132,12 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             return;
         }
 
-        let pixel_width = INITIAL_COLS * self.cell_width + compute_gutter_width(self.cell_width);
+        let pixel_width =
+            INITIAL_COLS * self.metrics.cell_width + compute_gutter_width(self.metrics.cell_width);
         // One extra cell_height for the tab bar, which is always visible
         // (it doubles as the titlebar for CSD window management).
-        let pixel_height = INITIAL_ROWS * self.cell_height + self.cell_height;
-        let transparent = self.opacity < 1.0;
+        let pixel_height = INITIAL_ROWS * self.metrics.cell_height + self.metrics.cell_height;
+        let transparent = self.metrics.opacity < 1.0;
         // LogicalSize so the window occupies the same visual area regardless
         // of the monitor's DPI scale factor. Cell metrics are computed at 1x
         // here; the render thread rescales them once it knows the actual
@@ -148,20 +159,21 @@ impl ApplicationHandler<AppEvent> for WindowHost {
         let startup_window_size = window.inner_size();
 
         let scale_factor = self
+            .metrics
             .startup_dpi_scale
             .map(|s| s as f64)
             .unwrap_or_else(|| window.scale_factor());
         let startup_background = startup_snapshot_path();
-        self.startup_presenter = StartupPresenter::new(
+        self.startup.presenter = StartupPresenter::new(
             window.clone(),
-            self.startup_fonts.clone(),
-            self.startup_font_size,
-            self.startup_supersampling,
+            self.metrics.startup_fonts.clone(),
+            self.metrics.startup_font_size,
+            self.metrics.startup_supersampling,
             scale_factor,
-            self.startup_gutter,
+            self.metrics.startup_gutter,
             startup_background,
         );
-        if self.present_startup_frame(event_loop, &window) {
+        if present_startup_frame(self, event_loop, &window) {
             window.request_redraw();
         }
 
@@ -172,14 +184,14 @@ impl ApplicationHandler<AppEvent> for WindowHost {
         window.set_ime_allowed(true);
         window.set_ime_purpose(winit::window::ImePurpose::Terminal);
 
-        if let Some(tx) = self.window_tx.take() {
+        if let Some(tx) = self.render.window_tx.take() {
             let _ = tx.send((window.clone(), event_loop.owned_display_handle()));
         }
 
-        self.window_size = (startup_window_size.width, startup_window_size.height);
+        self.metrics.window_size = (startup_window_size.width, startup_window_size.height);
         self.window = Some(window);
 
-        if self.startup_next_redraw.is_none() {
+        if self.startup.next_redraw.is_none() {
             event_loop.set_control_flow(ControlFlow::Wait);
         }
     }
@@ -192,13 +204,13 @@ impl ApplicationHandler<AppEvent> for WindowHost {
     ) {
         let ev = match event {
             WindowEvent::CloseRequested => {
-                self.send(RenderEvent::Action(Action::CloseWindow));
+                send(&mut self.render, RenderEvent::Action(Action::CloseWindow));
                 return;
             }
 
             WindowEvent::Resized(size) => {
-                self.window_size = (size.width, size.height);
-                self.refresh_command_editor_view();
+                self.metrics.window_size = (size.width, size.height);
+                refresh_command_editor_view(self);
                 RenderEvent::Resized {
                     width: size.width,
                     height: size.height,
@@ -207,7 +219,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
             WindowEvent::RedrawRequested => {
                 if let Some(window) = self.window.as_ref().cloned()
-                    && self.present_startup_frame(event_loop, &window)
+                    && present_startup_frame(self, event_loop, &window)
                 {
                     return;
                 }
@@ -215,7 +227,13 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::Focused(f) => {
-                self.handle_focus_event(f);
+                handle_focus_event(
+                    &mut self.input,
+                    &mut self.render,
+                    &self.startup,
+                    self.window.as_ref(),
+                    f,
+                );
                 return;
             }
 
@@ -224,9 +242,12 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     return;
                 }
                 match &event.logical_key {
-                    Key::Character(_) | Key::Named(_) => {
-                        self.handle_key_event(event.logical_key, event.location, event.physical_key)
-                    }
+                    Key::Character(_) | Key::Named(_) => handle_key_event(
+                        self,
+                        event.logical_key,
+                        event.location,
+                        event.physical_key,
+                    ),
                     _ => return,
                 }
                 return;
@@ -237,17 +258,17 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::ModifiersChanged(mods) => {
-                self.handle_modifiers_changed(mods.state());
+                handle_modifiers_changed(&mut self.input, &mut self.keyboard, mods.state());
                 return;
             }
 
             WindowEvent::CursorMoved { position, .. } => {
-                self.handle_cursor_moved(position.x, position.y);
+                handle_cursor_moved(self, position.x, position.y);
                 return;
             }
 
             WindowEvent::MouseInput { state, button, .. } => {
-                self.handle_mouse_input(state == ElementState::Pressed, button);
+                handle_mouse_input(self, state == ElementState::Pressed, button);
                 return;
             }
 
@@ -256,33 +277,39 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                     MouseScrollDelta::LineDelta(x, y) => (x as f64, y as f64, false),
                     MouseScrollDelta::PixelDelta(pos) => (pos.x, pos.y, true),
                 };
-                self.handle_mouse_wheel(x, y, pixels);
+                handle_mouse_wheel(self, x, y, pixels);
                 return;
             }
 
             WindowEvent::Ime(ime) => match ime {
                 Ime::Enabled => return,
                 Ime::Disabled => {
-                    self.ime_preedit_active = false;
-                    self.update_preedit(None);
+                    self.keyboard.ime_preedit_active = false;
+                    update_preedit(self, None);
                     return;
                 }
                 Ime::Preedit(text, cursor) => {
-                    self.ime_preedit_active = !text.is_empty();
+                    self.keyboard.ime_preedit_active = !text.is_empty();
                     let preedit = (!text.is_empty()).then_some(PreeditState { text, cursor });
-                    self.update_preedit(preedit);
+                    update_preedit(self, preedit);
                     return;
                 }
                 Ime::Commit(text) => {
-                    self.handle_ime_commit(&text);
-                    self.ime_preedit_active = false;
-                    self.update_preedit(None);
+                    handle_ime_commit(
+                        &mut self.input,
+                        &mut self.render,
+                        &self.startup,
+                        self.window.as_ref(),
+                        &text,
+                    );
+                    self.keyboard.ime_preedit_active = false;
+                    update_preedit(self, None);
                     return;
                 }
             },
 
             _ => return,
         };
-        self.send(ev);
+        send(&mut self.render, ev);
     }
 }

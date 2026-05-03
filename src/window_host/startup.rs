@@ -1,904 +1,998 @@
 use super::*;
 
-impl WindowHost {
-    pub(crate) fn send(
-        &mut self,
-        ev: RenderEvent,
-    ) {
-        let _ = self.event_tx.push(ev);
-        if let Some(thread) = self.render_thread_handle.get() {
-            thread.unpark();
-        }
+pub(crate) fn send(
+    render: &mut RenderRuntime,
+    ev: RenderEvent,
+) {
+    let _ = render.event_tx.push(ev);
+    if let Some(thread) = render.thread_handle.get() {
+        thread.unpark();
     }
+}
 
-    pub(crate) fn active_input_target(&mut self) -> Option<&mut InputEndpoint> {
-        let tab_id = self.active_input_tab?;
-        self.input_endpoints.get_mut(&tab_id)
-    }
+pub(crate) fn active_input_target(input: &mut InputRuntime) -> Option<&mut InputEndpoint> {
+    let tab_id = input.active_tab?;
+    input.endpoints.get_mut(&tab_id)
+}
 
-    pub(crate) fn startup_tab_titles(&mut self) -> Vec<(String, bool)> {
-        let tab_order = self.input_state.lock().tab_order.clone();
-        let mut titles: Vec<(String, bool)> = tab_order
-            .iter()
-            .filter_map(|tab_id| {
-                let tab = self.startup_tabs.iter_mut().find(|tab| tab.id == *tab_id)?;
-                let title = tab
-                    .snapshot_output
-                    .read()
-                    .current_title
-                    .clone()
-                    .unwrap_or_else(|| "Shell".to_owned());
-                Some((title, Some(*tab_id) == self.active_input_tab))
-            })
-            .collect();
-
-        if titles.is_empty()
-            && let Some(tab_id) = self.active_input_tab
-            && let Some(tab) = self.startup_tabs.iter_mut().find(|tab| tab.id == tab_id)
-        {
+pub(crate) fn startup_tab_titles(
+    startup: &mut StartupState,
+    render: &RenderRuntime,
+    active_tab: Option<TabId>,
+) -> Vec<(String, bool)> {
+    let tab_order = render.input_state.lock().tab_order.clone();
+    let mut titles: Vec<(String, bool)> = tab_order
+        .iter()
+        .filter_map(|tab_id| {
+            let tab = startup.tabs.iter_mut().find(|tab| tab.id == *tab_id)?;
             let title = tab
                 .snapshot_output
                 .read()
                 .current_title
                 .clone()
                 .unwrap_or_else(|| "Shell".to_owned());
-            titles.push((title, true));
-        }
+            Some((title, Some(*tab_id) == active_tab))
+        })
+        .collect();
 
-        titles
+    if titles.is_empty()
+        && let Some(tab_id) = active_tab
+        && let Some(tab) = startup.tabs.iter_mut().find(|tab| tab.id == tab_id)
+    {
+        let title = tab
+            .snapshot_output
+            .read()
+            .current_title
+            .clone()
+            .unwrap_or_else(|| "Shell".to_owned());
+        titles.push((title, true));
     }
 
-    pub(crate) fn startup_interaction_snapshot(
-        &self
-    ) -> (
-        Option<renderer::TabBarHover>,
-        Option<TabContextMenu>,
-        Option<renderer::GutterPopup>,
-    ) {
-        let state = self.input_state.lock();
-        (
-            state.hovered_tab_bar_button,
-            state.tab_context_menu.clone(),
-            state.gutter_popup.clone(),
+    titles
+}
+
+pub(crate) fn startup_interaction_snapshot(
+    render: &RenderRuntime
+) -> (
+    Option<renderer::TabBarHover>,
+    Option<TabContextMenu>,
+    Option<renderer::GutterPopup>,
+) {
+    let state = render.input_state.lock();
+    (
+        state.hovered_tab_bar_button,
+        state.tab_context_menu.clone(),
+        state.gutter_popup.clone(),
+    )
+}
+
+pub(crate) fn present_startup_frame(
+    host: &mut WindowHost,
+    event_loop: &ActiveEventLoop,
+    window: &Arc<Window>,
+) -> bool {
+    let Some(tab_id) = host.input.active_tab else {
+        return false;
+    };
+    let Some(active_startup_tab_idx) = host.startup.tabs.iter().position(|tab| tab.id == tab_id)
+    else {
+        return false;
+    };
+
+    let tab_titles = startup_tab_titles(&mut host.startup, &host.render, host.input.active_tab);
+    let tabs: Vec<renderer::TabInfo<'_>> = tab_titles
+        .iter()
+        .map(|(label, active)| renderer::TabInfo {
+            label,
+            active: *active,
+        })
+        .collect();
+    let active_startup_tab = &mut host.startup.tabs[active_startup_tab_idx];
+    let snap = active_startup_tab.snapshot_output.read().clone();
+    let visible_images = {
+        let terminal = active_startup_tab.terminal.lock();
+        terminal41::view::visible_images(
+            &terminal.active,
+            &terminal.viewport,
+            terminal.cell_height(),
+            terminal.cell_width(),
+            terminal.kitty_images(),
+            &terminal.palette,
+            Instant::now(),
         )
-    }
+        .collect::<Vec<_>>()
+    };
+    let (hovered_button, tab_context_menu, gutter_popup) =
+        startup_interaction_snapshot(&host.render);
+    let maximized = window.is_maximized();
+    let Some(presenter) = host.startup.presenter.as_mut() else {
+        return false;
+    };
 
-    pub(crate) fn present_startup_frame(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        window: &Arc<Window>,
-    ) -> bool {
-        let Some(tab_id) = self.active_input_tab else {
-            return false;
-        };
-        let Some(active_startup_tab_idx) =
-            self.startup_tabs.iter().position(|tab| tab.id == tab_id)
-        else {
-            return false;
-        };
+    let delay = presenter.present(
+        window,
+        snap,
+        visible_images,
+        &tabs,
+        host.metrics.new_tab_text.clone(),
+        hovered_button,
+        tab_context_menu.as_ref(),
+        gutter_popup.as_ref(),
+        maximized,
+    );
+    schedule_startup_redraw(&mut host.startup, event_loop, delay);
+    true
+}
 
-        let tab_titles = self.startup_tab_titles();
-        let tabs: Vec<renderer::TabInfo<'_>> = tab_titles
-            .iter()
-            .map(|(label, active)| renderer::TabInfo {
-                label,
-                active: *active,
-            })
-            .collect();
-        let active_startup_tab = &mut self.startup_tabs[active_startup_tab_idx];
-        let snap = active_startup_tab.snapshot_output.read().clone();
-        let visible_images = {
-            let terminal = active_startup_tab.terminal.lock();
-            terminal41::view::visible_images(
-                &terminal.active,
-                &terminal.viewport,
-                terminal.cell_height(),
-                terminal.cell_width(),
-                terminal.kitty_images(),
-                &terminal.palette,
-                Instant::now(),
-            )
-            .collect::<Vec<_>>()
-        };
-        let (hovered_button, tab_context_menu, gutter_popup) = self.startup_interaction_snapshot();
-        let maximized = window.is_maximized();
-        let Some(presenter) = self.startup_presenter.as_mut() else {
-            return false;
-        };
+pub(crate) fn layout_snapshot(render: &RenderRuntime) -> (u32, u32, u32, usize) {
+    let state = render.input_state.lock();
+    (
+        state.cell_width,
+        state.cell_height,
+        state.gutter_width,
+        state.tab_count,
+    )
+}
 
-        let delay = presenter.present(
-            window,
-            snap,
-            visible_images,
-            &tabs,
-            self.new_tab_text.clone(),
-            hovered_button,
-            tab_context_menu.as_ref(),
-            gutter_popup.as_ref(),
-            maximized,
-        );
-        self.schedule_startup_redraw(event_loop, delay);
-        true
-    }
+pub(crate) fn keybindings(render: &RenderRuntime) -> Keybindings {
+    render.input_state.lock().keybindings.clone()
+}
 
-    pub(crate) fn layout_snapshot(&self) -> (u32, u32, u32, usize) {
-        let state = self.input_state.lock();
-        (
-            state.cell_width,
-            state.cell_height,
-            state.gutter_width,
-            state.tab_count,
-        )
-    }
+pub(crate) fn command_editor_config(render: &RenderRuntime) -> CommandEditorConfig {
+    render.input_state.lock().command_editor_config.clone()
+}
 
-    pub(crate) fn keybindings(&self) -> Keybindings {
-        self.input_state.lock().keybindings.clone()
-    }
+pub(crate) fn command_palette_is_open(render: &RenderRuntime) -> bool {
+    render.input_state.lock().command_palette.is_some()
+}
 
-    pub(crate) fn command_editor_config(&self) -> CommandEditorConfig {
-        self.input_state.lock().command_editor_config.clone()
-    }
+pub(crate) fn open_command_palette(
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+) {
+    render.input_state.lock().command_palette = Some(command_palette_view());
+    notify_interaction_changed(input, render, startup, window);
+}
 
-    pub(crate) fn command_palette_is_open(&self) -> bool {
-        self.input_state.lock().command_palette.is_some()
-    }
+pub(crate) fn close_command_palette(
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+) {
+    render.input_state.lock().command_palette = None;
+    notify_interaction_changed(input, render, startup, window);
+}
 
-    pub(crate) fn open_command_palette(&mut self) {
-        self.input_state.lock().command_palette = Some(command_palette_view());
-        self.notify_interaction_changed();
-    }
+pub(crate) fn move_host_command_palette_selection(
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+    delta: isize,
+) {
+    let mut state = render.input_state.lock();
+    let Some(view) = state.command_palette.as_mut() else {
+        return;
+    };
+    super::move_command_palette_selection(view, delta);
+    drop(state);
+    notify_interaction_changed(input, render, startup, window);
+}
 
-    pub(crate) fn close_command_palette(&mut self) {
-        self.input_state.lock().command_palette = None;
-        self.notify_interaction_changed();
-    }
+pub(crate) fn update_command_palette_query(
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+    update: impl FnOnce(&mut String),
+) {
+    let mut state = render.input_state.lock();
+    let Some(view) = state.command_palette.as_mut() else {
+        return;
+    };
+    let mut query = view.query.clone();
+    update(&mut query);
+    set_command_palette_query(view, query);
+    drop(state);
+    notify_interaction_changed(input, render, startup, window);
+}
 
-    pub(crate) fn move_command_palette_selection(
-        &mut self,
-        delta: isize,
-    ) {
-        let mut state = self.input_state.lock();
-        let Some(view) = state.command_palette.as_mut() else {
-            return;
-        };
-        move_command_palette_selection(view, delta);
+pub(crate) fn complete_host_command_palette_selection(
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+) {
+    let mut state = render.input_state.lock();
+    let Some(view) = state.command_palette.as_mut() else {
+        return;
+    };
+    if super::complete_command_palette_selection(view) {
         drop(state);
-        self.notify_interaction_changed();
+        notify_interaction_changed(input, render, startup, window);
     }
+}
 
-    pub(crate) fn update_command_palette_query(
-        &mut self,
-        update: impl FnOnce(&mut String),
-    ) {
-        let mut state = self.input_state.lock();
-        let Some(view) = state.command_palette.as_mut() else {
-            return;
-        };
-        let mut query = view.query.clone();
-        update(&mut query);
-        set_command_palette_query(view, query);
-        drop(state);
-        self.notify_interaction_changed();
-    }
-
-    pub(crate) fn complete_command_palette_selection(&mut self) {
-        let mut state = self.input_state.lock();
-        let Some(view) = state.command_palette.as_mut() else {
-            return;
-        };
-        if complete_command_palette_selection(view) {
+pub(crate) fn accept_command_palette_selection(
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+) -> Option<CommandPaletteInvocation> {
+    let mut state = render.input_state.lock();
+    let view = state.command_palette.as_mut()?;
+    match command_palette_selected_invocation(view)? {
+        CommandPaletteAccept::Ready(invocation) => {
+            state.command_palette = None;
             drop(state);
-            self.notify_interaction_changed();
+            notify_interaction_changed(input, render, startup, window);
+            Some(invocation)
+        }
+        CommandPaletteAccept::NeedsArgument => {
+            let completed = super::complete_command_palette_selection(view);
+            drop(state);
+            if completed {
+                notify_interaction_changed(input, render, startup, window);
+            }
+            None
         }
     }
+}
 
-    pub(crate) fn accept_command_palette_selection(&mut self) -> Option<CommandPaletteInvocation> {
-        let mut state = self.input_state.lock();
-        let view = state.command_palette.as_mut()?;
-        match command_palette_selected_invocation(view)? {
-            CommandPaletteAccept::Ready(invocation) => {
-                state.command_palette = None;
-                drop(state);
-                self.notify_interaction_changed();
-                Some(invocation)
-            }
-            CommandPaletteAccept::NeedsArgument => {
-                let completed = complete_command_palette_selection(view);
-                drop(state);
-                if completed {
-                    self.notify_interaction_changed();
-                }
-                None
-            }
-        }
+pub(crate) fn command_editor_is_open_for_tab(
+    render: &RenderRuntime,
+    tab_id: TabId,
+) -> bool {
+    let state = render.input_state.lock();
+    command_editor_view_open_for_input_tab(&state, Some(tab_id))
+}
+
+pub(crate) fn clear_terminal_selection_for_tab(
+    host: &mut WindowHost,
+    tab_id: TabId,
+) -> bool {
+    let Some(target) = host.input.endpoints.get(&tab_id) else {
+        return false;
+    };
+    let mut terminal = target.terminal.lock();
+    if terminal.selection.take().is_none() {
+        return false;
     }
+    terminal.invalidate_snapshot_rows();
+    true
+}
 
-    pub(crate) fn command_editor_is_open_for_tab(
-        &self,
-        tab_id: TabId,
-    ) -> bool {
-        let state = self.input_state.lock();
-        command_editor_view_open_for_input_tab(&state, Some(tab_id))
-    }
-
-    pub(crate) fn clear_terminal_selection_for_tab(
-        &mut self,
-        tab_id: TabId,
-    ) -> bool {
-        let Some(target) = self.input_endpoints.get(&tab_id) else {
+pub(crate) fn clear_command_editor_selection_for_tab(
+    host: &mut WindowHost,
+    tab_id: TabId,
+) -> bool {
+    let changed = {
+        let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
             return false;
         };
-        let mut terminal = target.terminal.lock();
-        if terminal.selection.take().is_none() {
-            return false;
-        }
-        terminal.invalidate_snapshot_rows();
-        true
+        clear_editor_selection(&mut target.command_editor) == EditOutcome::Updated
+    };
+    if changed && host.input.active_tab == Some(tab_id) {
+        refresh_command_editor_view(host);
     }
+    changed
+}
 
-    pub(crate) fn clear_command_editor_selection_for_tab(
-        &mut self,
-        tab_id: TabId,
-    ) -> bool {
-        let changed = {
-            let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
-                return false;
-            };
-            clear_editor_selection(&mut target.command_editor) == EditOutcome::Updated
-        };
-        if changed && self.active_input_tab == Some(tab_id) {
-            self.refresh_command_editor_view();
+pub(crate) fn copy_active_selection_to_clipboard(
+    host: &mut WindowHost,
+    tab_id: TabId,
+    kind: ClipboardKind,
+    clear_after_copy: bool,
+    editor_open: bool,
+) -> Option<SelectionCopySource> {
+    let target = host.input.endpoints.get_mut(&tab_id)?;
+    let terminal_has_selection = target.terminal.lock().has_selection();
+    let editor_selection = selected_text(&target.command_editor);
+    let source = selection_copy_source(
+        terminal_has_selection,
+        editor_selection.is_some(),
+        editor_open,
+    )?;
+
+    match source {
+        SelectionCopySource::Terminal => {
+            let mut terminal = target.terminal.lock();
+            if let Some(text) = selection_text(terminal.selection.as_ref(), &terminal.active) {
+                terminal.clipboard.set(kind, &text);
+            }
+            if clear_after_copy {
+                terminal.selection = None;
+                terminal.invalidate_snapshot_rows();
+            }
         }
-        changed
-    }
-
-    pub(crate) fn copy_active_selection_to_clipboard(
-        &mut self,
-        tab_id: TabId,
-        kind: ClipboardKind,
-        clear_after_copy: bool,
-        editor_open: bool,
-    ) -> Option<SelectionCopySource> {
-        let target = self.input_endpoints.get_mut(&tab_id)?;
-        let terminal_has_selection = target.terminal.lock().has_selection();
-        let editor_selection = selected_text(&target.command_editor);
-        let source = selection_copy_source(
-            terminal_has_selection,
-            editor_selection.is_some(),
-            editor_open,
-        )?;
-
-        match source {
-            SelectionCopySource::Terminal => {
+        SelectionCopySource::Editor => {
+            let text = editor_selection.expect("source requires editor selection");
+            {
                 let mut terminal = target.terminal.lock();
-                if let Some(text) = selection_text(terminal.selection.as_ref(), &terminal.active) {
-                    terminal.clipboard.set(kind, &text);
-                }
-                if clear_after_copy {
-                    terminal.selection = None;
-                    terminal.invalidate_snapshot_rows();
-                }
+                terminal.clipboard.set(kind, &text);
             }
-            SelectionCopySource::Editor => {
-                let text = editor_selection.expect("source requires editor selection");
-                {
-                    let mut terminal = target.terminal.lock();
-                    terminal.clipboard.set(kind, &text);
-                }
-                if clear_after_copy {
-                    clear_editor_selection(&mut target.command_editor);
-                }
+            if clear_after_copy {
+                clear_editor_selection(&mut target.command_editor);
             }
         }
+    }
 
-        if clear_after_copy && source == SelectionCopySource::Editor {
-            self.refresh_command_editor_view();
+    if clear_after_copy && source == SelectionCopySource::Editor {
+        refresh_command_editor_view(host);
+    }
+    Some(source)
+}
+
+pub(crate) fn set_command_editor_view(
+    host: &mut WindowHost,
+    tab_id: TabId,
+    view: Option<CommandLineView>,
+) {
+    {
+        let mut state = host.render.input_state.lock();
+        if let Some(view) = view {
+            state.command_editor_views.insert(tab_id, view);
+        } else {
+            state.command_editor_views.remove(&tab_id);
         }
-        Some(source)
     }
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
 
-    pub(crate) fn set_command_editor_view(
-        &mut self,
-        tab_id: TabId,
-        view: Option<CommandLineView>,
-    ) {
-        {
-            let mut state = self.input_state.lock();
-            if let Some(view) = view {
-                state.command_editor_views.insert(tab_id, view);
-            } else {
-                state.command_editor_views.remove(&tab_id);
-            }
-        }
-        self.notify_interaction_changed();
-    }
-
-    pub(crate) fn refresh_command_editor_view(&mut self) {
-        let Some(tab_id) = self.active_input_tab else {
-            self.input_state.lock().command_editor_views.clear();
-            self.notify_interaction_changed();
-            return;
-        };
-        self.refresh_command_editor_view_for_tab(tab_id);
-    }
-
-    pub(crate) fn refresh_command_editor_view_for_tab(
-        &mut self,
-        tab_id: TabId,
-    ) {
-        let view = self.command_editor_view_for_tab(tab_id);
-        self.set_command_editor_view(tab_id, view);
-    }
-
-    pub(crate) fn command_editor_view_for_tab(
-        &mut self,
-        tab_id: TabId,
-    ) -> Option<CommandLineView> {
-        let config = self.command_editor_config();
-        if !config.enabled {
-            return None;
-        }
-        self.command_catalog.refresh_for_config(&config);
-        let context = {
-            let target = self.input_endpoints.get(&tab_id)?;
-            let terminal = target.terminal.lock();
-            command_editor_view_context(&terminal)
-        }?;
-        let history_entries =
-            self.command_editor_history_entries(&config, context.current_dir.as_deref());
-        let target = self.input_endpoints.get(&tab_id)?;
-        let settings = Self::command_editor_settings(
-            &config,
-            context.current_dir,
-            self.command_catalog.names().to_vec(),
-            history_entries,
+pub(crate) fn refresh_command_editor_view(host: &mut WindowHost) {
+    let Some(tab_id) = host.input.active_tab else {
+        host.render.input_state.lock().command_editor_views.clear();
+        notify_interaction_changed(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
         );
-        command_editor_view(&target.command_editor, &settings, config.vim_mode)
+        return;
+    };
+    refresh_command_editor_view_for_tab(host, tab_id);
+}
+
+pub(crate) fn refresh_command_editor_view_for_tab(
+    host: &mut WindowHost,
+    tab_id: TabId,
+) {
+    let view = command_editor_view_for_tab(host, tab_id);
+    set_command_editor_view(host, tab_id, view);
+}
+
+pub(crate) fn command_editor_view_for_tab(
+    host: &mut WindowHost,
+    tab_id: TabId,
+) -> Option<CommandLineView> {
+    let config = command_editor_config(&host.render);
+    if !config.enabled {
+        return None;
+    }
+    host.command.catalog.refresh_for_config(&config);
+    let context = {
+        let target = host.input.endpoints.get(&tab_id)?;
+        let terminal = target.terminal.lock();
+        command_editor_view_context(&terminal)
+    }?;
+    let history_entries =
+        command_editor_history_entries(host, &config, context.current_dir.as_deref());
+    let target = host.input.endpoints.get(&tab_id)?;
+    let settings = command_editor_settings(
+        &config,
+        context.current_dir,
+        host.command.catalog.names().to_vec(),
+        history_entries,
+    );
+    command_editor_view(&target.command_editor, &settings, config.vim_mode)
+}
+
+pub(crate) fn command_editor_history_entries(
+    host: &mut WindowHost,
+    config: &CommandEditorConfig,
+    current_dir: Option<&std::path::Path>,
+) -> Vec<HistoryEntry> {
+    let mut entries = shell_history_entries(host, config);
+    entries.extend(persistent_history_entries(host, config, current_dir));
+    entries
+}
+
+pub(crate) fn shell_history_entries(
+    host: &mut WindowHost,
+    config: &CommandEditorConfig,
+) -> Vec<HistoryEntry> {
+    if !config.deep_history_integration {
+        host.command.shell_history_entries.clear();
+        host.command.shell_history_loaded = false;
+        host.command.shell_history_enabled = false;
+        return Vec::new();
     }
 
-    pub(crate) fn command_editor_history_entries(
-        &mut self,
-        config: &CommandEditorConfig,
-        current_dir: Option<&std::path::Path>,
-    ) -> Vec<HistoryEntry> {
-        let mut entries = self.shell_history_entries(config);
-        entries.extend(self.persistent_history_entries(config, current_dir));
-        entries
+    if host.command.shell_history_enabled != config.deep_history_integration {
+        host.command.shell_history_entries.clear();
+        host.command.shell_history_loaded = false;
+        host.command.shell_history_enabled = config.deep_history_integration;
     }
 
-    pub(crate) fn shell_history_entries(
-        &mut self,
-        config: &CommandEditorConfig,
-    ) -> Vec<HistoryEntry> {
-        if !config.deep_history_integration {
-            self.shell_history_entries.clear();
-            self.shell_history_loaded = false;
-            self.shell_history_enabled = false;
-            return Vec::new();
-        }
-
-        if self.shell_history_enabled != config.deep_history_integration {
-            self.shell_history_entries.clear();
-            self.shell_history_loaded = false;
-            self.shell_history_enabled = config.deep_history_integration;
-        }
-
-        if !self.shell_history_loaded {
-            self.shell_history_entries =
-                match shellhist41::load_current_shell_history(&shellhist41::ShellHistoryOptions {
-                    max_entries: config.max_history,
-                    ..shellhist41::ShellHistoryOptions::default()
-                }) {
-                    Ok(entries) => entries
-                        .into_iter()
-                        .map(|entry| HistoryEntry::external(entry.command))
-                        .collect(),
-                    Err(error) => {
-                        log::debug!("command editor deep history unavailable: {error}");
-                        Vec::new()
-                    }
-                };
-            self.shell_history_loaded = true;
-        }
-
-        self.shell_history_entries.clone()
+    if !host.command.shell_history_loaded {
+        host.command.shell_history_entries =
+            match shellhist41::load_current_shell_history(&shellhist41::ShellHistoryOptions {
+                max_entries: config.max_history,
+                ..shellhist41::ShellHistoryOptions::default()
+            }) {
+                Ok(entries) => entries
+                    .into_iter()
+                    .map(|entry| HistoryEntry::external(entry.command))
+                    .collect(),
+                Err(error) => {
+                    log::debug!("command editor deep history unavailable: {error}");
+                    Vec::new()
+                }
+            };
+        host.command.shell_history_loaded = true;
     }
 
-    pub(crate) fn persistent_history_entries(
-        &self,
-        config: &CommandEditorConfig,
-        current_dir: Option<&std::path::Path>,
-    ) -> Vec<HistoryEntry> {
-        let Some(store) = &self.command_history_store else {
-            return Vec::new();
-        };
-        let Some(current_dir) = current_dir else {
-            return Vec::new();
-        };
-        match history41::recent_commands(
-            store,
-            history41::HistoryQuery {
-                cwd: current_dir.to_owned(),
-                limit: config.max_history,
-                include_global_fallback: true,
-            },
-        ) {
-            Ok(entries) => entries
-                .into_iter()
-                .rev()
-                .map(|entry| HistoryEntry::external(entry.command))
-                .collect(),
-            Err(error) => {
-                debug!("persistent command history unavailable: {error}");
-                Vec::new()
-            }
-        }
-    }
+    host.command.shell_history_entries.clone()
+}
 
-    pub(crate) fn command_editor_settings(
-        config: &CommandEditorConfig,
-        current_dir: Option<PathBuf>,
-        command_words: Vec<String>,
-        history_entries: Vec<HistoryEntry>,
-    ) -> EditorSettings {
-        EditorSettings {
-            completion_words: config.completions.clone(),
-            command_words,
-            history_entries,
-            current_dir,
-            max_history: config.max_history,
-        }
-    }
-
-    pub(crate) fn enqueue_persistent_command_history(
-        &mut self,
-        command: String,
-        cwd: PathBuf,
-        config: &CommandEditorConfig,
+pub(crate) fn persistent_history_entries(
+    host: &WindowHost,
+    config: &CommandEditorConfig,
+    current_dir: Option<&std::path::Path>,
+) -> Vec<HistoryEntry> {
+    let Some(store) = &host.command.history_store else {
+        return Vec::new();
+    };
+    let Some(current_dir) = current_dir else {
+        return Vec::new();
+    };
+    match history41::recent_commands(
+        store,
+        history41::HistoryQuery {
+            cwd: current_dir.to_owned(),
+            limit: config.max_history,
+            include_global_fallback: true,
+        },
     ) {
-        let Some(writer) = &mut self.command_history_writer else {
-            return;
-        };
-        writer.enqueue(history_runtime::store_request(command, cwd, config));
+        Ok(entries) => entries
+            .into_iter()
+            .rev()
+            .map(|entry| HistoryEntry::external(entry.command))
+            .collect(),
+        Err(error) => {
+            debug!("persistent command history unavailable: {error}");
+            Vec::new()
+        }
     }
+}
 
-    pub(crate) fn toggle_command_editor(&mut self) {
-        let enabled = {
-            let mut state = self.input_state.lock();
-            state.command_editor_config.enabled = !state.command_editor_config.enabled;
-            if !state.command_editor_config.enabled {
-                state.command_editor_views.clear();
-            }
-            state.command_editor_config.enabled
-        };
-        self.refresh_command_editor_view();
-        self.show_toast(format!(
-            "Command editor: {}",
-            if enabled { "on" } else { "off" }
+pub(crate) fn command_editor_settings(
+    config: &CommandEditorConfig,
+    current_dir: Option<PathBuf>,
+    command_words: Vec<String>,
+    history_entries: Vec<HistoryEntry>,
+) -> EditorSettings {
+    EditorSettings {
+        completion_words: config.completions.clone(),
+        command_words,
+        history_entries,
+        current_dir,
+        max_history: config.max_history,
+    }
+}
+
+pub(crate) fn enqueue_persistent_command_history(
+    host: &mut WindowHost,
+    command: String,
+    cwd: PathBuf,
+    config: &CommandEditorConfig,
+) {
+    let Some(writer) = &mut host.command.history_writer else {
+        return;
+    };
+    writer.enqueue(history_runtime::store_request(command, cwd, config));
+}
+
+pub(crate) fn toggle_command_editor(host: &mut WindowHost) {
+    let enabled = {
+        let mut state = host.render.input_state.lock();
+        state.command_editor_config.enabled = !state.command_editor_config.enabled;
+        if !state.command_editor_config.enabled {
+            state.command_editor_views.clear();
+        }
+        state.command_editor_config.enabled
+    };
+    refresh_command_editor_view(host);
+    show_toast(
+        host,
+        format!("Command editor: {}", if enabled { "on" } else { "off" }),
+    );
+}
+
+pub(crate) fn request_window_grid_size(
+    host: &WindowHost,
+    cols: u32,
+    rows: u32,
+) {
+    let Some(window) = &host.window else {
+        return;
+    };
+    let (cell_width, cell_height, gutter_width, _) = layout_snapshot(&host.render);
+    let width = cols.saturating_mul(cell_width).saturating_add(gutter_width);
+    let height = rows.saturating_mul(cell_height).saturating_add(cell_height);
+    let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+}
+
+pub(crate) fn request_window_size_for_tab(
+    host: &WindowHost,
+    tab_id: TabId,
+) {
+    let Some(endpoint) = host.input.endpoints.get(&tab_id) else {
+        return;
+    };
+    let terminal = endpoint.terminal.lock();
+    request_window_grid_size(
+        host,
+        terminal.viewport.cols,
+        view::total_rows(&terminal.active, &terminal.viewport),
+    );
+}
+
+pub(crate) fn update_preedit(
+    host: &mut WindowHost,
+    preedit: Option<PreeditState>,
+) {
+    host.render.input_state.lock().preedit = preedit;
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
+
+pub(crate) fn update_hovered_tab_bar_button(
+    render: &RenderRuntime,
+    hovered_button: Option<renderer::TabBarHover>,
+) {
+    render.input_state.lock().hovered_tab_bar_button = hovered_button;
+}
+
+pub(crate) fn update_tab_context_menu(
+    render: &RenderRuntime,
+    menu: Option<TabContextMenu>,
+) {
+    render.input_state.lock().tab_context_menu = menu;
+}
+
+pub(crate) fn update_gutter_popup(
+    render: &RenderRuntime,
+    popup: Option<renderer::GutterPopup>,
+) {
+    render.input_state.lock().gutter_popup = popup;
+}
+
+pub(crate) fn notify_interaction_changed(
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+) {
+    publish_active_input_snapshot(input);
+    let _ = render.event_tx.push(RenderEvent::None);
+    if let Some(thread) = render.thread_handle.get() {
+        thread.unpark();
+    }
+    if startup.presenter.is_some()
+        && let Some(window) = window
+    {
+        window.request_redraw();
+    }
+}
+
+pub(crate) fn extend_selection_to_mouse(host: &mut WindowHost) -> bool {
+    let cell = cell_at(host, host.mouse.pos.0, host.mouse.pos.1);
+    let Some(target) = active_input_target(&mut host.input) else {
+        return false;
+    };
+    let mut guard = target.terminal.lock();
+    let terminal = &mut *guard;
+    let Some(selection) = terminal.selection.as_ref() else {
+        return false;
+    };
+    let Some(new_sel) = extend_selection(
+        selection,
+        &terminal.active,
+        &terminal.viewport,
+        cell.0,
+        cell.1,
+    ) else {
+        return false;
+    };
+    terminal.selection = Some(new_sel);
+    terminal.invalidate_snapshot_rows();
+    drop(guard);
+    if let Some(tab_id) = host.input.active_tab {
+        clear_command_editor_selection_for_tab(host, tab_id);
+    }
+    true
+}
+
+pub(crate) fn current_selection_autoscroll_direction(
+    host: &mut WindowHost
+) -> Option<SelectionAutoscroll> {
+    if !host.mouse.left_drag_active
+        || !host.mouse.selection_drag_moved
+        || host.mouse.command_editor_drag_anchor.is_some()
+        || host.modals.permission_modal.is_some()
+        || host.modals.recording_popup.is_some()
+    {
+        return None;
+    }
+    let mouse_y = host.mouse.pos.1;
+    let (_, cell_height, _, _) = layout_snapshot(&host.render);
+    let command_editor_view_present = {
+        let state = host.render.input_state.lock();
+        command_editor_view_open_for_input_tab(&state, host.input.active_tab)
+    };
+    let target = active_input_target(&mut host.input)?;
+    let terminal = target.terminal.lock();
+    terminal.selection.as_ref()?;
+    let viewport_rows = terminal
+        .viewport
+        .rows
+        .saturating_sub(command_editor_terminal_row_offset(
+            &terminal,
+            command_editor_view_present,
         ));
-    }
+    selection_autoscroll_direction(mouse_y, cell_height, viewport_rows)
+}
 
-    pub(crate) fn request_window_grid_size(
-        &self,
-        cols: u32,
-        rows: u32,
-    ) {
-        let Some(window) = &self.window else {
-            return;
-        };
-        let (cell_width, cell_height, gutter_width, _) = self.layout_snapshot();
-        let width = cols.saturating_mul(cell_width).saturating_add(gutter_width);
-        let height = rows.saturating_mul(cell_height).saturating_add(cell_height);
-        let _ = window.request_inner_size(winit::dpi::PhysicalSize::new(width, height));
+pub(crate) fn refresh_selection_autoscroll_direction(
+    host: &mut WindowHost
+) -> Option<SelectionAutoscroll> {
+    let direction = current_selection_autoscroll_direction(host);
+    if host.mouse.selection_autoscroll_direction != direction {
+        host.mouse.selection_autoscroll_next = None;
+        host.mouse.selection_autoscroll_direction = direction;
     }
+    direction
+}
 
-    pub(crate) fn request_window_size_for_tab(
-        &self,
-        tab_id: TabId,
-    ) {
-        let Some(endpoint) = self.input_endpoints.get(&tab_id) else {
-            return;
-        };
-        let terminal = endpoint.terminal.lock();
-        self.request_window_grid_size(
-            terminal.viewport.cols,
-            view::total_rows(&terminal.active, &terminal.viewport),
-        );
+pub(crate) fn clear_selection_autoscroll(mouse: &mut MouseRuntime) {
+    mouse.selection_autoscroll_direction = None;
+    mouse.selection_autoscroll_next = None;
+}
+
+pub(crate) fn stop_selection_drag(mouse: &mut MouseRuntime) {
+    mouse.left_drag_active = false;
+    mouse.selection_drag_moved = false;
+    mouse.command_editor_drag_anchor = None;
+    clear_selection_autoscroll(mouse);
+}
+
+pub(crate) fn set_idle_control_flow(
+    startup: &StartupState,
+    event_loop: &ActiveEventLoop,
+) {
+    if let Some(when) = startup.next_redraw {
+        event_loop.set_control_flow(ControlFlow::WaitUntil(when));
+    } else {
+        event_loop.set_control_flow(ControlFlow::Wait);
     }
+}
 
-    pub(crate) fn update_preedit(
-        &mut self,
-        preedit: Option<PreeditState>,
-    ) {
-        self.input_state.lock().preedit = preedit;
-        self.notify_interaction_changed();
+pub(crate) fn apply_selection_autoscroll(
+    host: &mut WindowHost,
+    direction: SelectionAutoscroll,
+) -> bool {
+    let cell = cell_at(host, host.mouse.pos.0, host.mouse.pos.1);
+    let Some(target) = active_input_target(&mut host.input) else {
+        return false;
+    };
+    let mut guard = target.terminal.lock();
+    let terminal = &mut *guard;
+    if terminal.selection.is_none() {
+        return false;
     }
-
-    pub(crate) fn update_hovered_tab_bar_button(
-        &mut self,
-        hovered_button: Option<renderer::TabBarHover>,
-    ) {
-        self.input_state.lock().hovered_tab_bar_button = hovered_button;
-    }
-
-    pub(crate) fn update_tab_context_menu(
-        &mut self,
-        menu: Option<TabContextMenu>,
-    ) {
-        self.input_state.lock().tab_context_menu = menu;
-    }
-
-    pub(crate) fn update_gutter_popup(
-        &mut self,
-        popup: Option<renderer::GutterPopup>,
-    ) {
-        self.input_state.lock().gutter_popup = popup;
-    }
-
-    pub(crate) fn notify_interaction_changed(&mut self) {
-        self.publish_active_input_snapshot();
-        let _ = self.event_tx.push(RenderEvent::None);
-        if let Some(thread) = self.render_thread_handle.get() {
-            thread.unpark();
+    let scrolled = match direction {
+        SelectionAutoscroll::Up => {
+            let viewport = terminal.viewport;
+            view::scroll_viewport_up(&mut terminal.active, &viewport, 1)
         }
-        if self.startup_presenter.is_some()
-            && let Some(window) = &self.window
-        {
-            window.request_redraw();
-        }
+        SelectionAutoscroll::Down => view::scroll_viewport_down(&mut terminal.active, 1),
+    };
+    if scrolled == 0 {
+        return false;
     }
-
-    pub(crate) fn extend_selection_to_mouse(&mut self) -> bool {
-        let cell = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
-        let Some(target) = self.active_input_target() else {
-            return false;
-        };
-        let mut guard = target.terminal.lock();
-        let terminal = &mut *guard;
-        let Some(selection) = terminal.selection.as_ref() else {
-            return false;
-        };
-        let Some(new_sel) = extend_selection(
+    if let Some(selection) = terminal.selection.as_ref()
+        && let Some(new_sel) = extend_selection(
             selection,
             &terminal.active,
             &terminal.viewport,
             cell.0,
             cell.1,
-        ) else {
-            return false;
-        };
+        )
+    {
         terminal.selection = Some(new_sel);
-        terminal.invalidate_snapshot_rows();
-        drop(guard);
-        if let Some(tab_id) = self.active_input_tab {
-            self.clear_command_editor_selection_for_tab(tab_id);
-        }
-        true
+    }
+    terminal.invalidate_snapshot_rows();
+    true
+}
+
+pub(crate) fn run_selection_autoscroll(
+    host: &mut WindowHost,
+    event_loop: &ActiveEventLoop,
+) {
+    let Some(direction) = refresh_selection_autoscroll_direction(host) else {
+        clear_selection_autoscroll(&mut host.mouse);
+        set_idle_control_flow(&host.startup, event_loop);
+        return;
+    };
+
+    let now = Instant::now();
+    let due = host.mouse.selection_autoscroll_next.unwrap_or(now);
+    if now < due {
+        event_loop.set_control_flow(ControlFlow::WaitUntil(due));
+        return;
     }
 
-    pub(crate) fn current_selection_autoscroll_direction(&mut self) -> Option<SelectionAutoscroll> {
-        if !self.left_drag_active
-            || !self.selection_drag_moved
-            || self.command_editor_drag_anchor.is_some()
-            || self.permission_modal.is_some()
-            || self.recording_popup.is_some()
-        {
-            return None;
-        }
-        let mouse_y = self.mouse_pos.1;
-        let (_, cell_height, _, _) = self.layout_snapshot();
-        let command_editor_view_present = {
-            let state = self.input_state.lock();
-            command_editor_view_open_for_input_tab(&state, self.active_input_tab)
-        };
-        let target = self.active_input_target()?;
-        let terminal = target.terminal.lock();
-        terminal.selection.as_ref()?;
-        let viewport_rows =
-            terminal
-                .viewport
-                .rows
-                .saturating_sub(command_editor_terminal_row_offset(
-                    &terminal,
-                    command_editor_view_present,
-                ));
-        selection_autoscroll_direction(mouse_y, cell_height, viewport_rows)
+    if apply_selection_autoscroll(host, direction) {
+        notify_interaction_changed(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+        );
+        let next = now + SELECTION_AUTOSCROLL_INTERVAL;
+        host.mouse.selection_autoscroll_next = Some(next);
+        event_loop.set_control_flow(ControlFlow::WaitUntil(next));
+    } else {
+        clear_selection_autoscroll(&mut host.mouse);
+        set_idle_control_flow(&host.startup, event_loop);
     }
+}
 
-    pub(crate) fn refresh_selection_autoscroll_direction(&mut self) -> Option<SelectionAutoscroll> {
-        let direction = self.current_selection_autoscroll_direction();
-        if self.selection_autoscroll_direction != direction {
-            self.selection_autoscroll_next = None;
-            self.selection_autoscroll_direction = direction;
-        }
-        direction
-    }
+pub(crate) fn publish_active_input_snapshot(input: &InputRuntime) {
+    let Some(tab_id) = input.active_tab else {
+        return;
+    };
+    let Some(target) = input.endpoints.get(&tab_id) else {
+        return;
+    };
+    unpark_thread_if_started(&target.terminal_thread);
+}
 
-    pub(crate) fn clear_selection_autoscroll(&mut self) {
-        self.selection_autoscroll_direction = None;
-        self.selection_autoscroll_next = None;
-    }
-
-    pub(crate) fn stop_selection_drag(&mut self) {
-        self.left_drag_active = false;
-        self.selection_drag_moved = false;
-        self.command_editor_drag_anchor = None;
-        self.clear_selection_autoscroll();
-    }
-
-    pub(crate) fn set_idle_control_flow(
-        &self,
-        event_loop: &ActiveEventLoop,
-    ) {
-        if let Some(when) = self.startup_next_redraw {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(when));
-        } else {
-            event_loop.set_control_flow(ControlFlow::Wait);
-        }
-    }
-
-    pub(crate) fn apply_selection_autoscroll(
-        &mut self,
-        direction: SelectionAutoscroll,
-    ) -> bool {
-        let cell = self.cell_at(self.mouse_pos.0, self.mouse_pos.1);
-        let Some(target) = self.active_input_target() else {
-            return false;
-        };
-        let mut guard = target.terminal.lock();
-        let terminal = &mut *guard;
-        if terminal.selection.is_none() {
-            return false;
-        }
-        let scrolled = match direction {
-            SelectionAutoscroll::Up => {
-                let viewport = terminal.viewport;
-                view::scroll_viewport_up(&mut terminal.active, &viewport, 1)
-            }
-            SelectionAutoscroll::Down => view::scroll_viewport_down(&mut terminal.active, 1),
-        };
-        if scrolled == 0 {
-            return false;
-        }
-        if let Some(selection) = terminal.selection.as_ref()
-            && let Some(new_sel) = extend_selection(
-                selection,
-                &terminal.active,
-                &terminal.viewport,
-                cell.0,
-                cell.1,
-            )
-        {
-            terminal.selection = Some(new_sel);
-        }
-        terminal.invalidate_snapshot_rows();
-        true
-    }
-
-    pub(crate) fn run_selection_autoscroll(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-    ) {
-        let Some(direction) = self.refresh_selection_autoscroll_direction() else {
-            self.clear_selection_autoscroll();
-            self.set_idle_control_flow(event_loop);
-            return;
-        };
-
-        let now = Instant::now();
-        let due = self.selection_autoscroll_next.unwrap_or(now);
-        if now < due {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(due));
-            return;
-        }
-
-        if self.apply_selection_autoscroll(direction) {
-            self.notify_interaction_changed();
-            let next = now + SELECTION_AUTOSCROLL_INTERVAL;
-            self.selection_autoscroll_next = Some(next);
-            event_loop.set_control_flow(ControlFlow::WaitUntil(next));
-        } else {
-            self.clear_selection_autoscroll();
-            self.set_idle_control_flow(event_loop);
-        }
-    }
-
-    pub(crate) fn publish_active_input_snapshot(&mut self) {
-        let Some(tab_id) = self.active_input_tab else {
-            return;
-        };
-        let Some(target) = self.input_endpoints.get(&tab_id) else {
-            return;
-        };
-        unpark_thread_if_started(&target.terminal_thread);
-    }
-
-    pub(crate) fn schedule_startup_redraw(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-        delay: Option<Duration>,
-    ) {
-        let Some(delay) = delay else {
-            self.startup_next_redraw = None;
-            event_loop.set_control_flow(ControlFlow::Wait);
-            return;
-        };
-        let when = Instant::now() + delay.max(Duration::from_millis(1));
-        self.startup_next_redraw = Some(when);
-        event_loop.set_control_flow(ControlFlow::WaitUntil(when));
-    }
-
-    pub(crate) fn request_due_startup_redraw(
-        &mut self,
-        event_loop: &ActiveEventLoop,
-    ) {
-        if self.startup_presenter.is_none() {
-            return;
-        }
-        let Some(when) = self.startup_next_redraw else {
-            return;
-        };
-        if Instant::now() < when {
-            event_loop.set_control_flow(ControlFlow::WaitUntil(when));
-            return;
-        }
-        self.startup_next_redraw = None;
+pub(crate) fn schedule_startup_redraw(
+    startup: &mut StartupState,
+    event_loop: &ActiveEventLoop,
+    delay: Option<Duration>,
+) {
+    let Some(delay) = delay else {
+        startup.next_redraw = None;
         event_loop.set_control_flow(ControlFlow::Wait);
-        if let Some(window) = &self.window {
-            window.request_redraw();
-        }
-    }
+        return;
+    };
+    let when = Instant::now() + delay.max(Duration::from_millis(1));
+    startup.next_redraw = Some(when);
+    event_loop.set_control_flow(ControlFlow::WaitUntil(when));
+}
 
-    pub(crate) fn update_recording_popup_view(
-        &mut self,
-        popup: Option<RecordingPopupView>,
-    ) {
-        self.input_state.lock().recording_popup = popup;
-        self.notify_interaction_changed();
+pub(crate) fn request_due_startup_redraw(
+    startup: &mut StartupState,
+    window: Option<&Arc<Window>>,
+    event_loop: &ActiveEventLoop,
+) {
+    if startup.presenter.is_none() {
+        return;
     }
-
-    pub(crate) fn update_permission_modal_view(
-        &mut self,
-        modal: Option<PermissionModal>,
-    ) {
-        self.input_state.lock().permission_modal = modal;
-        self.notify_interaction_changed();
+    let Some(when) = startup.next_redraw else {
+        return;
+    };
+    if Instant::now() < when {
+        event_loop.set_control_flow(ControlFlow::WaitUntil(when));
+        return;
     }
-
-    pub(crate) fn update_permission_hover(
-        &mut self,
-        hovered: Option<PermissionChoice>,
-    ) {
-        let mut state = self.input_state.lock();
-        let Some(modal) = state.permission_modal.as_mut() else {
-            return;
-        };
-        if modal.hovered != hovered {
-            modal.hovered = hovered;
-            drop(state);
-            self.notify_interaction_changed();
-        }
+    startup.next_redraw = None;
+    event_loop.set_control_flow(ControlFlow::Wait);
+    if let Some(window) = window {
+        window.request_redraw();
     }
+}
 
-    pub(crate) fn update_toast_view(
-        &mut self,
-        toast: Option<ToastView>,
-    ) {
-        self.input_state.lock().toast = toast;
-        self.notify_interaction_changed();
+pub(crate) fn update_recording_popup_view(
+    host: &mut WindowHost,
+    popup: Option<RecordingPopupView>,
+) {
+    host.render.input_state.lock().recording_popup = popup;
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
+
+pub(crate) fn update_permission_modal_view(
+    host: &mut WindowHost,
+    modal: Option<PermissionModal>,
+) {
+    host.render.input_state.lock().permission_modal = modal;
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
+
+pub(crate) fn update_permission_hover(
+    host: &mut WindowHost,
+    hovered: Option<PermissionChoice>,
+) {
+    let mut state = host.render.input_state.lock();
+    let Some(modal) = state.permission_modal.as_mut() else {
+        return;
+    };
+    if modal.hovered != hovered {
+        modal.hovered = hovered;
+        drop(state);
+        notify_interaction_changed(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+        );
     }
+}
 
-    pub(crate) fn show_toast(
-        &mut self,
-        text: impl Into<String>,
-    ) {
-        let token = self.next_toast_token;
-        self.next_toast_token += 1;
-        self.update_toast_view(Some(ToastView { text: text.into() }));
-        let proxy = self.event_proxy.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(2));
-            let _ = proxy.send_event(AppEvent::DismissToast(token));
-        });
+pub(crate) fn update_toast_view(
+    host: &mut WindowHost,
+    toast: Option<ToastView>,
+) {
+    host.render.input_state.lock().toast = toast;
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
+
+pub(crate) fn show_toast(
+    host: &mut WindowHost,
+    text: impl Into<String>,
+) {
+    let token = host.modals.next_toast_token;
+    host.modals.next_toast_token += 1;
+    update_toast_view(host, Some(ToastView { text: text.into() }));
+    let proxy = host.render.event_proxy.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(2));
+        let _ = proxy.send_event(AppEvent::DismissToast(token));
+    });
+}
+
+pub(crate) fn show_recording_start_popup(
+    host: &mut WindowHost,
+    path: PathBuf,
+) {
+    let lines = vec![
+        "Output recording started.".to_string(),
+        format!("Recording to {}.", path.display()),
+        "Press enter to start recording.".to_string(),
+        "Escape to cancel.".to_string(),
+    ];
+    host.modals.recording_popup = Some(RecordingPopupState::PendingStart { path });
+    update_recording_popup_view(host, Some(RecordingPopupView { lines }));
+}
+
+pub(crate) fn request_permission(
+    host: &mut WindowHost,
+    feature: String,
+    response_tx: mpsc::Sender<PermissionDecision>,
+) {
+    let request = PermissionRequest {
+        feature,
+        response_tx,
+    };
+    if host.modals.permission_modal.is_some() {
+        host.modals.queued_permission_requests.push_back(request);
+        return;
     }
+    show_permission_modal(host, request);
+}
 
-    pub(crate) fn show_recording_start_popup(
-        &mut self,
-        path: PathBuf,
-    ) {
-        let lines = vec![
-            "Output recording started.".to_string(),
-            format!("Recording to {}.", path.display()),
-            "Press enter to start recording.".to_string(),
-            "Escape to cancel.".to_string(),
-        ];
-        self.recording_popup = Some(RecordingPopupState::PendingStart { path });
-        self.update_recording_popup_view(Some(RecordingPopupView { lines }));
-    }
-
-    pub(crate) fn request_permission(
-        &mut self,
-        feature: String,
-        response_tx: mpsc::Sender<PermissionDecision>,
-    ) {
-        let request = PermissionRequest {
-            feature,
-            response_tx,
-        };
-        if self.permission_modal.is_some() {
-            self.queued_permission_requests.push_back(request);
-            return;
-        }
-        self.show_permission_modal(request);
-    }
-
-    pub(crate) fn show_permission_modal(
-        &mut self,
-        request: PermissionRequest,
-    ) {
-        self.close_gutter_popup();
-        self.update_tab_context_menu(None);
-        self.permission_modal = Some(PermissionModalState {
-            response_tx: request.response_tx,
-        });
-        self.update_permission_modal_view(Some(PermissionModal {
+pub(crate) fn show_permission_modal(
+    host: &mut WindowHost,
+    request: PermissionRequest,
+) {
+    close_gutter_popup(&host.render, &mut host.input);
+    update_tab_context_menu(&host.render, None);
+    host.modals.permission_modal = Some(PermissionModalState {
+        response_tx: request.response_tx,
+    });
+    update_permission_modal_view(
+        host,
+        Some(PermissionModal {
             feature: request.feature,
             hovered: None,
-        }));
-    }
+        }),
+    );
+}
 
-    pub(crate) fn settle_permission_modal(
-        &mut self,
-        decision: PermissionDecision,
-    ) {
-        if let Some(modal) = self.permission_modal.take() {
-            let _ = modal.response_tx.send(decision);
-        }
-        self.update_permission_modal_view(None);
-        if let Some(next) = self.queued_permission_requests.pop_front() {
-            self.show_permission_modal(next);
-        }
+pub(crate) fn settle_permission_modal(
+    host: &mut WindowHost,
+    decision: PermissionDecision,
+) {
+    if let Some(modal) = host.modals.permission_modal.take() {
+        let _ = modal.response_tx.send(decision);
     }
+    update_permission_modal_view(host, None);
+    if let Some(next) = host.modals.queued_permission_requests.pop_front() {
+        show_permission_modal(host, next);
+    }
+}
 
-    pub(crate) fn show_recording_completed_popup(
-        &mut self,
-        path: PathBuf,
-    ) {
-        let token = self.next_recording_popup_token;
-        self.next_recording_popup_token += 1;
-        self.recording_popup = Some(RecordingPopupState::Completed { token });
-        self.update_recording_popup_view(Some(RecordingPopupView {
+pub(crate) fn show_recording_completed_popup(
+    host: &mut WindowHost,
+    path: PathBuf,
+) {
+    let token = host.modals.next_recording_popup_token;
+    host.modals.next_recording_popup_token += 1;
+    host.modals.recording_popup = Some(RecordingPopupState::Completed { token });
+    update_recording_popup_view(
+        host,
+        Some(RecordingPopupView {
             lines: vec![format!("Recorded to {}.", path.display())],
-        }));
-        let proxy = self.event_proxy.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(3));
-            let _ = proxy.send_event(AppEvent::DismissRecordingPopup(token));
-        });
-    }
+        }),
+    );
+    let proxy = host.render.event_proxy.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(3));
+        let _ = proxy.send_event(AppEvent::DismissRecordingPopup(token));
+    });
+}
 
-    pub(crate) fn show_recording_error_popup(
-        &mut self,
-        error: std::io::Error,
-    ) {
-        let token = self.next_recording_popup_token;
-        self.next_recording_popup_token += 1;
-        self.recording_popup = Some(RecordingPopupState::Completed { token });
-        self.update_recording_popup_view(Some(RecordingPopupView {
+pub(crate) fn show_recording_error_popup(
+    host: &mut WindowHost,
+    error: std::io::Error,
+) {
+    let token = host.modals.next_recording_popup_token;
+    host.modals.next_recording_popup_token += 1;
+    host.modals.recording_popup = Some(RecordingPopupState::Completed { token });
+    update_recording_popup_view(
+        host,
+        Some(RecordingPopupView {
             lines: vec![
                 "Failed to start output recording.".to_string(),
                 error.to_string(),
             ],
-        }));
-        let proxy = self.event_proxy.clone();
-        thread::spawn(move || {
-            thread::sleep(Duration::from_secs(3));
-            let _ = proxy.send_event(AppEvent::DismissRecordingPopup(token));
-        });
-    }
+        }),
+    );
+    let proxy = host.render.event_proxy.clone();
+    thread::spawn(move || {
+        thread::sleep(Duration::from_secs(3));
+        let _ = proxy.send_event(AppEvent::DismissRecordingPopup(token));
+    });
+}
 
-    pub(crate) fn dismiss_recording_popup(&mut self) {
-        self.recording_popup = None;
-        self.update_recording_popup_view(None);
-    }
+pub(crate) fn dismiss_recording_popup(
+    modals: &mut ModalRuntime,
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+) {
+    modals.recording_popup = None;
+    render.input_state.lock().recording_popup = None;
+    notify_interaction_changed(input, render, startup, window);
 }
