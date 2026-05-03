@@ -1173,14 +1173,25 @@ fn current_completion_word(
     if cursor > buffer.len() || !buffer.is_char_boundary(cursor) {
         return None;
     }
-    let start = current_completion_word_start(buffer, cursor);
+    let scan = scan_completion_word(buffer, cursor);
+    if !cursor_at_completion_word_end(buffer, cursor, scan) {
+        return None;
+    }
+    let start = scan.start;
     Some((start, &buffer[start..cursor]))
 }
 
-fn current_completion_word_start(
+#[derive(Debug, Clone, Copy)]
+struct CompletionWordScan {
+    start: usize,
+    quote: Option<char>,
+    escaping_next: bool,
+}
+
+fn scan_completion_word(
     buffer: &str,
     cursor: usize,
-) -> usize {
+) -> CompletionWordScan {
     let mut start = 0;
     let mut quote = None;
     let mut escaped = false;
@@ -1218,7 +1229,30 @@ fn current_completion_word_start(
         }
     }
 
-    start
+    CompletionWordScan {
+        start,
+        quote,
+        escaping_next: escaped,
+    }
+}
+
+fn cursor_at_completion_word_end(
+    buffer: &str,
+    cursor: usize,
+    scan: CompletionWordScan,
+) -> bool {
+    let Some(ch) = buffer[cursor..].chars().next() else {
+        return true;
+    };
+    if scan.escaping_next {
+        return false;
+    }
+    match scan.quote {
+        Some('\'') => ch == '\'',
+        Some('"') => ch == '"',
+        Some(_) => false,
+        None => ch.is_whitespace() || is_operator_char(ch),
+    }
 }
 
 fn current_path_completion_word(

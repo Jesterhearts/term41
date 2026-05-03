@@ -1127,6 +1127,31 @@ fn command_words_do_not_complete_argument_words() {
 }
 
 #[test]
+fn completion_ignores_cursor_inside_command_word() {
+    let settings = command_settings(&["cargo"]);
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("carx".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "car".len());
+
+    assert_eq!(editor.view(&settings).completion, None);
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Complete, &settings),
+        EditOutcome::Ignored
+    );
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::MoveRight, &settings),
+        EditOutcome::Updated
+    );
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "carx");
+    assert_eq!(view.cursor, "carx".len());
+}
+
+#[test]
 fn command_words_complete_after_shell_separator() {
     let settings = command_settings(&["cargo"]);
     let mut editor = CommandEditor::new();
@@ -1194,6 +1219,31 @@ fn completion_matches_nested_path_prefix() {
 }
 
 #[test]
+fn completion_ignores_cursor_inside_unquoted_path_word() {
+    let root = unique_test_dir("middle-path");
+    fs::create_dir_all(root.join("some")).expect("create temp dir");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat so/dir".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "cat so".len());
+
+    assert_eq!(editor.view(&settings).completion, None);
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::MoveRight, &settings),
+        EditOutcome::Updated
+    );
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "cat so/dir");
+    assert_eq!(view.cursor, "cat so/".len());
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn completion_matches_path_inside_double_quotes() {
     let root = unique_test_dir("double-quoted-path");
     fs::create_dir_all(&root).expect("create temp dir");
@@ -1229,6 +1279,36 @@ fn completion_matches_path_inside_single_quotes() {
     assert_eq!(editor.view(&settings).completion.as_deref(), Some("ar.txt"));
     apply_input(&mut editor, EditorInput::MoveRight, &settings);
     assert_eq!(editor.view(&settings).text, "cat 'foo bar.txt");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_ignores_cursor_before_escaped_whitespace() {
+    let root = unique_test_dir("escaped-space-middle-path");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("foo bar.txt"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo\\ bar.txt".to_owned()),
+        &settings,
+    );
+    set_cursor(&mut editor, "cat foo\\".len());
+
+    assert_eq!(editor.view(&settings).completion, None);
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Complete, &settings),
+        EditOutcome::Ignored
+    );
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::MoveRight, &settings),
+        EditOutcome::Updated
+    );
+    let view = editor.view(&settings);
+    assert_eq!(view.text, "cat foo\\ bar.txt");
+    assert_eq!(view.cursor, "cat foo\\ ".len());
 
     let _ = fs::remove_dir_all(root);
 }
