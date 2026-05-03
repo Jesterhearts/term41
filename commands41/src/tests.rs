@@ -1034,6 +1034,52 @@ fn tab_accepts_selected_completion_candidate() {
 }
 
 #[test]
+fn tab_accepts_one_word_from_selected_history_completion() {
+    let settings = EditorSettings {
+        history_entries: vec![
+            HistoryEntry::external("cargo clippy --all"),
+            HistoryEntry::external("cargo check --workspace"),
+        ],
+        ..EditorSettings::default()
+    };
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+
+    apply_input(&mut editor, EditorInput::Complete, &settings);
+
+    assert_eq!(editor.view(&settings).text, "cargo clippy");
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some(" --all"));
+}
+
+#[test]
+fn right_arrow_accepts_full_selected_history_completion() {
+    let settings = EditorSettings {
+        history_entries: vec![
+            HistoryEntry::external("cargo clippy --all"),
+            HistoryEntry::external("cargo check --workspace"),
+        ],
+        ..EditorSettings::default()
+    };
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo".to_owned()),
+        &settings,
+    );
+    apply_input(&mut editor, EditorInput::HistoryNext, &settings);
+
+    apply_input(&mut editor, EditorInput::MoveRight, &settings);
+
+    assert_eq!(editor.view(&settings).text, "cargo clippy --all");
+    assert!(editor.view(&settings).completion.is_none());
+}
+
+#[test]
 fn history_arrows_fall_back_without_ambiguous_completion() {
     let settings = command_settings(&["cargo"]);
     let mut editor = CommandEditor::new();

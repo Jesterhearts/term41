@@ -894,7 +894,7 @@ fn complete_current_prefix(
     editor: &mut CommandEditor,
     settings: &EditorSettings,
 ) -> EditOutcome {
-    if accept_selected_completion(editor) {
+    if accept_selected_completion_step(editor) {
         return EditOutcome::Updated;
     }
 
@@ -987,11 +987,11 @@ fn history_completion_step_suffix(
     settings: &EditorSettings,
 ) -> Option<String> {
     let suffix = history_completion_suffix(editor, settings)?;
-    let end = next_history_completion_step_end(&suffix)?;
+    let end = next_completion_step_end(&suffix)?;
     Some(suffix[..end].to_owned())
 }
 
-fn next_history_completion_step_end(text: &str) -> Option<usize> {
+fn next_completion_step_end(text: &str) -> Option<usize> {
     let mut saw_segment_text = false;
     let mut end = 0;
     for (idx, ch) in text.char_indices() {
@@ -1470,6 +1470,24 @@ fn accept_selected_completion(editor: &mut CommandEditor) -> bool {
     };
     begin_text_edit(editor);
     replace_selection_or_insert(editor, &suffix);
+    true
+}
+
+fn accept_selected_completion_step(editor: &mut CommandEditor) -> bool {
+    let Some(selection) = editor.completion_selection.take() else {
+        return false;
+    };
+    if selection.cursor != editor.cursor || selection.base != editor.buffer {
+        return false;
+    }
+    let Some(suffix) = selection.current_suffix() else {
+        return false;
+    };
+    let Some(end) = next_completion_step_end(&suffix) else {
+        return false;
+    };
+    begin_text_edit(editor);
+    replace_selection_or_insert(editor, &suffix[..end]);
     true
 }
 
