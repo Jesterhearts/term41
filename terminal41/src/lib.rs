@@ -924,6 +924,49 @@ impl Terminal {
         let input_context_before = self.input_context_state();
         let blank_scrollback_padding_requested =
             !self.on_alt_screen && action_requests_blank_scrollback_padding(&action);
+        /*
+         * Full-display clears on the primary screen have two incompatible
+         * callers that both use small, ordinary-looking CSI sequences:
+         *
+         * 1. Shell clear commands (`clear`, PowerShell clear, etc.) usually send
+         *    some form of `CUP(1,1) ED 2 [ED 3]`, then redraw a prompt near the top
+         *    of a now-empty screen. If the session has little history left, we
+         *    synthesize a blank scrollback page and bottom-align the live
+         *    prompt/content. That preserves the terminal invariant users expect
+         *    after clearing: PageUp still moves into a blank page instead of old
+         *    command output, and the prompt sits at the live bottom.
+         *
+         * 2. Primary-screen full-screen apps such as `top` can use almost the same
+         *    clear (`DECCKM`/application-keypad, hide cursor, `CUP(1,1) ED 2`)
+         *    without actually entering 1049 alternate screen. Those apps repaint
+         *    from absolute screen rows and may write fewer rows than the viewport
+         *    height. For them, the shell-clear behavior is wrong: trimming blank
+         *    rows below the cursor can remap row 0 onto old scrollback before the
+         *    first write, and manufacturing a blank scrollback page can pull stale
+         *    pre-clear content into the visible viewport. The right behavior is to
+         *    preserve top-origin row numbers and append any missing live rows after
+         *    the batch.
+         *
+         * We cannot decide solely from `ED 2` itself. So `ED 2`/`ED 3`
+         * starts a one-batch pending state, and subsequent actions refine
+         * it:
+         *
+         * - Explicit cursor addressing below row 1 means the app is treating the
+         *   screen as absolute rows, so padding must preserve row numbers.
+         * - A clear that happens while app cursor, app keypad, or mouse tracking is
+         *   active is treated as a foreground-app clear. This also preserves row
+         *   numbers, but deliberately does not create the shell-style blank
+         *   scrollback page. PowerShell may keep app modes enabled at the prompt, so
+         *   this signal is used only for clear padding/display repair, not for
+         *   globally hiding the command editor.
+         *
+         * `preserve_clear_absolute_rows` is checked before applying the next
+         * action so we do not perform the delayed blank-suffix trim on the
+         * very write/cursor movement that proves absolute row semantics.
+         * `track_scroll` consumes the pending flags after the batch, when it
+         * knows whether rows were popped and can choose prepend-vs-append
+         * padding exactly once.
+         */
         let preserve_clear_absolute_rows = self.primary_clear_absolute_rows_pending
             || (self.primary_blank_scrollback_padding_pending
                 && !self.on_alt_screen
@@ -1344,6 +1387,8 @@ impl Terminal {
         let padding_requested = std::mem::take(&mut self.primary_blank_scrollback_padding_pending);
         let preserve_absolute_rows = std::mem::take(&mut self.primary_clear_absolute_rows_pending);
         let foreground_app_clear = std::mem::take(&mut self.primary_clear_foreground_app_pending);
+        // See the long comment in `apply`: this is where the deferred
+        // clear-padding decision becomes concrete after the PTY batch.
         if std::mem::take(&mut self.primary_blank_suffix_trim_pending) && !preserve_absolute_rows {
             screen::trim_default_blank_rows_below_cursor(&mut self.active, &self.viewport);
         }
