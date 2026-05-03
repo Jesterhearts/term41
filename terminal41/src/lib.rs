@@ -318,6 +318,18 @@ fn action_requests_blank_scrollback_padding(action: &TerminalAction<'_>) -> bool
     )
 }
 
+fn action_addresses_rows_after_clear(action: &TerminalAction<'_>) -> bool {
+    matches!(
+        action,
+        TerminalAction::Csi(CsiAction::Parsed(ParsedCsiAction::Main(
+            MainCsiAction::CursorPosition { row: 2.., .. }
+                | MainCsiAction::LinePositionAbsolute { row: 2.. }
+                | MainCsiAction::CursorVerticalRelative { count: 1.. }
+                | MainCsiAction::CursorNextLine { count: 1.. }
+        )))
+    )
+}
+
 /// Security-sensitive protocol state and VT extension storage.
 #[derive(Debug, Default)]
 pub struct TerminalProtocolState {
@@ -543,6 +555,14 @@ pub struct Terminal {
     /// the live grid is full-height. `track_scroll` consumes this marker after
     /// the current PTY batch and prepends blank scrollback rows.
     primary_blank_scrollback_padding_pending: bool,
+    /// Primary-screen full-display clears leave default blank rows below the
+    /// cursor. The trim is delayed so `ED 2` followed by `ED 3` still lets
+    /// `ED 3` see the original scrollback boundary.
+    primary_blank_suffix_trim_pending: bool,
+    /// A primary-screen app addressed rows below the top after a full clear,
+    /// so short-history padding must preserve viewport row numbers instead of
+    /// bottom-aligning shell-prompt-style output.
+    primary_clear_absolute_rows_pending: bool,
     /// Security-sensitive optional protocol state and feature storage.
     pub protocol: TerminalProtocolState,
     /// Row-level snapshot invalidation state. The dirty rows live in one
@@ -644,6 +664,8 @@ impl Terminal {
             default_status_display,
             emoji_compatibility_mode: EmojiCompatibilityMode::Auto,
             primary_blank_scrollback_padding_pending: false,
+            primary_blank_suffix_trim_pending: false,
+            primary_clear_absolute_rows_pending: false,
             protocol: TerminalProtocolState {
                 feature_permissions,
                 limits,
@@ -871,8 +893,22 @@ impl Terminal {
         trace!("Classified action: {:?}", action);
         let dirty_before = self.snapshot_dirty_baseline();
         let dirty_scope = self.snapshot_dirty_scope(&action, dirty_before);
-        if !self.on_alt_screen && action_requests_blank_scrollback_padding(&action) {
+        let blank_scrollback_padding_requested =
+            !self.on_alt_screen && action_requests_blank_scrollback_padding(&action);
+        if self.primary_blank_suffix_trim_pending && !blank_scrollback_padding_requested {
+            screen::trim_default_blank_rows_below_cursor(&mut self.active, &self.viewport);
+            self.primary_blank_suffix_trim_pending = false;
+        }
+        if self.primary_blank_scrollback_padding_pending
+            && !self.on_alt_screen
+            && action_addresses_rows_after_clear(&action)
+        {
+            self.primary_clear_absolute_rows_pending = true;
+        }
+        if blank_scrollback_padding_requested {
             self.primary_blank_scrollback_padding_pending = true;
+            self.primary_blank_suffix_trim_pending = true;
+            self.primary_clear_absolute_rows_pending = false;
         }
         let was_on_alt_screen = self.on_alt_screen;
         let pending = match action {
@@ -1254,7 +1290,11 @@ impl Terminal {
             popped_before,
         );
 
+        if std::mem::take(&mut self.primary_blank_suffix_trim_pending) {
+            screen::trim_default_blank_rows_below_cursor(&mut self.active, &self.viewport);
+        }
         let padding_requested = std::mem::take(&mut self.primary_blank_scrollback_padding_pending);
+        let preserve_absolute_rows = std::mem::take(&mut self.primary_clear_absolute_rows_pending);
         if self.on_alt_screen {
             return;
         }
@@ -1265,18 +1305,29 @@ impl Terminal {
             } else {
                 0
             };
-        let prepended = screen::pad_short_history_to_live_bottom(
-            &mut self.active,
-            &self.viewport,
-            min_scrollback_rows,
-            padding_requested,
-        );
-        if prepended == 0 {
+        let padding = if preserve_absolute_rows {
+            screen::pad_short_history_to_absolute_rows(
+                &mut self.active,
+                &self.viewport,
+                min_scrollback_rows,
+            )
+        } else {
+            screen::pad_short_history_to_live_bottom(
+                &mut self.active,
+                &self.viewport,
+                min_scrollback_rows,
+            )
+        };
+        if !padding.changed {
             return;
         }
 
-        shift_visible_absolute_rows(&mut self.selection, &mut self.search, prepended);
-        shift_terminal_metadata_rows(&mut self.metadata, prepended);
+        shift_visible_absolute_rows(
+            &mut self.selection,
+            &mut self.search,
+            padding.prepended_rows,
+        );
+        shift_terminal_metadata_rows(&mut self.metadata, padding.prepended_rows);
         self.snapshot.mark_all();
     }
 }

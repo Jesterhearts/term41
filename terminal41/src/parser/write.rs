@@ -883,6 +883,7 @@ fn prepare_ascii_cursor(
         WriteTarget::Main {
             preserve_top_origin_scrollback,
         } => {
+            screen::ensure_cursor_row_exists(screen, viewport);
             let cols = current_row_display_cols(screen, viewport);
             if screen.cursor.col >= cols {
                 if screen.autowrap {
@@ -917,6 +918,7 @@ fn fit_char_to_target(
         WriteTarget::Main {
             preserve_top_origin_scrollback,
         } => {
+            screen::ensure_cursor_row_exists(screen, viewport);
             let cols = current_row_display_cols(screen, viewport);
             if screen.cursor.col + width as u32 > cols {
                 if screen.autowrap {
@@ -977,6 +979,7 @@ fn target_clear_anchored_cells(
         return;
     }
 
+    screen::ensure_cursor_row_exists(screen, viewport);
     let row = screen::active_row_index(screen, viewport);
     crate::image::clear_anchored_cells(&mut screen.images, row, row + 1, left_col, right_col);
 }
@@ -989,6 +992,7 @@ fn target_row_mut<'a>(
 ) -> Option<&'a mut Row> {
     match target {
         WriteTarget::Main { .. } => {
+            screen::ensure_cursor_row_exists(screen, viewport);
             let row = screen::active_row_index(screen, viewport);
             Some(&mut screen.grid.rows[row])
         }

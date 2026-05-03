@@ -30,6 +30,11 @@ pub(crate) struct ResizeScreenOutcome {
     pub prepended_rows: u64,
 }
 
+pub(crate) struct ShortHistoryPadding {
+    pub prepended_rows: u64,
+    pub changed: bool,
+}
+
 /// Snapshot of cursor position and active colors, used by DECSC/DECRC
 /// (ESC 7 / ESC 8) and the `?1048`/`?1049` private modes.
 #[derive(Debug, Clone, Copy)]
@@ -612,14 +617,12 @@ pub(super) fn pad_short_history_to_live_bottom(
     screen: &mut Screen,
     viewport: &Viewport,
     min_scrollback_rows: u32,
-    bottom_align_to_cursor: bool,
-) -> u64 {
+) -> ShortHistoryPadding {
     if page_memory_active(screen) {
-        return 0;
-    }
-
-    if bottom_align_to_cursor {
-        trim_default_blank_rows_below_cursor(screen, viewport);
+        return ShortHistoryPadding {
+            prepended_rows: 0,
+            changed: false,
+        };
     }
 
     let live_missing = (viewport.rows as usize).saturating_sub(screen.grid.rows.len());
@@ -641,10 +644,42 @@ pub(super) fn pad_short_history_to_live_bottom(
         image.row += scrollback_missing;
     }
 
-    (live_missing + scrollback_missing) as u64
+    ShortHistoryPadding {
+        prepended_rows: (live_missing + scrollback_missing) as u64,
+        changed: live_missing + scrollback_missing > 0,
+    }
 }
 
-fn trim_default_blank_rows_below_cursor(
+pub(super) fn pad_short_history_to_absolute_rows(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    min_scrollback_rows: u32,
+) -> ShortHistoryPadding {
+    if page_memory_active(screen) {
+        return ShortHistoryPadding {
+            prepended_rows: 0,
+            changed: false,
+        };
+    }
+
+    let live_missing = (viewport.rows as usize).saturating_sub(screen.grid.rows.len());
+    append_blank_rows(screen, viewport.cols, live_missing);
+
+    let min_scrollback_rows = min_scrollback_rows.min(screen.grid.scrollback_limit) as usize;
+    let desired_rows = viewport.rows as usize + min_scrollback_rows;
+    let scrollback_missing = desired_rows.saturating_sub(screen.grid.rows.len());
+    prepend_blank_rows(&mut screen.grid, viewport.cols, scrollback_missing);
+    for image in screen.images.values_mut() {
+        image.row += scrollback_missing;
+    }
+
+    ShortHistoryPadding {
+        prepended_rows: scrollback_missing as u64,
+        changed: live_missing + scrollback_missing > 0,
+    }
+}
+
+pub(super) fn trim_default_blank_rows_below_cursor(
     screen: &mut Screen,
     viewport: &Viewport,
 ) -> usize {
@@ -671,6 +706,26 @@ fn trim_default_blank_rows_below_cursor(
     let removed = screen.grid.rows.len() - keep_rows;
     screen.grid.rows.truncate(keep_rows);
     removed
+}
+
+pub(super) fn ensure_cursor_row_exists(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) -> u64 {
+    if page_memory_active(screen) {
+        return 0;
+    }
+
+    let mut inserted = 0;
+    while active_row_index(screen, viewport) >= screen.grid.rows.len() {
+        screen.grid.rows.push_back(Row::new(
+            viewport.cols,
+            screen.grid.default_fg,
+            screen.grid.default_bg,
+        ));
+        inserted += 1;
+    }
+    inserted
 }
 
 fn row_is_default_blank(
@@ -704,6 +759,24 @@ fn prepend_blank_rows(
     for _ in 0..count {
         grid.rows
             .push_front(Row::new(cols, grid.default_fg, grid.default_bg));
+    }
+}
+
+fn append_blank_rows(
+    screen: &mut Screen,
+    cols: u32,
+    count: usize,
+) {
+    if count == 0 {
+        return;
+    }
+
+    for _ in 0..count {
+        screen.grid.rows.push_back(Row::new(
+            cols,
+            screen.grid.default_fg,
+            screen.grid.default_bg,
+        ));
     }
 }
 
@@ -1175,6 +1248,24 @@ mod integration_tests {
         view::reset_viewport(&mut term.active);
         assert_eq!(visible_row_text(&term, 0), "                        ");
         assert_eq!(visible_row_text(&term, 3), "PS>                     ");
+        assert_eq!(term.active.cursor.row, 3);
+    }
+
+    #[test]
+    fn processing_clear_allows_future_cursor_row_writes_before_padding() {
+        let mut term = TestTerm::new(5, 4, 100, 16, 8);
+        term.process(b"old one\nold two\nold three\nold four\nold five\nold six\n");
+
+        term.process(b"\x1b[H\x1b[2J\x1b[3J\x1b[4;1HBOT");
+
+        assert_eq!(
+            term.active.grid.scrollback_len(&term.viewport),
+            term.viewport.rows
+        );
+        assert_eq!(visible_row_text(&term, 0), "     ");
+        assert_eq!(visible_row_text(&term, 1), "     ");
+        assert_eq!(visible_row_text(&term, 2), "     ");
+        assert_eq!(visible_row_text(&term, 3), "BOT  ");
         assert_eq!(term.active.cursor.row, 3);
     }
 

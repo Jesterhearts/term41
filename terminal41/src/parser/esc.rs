@@ -267,6 +267,7 @@ fn apply_esc_line_attr(
     viewport: &Viewport,
     line_attr: LineAttr,
 ) {
+    screen::ensure_cursor_row_exists(screen, viewport);
     let visible_start = screen
         .grid
         .rows
