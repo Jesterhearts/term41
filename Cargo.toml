@@ -122,7 +122,7 @@ embed-resource = "3.0.8"
 ico            = "0.5.0"
 
 [features]
-default              = ["ffmpeg", "wayland-data-control"]
+default              = ["ffmpeg", "vulkan", "wayland-data-control"]
 deadlock-detection   = ["parking_lot/deadlock_detection"]
 # Pulls in ffmpeg-next so image protocols can decode formats outside the
 # built-in PNG path (animated GIF is the motivating case). Requires the
@@ -137,8 +137,12 @@ software-only        = []
 testonly-perf-ctrl-c = []
 # Pulls in the wgpu vulkan feature, enabling pipeline caching on Vulkan.
 # The cache can improve startup times by avoiding shader compilation,
-# but vulkan sometimes just takes O(seconds) to startup even with caching,
-# which makes us look bad so it's off by default.
+# but vulkan sometimes just takes O(seconds) to startup even with caching.
+# Of course, wgpu/OpenGL has downtier support, so on my system I get text
+# flickering in very narrow scenarios, so I made it the default to use vulkan.
+# W/ software startup, the delay should be hidden, but if you want the fastest
+# time to handoff from software to GPU rendering, you can disable this and use
+# wgpu's OpenGL backend.
 vulkan               = ["wgpu/vulkan"]
 # Enables arboard's zwlr_data_control_manager_v1 backend on Wayland, giving
 # access to compositors that implement the protocol (sway, wayfire, Hyprland,

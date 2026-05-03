@@ -696,6 +696,8 @@ struct PageGeometryUpload<V> {
     ranges: Vec<PageDrawRange>,
     vertex_buffer: UploadBuffer,
     index_buffer: UploadBuffer,
+    has_vertices: bool,
+    has_indices: bool,
 }
 
 impl<V> Default for PageGeometryUpload<V> {
@@ -706,6 +708,8 @@ impl<V> Default for PageGeometryUpload<V> {
             ranges: Vec::new(),
             vertex_buffer: UploadBuffer::default(),
             index_buffer: UploadBuffer::default(),
+            has_vertices: false,
+            has_indices: false,
         }
     }
 }
@@ -715,6 +719,8 @@ impl<V: bytemuck::Pod + Copy> PageGeometryUpload<V> {
         self.vertices.clear();
         self.indices.clear();
         self.ranges.clear();
+        self.has_vertices = false;
+        self.has_indices = false;
     }
 
     fn push_batch(
@@ -746,20 +752,24 @@ impl<V: bytemuck::Pod + Copy> PageGeometryUpload<V> {
         vertex_label: &'static str,
         index_label: &'static str,
     ) {
-        self.vertex_buffer.write(
+        self.has_vertices = self.vertex_buffer.write(
             device,
             queue,
             vertex_label,
             wgpu::BufferUsages::VERTEX,
             &self.vertices,
         );
-        self.index_buffer.write(
+        self.has_indices = self.index_buffer.write(
             device,
             queue,
             index_label,
             wgpu::BufferUsages::INDEX,
             &self.indices,
         );
+    }
+
+    fn is_drawable(&self) -> bool {
+        self.has_vertices && self.has_indices && !self.ranges.is_empty()
     }
 }
 

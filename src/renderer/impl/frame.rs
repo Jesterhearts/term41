@@ -169,39 +169,9 @@ impl Renderer {
         layout: &FrameLayout,
         suspend_terminal_area: bool,
     ) -> RenderGeometry {
-        for attempt in 0..2 {
-            let glyph_generation = self.glyph_atlas.generation();
-            let font_generation = font_system.font_generation();
-            let geometry = self.build_render_geometry_once(
-                font_system,
-                snap,
-                rows,
-                tabs,
-                new_tab_text.clone(),
-                controls,
-                gutter_popup,
-                recording_popup,
-                permission_modal,
-                command_palette,
-                toast,
-                preedit,
-                command_editor,
-                layout,
-                suspend_terminal_area,
-            );
-            if self.glyph_atlas.generation() == glyph_generation
-                && font_system.font_generation() == font_generation
-            {
-                return geometry;
-            }
-            self.row_geometry_cache.clear();
-            debug!(
-                "font/glyph generation changed while building frame geometry; rebuilding \
-                 attempt={attempt}"
-            );
-        }
-
-        self.build_render_geometry_once(
+        let glyph_generation = self.glyph_atlas.generation();
+        let font_generation = font_system.font_generation();
+        let geometry = self.build_render_geometry_once(
             font_system,
             snap,
             rows,
@@ -217,7 +187,13 @@ impl Renderer {
             command_editor,
             layout,
             suspend_terminal_area,
-        )
+        );
+        if self.glyph_atlas.generation() != glyph_generation
+            || font_system.font_generation() != font_generation
+        {
+            error!("font/glyph generation changed while building frame geometry");
+        }
+        geometry
     }
 
     pub(super) fn build_render_geometry_once(
@@ -1045,11 +1021,9 @@ impl Renderer {
 
         self.submit_image_pass(&mut encoder, &view, &self.uploads.under_image);
 
-        self.submit_terminal_layer_pass(&mut encoder, &view);
-
-        if self.uploads.bg.has_indices {
+        {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("dynamic_bg_pass"),
+                label: Some("main_content_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -1062,23 +1036,36 @@ impl Renderer {
                 ..Default::default()
             });
 
-            pass.set_pipeline(&self.bg_pipeline);
-            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_vertex_buffer(0, self.uploads.bg.vertex_buffer.buffer().unwrap().slice(..));
-            pass.set_index_buffer(
-                self.uploads.bg.index_buffer.buffer().unwrap().slice(..),
-                wgpu::IndexFormat::Uint32,
+            draw_terminal_layer_quad(
+                &mut pass,
+                &self.layer_pipeline,
+                &self.screen_size_bind_group,
+                &self.terminal_layer,
             );
-            pass.draw_indexed(0..geometry.bg_indices.len() as u32, 0, 0..1);
+            draw_bg_upload(
+                &mut pass,
+                &self.bg_pipeline,
+                &self.screen_size_bind_group,
+                &self.uploads.bg,
+            );
+            draw_fg_upload(
+                &mut pass,
+                &self.fg_pipeline,
+                &self.screen_size_bind_group,
+                &self.glyph_atlas,
+                &self.uploads.fg,
+            );
         }
-
-        self.submit_fg_pass(&mut encoder, &view, &self.uploads.fg, "fg_pass");
 
         self.submit_image_pass(&mut encoder, &view, &self.uploads.over_image);
 
-        if self.uploads.overlay_bg.has_indices {
+        if self.uploads.overlay_bg.has_indices
+            || self.uploads.overlay_fg.is_drawable()
+            || self.uploads.top_overlay_bg.has_indices
+            || self.uploads.top_overlay_fg.is_drawable()
+        {
             let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("overlay_bg_pass"),
+                label: Some("overlay_pass"),
                 color_attachments: &[Some(wgpu::RenderPassColorAttachment {
                     view: &view,
                     resolve_target: None,
@@ -1091,80 +1078,33 @@ impl Renderer {
                 ..Default::default()
             });
 
-            pass.set_pipeline(&self.bg_pipeline);
-            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_vertex_buffer(
-                0,
-                self.uploads
-                    .overlay_bg
-                    .vertex_buffer
-                    .buffer()
-                    .unwrap()
-                    .slice(..),
+            draw_bg_upload(
+                &mut pass,
+                &self.bg_pipeline,
+                &self.screen_size_bind_group,
+                &self.uploads.overlay_bg,
             );
-            pass.set_index_buffer(
-                self.uploads
-                    .overlay_bg
-                    .index_buffer
-                    .buffer()
-                    .unwrap()
-                    .slice(..),
-                wgpu::IndexFormat::Uint32,
+            draw_fg_upload(
+                &mut pass,
+                &self.fg_pipeline,
+                &self.screen_size_bind_group,
+                &self.glyph_atlas,
+                &self.uploads.overlay_fg,
             );
-            pass.draw_indexed(0..geometry.overlay_bg_indices.len() as u32, 0, 0..1);
+            draw_bg_upload(
+                &mut pass,
+                &self.bg_pipeline,
+                &self.screen_size_bind_group,
+                &self.uploads.top_overlay_bg,
+            );
+            draw_fg_upload(
+                &mut pass,
+                &self.fg_pipeline,
+                &self.screen_size_bind_group,
+                &self.glyph_atlas,
+                &self.uploads.top_overlay_fg,
+            );
         }
-
-        self.submit_fg_pass(
-            &mut encoder,
-            &view,
-            &self.uploads.overlay_fg,
-            "overlay_fg_pass",
-        );
-
-        if self.uploads.top_overlay_bg.has_indices {
-            let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-                label: Some("top_overlay_bg_pass"),
-                color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                    view: &view,
-                    resolve_target: None,
-                    ops: wgpu::Operations {
-                        load: wgpu::LoadOp::Load,
-                        store: wgpu::StoreOp::Store,
-                    },
-                    depth_slice: None,
-                })],
-                ..Default::default()
-            });
-
-            pass.set_pipeline(&self.bg_pipeline);
-            pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-            pass.set_vertex_buffer(
-                0,
-                self.uploads
-                    .top_overlay_bg
-                    .vertex_buffer
-                    .buffer()
-                    .unwrap()
-                    .slice(..),
-            );
-            pass.set_index_buffer(
-                self.uploads
-                    .top_overlay_bg
-                    .index_buffer
-                    .buffer()
-                    .unwrap()
-                    .slice(..),
-                wgpu::IndexFormat::Uint32,
-            );
-            pass.draw_indexed(0..geometry.top_overlay_bg_indices.len() as u32, 0, 0..1);
-        }
-
-        self.submit_fg_pass(
-            &mut encoder,
-            &view,
-            &self.uploads.top_overlay_fg,
-            "top_overlay_fg_pass",
-        );
 
         self.queue.submit(Some(encoder.finish()));
         frame.present();
@@ -1177,7 +1117,7 @@ impl Renderer {
         if !self.terminal_layer.needs_full_repaint
             && !self.uploads.terminal_clear.has_indices
             && !self.uploads.terminal_bg.has_indices
-            && self.uploads.terminal_fg.ranges.is_empty()
+            && !self.uploads.terminal_fg.is_drawable()
         {
             return;
         }
@@ -1201,139 +1141,28 @@ impl Renderer {
                 ..Default::default()
             });
 
-            if self.uploads.terminal_clear.has_indices {
-                pass.set_pipeline(&self.bg_pipeline);
-                pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-                pass.set_vertex_buffer(
-                    0,
-                    self.uploads
-                        .terminal_clear
-                        .vertex_buffer
-                        .buffer()
-                        .unwrap()
-                        .slice(..),
-                );
-                pass.set_index_buffer(
-                    self.uploads
-                        .terminal_clear
-                        .index_buffer
-                        .buffer()
-                        .unwrap()
-                        .slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(0..self.uploads.terminal_clear.index_count, 0, 0..1);
-            }
-
-            if self.uploads.terminal_bg.has_indices {
-                pass.set_pipeline(&self.bg_pipeline);
-                pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-                pass.set_vertex_buffer(
-                    0,
-                    self.uploads
-                        .terminal_bg
-                        .vertex_buffer
-                        .buffer()
-                        .unwrap()
-                        .slice(..),
-                );
-                pass.set_index_buffer(
-                    self.uploads
-                        .terminal_bg
-                        .index_buffer
-                        .buffer()
-                        .unwrap()
-                        .slice(..),
-                    wgpu::IndexFormat::Uint32,
-                );
-                pass.draw_indexed(0..self.uploads.terminal_bg.index_count, 0, 0..1);
-            }
-        }
-
-        self.submit_fg_pass(
-            encoder,
-            &self.terminal_layer.view,
-            &self.uploads.terminal_fg,
-            "terminal_layer_fg",
-        );
-
-        self.terminal_layer.needs_full_repaint = false;
-    }
-
-    pub(super) fn submit_terminal_layer_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
-    ) {
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some("terminal_layer_composite"),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            ..Default::default()
-        });
-        pass.set_pipeline(&self.layer_pipeline);
-        pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-        pass.set_bind_group(1, &self.terminal_layer.bind_group, &[]);
-        pass.set_vertex_buffer(0, self.terminal_layer.vertex_buffer.slice(..));
-        pass.set_index_buffer(
-            self.terminal_layer.index_buffer.slice(..),
-            wgpu::IndexFormat::Uint32,
-        );
-        pass.draw_indexed(0..6, 0, 0..1);
-    }
-
-    pub(super) fn submit_fg_pass(
-        &self,
-        encoder: &mut wgpu::CommandEncoder,
-        view: &wgpu::TextureView,
-        fg_upload: &PageGeometryUpload<FgVertex>,
-        label: &'static str,
-    ) {
-        let Some(vertex_buffer) = fg_upload.vertex_buffer.buffer() else {
-            return;
-        };
-        let Some(index_buffer) = fg_upload.index_buffer.buffer() else {
-            return;
-        };
-        if fg_upload.ranges.is_empty() {
-            return;
-        }
-
-        let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
-            label: Some(label),
-            color_attachments: &[Some(wgpu::RenderPassColorAttachment {
-                view,
-                resolve_target: None,
-                ops: wgpu::Operations {
-                    load: wgpu::LoadOp::Load,
-                    store: wgpu::StoreOp::Store,
-                },
-                depth_slice: None,
-            })],
-            ..Default::default()
-        });
-        pass.set_pipeline(&self.fg_pipeline);
-        pass.set_bind_group(0, &self.screen_size_bind_group, &[]);
-        pass.set_vertex_buffer(0, vertex_buffer.slice(..));
-        pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
-        for range in &fg_upload.ranges {
-            let Some(bind_group) = self.glyph_atlas.bind_group(range.page_index) else {
-                continue;
-            };
-            pass.set_bind_group(1, bind_group, &[]);
-            pass.draw_indexed(
-                range.index_start..range.index_start + range.index_count,
-                range.vertex_base,
-                0..1,
+            draw_bg_upload(
+                &mut pass,
+                &self.bg_pipeline,
+                &self.screen_size_bind_group,
+                &self.uploads.terminal_clear,
+            );
+            draw_bg_upload(
+                &mut pass,
+                &self.bg_pipeline,
+                &self.screen_size_bind_group,
+                &self.uploads.terminal_bg,
+            );
+            draw_fg_upload(
+                &mut pass,
+                &self.fg_pipeline,
+                &self.screen_size_bind_group,
+                &self.glyph_atlas,
+                &self.uploads.terminal_fg,
             );
         }
+
+        self.terminal_layer.needs_full_repaint = false;
     }
 
     pub(super) fn submit_image_pass(
@@ -1342,15 +1171,15 @@ impl Renderer {
         view: &wgpu::TextureView,
         image_upload: &PageGeometryUpload<ImageVertex>,
     ) {
+        if !image_upload.is_drawable() {
+            return;
+        }
         let Some(vertex_buffer) = image_upload.vertex_buffer.buffer() else {
             return;
         };
         let Some(index_buffer) = image_upload.index_buffer.buffer() else {
             return;
         };
-        if image_upload.ranges.is_empty() {
-            return;
-        }
 
         let mut pass = encoder.begin_render_pass(&wgpu::RenderPassDescriptor {
             label: Some("image_pass"),
@@ -1388,5 +1217,79 @@ impl Renderer {
                 0..1,
             );
         }
+    }
+}
+
+fn draw_terminal_layer_quad<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    layer_pipeline: &'pass wgpu::RenderPipeline,
+    screen_size_bind_group: &'pass wgpu::BindGroup,
+    terminal_layer: &'pass TerminalLayer,
+) {
+    pass.set_pipeline(layer_pipeline);
+    pass.set_bind_group(0, screen_size_bind_group, &[]);
+    pass.set_bind_group(1, &terminal_layer.bind_group, &[]);
+    pass.set_vertex_buffer(0, terminal_layer.vertex_buffer.slice(..));
+    pass.set_index_buffer(
+        terminal_layer.index_buffer.slice(..),
+        wgpu::IndexFormat::Uint32,
+    );
+    pass.draw_indexed(0..6, 0, 0..1);
+}
+
+fn draw_bg_upload<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    bg_pipeline: &'pass wgpu::RenderPipeline,
+    screen_size_bind_group: &'pass wgpu::BindGroup,
+    upload: &'pass GeometryUpload,
+) {
+    if !upload.has_indices {
+        return;
+    }
+    let Some(vertex_buffer) = upload.vertex_buffer.buffer() else {
+        return;
+    };
+    let Some(index_buffer) = upload.index_buffer.buffer() else {
+        return;
+    };
+
+    pass.set_pipeline(bg_pipeline);
+    pass.set_bind_group(0, screen_size_bind_group, &[]);
+    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+    pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    pass.draw_indexed(0..upload.index_count, 0, 0..1);
+}
+
+fn draw_fg_upload<'pass>(
+    pass: &mut wgpu::RenderPass<'pass>,
+    fg_pipeline: &'pass wgpu::RenderPipeline,
+    screen_size_bind_group: &'pass wgpu::BindGroup,
+    glyph_atlas: &'pass GlyphAtlas,
+    fg_upload: &'pass PageGeometryUpload<FgVertex>,
+) {
+    if !fg_upload.is_drawable() {
+        return;
+    }
+    let Some(vertex_buffer) = fg_upload.vertex_buffer.buffer() else {
+        return;
+    };
+    let Some(index_buffer) = fg_upload.index_buffer.buffer() else {
+        return;
+    };
+
+    pass.set_pipeline(fg_pipeline);
+    pass.set_bind_group(0, screen_size_bind_group, &[]);
+    pass.set_vertex_buffer(0, vertex_buffer.slice(..));
+    pass.set_index_buffer(index_buffer.slice(..), wgpu::IndexFormat::Uint32);
+    for range in &fg_upload.ranges {
+        let Some(bind_group) = glyph_atlas.bind_group(range.page_index) else {
+            continue;
+        };
+        pass.set_bind_group(1, bind_group, &[]);
+        pass.draw_indexed(
+            range.index_start..range.index_start + range.index_count,
+            range.vertex_base,
+            0..1,
+        );
     }
 }
