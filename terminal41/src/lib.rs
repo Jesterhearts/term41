@@ -205,6 +205,9 @@ impl CommandMeta {
 pub struct TerminalEffects {
     /// Bytes that must be written back to the PTY, such as query replies.
     pub host_bytes: Vec<u8>,
+    /// True when terminal state changed in a way that can affect host-side
+    /// input routing or cached editor UI.
+    pub input_context_changed: bool,
     /// Latest host-driven geometry request emitted by VT controls such as
     /// DECSNLS / DECSCPP.
     pub resize_request: Option<(u32, u32)>,
@@ -220,6 +223,7 @@ impl TerminalEffects {
     /// Return whether this batch produced no host-visible side effects.
     pub fn is_empty(&self) -> bool {
         self.host_bytes.is_empty()
+            && !self.input_context_changed
             && self.resize_request.is_none()
             && !self.bell
             && self.clipboard_requests.is_empty()
@@ -233,6 +237,7 @@ impl TerminalEffects {
         other: Self,
     ) {
         self.host_bytes.extend(other.host_bytes);
+        self.input_context_changed |= other.input_context_changed;
         if other.resize_request.is_some() {
             self.resize_request = other.resize_request;
         }
@@ -328,6 +333,15 @@ fn action_addresses_rows_after_clear(action: &TerminalAction<'_>) -> bool {
                 | MainCsiAction::CursorNextLine { count: 1.. }
         )))
     )
+}
+
+fn foreground_app_mode_active(
+    screen: &Screen,
+    modes: &TerminalModes,
+) -> bool {
+    screen.app_cursor_keys
+        || screen.app_keypad
+        || crate::host::mouse_tracking_enabled(modes.mouse_tracking)
 }
 
 /// Security-sensitive protocol state and VT extension storage.
@@ -563,6 +577,10 @@ pub struct Terminal {
     /// so short-history padding must preserve viewport row numbers instead of
     /// bottom-aligning shell-prompt-style output.
     primary_clear_absolute_rows_pending: bool,
+    /// A foreground app cleared the primary screen while using application
+    /// terminal modes, so preserve top-origin rows without manufacturing a
+    /// shell-style blank scrollback page.
+    primary_clear_foreground_app_pending: bool,
     /// Security-sensitive optional protocol state and feature storage.
     pub protocol: TerminalProtocolState,
     /// Row-level snapshot invalidation state. The dirty rows live in one
@@ -597,6 +615,15 @@ struct SnapshotDirtyBaseline {
     offset: u32,
     total_rows: u32,
     status_line_row: Option<u32>,
+}
+
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+struct InputContextState {
+    on_alt_screen: bool,
+    app_cursor_keys: bool,
+    app_keypad: bool,
+    mouse_tracking: MouseTracking,
+    shell_integration_phase: ShellIntegrationPhase,
 }
 
 impl Terminal {
@@ -666,6 +693,7 @@ impl Terminal {
             primary_blank_scrollback_padding_pending: false,
             primary_blank_suffix_trim_pending: false,
             primary_clear_absolute_rows_pending: false,
+            primary_clear_foreground_app_pending: false,
             protocol: TerminalProtocolState {
                 feature_permissions,
                 limits,
@@ -893,9 +921,17 @@ impl Terminal {
         trace!("Classified action: {:?}", action);
         let dirty_before = self.snapshot_dirty_baseline();
         let dirty_scope = self.snapshot_dirty_scope(&action, dirty_before);
+        let input_context_before = self.input_context_state();
         let blank_scrollback_padding_requested =
             !self.on_alt_screen && action_requests_blank_scrollback_padding(&action);
-        if self.primary_blank_suffix_trim_pending && !blank_scrollback_padding_requested {
+        let preserve_clear_absolute_rows = self.primary_clear_absolute_rows_pending
+            || (self.primary_blank_scrollback_padding_pending
+                && !self.on_alt_screen
+                && action_addresses_rows_after_clear(&action));
+        if self.primary_blank_suffix_trim_pending
+            && !blank_scrollback_padding_requested
+            && !preserve_clear_absolute_rows
+        {
             screen::trim_default_blank_rows_below_cursor(&mut self.active, &self.viewport);
             self.primary_blank_suffix_trim_pending = false;
         }
@@ -906,9 +942,11 @@ impl Terminal {
             self.primary_clear_absolute_rows_pending = true;
         }
         if blank_scrollback_padding_requested {
+            let foreground_app_clear = foreground_app_mode_active(&self.active, &self.modes);
             self.primary_blank_scrollback_padding_pending = true;
             self.primary_blank_suffix_trim_pending = true;
-            self.primary_clear_absolute_rows_pending = false;
+            self.primary_clear_absolute_rows_pending = foreground_app_clear;
+            self.primary_clear_foreground_app_pending = foreground_app_clear;
         }
         let was_on_alt_screen = self.on_alt_screen;
         let pending = match action {
@@ -1051,6 +1089,9 @@ impl Terminal {
         if self.on_alt_screen != was_on_alt_screen {
             self.selection = None;
         }
+        if self.input_context_state() != input_context_before {
+            effects.input_context_changed = true;
+        }
         self.mark_snapshot_dirty_after(dirty_before, dirty_scope);
         pending
     }
@@ -1167,6 +1208,16 @@ impl Terminal {
             offset: self.active.offset,
             total_rows: self.viewport.rows + u32::from(status_line_row.is_some()),
             status_line_row,
+        }
+    }
+
+    fn input_context_state(&self) -> InputContextState {
+        InputContextState {
+            on_alt_screen: self.on_alt_screen,
+            app_cursor_keys: self.active.app_cursor_keys,
+            app_keypad: self.active.app_keypad,
+            mouse_tracking: self.modes.mouse_tracking,
+            shell_integration_phase: self.metadata.shell_integration_phase,
         }
     }
 
@@ -1290,21 +1341,23 @@ impl Terminal {
             popped_before,
         );
 
-        if std::mem::take(&mut self.primary_blank_suffix_trim_pending) {
-            screen::trim_default_blank_rows_below_cursor(&mut self.active, &self.viewport);
-        }
         let padding_requested = std::mem::take(&mut self.primary_blank_scrollback_padding_pending);
         let preserve_absolute_rows = std::mem::take(&mut self.primary_clear_absolute_rows_pending);
+        let foreground_app_clear = std::mem::take(&mut self.primary_clear_foreground_app_pending);
+        if std::mem::take(&mut self.primary_blank_suffix_trim_pending) && !preserve_absolute_rows {
+            screen::trim_default_blank_rows_below_cursor(&mut self.active, &self.viewport);
+        }
         if self.on_alt_screen {
             return;
         }
 
-        let min_scrollback_rows =
-            if self.active.grid.total_popped > popped_before || padding_requested {
-                self.viewport.rows
-            } else {
-                0
-            };
+        let min_scrollback_rows = if self.active.grid.total_popped > popped_before
+            || (padding_requested && !foreground_app_clear)
+        {
+            self.viewport.rows
+        } else {
+            0
+        };
         let padding = if preserve_absolute_rows {
             screen::pad_short_history_to_absolute_rows(
                 &mut self.active,
@@ -1404,6 +1457,45 @@ impl Drop for TerminalThread {
         if let Some(t) = self.thread_handle.get() {
             t.unpark();
         }
+    }
+}
+
+#[cfg(test)]
+mod terminal_effects_tests {
+    use crate::ShellIntegrationPhase;
+    use crate::test_support::TestTerm;
+
+    #[test]
+    fn app_cursor_mode_marks_input_context_changed() {
+        let mut term = TestTerm::new_80x24();
+
+        term.process(b"\x1b[?1h");
+
+        assert!(term.active.app_cursor_keys);
+        assert!(term.effects.input_context_changed);
+    }
+
+    #[test]
+    fn alt_screen_mode_marks_input_context_changed() {
+        let mut term = TestTerm::new_80x24();
+
+        term.process(b"\x1b[?1049h");
+
+        assert!(term.on_alt_screen);
+        assert!(term.effects.input_context_changed);
+    }
+
+    #[test]
+    fn shell_phase_marks_input_context_changed() {
+        let mut term = TestTerm::new_80x24();
+
+        term.process(b"\x1b]133;B\x07");
+
+        assert_eq!(
+            term.metadata.shell_integration_phase,
+            ShellIntegrationPhase::Command
+        );
+        assert!(term.effects.input_context_changed);
     }
 }
 

@@ -243,6 +243,34 @@ mod command_editor_context_tests {
     }
 
     #[test]
+    fn command_editor_view_context_keeps_prompt_editor_despite_prompt_keypad_modes() {
+        let mut term = TestTerm::new_80x24();
+        term.process(b"\x1b]133;B\x07");
+
+        assert_eq!(
+            term.metadata.shell_integration_phase,
+            ShellIntegrationPhase::Command
+        );
+        assert_eq!(
+            command_editor_view_context(&term),
+            Some(CommandEditorContext { current_dir: None })
+        );
+
+        term.process(b"\x1b[?1h\x1b=");
+
+        assert!(term.active.app_cursor_keys);
+        assert!(term.active.app_keypad);
+        assert_eq!(
+            command_editor_view_context(&term),
+            Some(CommandEditorContext { current_dir: None })
+        );
+        assert_eq!(
+            command_editor_input_context(&term, true),
+            Some(CommandEditorContext { current_dir: None })
+        );
+    }
+
+    #[test]
     fn command_editor_contexts_are_disabled_on_alt_screen() {
         let mut term = TestTerm::new_80x24();
         term.process(b"\x1b]133;B\x07");

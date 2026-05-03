@@ -158,6 +158,7 @@ impl WindowHost {
         };
         let TerminalEffects {
             host_bytes,
+            input_context_changed: _,
             resize_request,
             bell,
             clipboard_requests,

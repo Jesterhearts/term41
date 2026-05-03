@@ -1270,6 +1270,20 @@ mod integration_tests {
     }
 
     #[test]
+    fn processing_app_mode_clear_preserves_top_origin_rows() {
+        let mut term = TestTerm::new(10, 6, 100, 16, 8);
+        term.process(b"old one\nold two\nold three\nold four\nold five\nold six\n");
+
+        term.process(b"\x1b[?1h\x1b=\x1b[?25l\x1b[H\x1b[2Jtop\r\nTasks");
+
+        assert!(term.active.grid.scrollback_len(&term.viewport) < term.viewport.rows);
+        assert_eq!(visible_row_text(&term, 0), "top       ");
+        assert_eq!(visible_row_text(&term, 1), "Tasks     ");
+        assert_eq!(visible_row_text(&term, 2), "          ");
+        assert_eq!(visible_row_text(&term, 5), "          ");
+    }
+
+    #[test]
     fn processing_keeps_blank_scrollback_page_after_visible_only_clear() {
         let mut term = TestTerm::new(5, 4, 100, 16, 8);
 
