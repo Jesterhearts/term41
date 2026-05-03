@@ -608,6 +608,105 @@ pub(super) fn ensure_visible_rows(
     }
 }
 
+pub(super) fn pad_short_history_to_live_bottom(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    min_scrollback_rows: u32,
+    bottom_align_to_cursor: bool,
+) -> u64 {
+    if page_memory_active(screen) {
+        return 0;
+    }
+
+    if bottom_align_to_cursor {
+        trim_default_blank_rows_below_cursor(screen, viewport);
+    }
+
+    let live_missing = (viewport.rows as usize).saturating_sub(screen.grid.rows.len());
+    prepend_blank_rows(&mut screen.grid, viewport.cols, live_missing);
+    for image in screen.images.values_mut() {
+        image.row += live_missing;
+    }
+    screen.cursor.row = screen
+        .cursor
+        .row
+        .saturating_add(live_missing as u32)
+        .min(viewport.rows.saturating_sub(1));
+
+    let min_scrollback_rows = min_scrollback_rows.min(screen.grid.scrollback_limit) as usize;
+    let desired_rows = viewport.rows as usize + min_scrollback_rows;
+    let scrollback_missing = desired_rows.saturating_sub(screen.grid.rows.len());
+    prepend_blank_rows(&mut screen.grid, viewport.cols, scrollback_missing);
+    for image in screen.images.values_mut() {
+        image.row += scrollback_missing;
+    }
+
+    (live_missing + scrollback_missing) as u64
+}
+
+fn trim_default_blank_rows_below_cursor(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) -> usize {
+    let cursor_row = active_row_index(screen, viewport);
+    let keep_rows = cursor_row.saturating_add(1).min(screen.grid.rows.len());
+    if keep_rows == screen.grid.rows.len() {
+        return 0;
+    }
+
+    let removable = screen
+        .grid
+        .rows
+        .iter()
+        .skip(keep_rows)
+        .all(|row| row_is_default_blank(row, screen.grid.default_fg, screen.grid.default_bg));
+    let has_images = screen
+        .images
+        .values()
+        .any(|image| image.row >= keep_rows && image.row < screen.grid.rows.len());
+    if !removable || has_images {
+        return 0;
+    }
+
+    let removed = screen.grid.rows.len() - keep_rows;
+    screen.grid.rows.truncate(keep_rows);
+    removed
+}
+
+fn row_is_default_blank(
+    row: &Row,
+    fg: Srgb<u8>,
+    bg: Srgb<u8>,
+) -> bool {
+    !row.wrapped
+        && !row.prompt_start
+        && !row.output_start
+        && row.exit_status.is_none()
+        && row.line_attr == LineAttr::Normal
+        && !row.has_wide_cells
+        && row.cells.iter().all(|cell| cell == " ")
+        && row.fg.iter().all(|&cell_fg| cell_fg == fg)
+        && row.bg.iter().all(|&cell_bg| cell_bg == bg)
+        && row.attrs.iter().all(|&attrs| attrs == CellAttrs::default())
+        && row.underline_color.iter().all(Option::is_none)
+        && row.links.iter().all(Option::is_none)
+}
+
+fn prepend_blank_rows(
+    grid: &mut Grid,
+    cols: u32,
+    count: usize,
+) {
+    if count == 0 {
+        return;
+    }
+
+    for _ in 0..count {
+        grid.rows
+            .push_front(Row::new(cols, grid.default_fg, grid.default_bg));
+    }
+}
+
 /// Switch between the primary and alt screens. Idempotent: a no-op if the
 /// target screen is already active.
 fn switch_screen(
@@ -756,7 +855,7 @@ pub(super) fn resize_screen(
 
         let mut new_abs = grid.rows.len().saturating_sub(old_distance_from_bottom + 1);
 
-        let prepended = pad_short_history_to_live_bottom(grid, images, new_rows, new_cols);
+        let prepended = prepend_blank_rows_to_live_bottom(grid, images, new_rows, new_cols);
         outcome.prepended_rows = prepended as u64;
         new_abs = new_abs.saturating_add(prepended);
 
@@ -783,7 +882,7 @@ pub(super) fn resize_screen(
         }
 
         let mut new_abs = old_abs.saturating_sub(popped);
-        let prepended = pad_short_history_to_live_bottom(grid, images, new_rows, new_cols);
+        let prepended = prepend_blank_rows_to_live_bottom(grid, images, new_rows, new_cols);
         outcome.prepended_rows = prepended as u64;
         new_abs = new_abs.saturating_add(prepended);
 
@@ -805,7 +904,7 @@ pub(super) fn resize_screen(
     outcome
 }
 
-fn pad_short_history_to_live_bottom(
+fn prepend_blank_rows_to_live_bottom(
     grid: &mut Grid,
     images: &mut BTreeMap<u64, PlacedImage>,
     viewport_rows: u32,
@@ -996,6 +1095,117 @@ mod integration_tests {
         assert_eq!(visible_row_text(&term, 4), "def  ");
         assert_eq!(term.active.cursor.row, 4);
         assert_eq!(term.active.cursor.col, 3);
+    }
+
+    #[test]
+    fn processing_bottom_aligns_short_history_after_trim() {
+        let mut term = TestTerm::new(5, 4, 100, 16, 8);
+        term.active.grid.rows.truncate(2);
+        term.active.grid.rows[0].cells[0] = smol_str::SmolStr::new_inline("A");
+        term.active.grid.rows[1].cells[0] = smol_str::SmolStr::new_inline("B");
+        term.active.cursor.row = 1;
+
+        term.process(b"\x1b[3J");
+
+        assert_eq!(
+            term.active.grid.scrollback_len(&term.viewport),
+            term.viewport.rows
+        );
+        assert_eq!(visible_row_text(&term, 0), "     ");
+        assert_eq!(visible_row_text(&term, 1), "     ");
+        assert_eq!(visible_row_text(&term, 2), "A    ");
+        assert_eq!(visible_row_text(&term, 3), "B    ");
+        assert_eq!(term.active.cursor.row, 3);
+    }
+
+    #[test]
+    fn processing_keeps_blank_scrollback_page_after_saved_line_trim() {
+        let mut term = TestTerm::new(5, 4, 100, 16, 8);
+        term.process(b"\x1b[1;1HAAAAA\x1b[2;1HBBBBB\x1b[3;1HCCCCC\x1b[4;1HDDDDD");
+        term.process(b"\n");
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 1);
+
+        term.process(b"\x1b[3J");
+
+        assert_eq!(
+            term.active.grid.scrollback_len(&term.viewport),
+            term.viewport.rows
+        );
+        let viewport = term.viewport;
+        let scrolled = view::scroll_viewport_up(&mut term.active, &viewport, viewport.rows);
+        assert_eq!(scrolled, viewport.rows);
+        assert_eq!(visible_row_text(&term, 0), "     ");
+    }
+
+    #[test]
+    fn processing_keeps_blank_scrollback_page_after_terminfo_clear() {
+        let mut term = TestTerm::new(5, 4, 100, 16, 8);
+        term.process(b"\x1b[1;1HAAAAA\x1b[2;1HBBBBB\x1b[3;1HCCCCC\x1b[4;1HDDDDD");
+        term.process(b"\n");
+
+        term.process(b"\x1b[H\x1b[2J\x1b[3J");
+
+        assert_eq!(
+            term.active.grid.scrollback_len(&term.viewport),
+            term.viewport.rows
+        );
+        assert_eq!(term.active.cursor.row, term.viewport.rows - 1);
+    }
+
+    #[test]
+    fn processing_keeps_blank_scrollback_page_after_powershell_clear_recording() {
+        let mut term = TestTerm::new(24, 4, 100, 16, 8);
+        term.process(
+            b"old one\nold two\nold three\nold four\nold five\nold six\nold seven\nold eight\n",
+        );
+        assert!(term.active.grid.scrollback_len(&term.viewport) > 0);
+
+        term.process(
+            b"\x1b]133;C\x07\x1b[?1l\x1b[H\x1b[2J\x1b[3J\x1b[?1h\x1b=\
+              \x1b]0;\x07\x1b[6n\x1b]133;A\x07PS> \x1b]133;B\x07\x1b[?1h\x1b[6n",
+        );
+
+        assert_eq!(
+            term.active.grid.scrollback_len(&term.viewport),
+            term.viewport.rows
+        );
+        let viewport = term.viewport;
+        let scrolled = view::scroll_viewport_up(&mut term.active, &viewport, viewport.rows);
+        assert_eq!(scrolled, viewport.rows);
+        view::reset_viewport(&mut term.active);
+        assert_eq!(visible_row_text(&term, 0), "                        ");
+        assert_eq!(visible_row_text(&term, 3), "PS>                     ");
+        assert_eq!(term.active.cursor.row, 3);
+    }
+
+    #[test]
+    fn processing_keeps_blank_scrollback_page_after_visible_only_clear() {
+        let mut term = TestTerm::new(5, 4, 100, 16, 8);
+
+        term.process(b"\x1b[H\x1b[2J");
+
+        assert_eq!(
+            term.active.grid.scrollback_len(&term.viewport),
+            term.viewport.rows
+        );
+        assert_eq!(term.active.cursor.row, term.viewport.rows - 1);
+    }
+
+    #[test]
+    fn processing_does_not_pad_short_alt_screen_history() {
+        let mut term = TestTerm::new(5, 4, 100, 16, 8);
+        term.process(b"\x1b[?1049h");
+        term.active.grid.rows.truncate(2);
+        term.active.grid.rows[0].cells[0] = smol_str::SmolStr::new_inline("A");
+        term.active.grid.rows[1].cells[0] = smol_str::SmolStr::new_inline("B");
+        term.active.cursor.row = 1;
+
+        term.process(b"\x1b[3J");
+
+        assert_eq!(term.active.grid.rows.len(), 2);
+        assert_eq!(grid_row_text(&term, 0), "A    ");
+        assert_eq!(grid_row_text(&term, 1), "B    ");
+        assert_eq!(term.active.cursor.row, 1);
     }
 
     #[test]

@@ -88,6 +88,7 @@ pub use crate::dec::udk::DecModifierKey;
 pub use crate::dec::udk::LocalFunctionKeyControl;
 pub use crate::dec::udk::ModifierKeyControl;
 use crate::dec::udk::UdkState;
+use crate::dispatch::CsiAction;
 use crate::dispatch::TerminalAction;
 use crate::drcs::DrcsStore;
 pub(crate) use crate::feature::apply_status_display_mode;
@@ -104,6 +105,8 @@ pub use crate::io::mouse::MouseEncoding;
 pub use crate::io::mouse::MouseEventKind;
 pub use crate::io::mouse::MouseModifiers;
 pub use crate::io::mouse::MouseTracking;
+use crate::parser::MainCsiAction;
+use crate::parser::ParsedCsiAction;
 pub use crate::processing::HostInput;
 pub use crate::processing::HostInputEffects;
 pub use crate::processing::HostMouse;
@@ -304,6 +307,15 @@ fn shift_command_meta_rows(
     meta.command_row = meta.command_row.map(|row| row.saturating_add(delta));
     meta.output_row = meta.output_row.map(|row| row.saturating_add(delta));
     meta.finished_row = meta.finished_row.map(|row| row.saturating_add(delta));
+}
+
+fn action_requests_blank_scrollback_padding(action: &TerminalAction<'_>) -> bool {
+    matches!(
+        action,
+        TerminalAction::Csi(CsiAction::Parsed(ParsedCsiAction::Main(
+            MainCsiAction::EraseInDisplay { mode: 2 | 3 }
+        )))
+    )
 }
 
 /// Security-sensitive protocol state and VT extension storage.
@@ -527,6 +539,10 @@ pub struct Terminal {
     pub default_status_display: StatusDisplayKind,
     /// User-selected legacy emoji compatibility mode.
     pub emoji_compatibility_mode: EmojiCompatibilityMode,
+    /// Primary-screen clear actions can leave no scrollable viewport even when
+    /// the live grid is full-height. `track_scroll` consumes this marker after
+    /// the current PTY batch and prepends blank scrollback rows.
+    primary_blank_scrollback_padding_pending: bool,
     /// Security-sensitive optional protocol state and feature storage.
     pub protocol: TerminalProtocolState,
     /// Row-level snapshot invalidation state. The dirty rows live in one
@@ -627,6 +643,7 @@ impl Terminal {
             vt52_cursor_addr: Vt52CursorAddr::Idle,
             default_status_display,
             emoji_compatibility_mode: EmojiCompatibilityMode::Auto,
+            primary_blank_scrollback_padding_pending: false,
             protocol: TerminalProtocolState {
                 feature_permissions,
                 limits,
@@ -854,6 +871,9 @@ impl Terminal {
         trace!("Classified action: {:?}", action);
         let dirty_before = self.snapshot_dirty_baseline();
         let dirty_scope = self.snapshot_dirty_scope(&action, dirty_before);
+        if !self.on_alt_screen && action_requests_blank_scrollback_padding(&action) {
+            self.primary_blank_scrollback_padding_pending = true;
+        }
         let was_on_alt_screen = self.on_alt_screen;
         let pending = match action {
             TerminalAction::Ignore => dispatch::PendingApplication::None,
@@ -1232,7 +1252,32 @@ impl Terminal {
             &mut self.active,
             &mut self.metadata.command_metas,
             popped_before,
-        )
+        );
+
+        let padding_requested = std::mem::take(&mut self.primary_blank_scrollback_padding_pending);
+        if self.on_alt_screen {
+            return;
+        }
+
+        let min_scrollback_rows =
+            if self.active.grid.total_popped > popped_before || padding_requested {
+                self.viewport.rows
+            } else {
+                0
+            };
+        let prepended = screen::pad_short_history_to_live_bottom(
+            &mut self.active,
+            &self.viewport,
+            min_scrollback_rows,
+            padding_requested,
+        );
+        if prepended == 0 {
+            return;
+        }
+
+        shift_visible_absolute_rows(&mut self.selection, &mut self.search, prepended);
+        shift_terminal_metadata_rows(&mut self.metadata, prepended);
+        self.snapshot.mark_all();
     }
 }
 
