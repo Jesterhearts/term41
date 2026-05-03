@@ -54,6 +54,13 @@ use config41::keybindings::Action;
 use config41::keybindings::Keybindings;
 use font41::FontSystem;
 use history41::HistoryStore;
+use nucleo_matcher::Config as NucleoConfig;
+use nucleo_matcher::Matcher;
+use nucleo_matcher::Utf32Str;
+use nucleo_matcher::pattern::AtomKind;
+use nucleo_matcher::pattern::CaseMatching;
+use nucleo_matcher::pattern::Normalization;
+use nucleo_matcher::pattern::Pattern;
 use parking_lot::Mutex;
 use pty_pipe41::Pty;
 use pty_pipe41::PtyWriter;
@@ -397,6 +404,11 @@ pub(crate) struct CommandPaletteItem {
     pub(crate) action: Action,
 }
 
+struct CommandPaletteMatch {
+    item: CommandPaletteItem,
+    score: u32,
+}
+
 #[derive(Clone)]
 pub(crate) struct CommandPaletteView {
     pub(crate) query: String,
@@ -413,23 +425,74 @@ fn command_palette_view() -> CommandPaletteView {
 }
 
 fn command_palette_items(query: &str) -> Vec<CommandPaletteItem> {
-    let normalized_query = query.to_ascii_lowercase();
-    let mut items: Vec<_> = Action::command_palette_actions()
+    let items = Action::command_palette_actions()
         .iter()
-        .map(|action| CommandPaletteItem {
-            label: action.palette_label().to_owned(),
-            action: *action,
-        })
-        .filter(|item| {
-            normalized_query.is_empty()
-                || item
-                    .label
-                    .to_ascii_lowercase()
-                    .starts_with(&normalized_query)
-        })
-        .collect();
+        .map(|action| command_palette_item(*action));
+    if query.is_empty() {
+        return sorted_command_palette_items(items);
+    }
+
+    fuzzy_command_palette_items(query, items)
+}
+
+fn command_palette_item(action: Action) -> CommandPaletteItem {
+    CommandPaletteItem {
+        label: action.palette_label().to_owned(),
+        action,
+    }
+}
+
+fn sorted_command_palette_items(
+    items: impl IntoIterator<Item = CommandPaletteItem>
+) -> Vec<CommandPaletteItem> {
+    let mut items: Vec<_> = items.into_iter().collect();
     items.sort_by_key(|item| item.label.to_ascii_lowercase());
     items
+}
+
+fn fuzzy_command_palette_items(
+    query: &str,
+    items: impl IntoIterator<Item = CommandPaletteItem>,
+) -> Vec<CommandPaletteItem> {
+    let pattern = Pattern::new(
+        query,
+        CaseMatching::Ignore,
+        Normalization::Smart,
+        AtomKind::Fuzzy,
+    );
+    let mut matcher = command_palette_matcher();
+    let mut utf32_buf = Vec::new();
+    let mut matches: Vec<_> = items
+        .into_iter()
+        .filter_map(|item| {
+            pattern
+                .score(
+                    Utf32Str::new(item.label.as_str(), &mut utf32_buf),
+                    &mut matcher,
+                )
+                .map(|score| CommandPaletteMatch { item, score })
+        })
+        .collect();
+    matches.sort_by(command_palette_match_order);
+    matches.into_iter().map(|matched| matched.item).collect()
+}
+
+fn command_palette_matcher() -> Matcher {
+    let mut config = NucleoConfig::DEFAULT;
+    config.prefer_prefix = true;
+    Matcher::new(config)
+}
+
+fn command_palette_match_order(
+    left: &CommandPaletteMatch,
+    right: &CommandPaletteMatch,
+) -> std::cmp::Ordering {
+    right.score.cmp(&left.score).then_with(|| {
+        left.item
+            .label
+            .to_ascii_lowercase()
+            .cmp(&right.item.label.to_ascii_lowercase())
+    })
 }
 
 fn move_command_palette_selection(
@@ -1501,7 +1564,7 @@ mod command_palette_tests {
     }
 
     #[test]
-    fn command_palette_query_prefix_matches_labels() {
+    fn command_palette_query_matches_labels_by_prefix() {
         let items = command_palette_items("close");
         assert_eq!(
             items
@@ -1513,6 +1576,33 @@ mod command_palette_tests {
     }
 
     #[test]
+    fn command_palette_query_fuzzy_matches_labels() {
+        let items = command_palette_items("cat");
+        assert_eq!(
+            items.first().map(|item| item.action),
+            Some(Action::CloseActiveTab)
+        );
+    }
+
+    #[test]
+    fn command_palette_query_normalizes_unicode() {
+        let items = fuzzy_command_palette_items(
+            "resume",
+            [
+                CommandPaletteItem {
+                    label: "Copy".to_owned(),
+                    action: Action::Copy,
+                },
+                CommandPaletteItem {
+                    label: "Résumé session".to_owned(),
+                    action: Action::Paste,
+                },
+            ],
+        );
+        assert_eq!(items.first().map(|item| item.action), Some(Action::Paste));
+    }
+
+    #[test]
     fn command_palette_query_resets_selection() {
         let mut view = command_palette_view();
         move_command_palette_selection(&mut view, 1);
@@ -1521,7 +1611,7 @@ mod command_palette_tests {
         assert!(
             view.items
                 .iter()
-                .all(|item| item.label.to_ascii_lowercase().starts_with("toggle"))
+                .all(|item| item.label.to_ascii_lowercase().contains("toggle"))
         );
     }
 }
