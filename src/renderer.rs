@@ -336,6 +336,9 @@ pub enum RenderEvent {
         height: u32,
     },
     Action(Action),
+    SpawnNewTab {
+        cwd: Option<PathBuf>,
+    },
     SetActiveTab(usize),
     CloseTab(usize),
     CloseOtherTabs(usize),
@@ -735,6 +738,7 @@ impl RenderHost {
             RenderEvent::Action(action) => {
                 self.run_action(*action);
             }
+            RenderEvent::SpawnNewTab { cwd } => self.spawn_new_tab_in_dir(cwd.clone()),
             RenderEvent::SetActiveTab(tab_idx) => self.set_active_tab(*tab_idx),
             RenderEvent::CloseOtherTabs(tab_idx) => self.close_other_tabs(*tab_idx),
             RenderEvent::CloseTab(tab_idx) => self.close_tab(*tab_idx),
@@ -1055,14 +1059,21 @@ impl RenderHost {
     }
 
     fn spawn_new_tab(&mut self) {
-        let id = TabId(self.next_tab_id);
-        self.next_tab_id += 1;
-
         let cwd = if let Some(tab) = self.active_tab() {
             tab.terminal.lock().metadata.current_directory.clone()
         } else {
-            Default::default()
+            None
         };
+        self.spawn_new_tab_in_dir(cwd);
+    }
+
+    fn spawn_new_tab_in_dir(
+        &mut self,
+        cwd: Option<PathBuf>,
+    ) {
+        let id = TabId(self.next_tab_id);
+        self.next_tab_id += 1;
+
         let (cols, rows) = if let Some(renderer) = &self.renderer {
             let (width, height) = self.window_size;
             let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);

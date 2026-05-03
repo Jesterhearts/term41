@@ -181,14 +181,36 @@ impl WindowHost {
         self.notify_interaction_changed();
     }
 
-    pub(crate) fn accept_command_palette_selection(&mut self) -> Option<Action> {
-        let action = {
-            let state = self.input_state.lock();
-            let view = state.command_palette.as_ref()?;
-            command_palette_selected_action(view)
-        }?;
-        self.close_command_palette();
-        Some(action)
+    pub(crate) fn complete_command_palette_selection(&mut self) {
+        let mut state = self.input_state.lock();
+        let Some(view) = state.command_palette.as_mut() else {
+            return;
+        };
+        if complete_command_palette_selection(view) {
+            drop(state);
+            self.notify_interaction_changed();
+        }
+    }
+
+    pub(crate) fn accept_command_palette_selection(&mut self) -> Option<CommandPaletteInvocation> {
+        let mut state = self.input_state.lock();
+        let view = state.command_palette.as_mut()?;
+        match command_palette_selected_invocation(view)? {
+            CommandPaletteAccept::Ready(invocation) => {
+                state.command_palette = None;
+                drop(state);
+                self.notify_interaction_changed();
+                Some(invocation)
+            }
+            CommandPaletteAccept::NeedsArgument => {
+                let completed = complete_command_palette_selection(view);
+                drop(state);
+                if completed {
+                    self.notify_interaction_changed();
+                }
+                None
+            }
+        }
     }
 
     pub(crate) fn command_editor_is_open_for_tab(

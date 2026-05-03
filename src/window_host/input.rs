@@ -74,6 +74,10 @@ impl WindowHost {
                 self.move_command_palette_selection(1);
                 None
             }
+            Key::Named(NamedKey::Tab) => {
+                self.complete_command_palette_selection();
+                None
+            }
             Key::Named(NamedKey::Backspace) => {
                 self.update_command_palette_query(|query| {
                     query.pop();
@@ -104,8 +108,9 @@ impl WindowHost {
             _ => None,
         };
 
-        if let Some(action) = action {
-            if self.run_local_action(action, tab_id) {
+        if let Some(invocation) = action {
+            let action = invocation.action;
+            if self.run_local_command_palette_invocation(invocation, tab_id) {
                 self.notify_interaction_changed();
             } else {
                 self.send(RenderEvent::Action(action));
@@ -580,6 +585,61 @@ impl WindowHost {
             | Action::ToggleCommandEditor
             | Action::OpenCommandPalette => false,
         }
+    }
+
+    pub(crate) fn run_local_command_palette_invocation(
+        &mut self,
+        invocation: CommandPaletteInvocation,
+        tab_id: TabId,
+    ) -> bool {
+        match invocation.argument {
+            Some(CommandPaletteArgument::WorkingDirectory(argument))
+                if invocation.action == Action::OpenNewWindow =>
+            {
+                let cwd = self.resolve_command_palette_working_directory(tab_id, &argument);
+                if let Some(dir) = cwd.as_ref()
+                    && !dir.is_dir()
+                {
+                    self.show_toast(format!("No such directory: {}", dir.display()));
+                    return true;
+                }
+                spawn_new_window(cwd);
+                true
+            }
+            Some(CommandPaletteArgument::WorkingDirectory(argument))
+                if invocation.action == Action::NewTab =>
+            {
+                let cwd = self.resolve_command_palette_working_directory(tab_id, &argument);
+                if let Some(dir) = cwd.as_ref()
+                    && !dir.is_dir()
+                {
+                    self.show_toast(format!("No such directory: {}", dir.display()));
+                    return true;
+                }
+                self.send(RenderEvent::SpawnNewTab { cwd });
+                true
+            }
+            None => self.run_local_action(invocation.action, tab_id),
+            Some(_) => {
+                warn!(
+                    "command-palette: unsupported argument for {:?}",
+                    invocation.action
+                );
+                true
+            }
+        }
+    }
+
+    fn resolve_command_palette_working_directory(
+        &self,
+        tab_id: TabId,
+        argument: &str,
+    ) -> Option<PathBuf> {
+        let current_dir = self
+            .input_endpoints
+            .get(&tab_id)
+            .and_then(|target| target.terminal.lock().metadata.current_directory.clone());
+        resolve_command_palette_working_directory(current_dir, argument)
     }
 
     pub(crate) fn handle_key_event(

@@ -467,6 +467,15 @@ Notes:
   Path completion understands single- and double-quoted arguments and escapes
   spaces for unquoted paths.
 
+  The command palette supports argument-bearing commands whose labels end in
+  `:`. Text after the colon is treated as the argument; for example,
+  `Open new window in dir: Documents` launches a new window with `Documents`
+  resolved relative to the active session's current directory, and
+  `Open new tab in dir: Documents` does the same for a new tab in the current
+  window. Tab fills the currently highlighted palette row into the palette
+  input, and Enter on an argument-bearing row without an argument fills the
+  `: ` prompt instead of running an empty argument.
+
   Alternate-screen applications always receive normal terminal input. While the
   editor is visible on the primary screen, keyboard input targets the editor;
   foreground-app heuristics hide the editor so interactive terminal programs

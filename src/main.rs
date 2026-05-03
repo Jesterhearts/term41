@@ -409,6 +409,7 @@ struct ToastView {
 pub(crate) struct CommandPaletteItem {
     pub(crate) label: String,
     pub(crate) action: Action,
+    argument: Option<CommandPaletteArgumentKind>,
 }
 
 struct CommandPaletteMatch {
@@ -423,6 +424,34 @@ pub(crate) struct CommandPaletteView {
     pub(crate) selected: usize,
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum CommandPaletteArgumentKind {
+    WorkingDirectory,
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) enum CommandPaletteArgument {
+    WorkingDirectory(String),
+}
+
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub(crate) struct CommandPaletteInvocation {
+    pub(crate) action: Action,
+    pub(crate) argument: Option<CommandPaletteArgument>,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+enum CommandPaletteAccept {
+    Ready(CommandPaletteInvocation),
+    NeedsArgument,
+}
+
+#[derive(Debug, PartialEq, Eq)]
+struct CommandPaletteInput<'a> {
+    command: &'a str,
+    argument: Option<&'a str>,
+}
+
 fn command_palette_view() -> CommandPaletteView {
     CommandPaletteView {
         query: String::new(),
@@ -432,20 +461,60 @@ fn command_palette_view() -> CommandPaletteView {
 }
 
 fn command_palette_items(query: &str) -> Vec<CommandPaletteItem> {
+    let input = parse_command_palette_input(query);
     let items = Action::command_palette_actions()
         .iter()
-        .map(|action| command_palette_item(*action));
-    if query.is_empty() {
+        .flat_map(|action| command_palette_items_for_action(*action))
+        .filter(|item| input.argument.is_none() || item.argument.is_some());
+    if input.command.is_empty() {
         return sorted_command_palette_items(items);
     }
 
-    fuzzy_command_palette_items(query, items)
+    fuzzy_command_palette_items(input.command, items)
 }
 
-fn command_palette_item(action: Action) -> CommandPaletteItem {
+fn parse_command_palette_input(query: &str) -> CommandPaletteInput<'_> {
+    if let Some((command, argument)) = query.split_once(':') {
+        CommandPaletteInput {
+            command: command.trim_end(),
+            argument: Some(argument.trim_start()),
+        }
+    } else {
+        CommandPaletteInput {
+            command: query,
+            argument: None,
+        }
+    }
+}
+
+fn command_palette_items_for_action(action: Action) -> Vec<CommandPaletteItem> {
+    let mut items = vec![command_palette_item(action, action.palette_label(), None)];
+    if action == Action::OpenNewWindow {
+        items.push(command_palette_item(
+            action,
+            "Open new window in dir:",
+            Some(CommandPaletteArgumentKind::WorkingDirectory),
+        ));
+    }
+    if action == Action::NewTab {
+        items.push(command_palette_item(
+            action,
+            "Open new tab in dir:",
+            Some(CommandPaletteArgumentKind::WorkingDirectory),
+        ));
+    }
+    items
+}
+
+fn command_palette_item(
+    action: Action,
+    label: &str,
+    argument: Option<CommandPaletteArgumentKind>,
+) -> CommandPaletteItem {
     CommandPaletteItem {
-        label: action.palette_label().to_owned(),
+        label: label.to_owned(),
         action,
+        argument,
     }
 }
 
@@ -527,8 +596,48 @@ fn set_command_palette_query(
     view.selected = 0;
 }
 
-fn command_palette_selected_action(view: &CommandPaletteView) -> Option<Action> {
-    view.items.get(view.selected).map(|item| item.action)
+fn complete_command_palette_selection(view: &mut CommandPaletteView) -> bool {
+    let Some(query) = command_palette_completion_text(view) else {
+        return false;
+    };
+    set_command_palette_query(view, query);
+    true
+}
+
+fn command_palette_completion_text(view: &CommandPaletteView) -> Option<String> {
+    let item = view.items.get(view.selected)?;
+    let input = parse_command_palette_input(&view.query);
+    if item.argument.is_none() {
+        return Some(item.label.clone());
+    }
+    match input.argument {
+        Some(argument) if !argument.is_empty() => Some(format!("{} {}", item.label, argument)),
+        _ => Some(format!("{} ", item.label)),
+    }
+}
+
+fn command_palette_selected_invocation(view: &CommandPaletteView) -> Option<CommandPaletteAccept> {
+    let item = view.items.get(view.selected)?;
+    let input = parse_command_palette_input(&view.query);
+    let argument = match item.argument {
+        Some(CommandPaletteArgumentKind::WorkingDirectory) => {
+            let Some(argument) = input.argument else {
+                return Some(CommandPaletteAccept::NeedsArgument);
+            };
+            let argument = argument.trim();
+            if argument.is_empty() {
+                return Some(CommandPaletteAccept::NeedsArgument);
+            }
+            Some(CommandPaletteArgument::WorkingDirectory(
+                argument.to_owned(),
+            ))
+        }
+        None => None,
+    };
+    Some(CommandPaletteAccept::Ready(CommandPaletteInvocation {
+        action: item.action,
+        argument,
+    }))
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1541,6 +1650,32 @@ fn spawn_new_window(cwd: Option<PathBuf>) {
     }
 }
 
+fn resolve_command_palette_working_directory(
+    current_dir: Option<PathBuf>,
+    argument: &str,
+) -> Option<PathBuf> {
+    let argument = argument.trim();
+    if argument.is_empty() {
+        return None;
+    }
+    let path = expand_home_path(argument).unwrap_or_else(|| PathBuf::from(argument));
+    if path.is_absolute() {
+        Some(path)
+    } else {
+        Some(current_dir.map_or(path.clone(), |dir| dir.join(path)))
+    }
+}
+
+fn expand_home_path(argument: &str) -> Option<PathBuf> {
+    if argument == "~" {
+        return dirs::home_dir();
+    }
+    let rest = argument
+        .strip_prefix("~/")
+        .or_else(|| argument.strip_prefix("~\\"))?;
+    Some(dirs::home_dir()?.join(rest))
+}
+
 fn parse_command_args() -> Option<Vec<String>> {
     let mut args = std::env::args();
     let _argv0 = args.next();
@@ -1593,10 +1728,12 @@ mod command_palette_tests {
                 CommandPaletteItem {
                     label: "Copy".to_owned(),
                     action: Action::Copy,
+                    argument: None,
                 },
                 CommandPaletteItem {
                     label: "Résumé session".to_owned(),
                     action: Action::Paste,
+                    argument: None,
                 },
             ],
         );
@@ -1613,6 +1750,89 @@ mod command_palette_tests {
             view.items
                 .iter()
                 .all(|item| item.label.to_ascii_lowercase().contains("toggle"))
+        );
+    }
+
+    #[test]
+    fn command_palette_includes_argument_command_with_colon() {
+        let items = command_palette_items("open new window in dir");
+        assert_eq!(
+            items.first().map(|item| item.label.as_str()),
+            Some("Open new window in dir:")
+        );
+    }
+
+    #[test]
+    fn command_palette_includes_new_tab_argument_command_with_colon() {
+        let items = command_palette_items("open new tab in dir");
+        assert_eq!(
+            items.first().map(|item| item.label.as_str()),
+            Some("Open new tab in dir:")
+        );
+    }
+
+    #[test]
+    fn command_palette_argument_text_does_not_affect_matching() {
+        let items = command_palette_items("open new window in dir: Documents");
+        assert_eq!(
+            items.first().map(|item| item.label.as_str()),
+            Some("Open new window in dir:")
+        );
+    }
+
+    #[test]
+    fn command_palette_tab_completes_selected_label() {
+        let mut view = command_palette_view();
+        set_command_palette_query(&mut view, "open new window in dir".to_owned());
+        assert!(complete_command_palette_selection(&mut view));
+        assert_eq!(view.query, "Open new window in dir: ");
+    }
+
+    #[test]
+    fn command_palette_tab_preserves_argument_text() {
+        let mut view = command_palette_view();
+        set_command_palette_query(&mut view, "open new window in dir: Documents".to_owned());
+        assert!(complete_command_palette_selection(&mut view));
+        assert_eq!(view.query, "Open new window in dir: Documents");
+    }
+
+    #[test]
+    fn command_palette_enter_requires_argument_for_argument_commands() {
+        let mut view = command_palette_view();
+        set_command_palette_query(&mut view, "open new window in dir".to_owned());
+        assert_eq!(
+            command_palette_selected_invocation(&view),
+            Some(CommandPaletteAccept::NeedsArgument)
+        );
+    }
+
+    #[test]
+    fn command_palette_enter_returns_argument_invocation() {
+        let mut view = command_palette_view();
+        set_command_palette_query(&mut view, "open new window in dir: Documents".to_owned());
+        assert_eq!(
+            command_palette_selected_invocation(&view),
+            Some(CommandPaletteAccept::Ready(CommandPaletteInvocation {
+                action: Action::OpenNewWindow,
+                argument: Some(CommandPaletteArgument::WorkingDirectory(
+                    "Documents".to_owned()
+                )),
+            }))
+        );
+    }
+
+    #[test]
+    fn command_palette_enter_returns_new_tab_argument_invocation() {
+        let mut view = command_palette_view();
+        set_command_palette_query(&mut view, "open new tab in dir: Documents".to_owned());
+        assert_eq!(
+            command_palette_selected_invocation(&view),
+            Some(CommandPaletteAccept::Ready(CommandPaletteInvocation {
+                action: Action::NewTab,
+                argument: Some(CommandPaletteArgument::WorkingDirectory(
+                    "Documents".to_owned()
+                )),
+            }))
         );
     }
 }
