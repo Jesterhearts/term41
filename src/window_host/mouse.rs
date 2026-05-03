@@ -163,7 +163,8 @@ impl WindowHost {
             let terminal = target.terminal.lock();
             command_editor_view_context(&terminal)
         }?;
-        let history_entries = self.command_editor_history_entries(&config);
+        let history_entries =
+            self.command_editor_history_entries(&config, context.current_dir.as_deref());
         Some((
             Self::command_editor_settings(
                 &config,

@@ -1624,6 +1624,7 @@ process_info = true
         assert!(cfg.command_editor.merge_extra_dirs);
         assert!(!cfg.command_editor.deep_history_integration);
         assert_eq!(cfg.command_editor.max_history, 200);
+        assert_eq!(cfg.command_editor.max_persistent_history_per_dir, 200);
     }
 
     #[test]
@@ -1638,6 +1639,7 @@ binary_dirs = ["~/custom-bin"]
 merge_extra_dirs = false
 deep_history_integration = true
 max_history = 25
+max_persistent_history_per_dir = 75
 "#,
         );
         assert!(cfg.command_editor.enabled);
@@ -1650,6 +1652,7 @@ max_history = 25
         assert!(!cfg.command_editor.merge_extra_dirs);
         assert!(cfg.command_editor.deep_history_integration);
         assert_eq!(cfg.command_editor.max_history, 25);
+        assert_eq!(cfg.command_editor.max_persistent_history_per_dir, 75);
     }
 
     #[test]

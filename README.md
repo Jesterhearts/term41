@@ -365,7 +365,10 @@ vsync = "auto"
 # merge_extra_dirs = true
 # Opt in to read-only shell history discovery through shellhist41.
 # deep_history_integration = false
+# Maximum entries loaded into the command editor history list.
 # max_history = 200
+# Maximum persisted command-editor entries retained per working directory.
+# max_persistent_history_per_dir = 200
 
 [colors.status_line]
 # foreground = "#d8dee9"

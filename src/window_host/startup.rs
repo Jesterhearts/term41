@@ -309,7 +309,8 @@ impl WindowHost {
             let terminal = target.terminal.lock();
             command_editor_view_context(&terminal)
         }?;
-        let history_entries = self.command_editor_history_entries(&config);
+        let history_entries =
+            self.command_editor_history_entries(&config, context.current_dir.as_deref());
         let target = self.input_endpoints.get(&tab_id)?;
         let settings = Self::command_editor_settings(
             &config,
@@ -323,22 +324,32 @@ impl WindowHost {
     pub(crate) fn command_editor_history_entries(
         &mut self,
         config: &CommandEditorConfig,
+        current_dir: Option<&std::path::Path>,
+    ) -> Vec<HistoryEntry> {
+        let mut entries = self.shell_history_entries(config);
+        entries.extend(self.persistent_history_entries(config, current_dir));
+        entries
+    }
+
+    pub(crate) fn shell_history_entries(
+        &mut self,
+        config: &CommandEditorConfig,
     ) -> Vec<HistoryEntry> {
         if !config.deep_history_integration {
-            self.command_history_entries.clear();
-            self.command_history_loaded = false;
-            self.command_history_enabled = false;
+            self.shell_history_entries.clear();
+            self.shell_history_loaded = false;
+            self.shell_history_enabled = false;
             return Vec::new();
         }
 
-        if self.command_history_enabled != config.deep_history_integration {
-            self.command_history_entries.clear();
-            self.command_history_loaded = false;
-            self.command_history_enabled = config.deep_history_integration;
+        if self.shell_history_enabled != config.deep_history_integration {
+            self.shell_history_entries.clear();
+            self.shell_history_loaded = false;
+            self.shell_history_enabled = config.deep_history_integration;
         }
 
-        if !self.command_history_loaded {
-            self.command_history_entries =
+        if !self.shell_history_loaded {
+            self.shell_history_entries =
                 match shellhist41::load_current_shell_history(&shellhist41::ShellHistoryOptions {
                     max_entries: config.max_history,
                     ..shellhist41::ShellHistoryOptions::default()
@@ -352,10 +363,41 @@ impl WindowHost {
                         Vec::new()
                     }
                 };
-            self.command_history_loaded = true;
+            self.shell_history_loaded = true;
         }
 
-        self.command_history_entries.clone()
+        self.shell_history_entries.clone()
+    }
+
+    pub(crate) fn persistent_history_entries(
+        &self,
+        config: &CommandEditorConfig,
+        current_dir: Option<&std::path::Path>,
+    ) -> Vec<HistoryEntry> {
+        let Some(store) = &self.command_history_store else {
+            return Vec::new();
+        };
+        let Some(current_dir) = current_dir else {
+            return Vec::new();
+        };
+        match history41::recent_commands(
+            store,
+            history41::HistoryQuery {
+                cwd: current_dir.to_owned(),
+                limit: config.max_history,
+                include_global_fallback: true,
+            },
+        ) {
+            Ok(entries) => entries
+                .into_iter()
+                .rev()
+                .map(|entry| HistoryEntry::external(entry.command))
+                .collect(),
+            Err(error) => {
+                debug!("persistent command history unavailable: {error}");
+                Vec::new()
+            }
+        }
     }
 
     pub(crate) fn command_editor_settings(
@@ -371,6 +413,18 @@ impl WindowHost {
             current_dir,
             max_history: config.max_history,
         }
+    }
+
+    pub(crate) fn enqueue_persistent_command_history(
+        &mut self,
+        command: String,
+        cwd: PathBuf,
+        config: &CommandEditorConfig,
+    ) {
+        let Some(writer) = &mut self.command_history_writer else {
+            return;
+        };
+        writer.enqueue(history_runtime::store_request(command, cwd, config));
     }
 
     pub(crate) fn toggle_command_editor(&mut self) {

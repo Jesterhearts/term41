@@ -2,6 +2,7 @@
 #![allow(clippy::type_complexity)]
 
 mod command_catalog;
+mod history_runtime;
 mod output_recording;
 mod perf_ctrl_c;
 mod renderer;
@@ -52,6 +53,7 @@ use config41::StatusLineMode;
 use config41::keybindings::Action;
 use config41::keybindings::Keybindings;
 use font41::FontSystem;
+use history41::HistoryStore;
 use parking_lot::Mutex;
 use pty_pipe41::Pty;
 use pty_pipe41::PtyWriter;
@@ -117,6 +119,7 @@ use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::Window;
 use winit::window::WindowId;
 
+use crate::history_runtime::HistoryWriter;
 use crate::output_recording::RecorderControl;
 use crate::output_recording::next_recording_path;
 use crate::renderer::PermissionChoice;
@@ -501,9 +504,11 @@ struct WindowHost {
     startup_release_tx: Option<mpsc::SyncSender<Vec<Tab>>>,
     input_endpoints: HashMap<TabId, InputEndpoint>,
     command_catalog: CommandCatalog,
-    command_history_entries: Vec<HistoryEntry>,
-    command_history_loaded: bool,
-    command_history_enabled: bool,
+    command_history_store: Option<HistoryStore>,
+    command_history_writer: Option<HistoryWriter>,
+    shell_history_entries: Vec<HistoryEntry>,
+    shell_history_loaded: bool,
+    shell_history_enabled: bool,
     active_input_tab: Option<TabId>,
     input_state: Arc<Mutex<InputState>>,
     event_tx: cueue::Writer<RenderEvent>,
@@ -1223,6 +1228,21 @@ fn main() {
     let startup_gutter = config.gutter;
     let startup_keybindings = config.keybindings.clone();
     let startup_command_editor = config.command_editor.clone();
+    let command_history_store =
+        history_runtime::history_db_path().and_then(|path| match history41::open(&path) {
+            Ok(store) => Some(store),
+            Err(error) => {
+                warn!(
+                    "persistent command history: failed to open {}: {error}",
+                    path.display()
+                );
+                None
+            }
+        });
+    let command_history_writer = command_history_store
+        .as_ref()
+        .cloned()
+        .and_then(history_runtime::spawn_history_writer);
 
     // Create the terminal thread handle before spawning the PTY so the PTY
     // reader can unpark the terminal thread once it starts.
@@ -1375,9 +1395,11 @@ fn main() {
             },
         )]),
         command_catalog: CommandCatalog::from_config(&startup_command_editor),
-        command_history_entries: Vec::new(),
-        command_history_loaded: false,
-        command_history_enabled: startup_command_editor.deep_history_integration,
+        command_history_store,
+        command_history_writer,
+        shell_history_entries: Vec::new(),
+        shell_history_loaded: false,
+        shell_history_enabled: startup_command_editor.deep_history_integration,
         active_input_tab: Some(TabId(0)),
         input_state,
         event_tx,

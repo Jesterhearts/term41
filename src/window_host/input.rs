@@ -343,8 +343,9 @@ impl WindowHost {
         let Some(context) = editor_context else {
             return false;
         };
-        let history_entries = self.command_editor_history_entries(&config);
-        let handled = {
+        let history_cwd = context.current_dir.clone();
+        let history_entries = self.command_editor_history_entries(&config, history_cwd.as_deref());
+        let (handled, view, submitted_command) = {
             let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
                 return false;
             };
@@ -357,39 +358,43 @@ impl WindowHost {
             let outcome = apply_input(&mut target.command_editor, input.clone(), &settings);
             match outcome {
                 EditOutcome::Submitted(command) => {
+                    let history_command = command.clone();
                     let mut bytes = command.into_bytes();
                     bytes.push(b'\r');
                     Self::write_host_bytes(target, bytes, true);
                     let view =
                         command_editor_view(&target.command_editor, &settings, config.vim_mode);
-                    (true, view)
+                    (true, view, Some(history_command))
                 }
                 EditOutcome::Updated => {
                     let view =
                         command_editor_view(&target.command_editor, &settings, config.vim_mode);
-                    (true, view)
+                    (true, view, None)
                 }
                 EditOutcome::Canceled => {
                     let view =
                         command_editor_view(&target.command_editor, &settings, config.vim_mode);
-                    (true, view)
+                    (true, view, None)
                 }
                 EditOutcome::Ignored => {
                     if input == EditorInput::Cancel {
-                        (false, None)
+                        (false, None, None)
                     } else {
                         let view =
                             command_editor_view(&target.command_editor, &settings, config.vim_mode);
-                        (true, view)
+                        (true, view, None)
                     }
                 }
             }
         };
-        if handled.0 {
+        if handled {
+            if let (Some(command), Some(cwd)) = (submitted_command, history_cwd) {
+                self.enqueue_persistent_command_history(command, cwd, &config);
+            }
             self.clear_terminal_selection_for_tab(tab_id);
-            self.set_command_editor_view(tab_id, handled.1);
+            self.set_command_editor_view(tab_id, view);
         }
-        handled.0
+        handled
     }
 
     pub(crate) fn handle_command_editor_clipboard_action(
@@ -413,7 +418,8 @@ impl WindowHost {
         let Some(context) = context else {
             return false;
         };
-        let history_entries = self.command_editor_history_entries(&config);
+        let history_entries =
+            self.command_editor_history_entries(&config, context.current_dir.as_deref());
         let (handled_action, view) = {
             let Some(target) = self.input_endpoints.get_mut(&tab_id) else {
                 return false;

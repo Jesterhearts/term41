@@ -16,6 +16,7 @@ pub struct CommandEditorConfig {
     pub merge_extra_dirs: bool,
     pub deep_history_integration: bool,
     pub max_history: usize,
+    pub max_persistent_history_per_dir: usize,
 }
 
 impl Default for CommandEditorConfig {
@@ -28,6 +29,7 @@ impl Default for CommandEditorConfig {
             merge_extra_dirs: true,
             deep_history_integration: false,
             max_history: 200,
+            max_persistent_history_per_dir: 200,
         }
     }
 }
@@ -60,6 +62,10 @@ pub(crate) struct CommandEditorSettings {
     #[serde(deserialize_with = "usize_opt")]
     #[serde(default)]
     max_history: Option<usize>,
+    /// Maximum persisted command-editor entries retained for one cwd key.
+    #[serde(deserialize_with = "usize_opt")]
+    #[serde(default)]
+    max_persistent_history_per_dir: Option<usize>,
 }
 
 pub(crate) fn build_command_editor(raw: Option<CommandEditorSettings>) -> CommandEditorConfig {
@@ -83,6 +89,10 @@ pub(crate) fn build_command_editor(raw: Option<CommandEditorSettings>) -> Comman
             .deep_history_integration
             .unwrap_or(defaults.deep_history_integration),
         max_history: settings.max_history.unwrap_or(defaults.max_history).max(1),
+        max_persistent_history_per_dir: settings
+            .max_persistent_history_per_dir
+            .unwrap_or(defaults.max_persistent_history_per_dir)
+            .max(1),
     }
 }
 
@@ -196,5 +206,17 @@ mod tests {
             ),
             vec![home.join("tools")]
         );
+    }
+
+    #[test]
+    fn history_limits_are_clamped_to_one() {
+        let config = build_command_editor(Some(CommandEditorSettings {
+            max_history: Some(0),
+            max_persistent_history_per_dir: Some(0),
+            ..CommandEditorSettings::default()
+        }));
+
+        assert_eq!(config.max_history, 1);
+        assert_eq!(config.max_persistent_history_per_dir, 1);
     }
 }
