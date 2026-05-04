@@ -876,7 +876,7 @@ pub(super) fn resize_screen(
     let grid = &mut screen.grid;
     let cursor = &mut screen.cursor;
     let images = &mut screen.images;
-    let mut outcome = ResizeScreenOutcome::default();
+    let outcome = ResizeScreenOutcome::default();
 
     let effective_old_rows = (old_rows as usize).min(grid.rows.len());
     let visible_start = grid.rows.len().saturating_sub(effective_old_rows);
@@ -913,11 +913,7 @@ pub(super) fn resize_screen(
 
         restore_images(&grid.rows, &anchors, images);
 
-        let mut new_abs = grid.rows.len().saturating_sub(old_distance_from_bottom + 1);
-
-        let prepended = prepend_blank_rows_to_live_bottom(grid, images, new_rows, new_cols);
-        outcome.prepended_rows = prepended as u64;
-        new_abs = new_abs.saturating_add(prepended);
+        let new_abs = grid.rows.len().saturating_sub(old_distance_from_bottom + 1);
 
         let visible_start = grid.rows.len().saturating_sub(new_rows as usize);
         cursor.row = new_abs
@@ -941,11 +937,7 @@ pub(super) fn resize_screen(
             }
         }
 
-        let mut new_abs = old_abs.saturating_sub(popped);
-        let prepended = prepend_blank_rows_to_live_bottom(grid, images, new_rows, new_cols);
-        outcome.prepended_rows = prepended as u64;
-        new_abs = new_abs.saturating_add(prepended);
-
+        let new_abs = old_abs.saturating_sub(popped);
         let visible_start = grid.rows.len().saturating_sub(new_rows as usize);
         cursor.row = new_abs
             .saturating_sub(visible_start)
@@ -964,23 +956,6 @@ pub(super) fn resize_screen(
     outcome
 }
 
-fn prepend_blank_rows_to_live_bottom(
-    grid: &mut Grid,
-    images: &mut BTreeMap<u64, PlacedImage>,
-    viewport_rows: u32,
-    viewport_cols: u32,
-) -> usize {
-    let missing = (viewport_rows as usize).saturating_sub(grid.rows.len());
-    for _ in 0..missing {
-        grid.rows
-            .push_front(Row::new(viewport_cols, grid.default_fg, grid.default_bg));
-    }
-    for image in images.values_mut() {
-        image.row += missing;
-    }
-    missing
-}
-
 #[cfg(test)]
 mod integration_tests {
     use super::StatusDisplayKind;
@@ -994,7 +969,8 @@ mod integration_tests {
 
     fn visible_text(term: &Terminal) -> String {
         let mut s = String::new();
-        for r in 0..term.viewport.rows {
+        let rows = term.viewport.rows.min(term.active.grid.rows.len() as u32);
+        for r in 0..rows {
             let row = view::visible_row(&term.active, &term.viewport, r);
             for cell in &row.cells {
                 s.push_str(cell);
@@ -1142,18 +1118,16 @@ mod integration_tests {
     }
 
     #[test]
-    fn resize_taller_bottom_aligns_short_history() {
+    fn resize_taller_does_not_pad_short_history() {
         let mut term = TestTerm::new(5, 3, 100, 16, 8);
         term.process(b"abc\r\ndef");
 
         term.resize(5, 5);
 
-        assert_eq!(visible_row_text(&term, 0), "     ");
-        assert_eq!(visible_row_text(&term, 1), "     ");
-        assert_eq!(visible_row_text(&term, 2), "     ");
-        assert_eq!(visible_row_text(&term, 3), "abc  ");
-        assert_eq!(visible_row_text(&term, 4), "def  ");
-        assert_eq!(term.active.cursor.row, 4);
+        assert_eq!(term.active.grid.rows.len(), 2);
+        assert_eq!(term.active.grid.rows[0].cells.concat(), "abc  ");
+        assert_eq!(term.active.grid.rows[1].cells.concat(), "def  ");
+        assert_eq!(term.active.cursor.row, 1);
         assert_eq!(term.active.cursor.col, 3);
     }
 

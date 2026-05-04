@@ -1502,6 +1502,48 @@ mod command_block_tests {
         assert!(term.active.grid.rows.len() >= 4);
         assert!(row_text(&term.active.grid.rows[3]).starts_with("x"));
     }
+
+    #[test]
+    fn resize_preserves_completed_command_blocks() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07$ one\x1b]133;B\x07");
+        term.process(b"\r\n\x1b]133;C\x07output");
+        term.process(b"\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ two\x1b]133;B\x07");
+
+        assert_eq!(term.active.scrollback_blocks.len(), 1);
+        term.resize(6, 6);
+
+        assert_eq!(term.active.scrollback_blocks.len(), 1);
+        assert!(row_text(&term.active.scrollback_blocks[0].grid.rows[0]).starts_with("$ one"));
+    }
+
+    #[test]
+    fn resize_taller_keeps_completed_command_blocks_visible() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07$ one\x1b]133;B\x07");
+        term.process(b"\r\n\x1b]133;C\x07output");
+        term.process(b"\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ two\x1b]133;B\x07");
+        term.resize(10, 10);
+
+        let (mut publisher, mut output) = crate::terminal_snapshot_buffer(&mut term.inner);
+        crate::publish_terminal_snapshot(&mut term.inner, &mut publisher);
+        output.update();
+        let snap = output.read();
+        let text = snap
+            .rows
+            .iter()
+            .map(|row| row.cells.concat())
+            .collect::<Vec<_>>()
+            .join("\n");
+
+        assert!(text.contains("$ one"));
+        assert!(text.contains("output"));
+        assert!(text.contains("$ two"));
+    }
 }
 
 #[cfg(test)]

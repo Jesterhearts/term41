@@ -1574,7 +1574,7 @@ mod integration_tests {
         assert_eq!(term.active.cursor.row, 0);
         assert_eq!(term.active.cursor.col, 0);
         assert_eq!(term.active.scroll_top, 0);
-        let first_vis = term.active.grid.rows.len() - 24;
+        let first_vis = term.active.grid.rows.len().saturating_sub(24);
         assert_eq!(term.active.grid.rows[first_vis].cells[0].as_str(), " ");
     }
 

@@ -980,7 +980,7 @@ mod tests {
         );
         let snap = snapshot_terminal(&mut terminal);
 
-        assert_eq!(snap.rows.len(), snap.total_rows as usize);
+        assert_eq!(snap.total_rows, terminal.viewport.rows + 1);
         assert_eq!(snap.rows.last().unwrap().screen_row, terminal.viewport.rows);
     }
 
