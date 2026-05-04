@@ -899,6 +899,8 @@ pub(super) fn resize_screen(
     let max_rows = new_rows as usize + grid.scrollback_limit as usize;
 
     if new_cols as usize != old_cols as usize {
+        reflow_command_blocks(&mut screen.scrollback_blocks, new_cols);
+
         let anchors = anchor_images(&grid.rows, images);
 
         let cursor_abs_now =
@@ -954,6 +956,15 @@ pub(super) fn resize_screen(
     });
     screen.offset = screen.offset.min(scrollback);
     outcome
+}
+
+fn reflow_command_blocks(
+    blocks: &mut [CommandBlock],
+    new_cols: u32,
+) {
+    for block in blocks {
+        self::grid::reflow(&mut block.grid, new_cols);
+    }
 }
 
 #[cfg(test)]

@@ -1544,6 +1544,48 @@ mod command_block_tests {
         assert!(text.contains("output"));
         assert!(text.contains("$ two"));
     }
+
+    #[test]
+    fn resize_wider_reflows_completed_command_block_wraps() {
+        let mut term = TestTerm::new(6, 4, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07$ x\x1b]133;B\x07");
+        term.process(b"\r\n\x1b]133;C\x07abcdefghi");
+        term.process(b"\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ y\x1b]133;B\x07");
+        term.resize(12, 4);
+
+        let block = &term.active.scrollback_blocks[0];
+        assert!(block.grid.rows.iter().all(|row| row.len() == 12));
+        assert!(
+            block
+                .grid
+                .rows
+                .iter()
+                .any(|row| row_text(row).starts_with("abcdefghi"))
+        );
+    }
+
+    #[test]
+    fn resize_narrower_reflows_completed_command_block_wraps() {
+        let mut term = TestTerm::new(12, 4, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07$ x\x1b]133;B\x07");
+        term.process(b"\r\n\x1b]133;C\x07abcdefghi");
+        term.process(b"\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ y\x1b]133;B\x07");
+        term.resize(6, 4);
+
+        let block_text = term.active.scrollback_blocks[0]
+            .grid
+            .rows
+            .iter()
+            .map(row_text)
+            .collect::<Vec<_>>();
+
+        assert!(block_text.iter().any(|row| row.starts_with("abcdef")));
+        assert!(block_text.iter().any(|row| row.starts_with("ghi")));
+    }
 }
 
 #[cfg(test)]
