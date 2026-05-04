@@ -455,6 +455,27 @@ struct CompatibilitySettings {
     emoji: Option<EmojiCompatibilityMode>,
 }
 
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Default)]
+pub struct ShellIntegrationConfig {
+    /// Opt in to shell startup hooks that emit OSC 133 lifecycle markers.
+    pub hooks: bool,
+}
+
+#[derive(Deserialize, Default)]
+struct ShellIntegrationSettings {
+    /// Install ephemeral shell hooks in spawned default shells.
+    #[serde(default)]
+    hooks: Option<bool>,
+}
+
+fn build_shell_integration(raw: Option<ShellIntegrationSettings>) -> ShellIntegrationConfig {
+    let settings = raw.unwrap_or_default();
+    let defaults = ShellIntegrationConfig::default();
+    ShellIntegrationConfig {
+        hooks: settings.hooks.unwrap_or(defaults.hooks),
+    }
+}
+
 #[derive(Deserialize, Default)]
 struct LimitSettings {
     #[serde(deserialize_with = "usize_opt")]
@@ -731,6 +752,8 @@ struct ConfigFile {
     #[serde(default)]
     compatibility: Option<CompatibilitySettings>,
     #[serde(default)]
+    shell_integration: Option<ShellIntegrationSettings>,
+    #[serde(default)]
     command_editor: Option<CommandEditorSettings>,
 }
 
@@ -765,6 +788,7 @@ pub struct Config {
     pub limits: TerminalLimits,
     pub script_permissions: BTreeMap<String, ScriptPermissions>,
     pub compatibility: CompatibilityConfig,
+    pub shell_integration: ShellIntegrationConfig,
     pub command_editor: CommandEditorConfig,
 }
 
@@ -792,6 +816,7 @@ impl Default for Config {
             limits: TerminalLimits::default(),
             script_permissions: BTreeMap::new(),
             compatibility: CompatibilityConfig::default(),
+            shell_integration: ShellIntegrationConfig::default(),
             command_editor: CommandEditorConfig::default(),
         }
     }
@@ -841,6 +866,7 @@ fn parse_config(
     let kitty_graphics = kitty_graphics.unwrap_or_default();
     let limits = build_limits(limits);
     let compatibility = build_compatibility(file.compatibility);
+    let shell_integration = build_shell_integration(file.shell_integration);
     let command_editor = build_command_editor(file.command_editor);
     let new_tab_text = file.new_tab_text.unwrap_or('⮒'.to_smolstr());
 
@@ -873,6 +899,7 @@ fn parse_config(
         limits,
         script_permissions: scripts.unwrap_or_default(),
         compatibility,
+        shell_integration,
         command_editor,
         new_tab_text,
     }
@@ -1608,6 +1635,20 @@ process_info = true
                 .compatibility
                 .emoji,
             EmojiCompatibilityMode::Auto
+        );
+    }
+
+    #[test]
+    fn shell_integration_hooks_default_to_off() {
+        assert!(!parse("").shell_integration.hooks);
+    }
+
+    #[test]
+    fn shell_integration_hooks_are_opt_in() {
+        assert!(
+            parse("[shell_integration]\nhooks = true\n")
+                .shell_integration
+                .hooks
         );
     }
 

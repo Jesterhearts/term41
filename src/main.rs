@@ -1559,6 +1559,7 @@ fn main() {
             cell_height as u16,
             Some(term_features),
             command,
+            config.shell_integration.hooks,
             None,
             terminal_thread.thread_handle.clone(),
             child_exit_tx.clone(),

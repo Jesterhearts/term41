@@ -1145,6 +1145,7 @@ impl RenderHost {
             self.font_system.cell_height as u16,
             Some(term_features),
             None,
+            self.config.shell_integration.hooks,
             cwd,
             terminal_thread.thread_handle.clone(),
             self.child_exit_tx.clone(),

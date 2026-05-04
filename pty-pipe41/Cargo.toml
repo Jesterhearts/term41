@@ -5,6 +5,7 @@ edition = "2024"
 
 [dependencies]
 cueue.workspace = true
+hooks41.workspace = true
 libc            = "0.2.185"
 log.workspace   = true
 portable-pty    = "0.9.0"

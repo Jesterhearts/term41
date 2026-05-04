@@ -12,6 +12,7 @@ members = [
   "config41",
   "font41",
   "history41",
+  "hooks41",
   "image41",
   "pty-pipe41",
   "selftest41",
@@ -33,6 +34,7 @@ dirs                 = "6.0.0"
 flate2               = "1.1.9"
 font41               = { path = "font41" }
 history41            = { path = "history41" }
+hooks41              = { path = "hooks41" }
 image41              = { path = "image41" }
 infer                = { version = "0.19.0", default-features = false }
 log                  = "0.4.29"

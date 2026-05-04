@@ -352,11 +352,20 @@ vsync = "auto"
 # process_info = false
 # resource_usage = false
 
+[shell_integration]
+# Off by default. When enabled, term41 installs ephemeral hooks in the spawned
+# default shell so bash, zsh, fish, or PowerShell can emit OSC 133 prompt and
+# command lifecycle markers. User shell startup files are sourced but not
+# modified.
+# hooks = false
+
 [command_editor]
 # Off by default. When enabled, it is active while OSC 133 / OSC 633 shell
 # integration reports command-line editing on the primary screen. If the editor
 # remains visible during command output, input keeps targeting the editor until
 # foreground-app heuristics hide it.
+# You probably want to enable [shell_integration] hooks as well unless your
+# shell already emits OSC 133 markers, or you're going to have a bad time.
 # enabled = true
 # vim_mode = false
 # completions = ["cargo", "git", "rg"]
@@ -421,6 +430,11 @@ Notes:
 - `[security.scripts.<script_name>]` controls which optional libraries a script
   receives. The default sandbox has only basic string/table/math/utf8 support
   plus `require("terminal")`.
+- `[shell_integration] hooks = true` opts in to runtime shell hooks for the
+  default spawned shell. The hooks emit OSC 133 `A`, `B`, `C`, and `D` markers
+  for prompt start, command start, output start, and output end. The install is
+  per-child-process and temporary; term41 logs a warning when it cannot identify
+  the shell or has no hook implementation for it.
 - `[command_editor]` enables the terminal-local command editor layer.
   `Ctrl+Shift+D` toggles the editor for the current runtime session without
   rewriting the config file.

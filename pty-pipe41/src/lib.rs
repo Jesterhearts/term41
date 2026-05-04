@@ -77,6 +77,7 @@ impl PtyReader {
 pub struct Pty {
     master: Box<dyn MasterPty + Send>,
     child_killer: Box<dyn ChildKiller>,
+    _hooks: Option<hooks41::InstalledHooks>,
 }
 
 /// Input half of a PTY connection. Lives on the window thread so user input
@@ -106,6 +107,7 @@ impl Pty {
         cell_height: u16,
         term_features: Option<String>,
         command: Option<Vec<String>>,
+        shell_hooks: bool,
         cwd: Option<std::path::PathBuf>,
         data_thread: Arc<OnceLock<Thread>>,
         child_exit_tx: mpsc::Sender<TabId>,
@@ -125,19 +127,7 @@ impl Pty {
             })
             .map_err(io::Error::other)?;
 
-        let mut cmd = match command {
-            Some(argv) if !argv.is_empty() => {
-                let mut iter = argv.into_iter();
-                let program = iter.next().expect("argv non-empty");
-                let mut builder = CommandBuilder::new(program);
-                builder.args(iter);
-                builder
-            }
-            // new_default_prog resolves to $SHELL (or the passwd entry) on
-            // Unix and to %ComSpec%/cmd.exe on Windows, and arranges
-            // login-shell argv0 semantics where applicable.
-            _ => CommandBuilder::new_default_prog(),
-        };
+        let (mut cmd, hooks) = shell_command(command, shell_hooks)?;
         cmd.env("TERM", "xterm-256color");
         // Advertise iTerm2 in TERM_PROGRAM so clients that gate inline-image
         // output on a hardcoded allowlist (viu, chafa, rich, etc.) emit the
@@ -198,6 +188,7 @@ impl Pty {
             Self {
                 master: pair.master,
                 child_killer,
+                _hooks: hooks,
             },
             PtyWriter { writer },
             PtyReader { rx, pending_read },
@@ -217,6 +208,43 @@ impl Pty {
             pixel_height: 0,
         });
     }
+}
+
+fn shell_command(
+    command: Option<Vec<String>>,
+    shell_hooks: bool,
+) -> io::Result<(CommandBuilder, Option<hooks41::InstalledHooks>)> {
+    match command {
+        Some(argv) if !argv.is_empty() => Ok((command_builder(argv), None)),
+        _ if shell_hooks => hooked_default_shell_command(),
+        // new_default_prog resolves to $SHELL (or the passwd entry) on
+        // Unix and to %ComSpec%/cmd.exe on Windows, and arranges login-shell
+        // argv0 semantics where applicable.
+        _ => Ok((CommandBuilder::new_default_prog(), None)),
+    }
+}
+
+fn command_builder(argv: Vec<String>) -> CommandBuilder {
+    let mut iter = argv.into_iter();
+    let program = iter.next().expect("argv non-empty");
+    let mut builder = CommandBuilder::new(program);
+    builder.args(iter);
+    builder
+}
+
+fn hooked_default_shell_command() -> io::Result<(CommandBuilder, Option<hooks41::InstalledHooks>)> {
+    let Some(hooks) = hooks41::install_current_shell_hooks()
+        .map_err(|error| io::Error::other(error.to_string()))?
+    else {
+        return Ok((CommandBuilder::new_default_prog(), None));
+    };
+
+    let mut builder = CommandBuilder::new(&hooks.command().program);
+    builder.args(&hooks.command().args);
+    for (key, value) in &hooks.command().env {
+        builder.env(key, value);
+    }
+    Ok((builder, Some(hooks)))
 }
 
 impl Drop for Pty {
@@ -285,6 +313,30 @@ fn pump_reader(
 
 #[cfg(test)]
 mod tests {
+    use std::ffi::OsStr;
+
+    use super::*;
+
+    #[test]
+    fn default_shell_without_hooks_uses_portable_default_program() {
+        let (builder, hooks) = shell_command(None, false).unwrap();
+
+        assert!(builder.is_default_prog());
+        assert!(hooks.is_none());
+    }
+
+    #[test]
+    fn explicit_command_ignores_shell_hooks_flag() {
+        let (builder, hooks) =
+            shell_command(Some(vec!["echo".to_owned(), "hello".to_owned()]), true).unwrap();
+
+        assert_eq!(
+            builder.get_argv(),
+            &[OsStr::new("echo"), OsStr::new("hello")]
+        );
+        assert!(hooks.is_none());
+    }
+
     #[cfg(target_os = "linux")]
     #[test]
     fn process_group_parser_skips_ppid_field() {
