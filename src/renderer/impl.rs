@@ -1239,6 +1239,14 @@ fn terminal_block_y_offset_rows(
     if snap.on_alt_screen || snap.viewport_offset != 0 {
         return 0;
     }
+    let terminal_row_count = rows
+        .iter()
+        .filter(|row| snap.status_line_row != Some(row.screen_row))
+        .filter(|row| row.screen_row < snap.viewport_rows)
+        .count();
+    if terminal_row_count >= snap.viewport_rows as usize {
+        return 0;
+    }
     let row_content = rows
         .iter()
         .filter(|row| snap.status_line_row != Some(row.screen_row))

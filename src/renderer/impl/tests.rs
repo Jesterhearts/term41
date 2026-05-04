@@ -129,6 +129,16 @@ mod geometry_tests {
     }
 
     #[test]
+    fn full_height_terminal_blocks_do_not_bottom_align_to_content() {
+        let mut snap = snapshot(4, 5);
+        snap.rows[0].cells[0] = smol_str::SmolStr::new_inline("$");
+        snap.rows[1].cells[0] = smol_str::SmolStr::new_inline("x");
+        snap.rows[2].cells[0] = smol_str::SmolStr::new_inline("y");
+
+        assert_eq!(terminal_block_y_offset_rows(&snap.rows, &snap), 0);
+    }
+
+    #[test]
     fn image_batches_coalesce_adjacent_page_runs_only() {
         let mut geometry = ImageGeometry::default();
         image_batch_for_page(&mut geometry, 0);
