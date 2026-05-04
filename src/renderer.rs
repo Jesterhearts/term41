@@ -6,6 +6,7 @@ mod input_encoding;
 pub(crate) mod paint;
 mod shelf;
 pub(crate) mod startup;
+mod sticky_prompt;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -28,6 +29,7 @@ use font41::FontSystem;
 use parking_lot::Mutex;
 use pty_pipe41::Pty;
 use terminal41::StatusDisplayKind;
+use terminal41::TermSnapshot;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
 use terminal41::VisibleImage;
@@ -1516,30 +1518,35 @@ impl RenderHost {
             tab_menu: tab_context_menu.as_ref().map(|m| (m.x, m.hovered_item)),
         };
 
-        let visible_images = if suspend_terminal_area {
-            self.last_visible_images.clone()
+        let sticky_prompt_row = if suspend_terminal_area {
+            None
         } else {
-            let images = debug_span!("reading terminal state").in_scope(|| {
-                let terminal = self.tabs[active_idx].terminal.lock();
-                debug_span!("recording visible images").in_scope(|| {
-                    terminal41::view::visible_images(
-                        &terminal.active,
-                        &terminal.viewport,
-                        terminal.cell_height(),
-                        terminal.cell_width(),
-                        terminal.kitty_images(),
-                        &terminal.palette,
-                        Instant::now(),
-                    )
-                    .collect::<Vec<_>>()
-                })
-            });
+            let (images, sticky_prompt_row) =
+                debug_span!("reading terminal state").in_scope(|| {
+                    let terminal = self.tabs[active_idx].terminal.lock();
+                    let images = debug_span!("recording visible images").in_scope(|| {
+                        terminal41::view::visible_images(
+                            &terminal.active,
+                            &terminal.viewport,
+                            terminal.cell_height(),
+                            terminal.cell_width(),
+                            terminal.kitty_images(),
+                            &terminal.palette,
+                            Instant::now(),
+                        )
+                        .collect::<Vec<_>>()
+                    });
+                    let sticky_prompt_row = sticky_prompt::row_snapshot(&terminal, &snap);
+                    (images, sticky_prompt_row)
+                });
             self.last_visible_images = images.clone();
-            images
+            sticky_prompt_row
         };
+        let visible_images = self.last_visible_images.clone();
         if self.last_rendered_tab_id != Some(active_tab_id) {
             snap.reset_cached_rows = true;
         }
+        sticky_prompt::apply_to_snapshot(&mut snap, sticky_prompt_row);
         if self.last_script_status_text != script_output.status_text {
             self.script_status_generation = self.script_status_generation.wrapping_add(1).max(1);
         }
@@ -1872,7 +1879,7 @@ pub(crate) fn effective_bg_path(config: &Config) -> Option<PathBuf> {
 }
 
 fn apply_script_status_line(
-    snap: &mut terminal41::TermSnapshot,
+    snap: &mut TermSnapshot,
     status_text: Option<&str>,
     generation: u64,
 ) {
