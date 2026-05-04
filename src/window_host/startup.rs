@@ -715,10 +715,11 @@ pub(crate) fn apply_selection_autoscroll(
         return false;
     }
     if let Some(selection) = terminal.selection.as_ref()
-        && let Some(new_sel) = extend_selection(
+        && let Some(new_sel) = extend_rendered_selection(
             selection,
             &terminal.active,
             &terminal.viewport,
+            terminal.on_alt_screen,
             cell.0,
             cell.1,
         )

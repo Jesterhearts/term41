@@ -62,8 +62,21 @@ pub(crate) fn handle_cursor_moved(
         return;
     }
 
-    let pos = mouse_report_position_at(host, x, y);
-    if forward_mouse_to_app(&host.keyboard, &mut host.input) {
+    if host.mouse.left_drag_active && extend_selection_to_mouse(host) {
+        host.mouse.selection_drag_moved = true;
+        refresh_selection_autoscroll_direction(host);
+        notify_interaction_changed(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+        );
+        return;
+    }
+
+    if forward_mouse_to_app(&host.keyboard, &mut host.input)
+        && let Some(pos) = app_mouse_report_position_at(host, x, y)
+    {
         let motion_position = mouse_motion_position_key(host, pos);
         if host.mouse.last_motion_position == Some(motion_position) {
             return;
@@ -87,18 +100,6 @@ pub(crate) fn handle_cursor_moved(
             }),
             true,
         );
-        notify_interaction_changed(
-            &host.input,
-            &mut host.render,
-            &host.startup,
-            host.window.as_ref(),
-        );
-        return;
-    }
-
-    if host.mouse.left_drag_active && extend_selection_to_mouse(host) {
-        host.mouse.selection_drag_moved = true;
-        refresh_selection_autoscroll_direction(host);
         notify_interaction_changed(
             &host.input,
             &mut host.render,
@@ -139,7 +140,7 @@ pub(crate) fn command_editor_offset_at_mouse(
     if !command_editor_open {
         return None;
     }
-    let (cursor_row, viewport_rows, viewport_cols) = {
+    let (visual_cursor_row, viewport_rows, viewport_cols) = {
         let terminal = target.terminal.lock();
         if !matches!(
             terminal.metadata.shell_integration_phase,
@@ -149,7 +150,7 @@ pub(crate) fn command_editor_offset_at_mouse(
         }
         command_editor_input_context(&terminal, command_editor_open)?;
         (
-            terminal.active.cursor.row,
+            command_editor_visual_cursor_row(&terminal),
             terminal.viewport.rows.max(1),
             terminal.viewport.cols.max(1),
         )
@@ -159,7 +160,7 @@ pub(crate) fn command_editor_offset_at_mouse(
         command_editor_view_for_input_tab(&state, tab_id).cloned()
     }?;
 
-    let placement = command_editor_placement_for_cursor(cursor_row, viewport_rows);
+    let placement = command_editor_placement_for_cursor(visual_cursor_row, viewport_rows);
     let visible_rows = placement.rows;
     let box_top = placement.top_row as i32;
     let terminal_row = raw_y.saturating_sub(cell_h) / cell_h;
@@ -632,8 +633,35 @@ pub(crate) fn handle_mouse_input(
         host.mouse.last_motion_position = None;
     }
 
-    if forward_mouse_to_app(&host.keyboard, &mut host.input) {
-        let pos = mouse_report_position_at(host, host.mouse.pos.0, host.mouse.pos.1);
+    if !pressed && button == MouseButton::Left && host.mouse.left_drag_active {
+        stop_selection_drag(&mut host.mouse);
+        if let Some(target) = active_input_target(&mut host.input) {
+            let mut guard = target.terminal.lock();
+            let terminal = &mut *guard;
+            if terminal.has_selection() {
+                copy_selection(
+                    &mut terminal.clipboard,
+                    terminal.selection.as_ref(),
+                    &terminal.active,
+                    ClipboardKind::Primary,
+                );
+            } else {
+                terminal.selection = None;
+                terminal.invalidate_snapshot_rows();
+            }
+        }
+        notify_interaction_changed(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+        );
+        return;
+    }
+
+    if forward_mouse_to_app(&host.keyboard, &mut host.input)
+        && let Some(pos) = app_mouse_report_position_at(host, host.mouse.pos.0, host.mouse.pos.1)
+    {
         let kind = if pressed {
             MouseEventKind::Press
         } else {
@@ -762,30 +790,7 @@ pub(crate) fn handle_mouse_input(
                 host.window.as_ref(),
             );
         }
-        (MouseButton::Left, false) => {
-            stop_selection_drag(&mut host.mouse);
-            if let Some(target) = active_input_target(&mut host.input) {
-                let mut guard = target.terminal.lock();
-                let terminal = &mut *guard;
-                if terminal.has_selection() {
-                    copy_selection(
-                        &mut terminal.clipboard,
-                        terminal.selection.as_ref(),
-                        &terminal.active,
-                        ClipboardKind::Primary,
-                    );
-                } else {
-                    terminal.selection = None;
-                    terminal.invalidate_snapshot_rows();
-                }
-            }
-            notify_interaction_changed(
-                &host.input,
-                &mut host.render,
-                &host.startup,
-                host.window.as_ref(),
-            );
-        }
+        (MouseButton::Left, false) => {}
         (MouseButton::Right, true) => {
             if let Some(target) = active_input_target(&mut host.input) {
                 let mut guard = target.terminal.lock();
@@ -851,8 +856,9 @@ pub(crate) fn handle_mouse_wheel(
         (raw_x as i32, -(raw_y as i32))
     };
 
-    if forward_mouse_to_app(&host.keyboard, &mut host.input) {
-        let pos = mouse_report_position_at(host, host.mouse.pos.0, host.mouse.pos.1);
+    if forward_mouse_to_app(&host.keyboard, &mut host.input)
+        && let Some(pos) = app_mouse_report_position_at(host, host.mouse.pos.0, host.mouse.pos.1)
+    {
         let mods = mouse_modifiers(&host.keyboard);
         let Some(target) = active_input_target(&mut host.input) else {
             return;
@@ -1183,6 +1189,48 @@ pub(crate) fn mouse_report_position_at(
     mouse_report_position_from_pixels(
         raw_x, raw_y, cell_w, cell_h, gutter_w, cols, rows, row_offset,
     )
+}
+
+pub(crate) fn app_mouse_report_position_at(
+    host: &mut WindowHost,
+    x: f64,
+    y: f64,
+) -> Option<MouseReportPosition> {
+    let (_, cell_h, _, _) = layout_snapshot(&host.render);
+    let pos = mouse_report_position_at(host, x, y);
+    let target = active_input_target(&mut host.input)?;
+    let terminal = target.terminal.lock();
+    app_mouse_report_position_for_terminal(&terminal, pos, cell_h)
+}
+
+pub(crate) fn app_mouse_report_position_for_terminal(
+    terminal: &terminal41::Terminal,
+    pos: MouseReportPosition,
+    cell_h: u32,
+) -> Option<MouseReportPosition> {
+    let row = terminal41::selection::active_screen_row_at_viewport_row(
+        &terminal.active,
+        &terminal.viewport,
+        terminal.on_alt_screen,
+        pos.row,
+    )?;
+    let cell_h = cell_h.max(1);
+    let pixel_y = row
+        .saturating_mul(cell_h)
+        .saturating_add(pos.pixel_y % cell_h)
+        .min(
+            terminal
+                .viewport
+                .rows
+                .max(1)
+                .saturating_mul(cell_h)
+                .saturating_sub(1),
+        );
+    Some(MouseReportPosition {
+        row,
+        pixel_y,
+        ..pos
+    })
 }
 
 pub(crate) fn mouse_motion_position_key(

@@ -95,10 +95,10 @@ use terminal41::prompt::output_text_at;
 use terminal41::prompt::select_command_at;
 use terminal41::prompt::untrusted_command_line_at;
 use terminal41::selection::SelectionMode;
+use terminal41::selection::active_screen_row_at_viewport_row;
 use terminal41::selection::close_search;
 use terminal41::selection::copy_selection;
 use terminal41::selection::extend_rendered_selection;
-use terminal41::selection::extend_selection;
 use terminal41::selection::open_search;
 use terminal41::selection::search_active;
 use terminal41::selection::search_append;
@@ -944,13 +944,24 @@ fn command_editor_terminal_row_offset(
         && !search_active(&terminal.search)
         && command_editor_view_context(terminal).is_some()
     {
-        command_editor_terminal_row_offset_for_cursor(
-            terminal.active.cursor.row,
-            terminal.viewport.rows,
-        )
+        let cursor_row = command_editor_visual_cursor_row(terminal);
+        command_editor_terminal_row_offset_for_cursor(cursor_row, terminal.viewport.rows)
     } else {
         0
     }
+}
+
+fn command_editor_visual_cursor_row(terminal: &Terminal) -> u32 {
+    (0..terminal.viewport.rows.max(1))
+        .find(|&viewport_row| {
+            active_screen_row_at_viewport_row(
+                &terminal.active,
+                &terminal.viewport,
+                terminal.on_alt_screen,
+                viewport_row,
+            ) == Some(terminal.active.cursor.row)
+        })
+        .unwrap_or(terminal.active.cursor.row)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

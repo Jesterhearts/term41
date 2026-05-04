@@ -54,6 +54,46 @@ mod selection_autoscroll_tests {
     }
 
     #[test]
+    fn app_mouse_position_maps_rendered_blocks_to_active_rows() {
+        let mut term = terminal41::test_support::TestTerm::new(10, 5, 100, 16, 8);
+        term.process(b"one");
+        term.process(b"\x1b]133;A\x07two");
+        term.process(b"\x1b]133;A\x07three");
+
+        assert_eq!(
+            app_mouse_report_position_for_terminal(
+                &term.inner,
+                MouseReportPosition {
+                    col: 3,
+                    row: 4,
+                    pixel_x: 30,
+                    pixel_y: 87,
+                },
+                20,
+            ),
+            Some(MouseReportPosition {
+                col: 3,
+                row: 0,
+                pixel_x: 30,
+                pixel_y: 7,
+            })
+        );
+        assert_eq!(
+            app_mouse_report_position_for_terminal(
+                &term.inner,
+                MouseReportPosition {
+                    col: 3,
+                    row: 2,
+                    pixel_x: 30,
+                    pixel_y: 47,
+                },
+                20,
+            ),
+            None
+        );
+    }
+
+    #[test]
     fn command_editor_mouse_paste_takes_over_when_open() {
         assert_eq!(
             command_editor_mouse_paste_kind(true, true, MouseButton::Right),
@@ -281,7 +321,10 @@ mod command_editor_context_tests {
         let mut term = TestTerm::new_80x24();
 
         assert_eq!(command_editor_terminal_row_offset(&term, false), 0);
-        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
+        assert_eq!(
+            command_editor_terminal_row_offset(&term, true),
+            COMMAND_EDITOR_BOX_ROWS
+        );
 
         term.active.cursor.row = 23;
         assert_eq!(
@@ -290,10 +333,29 @@ mod command_editor_context_tests {
         );
 
         term.active.cursor.row = 21;
-        assert_eq!(command_editor_terminal_row_offset(&term, true), 1);
+        assert_eq!(
+            command_editor_terminal_row_offset(&term, true),
+            COMMAND_EDITOR_BOX_ROWS
+        );
 
         term.active.cursor.row = 20;
-        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
+        assert_eq!(
+            command_editor_terminal_row_offset(&term, true),
+            COMMAND_EDITOR_BOX_ROWS
+        );
+
+        let mut term = TestTerm::new(10, 5, 100, 16, 8);
+        term.process(b"one");
+        term.process(b"\x1b]133;A\x07two");
+        term.process(b"\x1b]133;A\x07three");
+        assert_eq!(
+            command_editor_visual_cursor_row(&term),
+            term.viewport.rows - 1
+        );
+        assert_eq!(
+            command_editor_terminal_row_offset(&term, true),
+            COMMAND_EDITOR_BOX_ROWS
+        );
 
         open_search(&mut term.search);
         assert_eq!(command_editor_terminal_row_offset(&term, true), 0);

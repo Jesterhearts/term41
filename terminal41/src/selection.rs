@@ -1232,6 +1232,36 @@ mod integration_tests {
     }
 
     #[test]
+    fn bottom_aligned_rendered_mouse_selection_can_copy_visible_blocks() {
+        let mut term = TestTerm::new(10, 8, 100, 16, 8);
+        term.process(b"one");
+        term.process(b"\x1b]133;A\x07two");
+        term.process(b"\x1b]133;A\x07three");
+
+        term.inner.selection = start_rendered_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.on_alt_screen,
+            0,
+            3,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_rendered_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.on_alt_screen,
+            2,
+            5,
+        );
+
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("one\n\ntwo")
+        );
+    }
+
+    #[test]
     fn word_selection_snaps_to_boundaries() {
         let mut term = TestTerm::new(20, 3, 100, 16, 8);
         write_row(&mut term, 0, "hello world");
