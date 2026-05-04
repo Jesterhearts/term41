@@ -475,7 +475,6 @@ fn active_block_screen_top(
         .scrollback_blocks
         .iter()
         .map(|block| crate::screen::command_block_rendered_rows_len(block) as u32)
-        .filter(|&rows| rows > 0)
         .map(|rows| rows + 1)
         .sum::<u32>();
     history_len.saturating_sub(top)

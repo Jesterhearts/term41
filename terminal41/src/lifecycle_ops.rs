@@ -71,19 +71,13 @@ pub(crate) fn scroll_to_prev_prompt(
     screen: &mut Screen,
     viewport: &Viewport,
 ) {
-    let top = selection::screen_row_to_absolute(screen, viewport, 0);
-    let popped = screen.grid.total_popped as u64;
-    let target = screen
-        .grid
-        .rows
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| r.prompt_start)
-        .map(|(i, _)| popped + i as u64)
-        .filter(|&r| r < top)
+    let top = rendered_viewport_top(screen, viewport);
+    let target = rendered_prompt_rows(screen)
+        .into_iter()
+        .filter(|&row| row < top)
         .max();
     if let Some(target) = target {
-        scroll_absolute_to_viewport_top(screen, viewport, target);
+        scroll_rendered_row_to_viewport_top(screen, viewport, target);
     }
 }
 
@@ -91,44 +85,72 @@ pub(crate) fn scroll_to_next_prompt(
     screen: &mut Screen,
     viewport: &Viewport,
 ) {
-    let top = selection::screen_row_to_absolute(screen, viewport, 0);
-    let popped = screen.grid.total_popped as u64;
-    let target = screen
-        .grid
-        .rows
-        .iter()
-        .enumerate()
-        .filter(|(_, r)| r.prompt_start)
-        .map(|(i, _)| popped + i as u64)
-        .find(|&r| r > top);
+    let top = rendered_viewport_top(screen, viewport);
+    let target = rendered_prompt_rows(screen)
+        .into_iter()
+        .find(|&row| row > top);
     if let Some(target) = target {
-        scroll_absolute_to_viewport_top(screen, viewport, target);
+        scroll_rendered_row_to_viewport_top(screen, viewport, target);
     }
 }
 
-fn scroll_absolute_to_viewport_top(
+fn rendered_viewport_top(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> usize {
+    let rendered_len = screen::rendered_rows_len(screen);
+    let max_top = rendered_len.saturating_sub(viewport.rows as usize);
+    max_top.saturating_sub(screen.offset as usize)
+}
+
+fn scroll_rendered_row_to_viewport_top(
     screen: &mut Screen,
     viewport: &Viewport,
-    target_abs: u64,
+    target: usize,
 ) {
     if screen::page_memory_active(screen) {
         return;
     }
-    let popped = screen.grid.total_popped as u64;
-    let Some(target_local) = target_abs.checked_sub(popped) else {
-        return;
-    };
-    let grid_len = screen.grid.rows.len();
-    let rows = viewport.rows as usize;
-    if grid_len <= rows || (target_local as usize) >= grid_len {
-        screen.offset = 0;
-        return;
-    }
-    let max_top = grid_len - rows;
-    let top = (target_local as usize).min(max_top);
-    let offset = (grid_len - rows - top) as u32;
+    let rendered_len = screen::rendered_rows_len(screen);
+    let max_top = rendered_len.saturating_sub(viewport.rows as usize);
+    let top = target.min(max_top);
+    let offset = max_top.saturating_sub(top) as u32;
     let max_offset = screen::rendered_scrollback_len(screen, viewport);
     screen.offset = offset.min(max_offset);
+}
+
+fn rendered_prompt_rows(screen: &Screen) -> Vec<usize> {
+    let mut prompts = Vec::new();
+    let mut rendered_row = 0;
+
+    for block in &screen.scrollback_blocks {
+        let block_rows = screen::command_block_rendered_rows_len(block);
+        prompts.extend(
+            block
+                .grid
+                .rows
+                .iter()
+                .take(block_rows)
+                .enumerate()
+                .filter(|(_, row)| row.prompt_start)
+                .map(|(idx, _)| rendered_row + idx),
+        );
+        rendered_row += block_rows + 1;
+    }
+
+    let active_rows = screen::active_block_rendered_rows_len(screen);
+    prompts.extend(
+        screen
+            .grid
+            .rows
+            .iter()
+            .take(active_rows)
+            .enumerate()
+            .filter(|(_, row)| row.prompt_start)
+            .map(|(idx, _)| rendered_row + idx),
+    );
+
+    prompts
 }
 
 pub(crate) fn scroll_viewport_down(

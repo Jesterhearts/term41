@@ -380,7 +380,8 @@ pub(super) fn start_command_block(
     if page_memory_active(screen) {
         return;
     }
-    if !screen.active_command_block_started && !active_block_has_content(screen) {
+    if !active_block_has_pty_backed_content(screen) {
+        clear_command_block_metadata(&mut screen.grid);
         screen.active_command_block_started = true;
         return;
     }
@@ -395,7 +396,12 @@ pub(super) fn start_command_block(
         default_fg: screen.grid.default_fg,
         default_bg: screen.grid.default_bg,
     };
-    let completed = std::mem::replace(&mut screen.grid, replacement);
+    let mut completed = std::mem::replace(&mut screen.grid, replacement);
+    let completed_rows = grid_content_rows_len(&completed)
+        .max(screen.cursor.row as usize + 1)
+        .max(1)
+        .min(completed.rows.len());
+    completed.rows.truncate(completed_rows);
     screen
         .scrollback_blocks
         .push(CommandBlock { grid: completed });
@@ -424,7 +430,6 @@ pub(super) fn rendered_rows_len(screen: &Screen) -> usize {
         .scrollback_blocks
         .iter()
         .map(command_block_rendered_rows_len)
-        .filter(|&rows| rows > 0)
         .map(|rows| rows + 1)
         .sum::<usize>();
     completed_rows + active_block_rendered_rows_len(screen)
@@ -437,12 +442,12 @@ pub(super) fn rendered_scrollback_len(
     rendered_rows_len(screen).saturating_sub(viewport.rows as usize) as u32
 }
 
-fn active_block_has_content(screen: &Screen) -> bool {
-    grid_has_content(&screen.grid)
+fn active_block_has_pty_backed_content(screen: &Screen) -> bool {
+    grid_has_pty_backed_content(&screen.grid)
 }
 
 pub(super) fn command_block_rendered_rows_len(block: &CommandBlock) -> usize {
-    grid_content_rows_len(&block.grid)
+    block.grid.rows.len()
 }
 
 pub(super) fn active_block_rendered_rows_len(screen: &Screen) -> usize {
@@ -452,8 +457,16 @@ pub(super) fn active_block_rendered_rows_len(screen: &Screen) -> usize {
         .min(screen.grid.rows.len())
 }
 
-fn grid_has_content(grid: &Grid) -> bool {
-    grid_content_rows_len(grid) > 0
+fn grid_has_pty_backed_content(grid: &Grid) -> bool {
+    grid.rows.iter().any(row_has_pty_backed_content)
+}
+
+fn clear_command_block_metadata(grid: &mut Grid) {
+    for row in &mut grid.rows {
+        row.prompt_start = false;
+        row.output_start = false;
+        row.exit_status = None;
+    }
 }
 
 fn grid_content_rows_len(grid: &Grid) -> usize {
@@ -461,6 +474,13 @@ fn grid_content_rows_len(grid: &Grid) -> usize {
         .iter()
         .rposition(row_has_visible_content)
         .map_or(0, |row| row + 1)
+}
+
+fn row_has_pty_backed_content(row: &Row) -> bool {
+    row.cells.iter().any(|cell| cell != " ")
+        || row.has_wide_cells
+        || row.exit_status.is_some()
+        || row.links.iter().any(Option::is_some)
 }
 
 fn row_has_visible_content(row: &Row) -> bool {
@@ -728,7 +748,15 @@ pub(super) fn ensure_cursor_row_exists(
     }
 
     let mut inserted = 0;
-    while active_row_index(screen, viewport) >= screen.grid.rows.len() {
+    let target = active_row_index(screen, viewport).min(
+        screen
+            .grid
+            .rows
+            .len()
+            .saturating_sub(viewport.rows as usize)
+            + viewport.rows.saturating_sub(1) as usize,
+    );
+    while target >= screen.grid.rows.len() {
         screen.grid.rows.push_back(Row::new(
             viewport.cols,
             screen.grid.default_fg,
@@ -1130,7 +1158,7 @@ mod integration_tests {
     }
 
     #[test]
-    fn processing_bottom_aligns_short_history_after_trim() {
+    fn processing_bottom_aligns_short_history_after_trim_without_padding_state() {
         let mut term = TestTerm::new(5, 4, 100, 16, 8);
         term.active.grid.rows.truncate(2);
         term.active.grid.rows[0].cells[0] = smol_str::SmolStr::new_inline("A");
@@ -1139,19 +1167,14 @@ mod integration_tests {
 
         term.process(b"\x1b[3J");
 
-        assert_eq!(
-            term.active.grid.scrollback_len(&term.viewport),
-            term.viewport.rows
-        );
-        assert_eq!(visible_row_text(&term, 0), "     ");
-        assert_eq!(visible_row_text(&term, 1), "     ");
-        assert_eq!(visible_row_text(&term, 2), "A    ");
-        assert_eq!(visible_row_text(&term, 3), "B    ");
-        assert_eq!(term.active.cursor.row, 3);
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 0);
+        assert_eq!(visible_row_text(&term, 0), "A    ");
+        assert_eq!(visible_row_text(&term, 1), "B    ");
+        assert_eq!(term.active.cursor.row, 1);
     }
 
     #[test]
-    fn processing_keeps_blank_scrollback_page_after_saved_line_trim() {
+    fn processing_saved_line_trim_does_not_pad_terminal_scrollback() {
         let mut term = TestTerm::new(5, 4, 100, 16, 8);
         term.process(b"\x1b[1;1HAAAAA\x1b[2;1HBBBBB\x1b[3;1HCCCCC\x1b[4;1HDDDDD");
         term.process(b"\n");
@@ -1159,33 +1182,26 @@ mod integration_tests {
 
         term.process(b"\x1b[3J");
 
-        assert_eq!(
-            term.active.grid.scrollback_len(&term.viewport),
-            term.viewport.rows
-        );
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 0);
         let viewport = term.viewport;
         let scrolled = view::scroll_viewport_up(&mut term.active, &viewport, viewport.rows);
-        assert_eq!(scrolled, viewport.rows);
-        assert_eq!(visible_row_text(&term, 0), "     ");
+        assert_eq!(scrolled, 0);
     }
 
     #[test]
-    fn processing_keeps_blank_scrollback_page_after_terminfo_clear() {
+    fn processing_terminfo_clear_does_not_pad_terminal_scrollback() {
         let mut term = TestTerm::new(5, 4, 100, 16, 8);
         term.process(b"\x1b[1;1HAAAAA\x1b[2;1HBBBBB\x1b[3;1HCCCCC\x1b[4;1HDDDDD");
         term.process(b"\n");
 
         term.process(b"\x1b[H\x1b[2J\x1b[3J");
 
-        assert_eq!(
-            term.active.grid.scrollback_len(&term.viewport),
-            term.viewport.rows
-        );
-        assert_eq!(term.active.cursor.row, term.viewport.rows - 1);
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 0);
+        assert_eq!(term.active.cursor.row, 0);
     }
 
     #[test]
-    fn processing_keeps_blank_scrollback_page_after_powershell_clear_recording() {
+    fn processing_powershell_clear_recording_does_not_pad_terminal_scrollback() {
         let mut term = TestTerm::new(24, 4, 100, 16, 8);
         term.process(
             b"old one\nold two\nold three\nold four\nold five\nold six\nold seven\nold eight\n",
@@ -1197,30 +1213,24 @@ mod integration_tests {
               \x1b]0;\x07\x1b[6n\x1b]133;A\x07PS> \x1b]133;B\x07\x1b[?1h\x1b[6n",
         );
 
-        assert_eq!(
-            term.active.grid.scrollback_len(&term.viewport),
-            term.viewport.rows
-        );
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 0);
         let viewport = term.viewport;
         let scrolled = view::scroll_viewport_up(&mut term.active, &viewport, viewport.rows);
-        assert_eq!(scrolled, viewport.rows);
+        assert_eq!(scrolled, 0);
         view::reset_viewport(&mut term.active);
-        assert_eq!(visible_row_text(&term, 0), "                        ");
-        assert_eq!(visible_row_text(&term, 3), "PS>                     ");
-        assert_eq!(term.active.cursor.row, 3);
+        assert_eq!(visible_row_text(&term, 0), "PS>                     ");
+        assert_eq!(visible_row_text(&term, 3), "                        ");
+        assert_eq!(term.active.cursor.row, 0);
     }
 
     #[test]
-    fn processing_clear_allows_future_cursor_row_writes_before_padding() {
+    fn processing_clear_allows_future_cursor_row_writes_without_padding() {
         let mut term = TestTerm::new(5, 4, 100, 16, 8);
         term.process(b"old one\nold two\nold three\nold four\nold five\nold six\n");
 
         term.process(b"\x1b[H\x1b[2J\x1b[3J\x1b[4;1HBOT");
 
-        assert_eq!(
-            term.active.grid.scrollback_len(&term.viewport),
-            term.viewport.rows
-        );
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 0);
         assert_eq!(visible_row_text(&term, 0), "     ");
         assert_eq!(visible_row_text(&term, 1), "     ");
         assert_eq!(visible_row_text(&term, 2), "     ");
@@ -1243,16 +1253,13 @@ mod integration_tests {
     }
 
     #[test]
-    fn processing_keeps_blank_scrollback_page_after_visible_only_clear() {
+    fn processing_visible_only_clear_does_not_pad_terminal_scrollback() {
         let mut term = TestTerm::new(5, 4, 100, 16, 8);
 
         term.process(b"\x1b[H\x1b[2J");
 
-        assert_eq!(
-            term.active.grid.scrollback_len(&term.viewport),
-            term.viewport.rows
-        );
-        assert_eq!(term.active.cursor.row, term.viewport.rows - 1);
+        assert_eq!(term.active.grid.scrollback_len(&term.viewport), 0);
+        assert_eq!(term.active.cursor.row, 0);
     }
 
     #[test]

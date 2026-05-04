@@ -415,6 +415,7 @@ mod tests {
     use super::command_text_at;
     use super::output_text_at;
     use super::select_command_at;
+    use crate::screen;
     use crate::test_support::TestTerm;
     use crate::view;
 
@@ -560,7 +561,7 @@ mod tests {
         emit_prompt(&mut term, "$ a", 3, 0);
         emit_prompt(&mut term, "$ b", 3, 0);
         emit_prompt(&mut term, "$ c", 3, 0);
-        term.active.offset = term.active.grid.scrollback_len(&term.viewport);
+        term.active.offset = screen::rendered_scrollback_len(&term.active, &term.viewport);
         let start = term.active.offset;
         let viewport = term.inner.viewport;
         view::scroll_to_next_prompt(&mut term.inner.active, &viewport);

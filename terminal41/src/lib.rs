@@ -1449,14 +1449,14 @@ mod command_block_tests {
     }
 
     #[test]
-    fn prompt_restart_preserves_prompt_only_block() {
+    fn prompt_restart_reuses_prompt_only_block() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
 
         term.process(b"\x1b]133;A\x07");
         term.process(b"\x1b]133;A\x07$ ");
 
-        assert_eq!(term.active.scrollback_blocks.len(), 1);
-        assert!(term.active.scrollback_blocks[0].grid.rows[0].prompt_start);
+        assert!(term.active.scrollback_blocks.is_empty());
+        assert!(term.active.grid.rows[0].prompt_start);
         assert!(row_text(&term.active.grid.rows[0]).starts_with("$ "));
     }
 
