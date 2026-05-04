@@ -1309,6 +1309,26 @@ fn completion_matches_nested_path_prefix() {
 }
 
 #[test]
+fn completion_matches_nested_backslash_path_prefix() {
+    let root = unique_test_dir("nested-backslash");
+    fs::create_dir_all(root.join("src")).expect("create temp dir");
+    fs::write(root.join("src/main.rs"), "").expect("write temp file");
+    let settings = path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("vim src\\ma".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("in.rs"));
+    apply_input(&mut editor, EditorInput::MoveRight, &settings);
+    assert_eq!(editor.view(&settings).text, "vim src\\main.rs");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn completion_ignores_cursor_inside_unquoted_path_word() {
     let root = unique_test_dir("middle-path");
     fs::create_dir_all(root.join("some")).expect("create temp dir");

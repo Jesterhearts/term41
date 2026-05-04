@@ -1308,28 +1308,39 @@ fn current_path_completion_word(
     Some(PathCompletionWord {
         start,
         raw: raw.to_owned(),
-        decoded: unescape_unquoted_word(raw),
+        decoded: decode_unquoted_path_word(raw),
         quote: None,
     })
 }
 
-fn unescape_unquoted_word(raw: &str) -> String {
+fn decode_unquoted_path_word(raw: &str) -> String {
     let mut out = String::new();
-    let mut escaped = false;
-    for ch in raw.chars() {
-        if escaped {
+    let mut chars = raw.chars().peekable();
+    while let Some(ch) = chars.next() {
+        if ch != '\\' {
             out.push(ch);
-            escaped = false;
-        } else if ch == '\\' {
-            escaped = true;
+            continue;
+        }
+
+        let Some(&next) = chars.peek() else {
+            out.push('\\');
+            break;
+        };
+        if backslash_escapes_path_char(next) {
+            out.push(chars.next().expect("peeked char exists"));
         } else {
-            out.push(ch);
+            out.push('\\');
         }
     }
-    if escaped {
-        out.push('\\');
-    }
     out
+}
+
+fn backslash_escapes_path_char(ch: char) -> bool {
+    ch.is_whitespace()
+        || matches!(
+            ch,
+            '\\' | '\'' | '"' | '$' | '`' | '!' | '&' | ';' | '|' | '<' | '>' | '(' | ')'
+        )
 }
 
 fn command_completion_candidates(
@@ -1684,6 +1695,7 @@ fn path_completion_allowed(
 
 fn is_explicit_path(word: &str) -> bool {
     word.contains('/')
+        || word.contains('\\')
         || word.starts_with('.')
         || word.starts_with('~')
         || word.starts_with(std::path::MAIN_SEPARATOR)
@@ -1710,19 +1722,27 @@ fn path_completion_request(
     current_dir: &Path,
     word: &PathCompletionWord,
 ) -> Option<PathCompletionRequest> {
-    let (typed_dir, entry_prefix) = split_path_completion_word(&word.decoded);
-    let directory = path_completion_directory(current_dir, typed_dir)?;
+    let (decoded_dir, entry_prefix) = split_path_completion_word(&word.decoded);
+    let raw_dir = if decoded_dir.is_empty() {
+        ""
+    } else {
+        split_path_completion_word(&word.raw).0
+    };
+    let directory = path_completion_directory(current_dir, decoded_dir)?;
     Some(PathCompletionRequest {
         directory,
         entry_prefix: entry_prefix.to_owned(),
-        completed_prefix: encode_path_completion_text(typed_dir, word.quote),
+        completed_prefix: raw_dir.to_owned(),
         quote: word.quote,
     })
 }
 
 fn split_path_completion_word(word: &str) -> (&str, &str) {
-    word.rsplit_once('/')
-        .map(|(dir, entry)| (&word[..dir.len() + 1], entry))
+    word.rfind(is_path_separator)
+        .map(|idx| {
+            let end = idx + word[idx..].chars().next().map_or(0, char::len_utf8);
+            (&word[..end], &word[end..])
+        })
         .unwrap_or(("", word))
 }
 
@@ -1739,7 +1759,8 @@ fn path_completion_directory(
     if let Some(rest) = typed_dir.strip_prefix("~/") {
         return home_dir().map(|home| home.join(rest));
     }
-    let typed_path = Path::new(typed_dir);
+    let normalized_dir = typed_dir.replace('\\', "/");
+    let typed_path = Path::new(&normalized_dir);
     if typed_path.is_absolute() {
         Some(typed_path.to_owned())
     } else {
