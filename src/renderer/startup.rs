@@ -999,6 +999,9 @@ fn paint_row_backgrounds(
             has_background_image,
         );
         if let Some(bg) = painted.fill_bg {
+            if col == 0 && gutter_w > 0 {
+                fill_rect(buffer, width, height, 0, y, gutter_w, cell_h, pack_rgb(bg));
+            }
             fill_rect(buffer, width, height, x, y, cell_w, cell_h, pack_rgb(bg));
         }
     }

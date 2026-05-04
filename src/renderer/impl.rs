@@ -2023,7 +2023,7 @@ fn append_gutter_marker(
     row: &RowSnapshot,
     gutter_px: f32,
     cell_h: f32,
-    y_offset: f32,
+    y: f32,
     geometry: &mut RowGeometry,
 ) {
     if gutter_px <= 0.0 || !row.prompt_start {
@@ -2037,7 +2037,7 @@ fn append_gutter_marker(
     let bar_h = cell_h * 0.9;
     let bar_y = (cell_h - bar_h) * 0.5;
     let color = gutter_marker_color(row.exit_status);
-    let y0 = row.screen_row as f32 * cell_h + bar_y + y_offset;
+    let y0 = y + bar_y;
 
     push_rect(
         bar_x,

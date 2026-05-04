@@ -542,14 +542,6 @@ impl Renderer {
         };
         let visible_cols = visible_row_cols(snap, snap_row);
 
-        append_gutter_marker(
-            snap_row,
-            layout.gutter_px,
-            layout.cell_h,
-            layout.tab_bar_h + layout.terminal_y_offset,
-            geometry,
-        );
-
         for col in 0..visible_cols {
             let x = col as f32 * effective_cell_w + layout.gutter_px;
             let block_cursor = cursor_state.block_cursor();
@@ -564,6 +556,17 @@ impl Renderer {
             let cell_attrs = snap_row.attrs[col as usize];
             if let Some(fill_bg) = painted.fill_bg {
                 let bg_color = pack_color(&fill_bg, self.bg_alpha);
+                if col == 0 && layout.gutter_px > 0.0 {
+                    push_rect(
+                        0.0,
+                        y,
+                        layout.gutter_px,
+                        layout.cell_h,
+                        bg_color,
+                        &mut geometry.bg.vertices,
+                        &mut geometry.bg.indices,
+                    );
+                }
                 let bi = geometry.bg.vertices.len() as u32;
                 geometry.bg.vertices.extend_from_slice(&[
                     BgVertex {
@@ -667,11 +670,14 @@ impl Renderer {
             }
         }
 
+        append_gutter_marker(snap_row, layout.gutter_px, layout.cell_h, y, geometry);
+
         if let Some(overlay) =
             cursor_state.bar_overlay_at(row, &snap_row.fg, layout.cell_w, layout.cell_h)
         {
             let ox = overlay.x + layout.gutter_px;
-            let oy = overlay.y + layout.tab_bar_h + layout.terminal_y_offset;
+            let oy =
+                overlay.y + layout.tab_bar_h + layout.terminal_y_offset + layout.block_y_offset;
             let bi = geometry.bg.vertices.len() as u32;
             geometry.bg.vertices.extend_from_slice(&[
                 BgVertex {

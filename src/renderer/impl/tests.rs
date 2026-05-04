@@ -159,9 +159,9 @@ mod geometry_tests {
         assert_eq!(geometry.bg.vertices.len(), 4);
         assert_eq!(geometry.bg.indices.len(), 6);
         assert!((geometry.bg.vertices[0].pos[0] - 2.4).abs() < 0.0001);
-        assert!((geometry.bg.vertices[0].pos[1] - 46.0).abs() < 0.0001);
+        assert!((geometry.bg.vertices[0].pos[1] - 6.0).abs() < 0.0001);
         assert!((geometry.bg.vertices[3].pos[0] - 9.6).abs() < 0.0001);
-        assert!((geometry.bg.vertices[3].pos[1] - 64.0).abs() < 0.0001);
+        assert!((geometry.bg.vertices[3].pos[1] - 24.0).abs() < 0.0001);
         assert_eq!(geometry.bg.vertices[0].color, gutter_marker_color(Some(0)));
     }
 
