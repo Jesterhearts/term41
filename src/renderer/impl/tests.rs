@@ -54,6 +54,7 @@ mod geometry_tests {
     use super::drcs_geometry_class;
     use super::fg_batch_for_page;
     use super::fitted_ink_origin_y;
+    use super::gutter_fill_bg_for_col0;
     use super::gutter_marker_color;
     use super::image_batch_for_page;
     use super::image_render_order;
@@ -136,6 +137,26 @@ mod geometry_tests {
         snap.rows[2].cells[0] = smol_str::SmolStr::new_inline("y");
 
         assert_eq!(terminal_block_y_offset_rows(&snap.rows, &snap), 0);
+    }
+
+    #[test]
+    fn block_cursor_at_col0_does_not_fill_gutter_with_cursor_color() {
+        let mut snap = snapshot(4, 5);
+        snap.palette.cursor = Some(Srgb::new(255, 0, 0));
+        snap.rows[0].bg[0] = Srgb::new(0, 32, 64);
+
+        let fill = gutter_fill_bg_for_col0(&snap, &snap.rows[0], 0, Some((0, 0)), false);
+
+        assert_eq!(fill, Some(Srgb::new(0, 32, 64)));
+    }
+
+    #[test]
+    fn block_cursor_at_col0_leaves_default_background_image_gutter_unfilled() {
+        let snap = snapshot(4, 5);
+
+        let fill = gutter_fill_bg_for_col0(&snap, &snap.rows[0], 0, Some((0, 0)), true);
+
+        assert_eq!(fill, None);
     }
 
     #[test]

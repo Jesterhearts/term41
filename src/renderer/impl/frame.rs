@@ -563,13 +563,22 @@ impl Renderer {
             let cell_attrs = snap_row.attrs[col as usize];
             if let Some(fill_bg) = painted.fill_bg {
                 let bg_color = pack_color(&fill_bg, self.bg_alpha);
-                if col == 0 && layout.gutter_px > 0.0 {
+                if col == 0
+                    && layout.gutter_px > 0.0
+                    && let Some(gutter_bg) = gutter_fill_bg_for_col0(
+                        snap,
+                        snap_row,
+                        row,
+                        block_cursor,
+                        self.background.is_some(),
+                    )
+                {
                     push_rect(
                         0.0,
                         y,
                         layout.gutter_px,
                         layout.cell_h,
-                        bg_color,
+                        pack_color(&gutter_bg, self.bg_alpha),
                         &mut geometry.bg.vertices,
                         &mut geometry.bg.indices,
                     );

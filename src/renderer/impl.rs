@@ -1142,6 +1142,21 @@ fn row_cursor_key(
     }
 }
 
+fn gutter_fill_bg_for_col0(
+    snap: &TermSnapshot,
+    snap_row: &RowSnapshot,
+    row: u32,
+    block_cursor: Option<(u32, u32)>,
+    has_background_image: bool,
+) -> Option<Srgb<u8>> {
+    let block_cursor = if block_cursor == Some((row, 0)) {
+        None
+    } else {
+        block_cursor
+    };
+    resolve_painted_cell(snap, snap_row, row, 0, block_cursor, has_background_image).fill_bg
+}
+
 fn row_blink_key(
     snap: &TermSnapshot,
     snap_row: &RowSnapshot,
