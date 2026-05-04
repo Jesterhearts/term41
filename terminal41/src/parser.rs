@@ -645,6 +645,8 @@ fn apply_hard_reset_state(
     for s in [&mut *screen, &mut *stash] {
         s.grid.default_fg = palette.fg;
         s.grid.default_bg = palette.bg;
+        s.scrollback_blocks.clear();
+        s.active_command_block_started = false;
         s.cursor = grid::Cursor::default();
         s.fg = palette.fg;
         s.bg = palette.bg;

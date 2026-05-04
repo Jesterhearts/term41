@@ -13,6 +13,7 @@ use crate::host;
 use crate::selection::is_cell_active_match;
 use crate::selection::is_cell_match;
 use crate::selection::is_cell_selected;
+use crate::selection::is_rendered_cell_selected;
 use crate::selection::search_active;
 use crate::selection::search_state;
 use crate::view;
@@ -309,7 +310,8 @@ fn snapshot_rendered_row(
             row,
             view::visible_row(&terminal.active, &terminal.viewport, row),
             generation,
-            true,
+            Some(row),
+            None,
         );
     }
     match rendered_row(terminal, row, terminal_rows) {
@@ -317,12 +319,28 @@ fn snapshot_rendered_row(
             separator_terminal_row(row, terminal.viewport.cols, &terminal.palette, generation)
         }
         RenderedRow::Active {
+            rendered_row,
             block_row,
             grid_row,
-        } => snapshot_grid_row(terminal, row, grid_row, generation, block_row == row),
-        RenderedRow::History(grid_row) => {
-            snapshot_grid_row(terminal, row, grid_row, generation, false)
-        }
+        } => snapshot_grid_row(
+            terminal,
+            row,
+            grid_row,
+            generation,
+            Some(block_row),
+            Some(rendered_row),
+        ),
+        RenderedRow::History {
+            rendered_row,
+            grid_row,
+        } => snapshot_grid_row(
+            terminal,
+            row,
+            grid_row,
+            generation,
+            None,
+            Some(rendered_row),
+        ),
     }
 }
 
@@ -331,7 +349,8 @@ fn snapshot_grid_row(
     row: u32,
     grid_row: &crate::Row,
     generation: u64,
-    active_selection_row: bool,
+    active_screen_row: Option<u32>,
+    rendered_row: Option<u32>,
 ) -> RowSnapshot {
     let is_double = !matches!(grid_row.line_attr, LineAttr::Normal);
     let cols = if is_double {
@@ -352,38 +371,43 @@ fn snapshot_grid_row(
         line_attr: grid_row.line_attr,
         selected: (0..cols)
             .map(|c| {
-                active_selection_row
-                    && is_cell_selected(
+                rendered_row.is_some_and(|rendered_row| {
+                    is_rendered_cell_selected(terminal.selection.as_ref(), rendered_row, c)
+                }) || active_screen_row.is_some_and(|active_row| {
+                    is_cell_selected(
                         terminal.selection.as_ref(),
                         &terminal.active,
                         &terminal.viewport,
-                        row,
+                        active_row,
                         c,
                     )
+                })
             })
             .collect(),
         matched: (0..cols)
             .map(|c| {
-                active_selection_row
-                    && is_cell_match(
+                active_screen_row.is_some_and(|active_row| {
+                    is_cell_match(
                         &terminal.search,
                         &terminal.active,
                         &terminal.viewport,
-                        row,
+                        active_row,
                         c,
                     )
+                })
             })
             .collect(),
         active_match: (0..cols)
             .map(|c| {
-                active_selection_row
-                    && is_cell_active_match(
+                active_screen_row.is_some_and(|active_row| {
+                    is_cell_active_match(
                         &terminal.search,
                         &terminal.active,
                         &terminal.viewport,
-                        row,
+                        active_row,
                         c,
                     )
+                })
             })
             .collect(),
         prompt_start: grid_row.prompt_start,
@@ -396,8 +420,12 @@ fn snapshot_grid_row(
 
 enum RenderedRow<'a> {
     Separator,
-    History(&'a crate::Row),
+    History {
+        rendered_row: u32,
+        grid_row: &'a crate::Row,
+    },
     Active {
+        rendered_row: u32,
         block_row: u32,
         grid_row: &'a crate::Row,
     },
@@ -412,10 +440,14 @@ fn rendered_row<'a>(
     let max_top = rendered_len.saturating_sub(terminal_rows);
     let top = max_top.saturating_sub(terminal.active.offset);
     let mut idx = top + screen_row;
+    let rendered_row = idx;
     for block in &terminal.active.scrollback_blocks {
         let block_rows = crate::screen::command_block_rendered_rows_len(block) as u32;
         if idx < block_rows {
-            return RenderedRow::History(&block.grid.rows[idx as usize]);
+            return RenderedRow::History {
+                rendered_row,
+                grid_row: &block.grid.rows[idx as usize],
+            };
         }
         idx -= block_rows;
         if idx == 0 {
@@ -425,6 +457,7 @@ fn rendered_row<'a>(
     }
     let local = idx.min(terminal.active.grid.rows.len().saturating_sub(1) as u32);
     RenderedRow::Active {
+        rendered_row,
         block_row: local,
         grid_row: &terminal.active.grid.rows[local as usize],
     }
@@ -697,6 +730,11 @@ mod tests {
     use crate::FeaturePermissions;
     use crate::TerminalLimits;
     use crate::TerminalProcessor;
+    use crate::selection::SelectionMode;
+    use crate::selection::extend_rendered_selection;
+    use crate::selection::extend_selection;
+    use crate::selection::start_rendered_selection;
+    use crate::selection::start_selection;
 
     fn terminal() -> Terminal {
         Terminal::new(
@@ -804,6 +842,120 @@ mod tests {
         assert_eq!(row.bg.len(), 5);
         assert_eq!(row.underline_color.len(), 5);
         assert_eq!(row.has_link.len(), 5);
+    }
+
+    #[test]
+    fn bottom_aligned_active_block_selection_uses_active_row() {
+        let mut terminal = terminal();
+        let mut processor = TerminalProcessor::new();
+
+        processor.process_bytes(&mut terminal, b"old");
+        processor.process_bytes(&mut terminal, b"\x1b]133;A\x07new");
+        terminal.selection = start_selection(
+            &terminal.active,
+            &terminal.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        terminal.selection = extend_selection(
+            &terminal.selection.clone().unwrap(),
+            &terminal.active,
+            &terminal.viewport,
+            2,
+            0,
+        );
+
+        let snap = snapshot_terminal(&mut terminal);
+        let active = snap.rows.last().unwrap();
+
+        assert_eq!(snapshot_row_text(active), "new  ");
+        assert_eq!(active.screen_row, 2);
+        assert_eq!(&active.selected[..3], &[true, true, true]);
+    }
+
+    #[test]
+    fn active_block_selection_uses_active_row_after_multiple_blocks() {
+        let mut terminal = Terminal::new(
+            5,
+            5,
+            10,
+            StatusLineMode::Off,
+            FeaturePermissions::default(),
+            TerminalLimits::default(),
+            16,
+            8,
+            ColorPalette::default(),
+        );
+        let mut processor = TerminalProcessor::new();
+
+        processor.process_bytes(&mut terminal, b"one");
+        processor.process_bytes(&mut terminal, b"\x1b]133;A\x07two");
+        processor.process_bytes(&mut terminal, b"\x1b]133;A\x07three");
+        terminal.selection = start_selection(
+            &terminal.active,
+            &terminal.viewport,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        terminal.selection = extend_selection(
+            &terminal.selection.clone().unwrap(),
+            &terminal.active,
+            &terminal.viewport,
+            4,
+            0,
+        );
+
+        let snap = snapshot_terminal(&mut terminal);
+        let active = snap.rows.last().unwrap();
+
+        assert_eq!(snapshot_row_text(active), "three");
+        assert_eq!(active.screen_row, 4);
+        assert_eq!(&active.selected[..5], &[true, true, true, true, true]);
+    }
+
+    #[test]
+    fn rendered_block_selection_highlights_completed_blocks() {
+        let mut terminal = Terminal::new(
+            5,
+            5,
+            10,
+            StatusLineMode::Off,
+            FeaturePermissions::default(),
+            TerminalLimits::default(),
+            16,
+            8,
+            ColorPalette::default(),
+        );
+        let mut processor = TerminalProcessor::new();
+
+        processor.process_bytes(&mut terminal, b"one");
+        processor.process_bytes(&mut terminal, b"\x1b]133;A\x07two");
+        processor.process_bytes(&mut terminal, b"\x1b]133;A\x07three");
+        terminal.selection = start_rendered_selection(
+            &terminal.active,
+            &terminal.viewport,
+            terminal.on_alt_screen,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        terminal.selection = extend_rendered_selection(
+            &terminal.selection.clone().unwrap(),
+            &terminal.active,
+            &terminal.viewport,
+            terminal.on_alt_screen,
+            2,
+            2,
+        );
+
+        let snap = snapshot_terminal(&mut terminal);
+
+        assert_eq!(snapshot_row_text(&snap.rows[0]), "one  ");
+        assert_eq!(&snap.rows[0].selected[..3], &[true, true, true]);
+        assert_eq!(snapshot_row_text(&snap.rows[2]), "two  ");
+        assert_eq!(&snap.rows[2].selected[..3], &[true, true, true]);
     }
 
     #[test]

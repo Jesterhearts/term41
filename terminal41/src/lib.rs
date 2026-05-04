@@ -1449,13 +1449,46 @@ mod command_block_tests {
     }
 
     #[test]
-    fn prompt_restart_does_not_finalize_empty_metadata_only_block() {
+    fn prompt_restart_preserves_prompt_only_block() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
 
         term.process(b"\x1b]133;A\x07");
         term.process(b"\x1b]133;A\x07$ ");
 
-        assert!(term.active.scrollback_blocks.is_empty());
+        assert_eq!(term.active.scrollback_blocks.len(), 1);
+        assert!(term.active.scrollback_blocks[0].grid.rows[0].prompt_start);
+        assert!(row_text(&term.active.grid.rows[0]).starts_with("$ "));
+    }
+
+    #[test]
+    fn prompt_start_drops_empty_block_without_prompt_metadata() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+
+        term.process(b"old");
+        term.process(b"\x1b]133;A\x07$ ");
+        term.process(b"\x1b]133;A\x07");
+
+        assert_eq!(term.active.scrollback_blocks.len(), 2);
+        assert!(row_text(&term.active.scrollback_blocks[0].grid.rows[0]).starts_with("old"));
+        assert!(row_text(&term.active.scrollback_blocks[1].grid.rows[0]).starts_with("$ "));
+        assert!(term.active.grid.rows[0].prompt_start);
+    }
+
+    #[test]
+    fn prompt_restart_preserves_finished_empty_command_block() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07");
+        term.process(b"\x1b]133;B\x07");
+        term.process(b"\x1b]133;C\x07");
+        term.process(b"\x1b]133;D;130\x07");
+        term.process(b"\x1b]133;A\x07$ ");
+
+        assert_eq!(term.active.scrollback_blocks.len(), 1);
+        assert_eq!(
+            term.active.scrollback_blocks[0].grid.rows[0].exit_status,
+            Some(130)
+        );
         assert!(row_text(&term.active.grid.rows[0]).starts_with("$ "));
     }
 

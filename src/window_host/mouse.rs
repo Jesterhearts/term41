@@ -132,9 +132,22 @@ pub(crate) fn command_editor_offset_at_mouse(
 
     let tab_id = host.input.active_tab?;
     let target = host.input.endpoints.get(&tab_id)?;
+    let command_editor_open = {
+        let state = host.render.input_state.lock();
+        command_editor_view_open_for_input_tab(&state, Some(tab_id))
+    };
+    if !command_editor_open {
+        return None;
+    }
     let (cursor_row, viewport_rows, viewport_cols) = {
         let terminal = target.terminal.lock();
-        command_editor_view_context(&terminal)?;
+        if !matches!(
+            terminal.metadata.shell_integration_phase,
+            terminal41::ShellIntegrationPhase::Command | terminal41::ShellIntegrationPhase::None
+        ) {
+            return None;
+        }
+        command_editor_input_context(&terminal, command_editor_open)?;
         (
             terminal.active.cursor.row,
             terminal.viewport.rows.max(1),
@@ -652,14 +665,23 @@ pub(crate) fn handle_mouse_input(
         return;
     }
 
-    let (col, row) = cell_at(host, host.mouse.pos.0, host.mouse.pos.1);
+    let (col, viewport_row) = cell_at(host, host.mouse.pos.0, host.mouse.pos.1);
     match (button, pressed) {
         (MouseButton::Left, true) => {
             if host.keyboard.modifiers.control_key()
                 && let Some(target) = active_input_target(&mut host.input)
             {
                 let url = target.terminal.lock();
-                let url = view::hyperlink_at(&url.active, &url.viewport, &url.hyperlinks, row, col)
+                let row = terminal41::selection::active_screen_row_at_viewport_row(
+                    &url.active,
+                    &url.viewport,
+                    url.on_alt_screen,
+                    viewport_row,
+                );
+                let url = row
+                    .and_then(|row| {
+                        view::hyperlink_at(&url.active, &url.viewport, &url.hyperlinks, row, col)
+                    })
                     .map(str::to_owned);
                 if let Some(url) = url {
                     if let Err(e) = open::that_detached(&url) {
@@ -672,12 +694,13 @@ pub(crate) fn handle_mouse_input(
                 let extended = if let Some(target) = active_input_target(&mut host.input) {
                     let mut terminal = target.terminal.lock();
                     if let Some(selection) = terminal.selection.as_ref()
-                        && let Some(new_selection) = extend_selection_from_start(
+                        && let Some(new_selection) = extend_rendered_selection(
                             selection,
                             &terminal.active,
                             &terminal.viewport,
+                            terminal.on_alt_screen,
                             col,
-                            row,
+                            viewport_row,
                         )
                     {
                         terminal.selection = Some(new_selection);
@@ -705,8 +728,8 @@ pub(crate) fn handle_mouse_input(
                     return;
                 }
             }
-            host.mouse.click_count = next_click_count(&host.mouse, (col, row));
-            host.mouse.last_click_cell = Some((col, row));
+            host.mouse.click_count = next_click_count(&host.mouse, (col, viewport_row));
+            host.mouse.last_click_cell = Some((col, viewport_row));
             host.mouse.last_click_time = Some(Instant::now());
             let mode = match host.mouse.click_count {
                 2 => SelectionMode::Word,
@@ -716,8 +739,14 @@ pub(crate) fn handle_mouse_input(
             if let Some(target) = active_input_target(&mut host.input) {
                 let mut target = target.terminal.lock();
                 let target = &mut *target;
-                target.selection =
-                    start_selection(&target.active, &target.viewport, col, row, mode);
+                target.selection = start_rendered_selection(
+                    &target.active,
+                    &target.viewport,
+                    target.on_alt_screen,
+                    col,
+                    viewport_row,
+                    mode,
+                );
                 target.invalidate_snapshot_rows();
             }
             if let Some(tab_id) = host.input.active_tab {
@@ -1095,7 +1124,11 @@ pub(crate) fn forward_mouse_to_app(
 ) -> bool {
     let is_shift = keyboard.modifiers.shift_key();
     active_input_target(input).is_some_and(|target| {
-        host::mouse_tracking_enabled(target.terminal.lock().modes.mouse_tracking) && !is_shift
+        let terminal = target.terminal.lock();
+        host::mouse_tracking_enabled(terminal.modes.mouse_tracking)
+            && !is_shift
+            && terminal.metadata.shell_integration_phase
+                == terminal41::ShellIntegrationPhase::Output
     })
 }
 

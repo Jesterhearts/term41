@@ -376,6 +376,7 @@ pub fn select_command_at(
         anchor,
         head,
         mode: SelectionMode::Char,
+        rendered: false,
         origin: anchor,
     });
 }

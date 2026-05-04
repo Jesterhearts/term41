@@ -52,6 +52,9 @@ pub struct Selection {
     pub head: SelectionPoint,
     /// Expansion mode for this selection.
     pub mode: SelectionMode,
+    /// True when row coordinates address the rendered command-block stream
+    /// rather than the active grid.
+    pub rendered: bool,
     /// The cell the user originally clicked. Carried so Word/Line selections
     /// can pick the correct word/line boundary as the head end when the
     /// drag direction flips relative to where the click started.
@@ -181,6 +184,128 @@ pub(crate) fn screen_row_to_absolute(
     (screen.grid.total_popped + base + screen_row as usize) as u64
 }
 
+/// Map a physical viewport row from mouse input to the terminal row index used
+/// by snapshots and selection APIs.
+pub fn rendered_screen_row_at_viewport_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    on_alt_screen: bool,
+    viewport_row: u32,
+) -> Option<u32> {
+    if viewport_row >= viewport.rows {
+        return None;
+    }
+    if on_alt_screen || screen.offset != 0 {
+        return Some(viewport_row);
+    }
+
+    let rendered_rows = screen::rendered_rows_len(screen) as u32;
+    let visible_rows = rendered_rows.min(viewport.rows).max(1);
+    let row_offset = viewport.rows.saturating_sub(visible_rows);
+    if viewport_row < row_offset {
+        return None;
+    }
+    Some(viewport_row - row_offset)
+}
+
+/// Map a physical viewport row from mouse input to a selectable active-grid
+/// screen row. Completed command blocks own separate grids, so they are not
+/// addressable by the current selection model.
+pub fn active_screen_row_at_viewport_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    on_alt_screen: bool,
+    viewport_row: u32,
+) -> Option<u32> {
+    let screen_row =
+        rendered_screen_row_at_viewport_row(screen, viewport, on_alt_screen, viewport_row)?;
+    if on_alt_screen || screen.scrollback_blocks.is_empty() {
+        return Some(screen_row);
+    }
+
+    let rendered_len = screen::rendered_rows_len(screen) as u32;
+    let max_top = rendered_len.saturating_sub(viewport.rows);
+    let top = max_top.saturating_sub(screen.offset);
+    let mut idx = top + screen_row;
+    for block in &screen.scrollback_blocks {
+        let block_rows = screen::command_block_rendered_rows_len(block) as u32;
+        if idx < block_rows {
+            return None;
+        }
+        idx -= block_rows;
+        if idx == 0 {
+            return None;
+        }
+        idx -= 1;
+    }
+    Some(idx)
+}
+
+fn rendered_document_top(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> u32 {
+    let rendered_len = screen::rendered_rows_len(screen) as u32;
+    let visible_rows = rendered_len.min(viewport.rows).max(1);
+    let row_offset = viewport.rows.saturating_sub(visible_rows);
+    let max_top = rendered_len.saturating_sub(visible_rows);
+    max_top
+        .saturating_sub(screen.offset)
+        .saturating_sub(row_offset)
+}
+
+pub fn rendered_document_row_at_viewport_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    on_alt_screen: bool,
+    viewport_row: u32,
+) -> Option<u32> {
+    let screen_row =
+        rendered_screen_row_at_viewport_row(screen, viewport, on_alt_screen, viewport_row)?;
+    if on_alt_screen || screen.scrollback_blocks.is_empty() {
+        return Some(screen_row);
+    }
+    Some(rendered_document_top(screen, viewport) + screen_row)
+}
+
+fn rendered_row_ref(
+    screen: &Screen,
+    rendered_row: u32,
+) -> Option<&Row> {
+    let mut idx = rendered_row;
+    for block in &screen.scrollback_blocks {
+        let block_rows = screen::command_block_rendered_rows_len(block) as u32;
+        if idx < block_rows {
+            return block.grid.rows.get(idx as usize);
+        }
+        idx -= block_rows;
+        if idx == 0 {
+            return None;
+        }
+        idx -= 1;
+    }
+    screen.grid.rows.get(idx as usize)
+}
+
+fn rendered_selection_point_at_viewport_row<'a>(
+    screen: &'a Screen,
+    viewport: &Viewport,
+    on_alt_screen: bool,
+    viewport_row: u32,
+    col: u32,
+) -> Option<(SelectionPoint, &'a Row)> {
+    let rendered_row =
+        rendered_document_row_at_viewport_row(screen, viewport, on_alt_screen, viewport_row)?;
+    let row = rendered_row_ref(screen, rendered_row)?;
+    Some((
+        SelectionPoint {
+            row: rendered_row as u64,
+            col,
+        },
+        row,
+    ))
+}
+
 pub(crate) fn absolute_row_to_local(
     screen: &Screen,
     abs: u64,
@@ -244,6 +369,61 @@ pub fn start_selection(
         anchor,
         head,
         mode,
+        rendered: false,
+        origin,
+    })
+}
+
+#[must_use]
+pub fn start_rendered_selection(
+    screen: &Screen,
+    viewport: &Viewport,
+    on_alt_screen: bool,
+    col: u32,
+    viewport_row: u32,
+    mode: SelectionMode,
+) -> Option<Selection> {
+    let (origin, row) = rendered_selection_point_at_viewport_row(
+        screen,
+        viewport,
+        on_alt_screen,
+        viewport_row,
+        col,
+    )?;
+    let (anchor, head) = match mode {
+        SelectionMode::Char => (origin, origin),
+        SelectionMode::Word => {
+            let (s, e) = expand_to_word(row, col);
+            (
+                SelectionPoint {
+                    row: origin.row,
+                    col: s,
+                },
+                SelectionPoint {
+                    row: origin.row,
+                    col: e,
+                },
+            )
+        }
+        SelectionMode::Line => {
+            let (s, e) = expand_to_line(row);
+            (
+                SelectionPoint {
+                    row: origin.row,
+                    col: s,
+                },
+                SelectionPoint {
+                    row: origin.row,
+                    col: e,
+                },
+            )
+        }
+    };
+    Some(Selection {
+        anchor,
+        head,
+        mode,
+        rendered: true,
         origin,
     })
 }
@@ -329,6 +509,94 @@ pub fn extend_selection(
         anchor,
         head,
         mode: selection.mode,
+        rendered: selection.rendered,
+        origin: selection.origin,
+    })
+}
+
+#[must_use]
+pub fn extend_rendered_selection(
+    selection: &Selection,
+    screen: &Screen,
+    viewport: &Viewport,
+    on_alt_screen: bool,
+    col: u32,
+    viewport_row: u32,
+) -> Option<Selection> {
+    if !selection.rendered {
+        return extend_selection(selection, screen, viewport, col, viewport_row);
+    }
+    let (new_point, head_row) = rendered_selection_point_at_viewport_row(
+        screen,
+        viewport,
+        on_alt_screen,
+        viewport_row,
+        col,
+    )?;
+    let origin_row = rendered_row_ref(screen, selection.origin.row as u32)?;
+    let forward = (new_point.row, new_point.col) >= (selection.origin.row, selection.origin.col);
+    let (anchor, head) = match selection.mode {
+        SelectionMode::Char => (selection.origin, new_point),
+        SelectionMode::Word => {
+            let (o_start, o_end) = expand_to_word(origin_row, selection.origin.col);
+            let (h_start, h_end) = expand_to_word(head_row, col);
+            if forward {
+                (
+                    SelectionPoint {
+                        row: selection.origin.row,
+                        col: o_start,
+                    },
+                    SelectionPoint {
+                        row: new_point.row,
+                        col: h_end,
+                    },
+                )
+            } else {
+                (
+                    SelectionPoint {
+                        row: selection.origin.row,
+                        col: o_end,
+                    },
+                    SelectionPoint {
+                        row: new_point.row,
+                        col: h_start,
+                    },
+                )
+            }
+        }
+        SelectionMode::Line => {
+            let (o_start, o_end) = expand_to_line(origin_row);
+            let (h_start, h_end) = expand_to_line(head_row);
+            if forward {
+                (
+                    SelectionPoint {
+                        row: selection.origin.row,
+                        col: o_start,
+                    },
+                    SelectionPoint {
+                        row: new_point.row,
+                        col: h_end,
+                    },
+                )
+            } else {
+                (
+                    SelectionPoint {
+                        row: selection.origin.row,
+                        col: o_end,
+                    },
+                    SelectionPoint {
+                        row: new_point.row,
+                        col: h_start,
+                    },
+                )
+            }
+        }
+    };
+    Some(Selection {
+        anchor,
+        head,
+        mode: selection.mode,
+        rendered: true,
         origin: selection.origin,
     })
 }
@@ -354,6 +622,7 @@ pub fn extend_selection_from_start(
         anchor: start,
         head,
         mode: SelectionMode::Char,
+        rendered: selection.rendered,
         origin: start,
     })
 }
@@ -372,9 +641,29 @@ pub fn is_cell_selected(
     if selection.is_empty() {
         return false;
     }
+    if selection.rendered {
+        return false;
+    }
     let abs_row = screen_row_to_absolute(screen, viewport, screen_row);
     selection.contains(SelectionPoint {
         row: abs_row,
+        col: screen_col,
+    })
+}
+
+pub fn is_rendered_cell_selected(
+    selection: Option<&Selection>,
+    rendered_row: u32,
+    screen_col: u32,
+) -> bool {
+    let Some(selection) = selection else {
+        return false;
+    };
+    if !selection.rendered || selection.is_empty() {
+        return false;
+    }
+    selection.contains(SelectionPoint {
+        row: rendered_row as u64,
         col: screen_col,
     })
 }
@@ -397,6 +686,7 @@ pub fn close_search(
             anchor,
             head,
             mode: SelectionMode::Char,
+            rendered: false,
             origin: anchor,
         });
     }
@@ -620,6 +910,9 @@ pub fn selection_text(
         return None;
     }
     let (start, end) = selection.ordered();
+    if selection.rendered {
+        return rendered_selection_text(selection, screen, start, end);
+    }
     let popped = screen.grid.total_popped as u64;
     let last_idx = screen.grid.rows.len().saturating_sub(1);
 
@@ -672,6 +965,58 @@ pub fn selection_text(
         }
     }
 
+    Some(out)
+}
+
+fn rendered_selection_text(
+    selection: &Selection,
+    screen: &Screen,
+    start: SelectionPoint,
+    end: SelectionPoint,
+) -> Option<String> {
+    let mut out = String::new();
+    for abs_row in start.row..=end.row {
+        let Some(row) = rendered_row_ref(screen, abs_row as u32) else {
+            if abs_row < end.row {
+                out.push('\n');
+            }
+            continue;
+        };
+        let row_len_cols = row.cells.len() as u32;
+        if row_len_cols == 0 {
+            if abs_row < end.row && !row.wrapped {
+                out.push('\n');
+            }
+            continue;
+        }
+
+        let (col_start, col_end, trim) = match selection.mode {
+            SelectionMode::Line => (0, row_len_cols - 1, true),
+            _ => {
+                let is_first = abs_row == start.row;
+                let is_last = abs_row == end.row;
+                let cs = if is_first { start.col } else { 0 };
+                let ce = if is_last { end.col } else { row_len_cols - 1 };
+                let trim = !is_last;
+                (cs, ce, trim)
+            }
+        };
+        let col_end = col_end.min(row_len_cols - 1);
+        if col_start <= col_end {
+            let mut segment = String::new();
+            for cell in &row.cells[col_start as usize..=col_end as usize] {
+                segment.push_str(cell);
+            }
+            if trim {
+                out.push_str(segment.trim_end_matches(' '));
+            } else {
+                out.push_str(&segment);
+            }
+        }
+        if abs_row < end.row && !row.wrapped {
+            out.push('\n');
+        }
+    }
     Some(out)
 }
 
@@ -739,6 +1084,150 @@ mod integration_tests {
         assert_eq!(
             selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
             Some("hello")
+        );
+    }
+
+    #[test]
+    fn viewport_mouse_row_maps_to_bottom_aligned_active_row() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+        write_row(&mut term, 0, "hello");
+
+        assert_eq!(
+            rendered_screen_row_at_viewport_row(
+                &term.inner.active,
+                &term.inner.viewport,
+                term.inner.on_alt_screen,
+                0,
+            ),
+            None
+        );
+        assert_eq!(
+            rendered_screen_row_at_viewport_row(
+                &term.inner.active,
+                &term.inner.viewport,
+                term.inner.on_alt_screen,
+                2,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            active_screen_row_at_viewport_row(
+                &term.inner.active,
+                &term.inner.viewport,
+                term.inner.on_alt_screen,
+                2,
+            ),
+            Some(0)
+        );
+
+        let row = active_screen_row_at_viewport_row(
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.on_alt_screen,
+            2,
+        )
+        .unwrap();
+        term.inner.selection = start_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            0,
+            row,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            4,
+            row,
+        );
+
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("hello")
+        );
+    }
+
+    #[test]
+    fn viewport_mouse_row_does_not_select_completed_command_blocks() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"old");
+        term.process(b"\x1b]133;A\x07new");
+
+        assert_eq!(
+            rendered_screen_row_at_viewport_row(
+                &term.inner.active,
+                &term.inner.viewport,
+                term.inner.on_alt_screen,
+                1,
+            ),
+            Some(0)
+        );
+        assert_eq!(
+            active_screen_row_at_viewport_row(
+                &term.inner.active,
+                &term.inner.viewport,
+                term.inner.on_alt_screen,
+                1,
+            ),
+            None
+        );
+        assert_eq!(
+            active_screen_row_at_viewport_row(
+                &term.inner.active,
+                &term.inner.viewport,
+                term.inner.on_alt_screen,
+                3,
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn viewport_mouse_row_maps_to_active_row_after_multiple_command_blocks() {
+        let mut term = TestTerm::new(10, 5, 100, 16, 8);
+        term.process(b"one");
+        term.process(b"\x1b]133;A\x07two");
+        term.process(b"\x1b]133;A\x07three");
+
+        assert_eq!(
+            active_screen_row_at_viewport_row(
+                &term.inner.active,
+                &term.inner.viewport,
+                term.inner.on_alt_screen,
+                4,
+            ),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn rendered_mouse_selection_can_copy_completed_command_blocks() {
+        let mut term = TestTerm::new(10, 5, 100, 16, 8);
+        term.process(b"one");
+        term.process(b"\x1b]133;A\x07two");
+        term.process(b"\x1b]133;A\x07three");
+
+        term.inner.selection = start_rendered_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.on_alt_screen,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_rendered_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.on_alt_screen,
+            2,
+            2,
+        );
+
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("one\n\ntwo")
         );
     }
 
@@ -1284,6 +1773,7 @@ mod tests {
             anchor,
             head,
             mode,
+            rendered: false,
             origin: anchor,
         }
     }

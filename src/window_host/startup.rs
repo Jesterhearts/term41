@@ -608,10 +608,11 @@ pub(crate) fn extend_selection_to_mouse(host: &mut WindowHost) -> bool {
     let Some(selection) = terminal.selection.as_ref() else {
         return false;
     };
-    let Some(new_sel) = extend_selection(
+    let Some(new_sel) = extend_rendered_selection(
         selection,
         &terminal.active,
         &terminal.viewport,
+        terminal.on_alt_screen,
         cell.0,
         cell.1,
     ) else {

@@ -131,6 +131,8 @@ pub struct Screen {
     /// Completed primary-screen command blocks. The writable active block is
     /// `grid`; alternate screens keep this empty and behave as a single block.
     pub scrollback_blocks: Vec<CommandBlock>,
+    /// Whether `grid` is an explicit shell-integration command block.
+    pub active_command_block_started: bool,
     /// Cursor position within the active visible display.
     pub cursor: Cursor,
     /// Current foreground color for new cell writes.
@@ -242,6 +244,7 @@ impl Screen {
                 default_bg: bg,
             },
             scrollback_blocks: Vec::new(),
+            active_command_block_started: false,
             cursor: Cursor::default(),
             fg,
             bg,
@@ -377,7 +380,8 @@ pub(super) fn start_command_block(
     if page_memory_active(screen) {
         return;
     }
-    if !active_block_has_content(screen) && screen.scrollback_blocks.is_empty() {
+    if !screen.active_command_block_started && !active_block_has_content(screen) {
+        screen.active_command_block_started = true;
         return;
     }
     let replacement = Grid {
@@ -392,11 +396,10 @@ pub(super) fn start_command_block(
         default_bg: screen.grid.default_bg,
     };
     let completed = std::mem::replace(&mut screen.grid, replacement);
-    if grid_has_content(&completed) {
-        screen
-            .scrollback_blocks
-            .push(CommandBlock { grid: completed });
-    }
+    screen
+        .scrollback_blocks
+        .push(CommandBlock { grid: completed });
+    screen.active_command_block_started = true;
     screen.cursor.row = 0;
     screen.cursor.col = 0;
     screen.offset = 0;
@@ -463,6 +466,9 @@ fn grid_content_rows_len(grid: &Grid) -> usize {
 fn row_has_visible_content(row: &Row) -> bool {
     row.cells.iter().any(|cell| cell != " ")
         || row.has_wide_cells
+        || row.prompt_start
+        || row.output_start
+        || row.exit_status.is_some()
         || row.links.iter().any(Option::is_some)
 }
 
