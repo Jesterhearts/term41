@@ -6,6 +6,7 @@ use std::time::Duration;
 use crate::CommandMeta;
 use crate::Screen;
 use crate::Viewport;
+use crate::screen;
 use crate::selection;
 use crate::selection::Selection;
 use crate::selection::SelectionMode;
@@ -80,8 +81,11 @@ pub fn find_prompt_for_screen_row(
     viewport: &Viewport,
     screen_row: u32,
 ) -> Option<u64> {
+    let screen_row =
+        selection::active_screen_row_at_viewport_row(screen, viewport, false, screen_row)?;
     let base = selection::active_viewport(screen, viewport).top_index(screen.grid.rows.len());
-    let start = base + screen_row as usize;
+    let last = screen.grid.rows.len().checked_sub(1)?;
+    let start = base.saturating_add(screen_row as usize).min(last);
     let popped = screen.grid.total_popped as u64;
     for i in (0..=start).rev() {
         if screen.grid.rows[i].prompt_start {
@@ -115,6 +119,42 @@ struct TextPoint {
 struct TextRange {
     start: TextPoint,
     end: TextPoint,
+}
+
+/// Prompt marker resolved from the rendered command-block stream.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct PromptRef {
+    /// Row in the rendered command-block document.
+    pub rendered_row: u64,
+    /// Absolute active-grid row when this prompt belongs to the live block.
+    pub active_abs_row: Option<u64>,
+}
+
+struct RenderedRowInfo<'a> {
+    row: &'a crate::Row,
+    rendered_row: u32,
+    block_end: u32,
+    active_local: Option<usize>,
+}
+
+/// Find the nearest prompt marker at or above a viewport row in the rendered
+/// command-block stream.
+pub fn find_prompt_ref_for_screen_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    screen_row: u32,
+) -> Option<PromptRef> {
+    let start =
+        selection::rendered_document_row_at_viewport_row(screen, viewport, false, screen_row)?;
+    for rendered_row in (0..=start).rev() {
+        let Some(info) = rendered_row_info(screen, rendered_row) else {
+            continue;
+        };
+        if info.row.prompt_start {
+            return Some(prompt_ref_for_rendered_row(screen, info));
+        }
+    }
+    None
 }
 
 /// Return the absolute row where the command block ends.
@@ -287,6 +327,202 @@ fn extract_range_text(
     out
 }
 
+fn rendered_row_info(
+    screen: &Screen,
+    rendered_row: u32,
+) -> Option<RenderedRowInfo<'_>> {
+    let mut idx = rendered_row;
+    let mut base = 0;
+    for block in &screen.scrollback_blocks {
+        let block_rows = screen::command_block_rendered_rows_len(block) as u32;
+        if idx < block_rows {
+            return Some(RenderedRowInfo {
+                row: &block.grid.rows[idx as usize],
+                rendered_row,
+                block_end: base + block_rows,
+                active_local: None,
+            });
+        }
+        idx -= block_rows;
+        base += block_rows;
+        if idx == 0 {
+            return None;
+        }
+        idx -= 1;
+        base += 1;
+    }
+
+    let active_rows = screen::active_block_rendered_rows_len(screen) as u32;
+    if idx >= active_rows {
+        return None;
+    }
+    Some(RenderedRowInfo {
+        row: &screen.grid.rows[idx as usize],
+        rendered_row,
+        block_end: base + active_rows,
+        active_local: Some(idx as usize),
+    })
+}
+
+fn prompt_ref_for_rendered_row(
+    screen: &Screen,
+    info: RenderedRowInfo<'_>,
+) -> PromptRef {
+    PromptRef {
+        rendered_row: info.rendered_row as u64,
+        active_abs_row: info
+            .active_local
+            .map(|local| (screen.grid.total_popped + local) as u64),
+    }
+}
+
+fn rendered_output_start_point(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<TextPoint> {
+    let info = rendered_row_info(screen, prompt.rendered_row as u32)?;
+    for rendered_row in prompt.rendered_row as u32..info.block_end {
+        let row = rendered_row_info(screen, rendered_row)?.row;
+        if row.output_start {
+            return Some(TextPoint {
+                row: rendered_row as u64,
+                col: row
+                    .output_start_col
+                    .unwrap_or_else(|| first_content_col(row)),
+            });
+        }
+    }
+    None
+}
+
+fn rendered_command_start_point(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<TextPoint> {
+    let info = rendered_row_info(screen, prompt.rendered_row as u32)?;
+    for rendered_row in prompt.rendered_row as u32..info.block_end {
+        let row = rendered_row_info(screen, rendered_row)?.row;
+        if let Some(col) = row.command_start_col {
+            return Some(TextPoint {
+                row: rendered_row as u64,
+                col,
+            });
+        }
+    }
+    Some(text_point_from_row_start(prompt.rendered_row))
+}
+
+fn first_content_col(row: &crate::Row) -> u32 {
+    row.cells.iter().position(|cell| cell != " ").unwrap_or(0) as u32
+}
+
+fn rendered_block_end_point(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<TextPoint> {
+    Some(text_point_from_row_start(
+        rendered_block_text_end(prompt, screen)? as u64,
+    ))
+}
+
+fn rendered_block_text_end(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<u32> {
+    let info = rendered_row_info(screen, prompt.rendered_row as u32)?;
+    let mut end = info.block_end;
+    while end > prompt.rendered_row as u32 + 1 {
+        let Some(row) = rendered_row_info(screen, end - 1).map(|info| info.row) else {
+            break;
+        };
+        if row.content_len() > 0 {
+            break;
+        }
+        end -= 1;
+    }
+    Some(end)
+}
+
+fn rendered_command_text_range(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<TextRange> {
+    let start = rendered_command_start_point(prompt, screen)?;
+    let end = rendered_output_start_point(prompt, screen)
+        .map(|output| {
+            if output.row > start.row {
+                text_point_from_row_start(output.row)
+            } else {
+                output
+            }
+        })
+        .or_else(|| rendered_block_end_point(prompt, screen))?;
+    text_range(start, end)
+}
+
+fn rendered_output_text_range(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<TextRange> {
+    let start = rendered_output_start_point(prompt, screen)?;
+    let end = rendered_block_end_point(prompt, screen)?;
+    text_range(start, end)
+}
+
+fn rendered_command_and_output_text_range(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<TextRange> {
+    let start = rendered_command_start_point(prompt, screen)?;
+    let end = rendered_block_end_point(prompt, screen)?;
+    text_range(start, end)
+}
+
+fn extract_rendered_range_text(
+    screen: &Screen,
+    range: TextRange,
+) -> String {
+    let Some(end_abs) = last_row_in_range(range) else {
+        return String::new();
+    };
+    let mut out = String::new();
+    for rendered_row in range.start.row..=end_abs {
+        let Some(info) = rendered_row_info(screen, rendered_row as u32) else {
+            continue;
+        };
+        let row = info.row;
+        let cs = if rendered_row == range.start.row {
+            range.start.col as usize
+        } else if row.output_start {
+            row.output_start_col
+                .unwrap_or_else(|| first_content_col(row)) as usize
+        } else {
+            0
+        };
+        let ce = if rendered_row == range.end.row {
+            range.end.col as usize
+        } else {
+            row.cells.len()
+        }
+        .min(row.cells.len());
+        if cs >= ce {
+            if rendered_row < end_abs && !row.wrapped {
+                out.push('\n');
+            }
+            continue;
+        }
+        let mut seg = String::new();
+        for cell in &row.cells[cs..ce] {
+            seg.push_str(cell);
+        }
+        out.push_str(seg.trim_end_matches(' '));
+        if rendered_row < end_abs && !row.wrapped {
+            out.push('\n');
+        }
+    }
+    out
+}
+
 /// Extract the command text associated with a prompt row.
 pub fn command_text_at(
     prompt_abs: u64,
@@ -295,6 +531,21 @@ pub fn command_text_at(
 ) -> Option<String> {
     let meta = command_metas.get(&prompt_abs);
     let text = extract_range_text(screen, command_text_range(prompt_abs, meta, screen)?);
+    if text.is_empty() { None } else { Some(text) }
+}
+
+/// Extract the command text associated with a rendered prompt.
+pub fn command_text_for_prompt(
+    prompt: PromptRef,
+    command_metas: &HashMap<u64, CommandMeta>,
+    screen: &Screen,
+) -> Option<String> {
+    if let Some(prompt_abs) = prompt.active_abs_row
+        && let Some(text) = command_text_at(prompt_abs, command_metas, screen)
+    {
+        return Some(text);
+    }
+    let text = extract_rendered_range_text(screen, rendered_command_text_range(prompt, screen)?);
     if text.is_empty() { None } else { Some(text) }
 }
 
@@ -321,6 +572,21 @@ pub fn output_text_at(
     if text.is_empty() { None } else { Some(text) }
 }
 
+/// Extract command output associated with a rendered prompt.
+pub fn output_text_for_prompt(
+    prompt: PromptRef,
+    command_metas: &HashMap<u64, CommandMeta>,
+    screen: &Screen,
+) -> Option<String> {
+    if let Some(prompt_abs) = prompt.active_abs_row
+        && let Some(text) = output_text_at(prompt_abs, command_metas, screen)
+    {
+        return Some(text);
+    }
+    let text = extract_rendered_range_text(screen, rendered_output_text_range(prompt, screen)?);
+    if text.is_empty() { None } else { Some(text) }
+}
+
 /// Extract command text plus output associated with a prompt row.
 pub fn command_and_output_text_at(
     prompt_abs: u64,
@@ -335,6 +601,24 @@ pub fn command_and_output_text_at(
     if text.is_empty() { None } else { Some(text) }
 }
 
+/// Extract command text plus output associated with a rendered prompt.
+pub fn command_and_output_text_for_prompt(
+    prompt: PromptRef,
+    command_metas: &HashMap<u64, CommandMeta>,
+    screen: &Screen,
+) -> Option<String> {
+    if let Some(prompt_abs) = prompt.active_abs_row
+        && let Some(text) = command_and_output_text_at(prompt_abs, command_metas, screen)
+    {
+        return Some(text);
+    }
+    let text = extract_rendered_range_text(
+        screen,
+        rendered_command_and_output_text_range(prompt, screen)?,
+    );
+    if text.is_empty() { None } else { Some(text) }
+}
+
 /// Return the recorded runtime for a completed command.
 pub fn command_duration_at(
     prompt_abs: u64,
@@ -344,6 +628,14 @@ pub fn command_duration_at(
     let start = meta.started_at?;
     let end = meta.finished_at?;
     Some(end.duration_since(start))
+}
+
+/// Return the recorded runtime for a completed rendered command.
+pub fn command_duration_for_prompt(
+    prompt: PromptRef,
+    command_metas: &HashMap<u64, CommandMeta>,
+) -> Option<Duration> {
+    command_duration_at(prompt.active_abs_row?, command_metas)
 }
 
 /// Replace the current selection with the command text at a prompt row.
@@ -381,6 +673,40 @@ pub fn select_command_at(
     });
 }
 
+/// Replace the current selection with the command text at a rendered prompt.
+pub fn select_command_for_prompt(
+    selection: &mut Option<Selection>,
+    prompt: PromptRef,
+    command_metas: &HashMap<u64, CommandMeta>,
+    screen: &Screen,
+) {
+    if let Some(prompt_abs) = prompt.active_abs_row {
+        select_command_at(selection, prompt_abs, command_metas, screen);
+        return;
+    }
+    let Some(range) = rendered_command_text_range(prompt, screen) else {
+        return;
+    };
+    let text = extract_rendered_range_text(screen, range);
+    if text.trim().is_empty() {
+        return;
+    }
+    let anchor = SelectionPoint {
+        row: range.start.row,
+        col: range.start.col,
+    };
+    let Some(head) = selection_head_for_rendered_range(screen, range) else {
+        return;
+    };
+    *selection = Some(Selection {
+        anchor,
+        head,
+        mode: SelectionMode::Char,
+        rendered: true,
+        origin: anchor,
+    });
+}
+
 fn selection_head_for_range(
     screen: &Screen,
     range: TextRange,
@@ -407,15 +733,48 @@ fn selection_head_for_range(
     })
 }
 
+fn selection_head_for_rendered_range(
+    screen: &Screen,
+    range: TextRange,
+) -> Option<SelectionPoint> {
+    let end_abs = last_row_in_range(range)?;
+    if range.end.col > 0 && range.end.row == end_abs {
+        let col = rendered_row_info(screen, end_abs as u32)
+            .map(|info| range.end.col.min(info.row.len()))
+            .unwrap_or(range.end.col);
+        if col == 0 {
+            return None;
+        }
+        return Some(SelectionPoint {
+            row: end_abs,
+            col: col - 1,
+        });
+    }
+    let end_col = rendered_row_info(screen, end_abs as u32)
+        .map(|info| info.row.content_len().saturating_sub(1))
+        .unwrap_or(0);
+    Some(SelectionPoint {
+        row: end_abs,
+        col: end_col,
+    })
+}
+
 #[cfg(test)]
 mod tests {
     use std::path::PathBuf;
 
     use super::command_and_output_text_at;
+    use super::command_and_output_text_for_prompt;
     use super::command_text_at;
+    use super::command_text_for_prompt;
+    use super::find_prompt_for_screen_row;
+    use super::find_prompt_ref_for_screen_row;
     use super::output_text_at;
+    use super::output_text_for_prompt;
     use super::select_command_at;
+    use super::select_command_for_prompt;
     use crate::screen;
+    use crate::selection;
     use crate::test_support::TestTerm;
     use crate::view;
 
@@ -531,6 +890,84 @@ mod tests {
         assert_eq!(selection.anchor.col, 2);
         assert_eq!(selection.head.row, 0);
         assert_eq!(selection.head.col, 6);
+    }
+
+    #[test]
+    fn find_prompt_for_screen_row_ignores_completed_block_output_rows() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        emit_prompt(&mut term, "$ a", 1, 0);
+        term.process(b"\x1b]133;A\x07$ b");
+        term.active.offset = screen::rendered_scrollback_len(&term.active, &term.inner.viewport);
+
+        assert!(term.active.scrollback_blocks[0].grid.rows[1].output_start);
+        assert_eq!(
+            find_prompt_for_screen_row(&term.active, &term.inner.viewport, 1),
+            None
+        );
+    }
+
+    #[test]
+    fn find_prompt_for_screen_row_finds_active_command_output_rows() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ a\x1b]133;B\x07\n\x1b]133;C\x07out");
+
+        assert!(term.active.grid.rows[1].output_start);
+        assert_eq!(
+            find_prompt_for_screen_row(&term.active, &term.inner.viewport, 3),
+            Some(0)
+        );
+    }
+
+    #[test]
+    fn find_prompt_ref_for_screen_row_finds_completed_block_output_rows() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07ab\n\x1b]133;C\x07out0\n\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ b");
+        term.active.offset = screen::rendered_scrollback_len(&term.active, &term.inner.viewport);
+
+        let prompt = find_prompt_ref_for_screen_row(&term.active, &term.inner.viewport, 1)
+            .expect("completed block prompt");
+
+        assert_eq!(prompt.rendered_row, 0);
+        assert_eq!(prompt.active_abs_row, None);
+        assert_eq!(
+            command_text_for_prompt(prompt, &term.metadata.command_metas, &term.active).as_deref(),
+            Some("ab")
+        );
+        assert_eq!(
+            output_text_for_prompt(prompt, &term.metadata.command_metas, &term.active).as_deref(),
+            Some("out0")
+        );
+        assert_eq!(
+            command_and_output_text_for_prompt(prompt, &term.metadata.command_metas, &term.active)
+                .as_deref(),
+            Some("ab\nout0")
+        );
+    }
+
+    #[test]
+    fn select_command_for_prompt_selects_completed_block_command_row() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07ab\n\x1b]133;C\x07out0\n\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ b");
+        term.active.offset = screen::rendered_scrollback_len(&term.active, &term.inner.viewport);
+        let prompt = find_prompt_ref_for_screen_row(&term.active, &term.inner.viewport, 1)
+            .expect("completed block prompt");
+
+        let mut selected = None;
+        select_command_for_prompt(
+            &mut selected,
+            prompt,
+            &term.metadata.command_metas,
+            &term.active,
+        );
+
+        let selected = selected.expect("rendered command selection");
+        assert!(selected.rendered);
+        assert_eq!(
+            selection::selection_text(Some(&selected), &term.active).as_deref(),
+            Some("ab")
+        );
     }
 
     #[test]

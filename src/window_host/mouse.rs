@@ -34,6 +34,7 @@ pub(crate) fn handle_cursor_moved(
             state.cell_width,
             state.cell_height,
             state.gutter_width,
+            host.metrics.window_size.0,
             host.metrics.window_size.1,
         );
         if let Some(popup) = state.gutter_popup.as_mut() {
@@ -995,20 +996,20 @@ pub(crate) fn open_gutter_popup(
     };
     let mut guard = target.terminal.lock();
     let terminal = &mut *guard;
-    let Some(prompt_abs) =
-        find_prompt_for_screen_row(&terminal.active, &terminal.viewport, screen_row)
+    let Some(prompt) =
+        find_prompt_ref_for_screen_row(&terminal.active, &terminal.viewport, screen_row)
     else {
         return;
     };
-    select_command_at(
+    select_command_for_prompt(
         &mut terminal.selection,
-        prompt_abs,
+        prompt,
         &terminal.metadata.command_metas,
         &terminal.active,
     );
     terminal.invalidate_snapshot_rows();
     let duration_text =
-        command_duration_at(prompt_abs, &terminal.metadata.command_metas).map(format_duration);
+        command_duration_for_prompt(prompt, &terminal.metadata.command_metas).map(format_duration);
     drop(guard);
     if let Some(tab_id) = host.input.active_tab {
         clear_command_editor_selection_for_tab(host, tab_id);
@@ -1016,8 +1017,9 @@ pub(crate) fn open_gutter_popup(
     update_gutter_popup(
         &host.render,
         Some(renderer::GutterPopup {
-            prompt_abs_row: prompt_abs,
-            screen_row,
+            prompt,
+            anchor_x: host.mouse.pos.0.max(0.0) as f32,
+            anchor_y: host.mouse.pos.1.max(0.0) as f32,
             duration_text,
             hovered_item: None,
         }),
@@ -1046,7 +1048,7 @@ pub(crate) fn execute_popup_action(
             let mut guard = target.terminal.lock();
             let terminal = &mut *guard;
             if let Some(cmd) = popup_command_text(
-                popup.prompt_abs_row,
+                popup.prompt,
                 &terminal.metadata.command_metas,
                 &terminal.active,
             ) {
@@ -1069,7 +1071,7 @@ pub(crate) fn execute_popup_action(
             let mut guard = target.terminal.lock();
             let terminal = &mut *guard;
             if let Some(text) = popup_command_text(
-                popup.prompt_abs_row,
+                popup.prompt,
                 &terminal.metadata.command_metas,
                 &terminal.active,
             ) {
@@ -1084,8 +1086,8 @@ pub(crate) fn execute_popup_action(
         }
         2 => {
             let mut terminal = target.terminal.lock();
-            if let Some(text) = command_and_output_text_at(
-                popup.prompt_abs_row,
+            if let Some(text) = command_and_output_text_for_prompt(
+                popup.prompt,
                 &terminal.metadata.command_metas,
                 &terminal.active,
             ) {
@@ -1096,8 +1098,8 @@ pub(crate) fn execute_popup_action(
         }
         3 => {
             let mut terminal = target.terminal.lock();
-            if let Some(text) = output_text_at(
-                popup.prompt_abs_row,
+            if let Some(text) = output_text_for_prompt(
+                popup.prompt,
                 &terminal.metadata.command_metas,
                 &terminal.active,
             ) {
@@ -1404,6 +1406,7 @@ pub(crate) fn gutter_popup_item_at(
         state.cell_width,
         state.cell_height,
         state.gutter_width,
+        metrics.window_size.0,
         metrics.window_size.1,
     )
 }

@@ -33,6 +33,7 @@ use crate::renderer::TAB_MENU_ITEMS;
 use crate::renderer::TAB_MENU_WIDTH_CELLS;
 use crate::renderer::TabContextMenu;
 use crate::renderer::compute_gutter_width;
+use crate::renderer::gutter_popup_origin;
 use crate::renderer::r#impl::CURSOR_BLINK_HALF_PERIOD;
 use crate::renderer::r#impl::FAILURE;
 use crate::renderer::r#impl::RUNNING;
@@ -656,10 +657,18 @@ fn paint_gutter_popup(
     let total_rows = header_rows + GUTTER_MENU_ITEMS.len();
     let popup_w = (cell_w as f32 * POPUP_WIDTH_CELLS).round() as i32;
     let popup_h = total_rows as i32 * cell_h;
-    let popup_x = gutter_w;
-    let popup_y = (popup.screen_row as i32 * cell_h + tab_bar_h)
-        .min(height as i32 - popup_h)
-        .max(tab_bar_h);
+    let (popup_x, popup_y) = gutter_popup_origin(
+        popup,
+        popup_w as f32,
+        popup_h as f32,
+        cell_w as f32,
+        cell_h as f32,
+        gutter_w as f32,
+        width as f32,
+        height as f32,
+    );
+    let popup_x = popup_x.round() as i32;
+    let popup_y = popup_y.round().max(tab_bar_h as f32) as i32;
 
     let panel_bg = Srgb::new(30, 30, 38);
     let border = Srgb::new(80, 80, 100);

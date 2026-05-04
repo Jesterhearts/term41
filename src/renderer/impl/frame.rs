@@ -356,20 +356,6 @@ impl Renderer {
             &mut geometry.fg,
         );
 
-        if let Some(popup) = gutter_popup {
-            self.render_gutter_popup(
-                font_system,
-                popup,
-                layout.gutter_px,
-                layout.cell_w,
-                layout.cell_h,
-                layout.tab_bar_h,
-                &mut geometry.bg_vertices,
-                &mut geometry.bg_indices,
-                &mut geometry.fg,
-            );
-        }
-
         if let Some(popup) = recording_popup {
             self.render_recording_popup(
                 font_system,
@@ -446,6 +432,20 @@ impl Renderer {
             );
         }
 
+        if let Some(popup) = gutter_popup {
+            self.render_gutter_popup(
+                font_system,
+                popup,
+                layout.gutter_px,
+                layout.cell_w,
+                layout.cell_h,
+                layout.tab_bar_h,
+                &mut geometry.top_overlay_bg_vertices,
+                &mut geometry.top_overlay_bg_indices,
+                &mut geometry.top_overlay_fg,
+            );
+        }
+
         geometry
     }
 
@@ -501,11 +501,18 @@ impl Renderer {
             let total = (header + GUTTER_MENU_ITEMS.len()) as f32;
             let width = layout.cell_w * POPUP_WIDTH_CELLS;
             let height = total * layout.cell_h;
-            let left = layout.gutter_px;
             let surface_h = self.surface_config.height as f32;
-            let top = terminal_row_y(popup.screen_row, layout)
-                .min(surface_h - height)
-                .max(layout.tab_bar_h);
+            let (left, top) = gutter_popup_origin(
+                popup,
+                width,
+                height,
+                layout.cell_w,
+                layout.cell_h,
+                layout.gutter_px,
+                self.surface_config.width as f32,
+                surface_h,
+            );
+            let top = top.max(layout.tab_bar_h);
             ClipRect {
                 left,
                 top,

@@ -87,12 +87,13 @@ use terminal41::TerminalThread;
 use terminal41::apply_host_input;
 use terminal41::host;
 use terminal41::io::clipboard::copy_to_clipboard;
-use terminal41::prompt::command_and_output_text_at;
-use terminal41::prompt::command_duration_at;
-use terminal41::prompt::command_text_at;
-use terminal41::prompt::find_prompt_for_screen_row;
-use terminal41::prompt::output_text_at;
-use terminal41::prompt::select_command_at;
+use terminal41::prompt::PromptRef;
+use terminal41::prompt::command_and_output_text_for_prompt;
+use terminal41::prompt::command_duration_for_prompt;
+use terminal41::prompt::command_text_for_prompt;
+use terminal41::prompt::find_prompt_ref_for_screen_row;
+use terminal41::prompt::output_text_for_prompt;
+use terminal41::prompt::select_command_for_prompt;
 use terminal41::prompt::untrusted_command_line_at;
 use terminal41::selection::SelectionMode;
 use terminal41::selection::active_screen_row_at_viewport_row;
@@ -809,6 +810,7 @@ fn popup_item_at(
     cell_width: u32,
     cell_height: u32,
     gutter_width: u32,
+    window_width: u32,
     window_height: u32,
 ) -> Option<usize> {
     let popup = popup?;
@@ -817,8 +819,16 @@ fn popup_item_at(
     let total_rows = popup.duration_text.is_some() as usize + 4;
     let popup_w = cell_w * POPUP_WIDTH_CELLS;
     let popup_h = total_rows as f32 * cell_h;
-    let popup_x = gutter_width as f32;
-    let popup_y = (popup.screen_row as f32 * cell_h + cell_h).min(window_height as f32 - popup_h);
+    let (popup_x, popup_y) = renderer::gutter_popup_origin(
+        popup,
+        popup_w,
+        popup_h,
+        cell_w,
+        cell_h,
+        gutter_width as f32,
+        window_width as f32,
+        window_height as f32,
+    );
     let x = x as f32;
     let y = y as f32;
     if x < popup_x || x > popup_x + popup_w || y < popup_y || y > popup_y + popup_h {
@@ -848,14 +858,14 @@ fn format_duration(d: Duration) -> String {
 }
 
 fn popup_command_text(
-    prompt_abs: u64,
+    prompt: PromptRef,
     command_metas: &HashMap<u64, terminal41::CommandMeta>,
     screen: &terminal41::Screen,
 ) -> Option<PopupCommandText> {
-    if let Some(command) = command_text_at(prompt_abs, command_metas, screen) {
+    if let Some(command) = command_text_for_prompt(prompt, command_metas, screen) {
         return Some(PopupCommandText::Observed(command));
     }
-    untrusted_command_line_at(prompt_abs, command_metas)
+    untrusted_command_line_at(prompt.active_abs_row?, command_metas)
         .map(|command| PopupCommandText::Untrusted(command.to_owned()))
 }
 

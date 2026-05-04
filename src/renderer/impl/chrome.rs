@@ -681,10 +681,17 @@ impl Renderer {
         let total_rows = header_rows + GUTTER_MENU_ITEMS.len();
         let popup_w = cell_w * POPUP_WIDTH_CELLS;
         let popup_h = total_rows as f32 * cell_h;
-        let popup_x = gutter_px;
-        let popup_y = (popup.screen_row as f32 * cell_h + tab_bar_h)
-            .min(surface_h - popup_h)
-            .max(tab_bar_h);
+        let (popup_x, popup_y) = gutter_popup_origin(
+            popup,
+            popup_w,
+            popup_h,
+            cell_w,
+            cell_h,
+            gutter_px,
+            self.surface_config.width as f32,
+            surface_h,
+        );
+        let popup_y = popup_y.max(tab_bar_h);
 
         // Panel background.
         let panel_bg = pack_color(&palette::Srgb::new(30, 30, 38), 255);

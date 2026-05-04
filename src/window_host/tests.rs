@@ -656,7 +656,14 @@ mod popup_command_tests {
         term.process(b"cargo test");
         term.process(b"\x1b]633;E;cargo\\x20metadata\x07");
 
-        let text = popup_command_text(0, &term.metadata.command_metas, &term.active);
+        let text = popup_command_text(
+            PromptRef {
+                rendered_row: 0,
+                active_abs_row: Some(0),
+            },
+            &term.metadata.command_metas,
+            &term.active,
+        );
         match text {
             Some(PopupCommandText::Observed(text)) => assert_eq!(text, "cargo test"),
             _ => panic!("expected observed command text"),
@@ -669,7 +676,14 @@ mod popup_command_tests {
         term.process(b"\x1b]633;A\x07");
         term.process(b"\x1b]633;E;cargo\\x20test\x07");
 
-        let text = popup_command_text(0, &term.metadata.command_metas, &term.active);
+        let text = popup_command_text(
+            PromptRef {
+                rendered_row: 0,
+                active_abs_row: Some(0),
+            },
+            &term.metadata.command_metas,
+            &term.active,
+        );
         match text {
             Some(PopupCommandText::Untrusted(text)) => assert_eq!(text, "cargo test"),
             _ => panic!("expected untrusted command text"),

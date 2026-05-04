@@ -725,6 +725,8 @@ fn apply_shell_integration_action(
             }
             let abs = mark_current_row(screen, viewport, |row| {
                 row.prompt_start = true;
+                row.command_start_col = None;
+                row.output_start_col = None;
                 // A fresh prompt invalidates any lingering exit_status from
                 // a prior occupant of this row (e.g. a recycled scrollback
                 // slot). The shell hasn't even shown the prompt yet.
@@ -740,23 +742,28 @@ fn apply_shell_integration_action(
             // Prompt end / command start. Record the cursor column so
             // "select command" can skip the prompt decoration.
             if let Some(prompt_abs) = *current_prompt_row {
-                let abs = current_absolute_row(screen, viewport);
+                let command_col = screen.cursor.col;
+                let abs = mark_current_row(screen, viewport, |row| {
+                    row.command_start_col = Some(command_col);
+                });
                 if let Some(meta) = command_metas.get_mut(&prompt_abs) {
-                    meta.command_col = Some(screen.cursor.col);
+                    meta.command_col = Some(command_col);
                     meta.command_row = Some(abs);
                 }
             }
         }
         ShellIntegrationAction::OutputStart => {
             *shell_integration_phase = ShellIntegrationPhase::Output;
+            let output_col = screen.cursor.col;
             let abs = mark_current_row(screen, viewport, |row| {
                 row.output_start = true;
+                row.output_start_col = Some(output_col);
             });
             if let Some(prompt_abs) = *current_prompt_row
                 && let Some(meta) = command_metas.get_mut(&prompt_abs)
             {
                 meta.output_row = Some(abs);
-                meta.output_col = Some(screen.cursor.col);
+                meta.output_col = Some(output_col);
                 meta.started_at = Some(Instant::now());
             }
         }

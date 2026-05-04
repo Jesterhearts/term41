@@ -40,6 +40,7 @@ use crate::renderer::background::Background;
 use crate::renderer::background::BgImageVertex;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::glyph_atlas::GlyphSlot;
+use crate::renderer::gutter_popup_origin;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
 use crate::renderer::image_atlas::ImageAtlas;
 use crate::renderer::paint::blink_animation_enabled;

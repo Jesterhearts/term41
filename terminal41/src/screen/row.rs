@@ -59,9 +59,15 @@ pub struct Row {
     /// Only set on the head of a logical line (the non-continuation row), so
     /// reflow naturally keeps the mark with its prompt.
     pub prompt_start: bool,
+    /// Column where OSC 133 `B` was emitted on this row — command text starts
+    /// here. Kept on the row so completed command blocks can still select the
+    /// command without including the prompt after active metadata rotates.
+    pub command_start_col: Option<u32>,
     /// OSC 133 `C` was emitted on this row — command output starts here.
     /// Mirrors `prompt_start`: head-of-logical-line only.
     pub output_start: bool,
+    /// Column where OSC 133 `C` was emitted on this row.
+    pub output_start_col: Option<u32>,
     /// Exit status of the command whose prompt begins on this row, set when
     /// an OSC 133 `D` arrives and can be resolved back to the matching
     /// prompt. `None` when the command is still running, had no
@@ -95,7 +101,9 @@ impl Row {
             links: vec![None; n],
             wrapped: false,
             prompt_start: false,
+            command_start_col: None,
             output_start: false,
+            output_start_col: None,
             exit_status: None,
             line_attr: LineAttr::Normal,
             has_wide_cells: false,
@@ -155,7 +163,9 @@ impl Row {
         // clears via `clear_range` leave them alone, so apps that use SGR to
         // redraw a prompt line in place don't lose the mark mid-update.
         self.prompt_start = false;
+        self.command_start_col = None;
         self.output_start = false;
+        self.output_start_col = None;
         self.exit_status = None;
     }
 
@@ -367,7 +377,9 @@ impl Row {
             links: self.links[left..right_excl].to_vec(),
             wrapped: false,
             prompt_start: false,
+            command_start_col: None,
             output_start: false,
+            output_start_col: None,
             exit_status: None,
             line_attr: LineAttr::Normal,
             has_wide_cells: cells_contain_wide(&self.cells[left..right_excl]),
