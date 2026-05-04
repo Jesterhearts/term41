@@ -759,20 +759,47 @@ mod popup_command_tests {
 
     #[test]
     fn popup_rerun_pastes_single_line_raw_without_bracketed_mode() {
-        let paste = popup_rerun_paste(PopupCommandText::Observed(" cargo test \r".into()), false);
-        assert!(matches!(paste, Some((text, PasteMode::Terminal)) if text == "cargo test"));
+        let paste = popup_rerun_paste(
+            PopupCommandText::Observed(" cargo test \r".into()),
+            false,
+            false,
+        );
+        assert!(matches!(
+            paste,
+            Some((text, PopupRerunPasteTarget::Terminal(PasteMode::Terminal)))
+                if text == "cargo test"
+        ));
+    }
+
+    #[test]
+    fn popup_rerun_pastes_to_editor_when_available() {
+        let paste = popup_rerun_paste(
+            PopupCommandText::Untrusted("cargo test\ncargo publish".into()),
+            true,
+            true,
+        );
+        assert!(matches!(
+            paste,
+            Some((text, PopupRerunPasteTarget::Editor))
+                if text == "cargo test\ncargo publish"
+        ));
     }
 
     #[test]
     fn popup_rerun_pastes_bracketed_when_mode_is_enabled() {
-        let paste = popup_rerun_paste(PopupCommandText::Observed("cargo test".into()), true);
-        assert!(matches!(paste, Some((text, PasteMode::Bracketed)) if text == "cargo test"));
+        let paste = popup_rerun_paste(PopupCommandText::Observed("cargo test".into()), false, true);
+        assert!(matches!(
+            paste,
+            Some((text, PopupRerunPasteTarget::Terminal(PasteMode::Bracketed)))
+                if text == "cargo test"
+        ));
     }
 
     #[test]
     fn popup_rerun_rejects_multiline_without_bracketed_mode() {
         let paste = popup_rerun_paste(
             PopupCommandText::Untrusted("cargo test\ncargo publish".into()),
+            false,
             false,
         );
         assert!(paste.is_none());

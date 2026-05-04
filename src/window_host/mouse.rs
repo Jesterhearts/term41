@@ -345,6 +345,35 @@ pub(crate) fn paste_command_editor_selection(
     true
 }
 
+pub(crate) fn insert_command_editor_text(
+    host: &mut WindowHost,
+    tab_id: TabId,
+    text: String,
+) -> bool {
+    let Some((settings, vim_mode)) = command_editor_settings_for_mouse(host, tab_id) else {
+        return false;
+    };
+    let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
+        return false;
+    };
+
+    apply_input(
+        &mut target.command_editor,
+        EditorInput::Insert(text),
+        &settings,
+    );
+    let view = command_editor_view(&target.command_editor, &settings, vim_mode);
+    {
+        let mut terminal = target.terminal.lock();
+        reset_viewport_and_invalidate(&mut terminal);
+        if terminal.selection.take().is_some() {
+            terminal.invalidate_snapshot_rows();
+        }
+    }
+    set_command_editor_view(host, tab_id, view);
+    true
+}
+
 pub(crate) fn permission_choice_at(
     render: &RenderRuntime,
     metrics: &WindowMetrics,
@@ -1032,6 +1061,20 @@ pub(crate) fn open_gutter_popup(
     );
 }
 
+fn popup_rerun_command_for_tab(
+    host: &mut WindowHost,
+    tab_id: TabId,
+    prompt: PromptRef,
+) -> Option<(PopupCommandText, bool)> {
+    let target = host.input.endpoints.get_mut(&tab_id)?;
+    let mut terminal = target.terminal.lock();
+    let command = popup_command_text(prompt, &terminal.metadata.command_metas, &terminal.active)?;
+    let bracketed_paste_enabled = terminal.modes.bracketed_paste;
+    terminal.selection = None;
+    terminal.invalidate_snapshot_rows();
+    Some((command, bracketed_paste_enabled))
+}
+
 pub(crate) fn execute_popup_action(
     host: &mut WindowHost,
     item_idx: usize,
@@ -1040,34 +1083,45 @@ pub(crate) fn execute_popup_action(
     let Some(popup) = popup else {
         return;
     };
-    let Some(target) = active_input_target(&mut host.input) else {
+    let Some(tab_id) = host.input.active_tab else {
         return;
     };
     match item_idx {
         0 => {
-            let mut guard = target.terminal.lock();
-            let terminal = &mut *guard;
-            if let Some(cmd) = popup_command_text(
-                popup.prompt,
-                &terminal.metadata.command_metas,
-                &terminal.active,
-            ) {
-                let bracketed_paste_enabled = terminal.modes.bracketed_paste;
-                terminal.selection = None;
-                terminal.invalidate_snapshot_rows();
-                drop(guard);
-                if let Some((text, mode)) = popup_rerun_paste(cmd, bracketed_paste_enabled) {
-                    emit_host_input(target, HostInput::PasteText { text: &text, mode }, true);
-                    show_toast(host, "Pasted command; review before Enter");
-                } else {
-                    show_toast(
-                        host,
-                        "Multiline command needs bracketed paste; use Copy Command",
-                    );
+            let Some((cmd, bracketed_paste_enabled)) =
+                popup_rerun_command_for_tab(host, tab_id, popup.prompt)
+            else {
+                return;
+            };
+            let editor_available = command_editor_settings_for_mouse(host, tab_id).is_some();
+            if let Some((text, target)) =
+                popup_rerun_paste(cmd, editor_available, bracketed_paste_enabled)
+            {
+                match target {
+                    PopupRerunPasteTarget::Editor => {
+                        if insert_command_editor_text(host, tab_id, text) {
+                            show_toast(host, "Pasted command into editor; review before Enter");
+                        }
+                    }
+                    PopupRerunPasteTarget::Terminal(mode) => {
+                        let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
+                            return;
+                        };
+                        emit_host_input(target, HostInput::PasteText { text: &text, mode }, true);
+                        show_toast(host, "Pasted command; review before Enter");
+                    }
                 }
+            } else {
+                show_toast(
+                    host,
+                    "Multiline command needs bracketed paste or editor; use Copy Command",
+                );
             }
         }
         1 => {
+            let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
+                return;
+            };
             let mut guard = target.terminal.lock();
             let terminal = &mut *guard;
             if let Some(text) = popup_command_text(
@@ -1085,6 +1139,9 @@ pub(crate) fn execute_popup_action(
             terminal.invalidate_snapshot_rows();
         }
         2 => {
+            let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
+                return;
+            };
             let mut terminal = target.terminal.lock();
             if let Some(text) = command_and_output_text_for_prompt(
                 popup.prompt,
@@ -1097,6 +1154,9 @@ pub(crate) fn execute_popup_action(
             terminal.invalidate_snapshot_rows();
         }
         3 => {
+            let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
+                return;
+            };
             let mut terminal = target.terminal.lock();
             if let Some(text) = output_text_for_prompt(
                 popup.prompt,

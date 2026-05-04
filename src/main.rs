@@ -805,6 +805,12 @@ enum PopupCommandText {
     Untrusted(String),
 }
 
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+enum PopupRerunPasteTarget {
+    Editor,
+    Terminal(PasteMode),
+}
+
 fn popup_item_at(
     popup: Option<&renderer::GutterPopup>,
     x: f64,
@@ -880,19 +886,24 @@ fn popup_rerun_command_text(command: PopupCommandText) -> String {
 
 fn popup_rerun_paste(
     command: PopupCommandText,
+    editor_available: bool,
     bracketed_paste_enabled: bool,
-) -> Option<(String, PasteMode)> {
+) -> Option<(String, PopupRerunPasteTarget)> {
     let text = popup_rerun_command_text(command);
 
+    if editor_available {
+        return Some((text, PopupRerunPasteTarget::Editor));
+    }
+
     if bracketed_paste_enabled {
-        return Some((text, PasteMode::Bracketed));
+        return Some((text, PopupRerunPasteTarget::Terminal(PasteMode::Bracketed)));
     }
 
     if text.contains(['\r', '\n']) {
         return None;
     }
 
-    Some((text, PasteMode::Terminal))
+    Some((text, PopupRerunPasteTarget::Terminal(PasteMode::Terminal)))
 }
 
 /// Maximum time between clicks that still count as part of a sequence.
