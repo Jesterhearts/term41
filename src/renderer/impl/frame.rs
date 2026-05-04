@@ -4,10 +4,17 @@ impl Renderer {
     pub(super) fn apply_terminal_snapshot_rows(
         &mut self,
         snap: &TermSnapshot,
+        block_y_offset_rows: u32,
     ) {
-        let total_rows = snap.total_rows as usize;
+        let total_rows = snap
+            .rows
+            .iter()
+            .map(|row| row.screen_row as usize + 1)
+            .max()
+            .unwrap_or(0);
         if snap.reset_cached_rows
             || self.terminal_rows.len() != total_rows
+            || self.terminal_block_y_offset_rows != block_y_offset_rows
             || !cached_rows_match_snapshot_shape(&self.terminal_rows, snap)
         {
             self.terminal_rows = (0..total_rows)
@@ -17,6 +24,7 @@ impl Renderer {
             self.row_geometry_cache.clear();
             self.row_geometry_cache.resize_with(total_rows, || None);
             self.terminal_layer.needs_full_repaint = true;
+            self.terminal_block_y_offset_rows = block_y_offset_rows;
         } else if self.row_geometry_cache.len() != total_rows {
             self.terminal_row_generations.resize(total_rows, u64::MAX);
             self.row_geometry_cache.clear();
@@ -61,6 +69,7 @@ impl Renderer {
             gutter_px: self.gutter_width_px(font_system.cell_width) as f32,
             tab_bar_h: if tabs.is_empty() { 0.0 } else { cell_h },
             terminal_y_offset: 0.0,
+            block_y_offset: 0.0,
         }
     }
 
@@ -102,6 +111,7 @@ impl Renderer {
             let base_y = vis.screen_row as f32 * layout.cell_h
                 + layout.tab_bar_h
                 + layout.terminal_y_offset
+                + layout.block_y_offset
                 + vis.cell_y_offset as f32;
             let scale_x = if vis.image.width > 0 {
                 vis.display_width as f32 / vis.image.width as f32
@@ -460,12 +470,14 @@ impl Renderer {
                 gutter_px: layout.gutter_px.to_bits(),
                 tab_bar_h: layout.tab_bar_h.to_bits(),
                 terminal_y_offset: layout.terminal_y_offset.to_bits(),
+                block_y_offset: layout.block_y_offset.to_bits(),
             },
             cursor: row_cursor_key(cursor_state, row),
             blink: row_blink_key(snap, snap_row, blink_off, rapid_blink_off),
             gutter_marker: RowGutterMarkerKey {
                 prompt_start: snap_row.prompt_start,
                 exit_status: snap_row.exit_status,
+                block_separator: snap_row.block_separator,
             },
             popup_clip: row_popup_clip_key(row, layout, popup_clip),
             background_present: self.background.is_some(),
@@ -517,6 +529,10 @@ impl Renderer {
         geometry: &mut RowGeometry,
     ) {
         let y = snapshot_row_y(row, snap, layout);
+        if snap_row.block_separator {
+            append_block_separator_row(snap, y, layout, geometry);
+            return;
+        }
         let line_attr = snap_row.line_attr;
         let is_double_wide = !matches!(line_attr, LineAttr::Normal);
         let effective_cell_w = if is_double_wide {
@@ -1218,6 +1234,28 @@ impl Renderer {
             );
         }
     }
+}
+
+fn append_block_separator_row(
+    snap: &TermSnapshot,
+    y: f32,
+    layout: &FrameLayout,
+    geometry: &mut RowGeometry,
+) {
+    let thickness = (layout.cell_h * 0.08).max(1.0);
+    let inset = layout.cell_w * 0.5;
+    let x = layout.gutter_px + inset;
+    let width = (snap.viewport_cols as f32 * layout.cell_w - inset * 2.0).max(0.0);
+    let y = y + (layout.cell_h - thickness) * 0.5;
+    push_rect(
+        x,
+        y,
+        width,
+        thickness,
+        pack_color(&snap.palette.fg, 72),
+        &mut geometry.bg.vertices,
+        &mut geometry.bg.indices,
+    );
 }
 
 fn draw_terminal_layer_quad<'pass>(

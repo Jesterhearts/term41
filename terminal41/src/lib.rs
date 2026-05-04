@@ -314,34 +314,13 @@ fn shift_command_meta_rows(
     meta.finished_row = meta.finished_row.map(|row| row.saturating_add(delta));
 }
 
-fn action_requests_blank_scrollback_padding(action: &TerminalAction<'_>) -> bool {
+fn action_clears_history_blocks(action: &TerminalAction<'_>) -> bool {
     matches!(
         action,
         TerminalAction::Csi(CsiAction::Parsed(ParsedCsiAction::Main(
-            MainCsiAction::EraseInDisplay { mode: 2 | 3 }
+            MainCsiAction::EraseInDisplay { mode: 3 }
         )))
     )
-}
-
-fn action_addresses_rows_after_clear(action: &TerminalAction<'_>) -> bool {
-    matches!(
-        action,
-        TerminalAction::Csi(CsiAction::Parsed(ParsedCsiAction::Main(
-            MainCsiAction::CursorPosition { row: 2.., .. }
-                | MainCsiAction::LinePositionAbsolute { row: 2.. }
-                | MainCsiAction::CursorVerticalRelative { count: 1.. }
-                | MainCsiAction::CursorNextLine { count: 1.. }
-        )))
-    )
-}
-
-fn foreground_app_mode_active(
-    screen: &Screen,
-    modes: &TerminalModes,
-) -> bool {
-    screen.app_cursor_keys
-        || screen.app_keypad
-        || crate::host::mouse_tracking_enabled(modes.mouse_tracking)
 }
 
 /// Security-sensitive protocol state and VT extension storage.
@@ -565,22 +544,6 @@ pub struct Terminal {
     pub default_status_display: StatusDisplayKind,
     /// User-selected legacy emoji compatibility mode.
     pub emoji_compatibility_mode: EmojiCompatibilityMode,
-    /// Primary-screen clear actions can leave no scrollable viewport even when
-    /// the live grid is full-height. `track_scroll` consumes this marker after
-    /// the current PTY batch and prepends blank scrollback rows.
-    primary_blank_scrollback_padding_pending: bool,
-    /// Primary-screen full-display clears leave default blank rows below the
-    /// cursor. The trim is delayed so `ED 2` followed by `ED 3` still lets
-    /// `ED 3` see the original scrollback boundary.
-    primary_blank_suffix_trim_pending: bool,
-    /// A primary-screen app addressed rows below the top after a full clear,
-    /// so short-history padding must preserve viewport row numbers instead of
-    /// bottom-aligning shell-prompt-style output.
-    primary_clear_absolute_rows_pending: bool,
-    /// A foreground app cleared the primary screen while using application
-    /// terminal modes, so preserve top-origin rows without manufacturing a
-    /// shell-style blank scrollback page.
-    primary_clear_foreground_app_pending: bool,
     /// Security-sensitive optional protocol state and feature storage.
     pub protocol: TerminalProtocolState,
     /// Row-level snapshot invalidation state. The dirty rows live in one
@@ -690,10 +653,6 @@ impl Terminal {
             vt52_cursor_addr: Vt52CursorAddr::Idle,
             default_status_display,
             emoji_compatibility_mode: EmojiCompatibilityMode::Auto,
-            primary_blank_scrollback_padding_pending: false,
-            primary_blank_suffix_trim_pending: false,
-            primary_clear_absolute_rows_pending: false,
-            primary_clear_foreground_app_pending: false,
             protocol: TerminalProtocolState {
                 feature_permissions,
                 limits,
@@ -922,74 +881,11 @@ impl Terminal {
         let dirty_before = self.snapshot_dirty_baseline();
         let dirty_scope = self.snapshot_dirty_scope(&action, dirty_before);
         let input_context_before = self.input_context_state();
-        let blank_scrollback_padding_requested =
-            !self.on_alt_screen && action_requests_blank_scrollback_padding(&action);
-        /*
-         * Full-display clears on the primary screen have two incompatible
-         * callers that both use small, ordinary-looking CSI sequences:
-         *
-         * 1. Shell clear commands (`clear`, PowerShell clear, etc.) usually send
-         *    some form of `CUP(1,1) ED 2 [ED 3]`, then redraw a prompt near the top
-         *    of a now-empty screen. If the session has little history left, we
-         *    synthesize a blank scrollback page and bottom-align the live
-         *    prompt/content. That preserves the terminal invariant users expect
-         *    after clearing: PageUp still moves into a blank page instead of old
-         *    command output, and the prompt sits at the live bottom.
-         *
-         * 2. Primary-screen full-screen apps such as `top` can use almost the same
-         *    clear (`DECCKM`/application-keypad, hide cursor, `CUP(1,1) ED 2`)
-         *    without actually entering 1049 alternate screen. Those apps repaint
-         *    from absolute screen rows and may write fewer rows than the viewport
-         *    height. For them, the shell-clear behavior is wrong: trimming blank
-         *    rows below the cursor can remap row 0 onto old scrollback before the
-         *    first write, and manufacturing a blank scrollback page can pull stale
-         *    pre-clear content into the visible viewport. The right behavior is to
-         *    preserve top-origin row numbers and append any missing live rows after
-         *    the batch.
-         *
-         * We cannot decide solely from `ED 2` itself. So `ED 2`/`ED 3`
-         * starts a one-batch pending state, and subsequent actions refine
-         * it:
-         *
-         * - Explicit cursor addressing below row 1 means the app is treating the
-         *   screen as absolute rows, so padding must preserve row numbers.
-         * - A clear that happens while app cursor, app keypad, or mouse tracking is
-         *   active is treated as a foreground-app clear. This also preserves row
-         *   numbers, but deliberately does not create the shell-style blank
-         *   scrollback page. PowerShell may keep app modes enabled at the prompt, so
-         *   this signal is used only for clear padding/display repair, not for
-         *   globally hiding the command editor.
-         *
-         * `preserve_clear_absolute_rows` is checked before applying the next
-         * action so we do not perform the delayed blank-suffix trim on the
-         * very write/cursor movement that proves absolute row semantics.
-         * `track_scroll` consumes the pending flags after the batch, when it
-         * knows whether rows were popped and can choose prepend-vs-append
-         * padding exactly once.
-         */
-        let preserve_clear_absolute_rows = self.primary_clear_absolute_rows_pending
-            || (self.primary_blank_scrollback_padding_pending
-                && !self.on_alt_screen
-                && action_addresses_rows_after_clear(&action));
-        if self.primary_blank_suffix_trim_pending
-            && !blank_scrollback_padding_requested
-            && !preserve_clear_absolute_rows
-        {
-            screen::trim_default_blank_rows_below_cursor(&mut self.active, &self.viewport);
-            self.primary_blank_suffix_trim_pending = false;
-        }
-        if self.primary_blank_scrollback_padding_pending
-            && !self.on_alt_screen
-            && action_addresses_rows_after_clear(&action)
-        {
-            self.primary_clear_absolute_rows_pending = true;
-        }
-        if blank_scrollback_padding_requested {
-            let foreground_app_clear = foreground_app_mode_active(&self.active, &self.modes);
-            self.primary_blank_scrollback_padding_pending = true;
-            self.primary_blank_suffix_trim_pending = true;
-            self.primary_clear_absolute_rows_pending = foreground_app_clear;
-            self.primary_clear_foreground_app_pending = foreground_app_clear;
+        if !self.on_alt_screen && action_clears_history_blocks(&action) {
+            let shifted = screen::clear_command_history_blocks(&mut self.active, &self.viewport);
+            shift_visible_absolute_rows(&mut self.selection, &mut self.search, shifted);
+            shift_terminal_metadata_rows(&mut self.metadata, shifted);
+            self.snapshot.mark_all();
         }
         let was_on_alt_screen = self.on_alt_screen;
         let pending = match action {
@@ -1097,6 +993,7 @@ impl Terminal {
                     &mut self.hyperlinks,
                     &mut self.active,
                     &self.viewport,
+                    self.on_alt_screen,
                     &mut self.metadata.current_title,
                     &mut self.metadata.current_prompt_row,
                     &mut self.metadata.shell_integration_phase,
@@ -1384,49 +1281,7 @@ impl Terminal {
             popped_before,
         );
 
-        let padding_requested = std::mem::take(&mut self.primary_blank_scrollback_padding_pending);
-        let preserve_absolute_rows = std::mem::take(&mut self.primary_clear_absolute_rows_pending);
-        let foreground_app_clear = std::mem::take(&mut self.primary_clear_foreground_app_pending);
-        // See the long comment in `apply`: this is where the deferred
-        // clear-padding decision becomes concrete after the PTY batch.
-        if std::mem::take(&mut self.primary_blank_suffix_trim_pending) && !preserve_absolute_rows {
-            screen::trim_default_blank_rows_below_cursor(&mut self.active, &self.viewport);
-        }
-        if self.on_alt_screen {
-            return;
-        }
-
-        let min_scrollback_rows = if self.active.grid.total_popped > popped_before
-            || (padding_requested && !foreground_app_clear)
-        {
-            self.viewport.rows
-        } else {
-            0
-        };
-        let padding = if preserve_absolute_rows {
-            screen::pad_short_history_to_absolute_rows(
-                &mut self.active,
-                &self.viewport,
-                min_scrollback_rows,
-            )
-        } else {
-            screen::pad_short_history_to_live_bottom(
-                &mut self.active,
-                &self.viewport,
-                min_scrollback_rows,
-            )
-        };
-        if !padding.changed {
-            return;
-        }
-
-        shift_visible_absolute_rows(
-            &mut self.selection,
-            &mut self.search,
-            padding.prepended_rows,
-        );
-        shift_terminal_metadata_rows(&mut self.metadata, padding.prepended_rows);
-        self.snapshot.mark_all();
+        let _ = popped_before;
     }
 }
 
@@ -1541,6 +1396,78 @@ mod terminal_effects_tests {
             ShellIntegrationPhase::Command
         );
         assert!(term.effects.input_context_changed);
+    }
+}
+
+#[cfg(test)]
+mod command_block_tests {
+    use crate::test_support::TestTerm;
+
+    fn row_text(row: &crate::Row) -> String {
+        row.cells.concat()
+    }
+
+    #[test]
+    fn osc_133_prompt_start_moves_previous_grid_into_own_block() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+
+        term.process(b"old");
+        term.process(b"\x1b]133;A\x07$ ");
+
+        assert_eq!(term.active.scrollback_blocks.len(), 1);
+        assert!(row_text(&term.active.scrollback_blocks[0].grid.rows[0]).starts_with("old"));
+        assert!(row_text(&term.active.grid.rows[0]).starts_with("$ "));
+    }
+
+    #[test]
+    fn primary_ed_2_clears_only_active_block_and_ed_3_drops_completed_blocks() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+
+        term.process(b"old");
+        term.process(b"\x1b]133;A\x07$ prompt");
+        term.process(b"\x1b[2J");
+
+        assert_eq!(term.active.scrollback_blocks.len(), 1);
+        assert!(row_text(&term.active.scrollback_blocks[0].grid.rows[0]).starts_with("old"));
+        assert!(row_text(&term.active.grid.rows[0]).trim().is_empty());
+
+        term.process(b"\x1b[3J");
+
+        assert!(term.active.scrollback_blocks.is_empty());
+    }
+
+    #[test]
+    fn alt_screen_ignores_command_block_splitting() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+
+        term.process(b"\x1b[?1049h");
+        term.process(b"alt");
+        term.process(b"\x1b]133;A\x07");
+
+        assert!(term.active.scrollback_blocks.is_empty());
+        assert!(row_text(&term.active.grid.rows[0]).starts_with("alt"));
+    }
+
+    #[test]
+    fn prompt_restart_does_not_finalize_empty_metadata_only_block() {
+        let mut term = TestTerm::new(10, 3, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07");
+        term.process(b"\x1b]133;A\x07$ ");
+
+        assert!(term.active.scrollback_blocks.is_empty());
+        assert!(row_text(&term.active.grid.rows[0]).starts_with("$ "));
+    }
+
+    #[test]
+    fn csi_edit_after_cursor_position_expands_active_block_grid() {
+        let mut term = TestTerm::new(10, 5, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07");
+        term.process(b"\x1b[4;1H\x1b[Kx");
+
+        assert!(term.active.grid.rows.len() >= 4);
+        assert!(row_text(&term.active.grid.rows[3]).starts_with("x"));
     }
 }
 

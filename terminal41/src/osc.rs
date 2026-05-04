@@ -194,6 +194,7 @@ pub(super) fn handle_osc(
     hyperlinks: &mut HyperlinkRegistry,
     active_screen: &mut Screen,
     viewport: &Viewport,
+    on_alt_screen: bool,
     current_title: &mut Option<String>,
     /// Absolute row index of the most recent OSC 133 `A` (prompt start).
     /// An `OSC 133 D` stamps its exit code onto this row's exit_status so
@@ -222,6 +223,7 @@ pub(super) fn handle_osc(
         .hyperlinks(hyperlinks)
         .active_screen(active_screen)
         .viewport(viewport)
+        .on_alt_screen(on_alt_screen)
         .current_title(current_title)
         .current_prompt_row(current_prompt_row)
         .shell_integration_phase(shell_integration_phase)
@@ -494,6 +496,7 @@ fn apply_parsed_osc(
     hyperlinks: &mut HyperlinkRegistry,
     active_screen: &mut Screen,
     viewport: &Viewport,
+    on_alt_screen: bool,
     current_title: &mut Option<String>,
     current_prompt_row: &mut Option<u64>,
     shell_integration_phase: &mut ShellIntegrationPhase,
@@ -550,6 +553,7 @@ fn apply_parsed_osc(
             action,
             active_screen,
             viewport,
+            on_alt_screen,
             current_prompt_row,
             shell_integration_phase,
             command_metas,
@@ -559,6 +563,7 @@ fn apply_parsed_osc(
             current_directory,
             active_screen,
             viewport,
+            on_alt_screen,
             current_prompt_row,
             shell_integration_phase,
             command_metas,
@@ -666,6 +671,7 @@ fn apply_vscode_shell_integration_action(
     current_directory: &mut Option<PathBuf>,
     screen: &mut Screen,
     viewport: &Viewport,
+    on_alt_screen: bool,
     current_prompt_row: &mut Option<u64>,
     shell_integration_phase: &mut ShellIntegrationPhase,
     command_metas: &mut HashMap<u64, CommandMeta>,
@@ -675,6 +681,7 @@ fn apply_vscode_shell_integration_action(
             action,
             screen,
             viewport,
+            on_alt_screen,
             current_prompt_row,
             shell_integration_phase,
             command_metas,
@@ -706,12 +713,16 @@ fn apply_shell_integration_action(
     action: ShellIntegrationAction,
     screen: &mut Screen,
     viewport: &Viewport,
+    on_alt_screen: bool,
     current_prompt_row: &mut Option<u64>,
     shell_integration_phase: &mut ShellIntegrationPhase,
     command_metas: &mut HashMap<u64, CommandMeta>,
 ) {
     match action {
         ShellIntegrationAction::PromptStart => {
+            if !on_alt_screen {
+                crate::screen::start_command_block(screen, viewport);
+            }
             let abs = mark_current_row(screen, viewport, |row| {
                 row.prompt_start = true;
                 // A fresh prompt invalidates any lingering exit_status from
@@ -775,6 +786,7 @@ fn mark_current_row(
     viewport: &Viewport,
     apply: impl FnOnce(&mut Row),
 ) -> u64 {
+    crate::screen::ensure_cursor_row_exists(screen, viewport);
     let local = crate::screen::active_row_index(screen, viewport);
     apply(&mut screen.grid.rows[local]);
     (screen.grid.total_popped + local) as u64
@@ -954,6 +966,7 @@ mod tests {
                 .hyperlinks(&mut self.registry)
                 .active_screen(&mut self.screen)
                 .viewport(&self.viewport)
+                .on_alt_screen(false)
                 .current_title(&mut self.title)
                 .current_prompt_row(&mut self.prompt_row)
                 .shell_integration_phase(&mut self.shell_integration_phase)
@@ -1488,7 +1501,7 @@ mod tests {
             &self,
             screen_row: u32,
         ) -> &Row {
-            let first_visible = self.screen.grid.rows.len() - self.viewport.rows as usize;
+            let first_visible = self.viewport.top_index(self.screen.grid.rows.len());
             &self.screen.grid.rows[first_visible + screen_row as usize]
         }
     }
@@ -1576,13 +1589,13 @@ mod tests {
         bag.move_cursor(0, 2);
         bag.dispatch(b"133;A");
         // A-without-D sequences are common when shell integration is
-        // mid-transition: the second A should take over as the target of
-        // the next D, and the first row keeps its mark but no exit code.
+        // mid-transition. A metadata-only first prompt should not become an
+        // empty historical command block, and the second A should take over
+        // as the target of the next D.
         bag.dispatch(b"133;D;7");
-        assert_eq!(bag.row_at(0).exit_status, None);
         assert_eq!(bag.row_at(2).exit_status, Some(7));
-        assert!(bag.row_at(0).prompt_start);
         assert!(bag.row_at(2).prompt_start);
+        assert!(bag.screen.scrollback_blocks.is_empty());
     }
 
     #[test]
@@ -1821,9 +1834,9 @@ mod process_tests {
         emit_prompt(&mut term, "$ second", 2, 1);
         let first = term
             .active
-            .grid
-            .rows
+            .scrollback_blocks
             .iter()
+            .flat_map(|block| block.grid.rows.iter())
             .find(|r| r.prompt_start)
             .expect("first prompt row survived");
         assert_eq!(first.exit_status, Some(0));

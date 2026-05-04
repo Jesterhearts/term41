@@ -190,7 +190,7 @@ mod command_editor_context_tests {
     }
 
     #[test]
-    fn command_editor_input_context_tracks_visible_open_editor_during_output() {
+    fn command_editor_context_hides_while_command_is_running() {
         let mut term = TestTerm::new_80x24();
         term.process(b"\x1b]133;B\x07");
         term.process(b"\x1b]133;C\x07");
@@ -199,38 +199,29 @@ mod command_editor_context_tests {
             term.metadata.shell_integration_phase,
             ShellIntegrationPhase::Output
         );
-        assert_eq!(
-            command_editor_view_context(&term),
-            Some(CommandEditorContext { current_dir: None })
-        );
+        assert_eq!(command_editor_view_context(&term), None);
         assert_eq!(command_editor_input_context(&term, false), None);
-        assert_eq!(
-            command_editor_input_context(&term, true),
-            Some(CommandEditorContext { current_dir: None })
-        );
+        assert_eq!(command_editor_input_context(&term, true), None);
     }
 
     #[test]
-    fn command_editor_view_context_hides_primary_screen_interactive_apps() {
+    fn command_editor_view_context_returns_after_command_phase_resumes() {
         let mut term = TestTerm::new_80x24();
-        term.process(b"\x1b]133;C\x07");
-
-        assert_eq!(
-            term.metadata.shell_integration_phase,
-            ShellIntegrationPhase::Output
-        );
-        assert_eq!(
-            command_editor_view_context(&term),
-            Some(CommandEditorContext { current_dir: None })
-        );
-
         term.process(b"\x1b[?1000h");
 
         assert!(host::mouse_tracking_enabled(term.modes.mouse_tracking));
         assert_eq!(command_editor_view_context(&term), None);
         assert_eq!(command_editor_input_context(&term, true), None);
 
-        term.process(b"\x1b[?1000l\x1b]133;B\x07");
+        term.process(b"\x1b[?1000l\x1b]133;C\x07");
+
+        assert_eq!(
+            term.metadata.shell_integration_phase,
+            ShellIntegrationPhase::Output
+        );
+        assert_eq!(command_editor_view_context(&term), None);
+
+        term.process(b"\x1b]133;B\x07");
 
         assert_eq!(
             term.metadata.shell_integration_phase,

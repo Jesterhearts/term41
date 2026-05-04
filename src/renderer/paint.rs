@@ -123,6 +123,7 @@ pub(crate) fn status_line_label_row(
             })
             .collect(),
         exit_status: None,
+        block_separator: false,
         has_link: vec![false; len],
         underline_color: vec![None; len],
         prompt_start: false,
@@ -149,6 +150,7 @@ pub(crate) fn local_status_line_row(
         active_match: vec![false; cols],
         cells: vec![smol_str::SmolStr::new_inline(" "); cols],
         exit_status: None,
+        block_separator: false,
         has_link: vec![false; cols],
         underline_color: vec![None; cols],
         prompt_start: false,
@@ -227,6 +229,7 @@ fn blank_status_line_row(
         active_match: vec![false; cols],
         cells: vec![smol_str::SmolStr::new_inline(" "); cols],
         exit_status: None,
+        block_separator: false,
         has_link: vec![false; cols],
         underline_color: vec![None; cols],
         prompt_start: false,
@@ -614,6 +617,7 @@ mod tests {
             cursor_style: CursorStyle::default(),
             screen_reverse: false,
             on_alt_screen: false,
+            command_editor_hidden: false,
             synchronized_update_active: false,
             current_title: None,
             reset_cached_rows: true,
@@ -636,6 +640,7 @@ mod tests {
             active_match: vec![false],
             prompt_start: false,
             exit_status: None,
+            block_separator: false,
         }
     }
 

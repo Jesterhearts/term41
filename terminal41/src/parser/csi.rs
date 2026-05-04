@@ -641,11 +641,13 @@ fn apply_main_csi(
             let n = count.max(1) as u32;
             screen.cursor.row = (screen.cursor.row + n).min(viewport.rows - 1);
             screen.cursor.col = 0;
+            clamp_cursor_to_row_width(screen, &viewport);
         }
         MainCsiAction::CursorPreviousLine { count } => {
             let n = count.max(1) as u32;
             screen.cursor.row = screen.cursor.row.saturating_sub(n);
             screen.cursor.col = 0;
+            clamp_cursor_to_row_width(screen, &viewport);
         }
         MainCsiAction::CursorPosition { row, col } => {
             let row = row.max(1) as u32 - 1;
@@ -657,9 +659,11 @@ fn apply_main_csi(
             };
             let cols = row_display_cols(screen, &viewport, target_row);
             screen.cursor.row = target_row;
+            screen::ensure_cursor_row_exists(screen, &viewport);
             screen.cursor.col = col.min(cols - 1);
         }
         MainCsiAction::EraseInDisplay { mode } => {
+            screen::ensure_cursor_row_exists(screen, &viewport);
             grid::erase_in_display(
                 &mut screen.grid,
                 &screen.cursor,
@@ -669,6 +673,7 @@ fn apply_main_csi(
             );
         }
         MainCsiAction::EraseInLine { mode } => {
+            screen::ensure_cursor_row_exists(screen, &viewport);
             grid::erase_in_line(
                 &mut screen.grid,
                 &screen.cursor,
@@ -698,11 +703,13 @@ fn apply_main_csi(
             clamp_cursor_to_row_width(screen, &viewport);
         }
         MainCsiAction::CursorHorizontalAbsolute { col } => {
+            screen::ensure_cursor_row_exists(screen, &viewport);
             let col = col.max(1) as u32 - 1;
             let cols = current_row_display_cols(screen, &viewport);
             screen.cursor.col = col.min(cols - 1);
         }
         MainCsiAction::CursorForwardRelative { count } => {
+            screen::ensure_cursor_row_exists(screen, &viewport);
             let cols = row_display_cols(screen, &viewport, screen.cursor.row);
             screen.cursor.col = (screen.cursor.col + count.max(1) as u32).min(cols - 1);
         }
@@ -772,6 +779,7 @@ fn apply_main_csi(
             }
         }
         MainCsiAction::DeleteChars { count } => {
+            screen::ensure_cursor_row_exists(screen, &viewport);
             grid::delete_chars(
                 &mut screen.grid,
                 &mut screen.cursor,
@@ -781,6 +789,7 @@ fn apply_main_csi(
             );
         }
         MainCsiAction::InsertChars { count } => {
+            screen::ensure_cursor_row_exists(screen, &viewport);
             grid::shift_chars(
                 &mut screen.grid,
                 &mut screen.cursor,
@@ -790,6 +799,7 @@ fn apply_main_csi(
             );
         }
         MainCsiAction::EraseChars { count } => {
+            screen::ensure_cursor_row_exists(screen, &viewport);
             grid::erase_chars(
                 &mut screen.grid,
                 &mut screen.cursor,
@@ -1075,6 +1085,7 @@ pub(crate) fn csi_apply(
             }
         }
         ParsedCsiAction::SelectiveEraseDisplay { mode } => {
+            screen::ensure_cursor_row_exists(screen, viewport);
             let view = screen::screen_viewport(screen, viewport);
             grid::erase_in_display_selective(
                 &mut screen.grid,
@@ -1085,6 +1096,7 @@ pub(crate) fn csi_apply(
             );
         }
         ParsedCsiAction::SelectiveEraseLine { mode } => {
+            screen::ensure_cursor_row_exists(screen, viewport);
             let view = screen::screen_viewport(screen, viewport);
             grid::erase_in_line_selective(
                 &mut screen.grid,

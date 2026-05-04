@@ -30,9 +30,9 @@ pub(crate) struct ResizeScreenOutcome {
     pub prepended_rows: u64,
 }
 
-pub(crate) struct ShortHistoryPadding {
-    pub prepended_rows: u64,
-    pub changed: bool,
+#[derive(Debug)]
+pub struct CommandBlock {
+    pub grid: Grid,
 }
 
 /// Snapshot of cursor position and active colors, used by DECSC/DECRC
@@ -128,6 +128,9 @@ impl StatusLine {
 pub struct Screen {
     /// Backing rows, including visible rows and scrollback.
     pub grid: Grid,
+    /// Completed primary-screen command blocks. The writable active block is
+    /// `grid`; alternate screens keep this empty and behave as a single block.
+    pub scrollback_blocks: Vec<CommandBlock>,
     /// Cursor position within the active visible display.
     pub cursor: Cursor,
     /// Current foreground color for new cell writes.
@@ -238,6 +241,7 @@ impl Screen {
                 default_fg: fg,
                 default_bg: bg,
             },
+            scrollback_blocks: Vec::new(),
             cursor: Cursor::default(),
             fg,
             bg,
@@ -364,6 +368,102 @@ pub(super) fn active_row_index(
         .len()
         .saturating_sub(viewport.rows as usize)
         + screen.cursor.row as usize
+}
+
+pub(super) fn start_command_block(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    if page_memory_active(screen) {
+        return;
+    }
+    if !active_block_has_content(screen) && screen.scrollback_blocks.is_empty() {
+        return;
+    }
+    let replacement = Grid {
+        rows: VecDeque::from([Row::new(
+            viewport.cols,
+            screen.grid.default_fg,
+            screen.grid.default_bg,
+        )]),
+        scrollback_limit: screen.grid.scrollback_limit,
+        total_popped: 0,
+        default_fg: screen.grid.default_fg,
+        default_bg: screen.grid.default_bg,
+    };
+    let completed = std::mem::replace(&mut screen.grid, replacement);
+    if grid_has_content(&completed) {
+        screen
+            .scrollback_blocks
+            .push(CommandBlock { grid: completed });
+    }
+    screen.cursor.row = 0;
+    screen.cursor.col = 0;
+    screen.offset = 0;
+}
+
+pub(super) fn clear_command_history_blocks(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) -> u64 {
+    if page_memory_active(screen) {
+        return 0;
+    }
+    let removed = rendered_scrollback_len(screen, viewport) as u64;
+    screen.scrollback_blocks.clear();
+    screen.offset = 0;
+    screen.cursor.row = screen.cursor.row.min(viewport.rows.saturating_sub(1));
+    removed
+}
+
+pub(super) fn rendered_rows_len(screen: &Screen) -> usize {
+    let completed_rows = screen
+        .scrollback_blocks
+        .iter()
+        .map(command_block_rendered_rows_len)
+        .filter(|&rows| rows > 0)
+        .map(|rows| rows + 1)
+        .sum::<usize>();
+    completed_rows + active_block_rendered_rows_len(screen)
+}
+
+pub(super) fn rendered_scrollback_len(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> u32 {
+    rendered_rows_len(screen).saturating_sub(viewport.rows as usize) as u32
+}
+
+fn active_block_has_content(screen: &Screen) -> bool {
+    grid_has_content(&screen.grid)
+}
+
+pub(super) fn command_block_rendered_rows_len(block: &CommandBlock) -> usize {
+    grid_content_rows_len(&block.grid)
+}
+
+pub(super) fn active_block_rendered_rows_len(screen: &Screen) -> usize {
+    grid_content_rows_len(&screen.grid)
+        .max(screen.cursor.row as usize + 1)
+        .max(1)
+        .min(screen.grid.rows.len())
+}
+
+fn grid_has_content(grid: &Grid) -> bool {
+    grid_content_rows_len(grid) > 0
+}
+
+fn grid_content_rows_len(grid: &Grid) -> usize {
+    grid.rows
+        .iter()
+        .rposition(row_has_visible_content)
+        .map_or(0, |row| row + 1)
+}
+
+fn row_has_visible_content(row: &Row) -> bool {
+    row.cells.iter().any(|cell| cell != " ")
+        || row.has_wide_cells
+        || row.links.iter().any(Option::is_some)
 }
 
 pub(super) fn page_count_for_lines(lines_per_page: u32) -> u32 {
@@ -613,101 +713,6 @@ pub(super) fn ensure_visible_rows(
     }
 }
 
-pub(super) fn pad_short_history_to_live_bottom(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    min_scrollback_rows: u32,
-) -> ShortHistoryPadding {
-    if page_memory_active(screen) {
-        return ShortHistoryPadding {
-            prepended_rows: 0,
-            changed: false,
-        };
-    }
-
-    let live_missing = (viewport.rows as usize).saturating_sub(screen.grid.rows.len());
-    prepend_blank_rows(&mut screen.grid, viewport.cols, live_missing);
-    for image in screen.images.values_mut() {
-        image.row += live_missing;
-    }
-    screen.cursor.row = screen
-        .cursor
-        .row
-        .saturating_add(live_missing as u32)
-        .min(viewport.rows.saturating_sub(1));
-
-    let min_scrollback_rows = min_scrollback_rows.min(screen.grid.scrollback_limit) as usize;
-    let desired_rows = viewport.rows as usize + min_scrollback_rows;
-    let scrollback_missing = desired_rows.saturating_sub(screen.grid.rows.len());
-    prepend_blank_rows(&mut screen.grid, viewport.cols, scrollback_missing);
-    for image in screen.images.values_mut() {
-        image.row += scrollback_missing;
-    }
-
-    ShortHistoryPadding {
-        prepended_rows: (live_missing + scrollback_missing) as u64,
-        changed: live_missing + scrollback_missing > 0,
-    }
-}
-
-pub(super) fn pad_short_history_to_absolute_rows(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    min_scrollback_rows: u32,
-) -> ShortHistoryPadding {
-    if page_memory_active(screen) {
-        return ShortHistoryPadding {
-            prepended_rows: 0,
-            changed: false,
-        };
-    }
-
-    let live_missing = (viewport.rows as usize).saturating_sub(screen.grid.rows.len());
-    append_blank_rows(screen, viewport.cols, live_missing);
-
-    let min_scrollback_rows = min_scrollback_rows.min(screen.grid.scrollback_limit) as usize;
-    let desired_rows = viewport.rows as usize + min_scrollback_rows;
-    let scrollback_missing = desired_rows.saturating_sub(screen.grid.rows.len());
-    prepend_blank_rows(&mut screen.grid, viewport.cols, scrollback_missing);
-    for image in screen.images.values_mut() {
-        image.row += scrollback_missing;
-    }
-
-    ShortHistoryPadding {
-        prepended_rows: scrollback_missing as u64,
-        changed: live_missing + scrollback_missing > 0,
-    }
-}
-
-pub(super) fn trim_default_blank_rows_below_cursor(
-    screen: &mut Screen,
-    viewport: &Viewport,
-) -> usize {
-    let cursor_row = active_row_index(screen, viewport);
-    let keep_rows = cursor_row.saturating_add(1).min(screen.grid.rows.len());
-    if keep_rows == screen.grid.rows.len() {
-        return 0;
-    }
-
-    let removable = screen
-        .grid
-        .rows
-        .iter()
-        .skip(keep_rows)
-        .all(|row| row_is_default_blank(row, screen.grid.default_fg, screen.grid.default_bg));
-    let has_images = screen
-        .images
-        .values()
-        .any(|image| image.row >= keep_rows && image.row < screen.grid.rows.len());
-    if !removable || has_images {
-        return 0;
-    }
-
-    let removed = screen.grid.rows.len() - keep_rows;
-    screen.grid.rows.truncate(keep_rows);
-    removed
-}
-
 pub(super) fn ensure_cursor_row_exists(
     screen: &mut Screen,
     viewport: &Viewport,
@@ -726,58 +731,6 @@ pub(super) fn ensure_cursor_row_exists(
         inserted += 1;
     }
     inserted
-}
-
-fn row_is_default_blank(
-    row: &Row,
-    fg: Srgb<u8>,
-    bg: Srgb<u8>,
-) -> bool {
-    !row.wrapped
-        && !row.prompt_start
-        && !row.output_start
-        && row.exit_status.is_none()
-        && row.line_attr == LineAttr::Normal
-        && !row.has_wide_cells
-        && row.cells.iter().all(|cell| cell == " ")
-        && row.fg.iter().all(|&cell_fg| cell_fg == fg)
-        && row.bg.iter().all(|&cell_bg| cell_bg == bg)
-        && row.attrs.iter().all(|&attrs| attrs == CellAttrs::default())
-        && row.underline_color.iter().all(Option::is_none)
-        && row.links.iter().all(Option::is_none)
-}
-
-fn prepend_blank_rows(
-    grid: &mut Grid,
-    cols: u32,
-    count: usize,
-) {
-    if count == 0 {
-        return;
-    }
-
-    for _ in 0..count {
-        grid.rows
-            .push_front(Row::new(cols, grid.default_fg, grid.default_bg));
-    }
-}
-
-fn append_blank_rows(
-    screen: &mut Screen,
-    cols: u32,
-    count: usize,
-) {
-    if count == 0 {
-        return;
-    }
-
-    for _ in 0..count {
-        screen.grid.rows.push_back(Row::new(
-            cols,
-            screen.grid.default_fg,
-            screen.grid.default_bg,
-        ));
-    }
 }
 
 /// Switch between the primary and alt screens. Idempotent: a no-op if the

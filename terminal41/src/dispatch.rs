@@ -409,6 +409,7 @@ pub(super) fn apply_osc_action(
     hyperlinks: &mut HyperlinkRegistry,
     active: &mut Screen,
     viewport: &Viewport,
+    on_alt_screen: bool,
     current_title: &mut Option<String>,
     current_prompt_row: &mut Option<u64>,
     shell_integration_phase: &mut ShellIntegrationPhase,
@@ -432,6 +433,7 @@ pub(super) fn apply_osc_action(
                 .hyperlinks(hyperlinks)
                 .active_screen(active)
                 .viewport(viewport)
+                .on_alt_screen(on_alt_screen)
                 .current_title(current_title)
                 .current_prompt_row(current_prompt_row)
                 .shell_integration_phase(shell_integration_phase)

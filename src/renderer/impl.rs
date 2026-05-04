@@ -319,6 +319,7 @@ struct FrameLayout {
     gutter_px: f32,
     tab_bar_h: f32,
     terminal_y_offset: f32,
+    block_y_offset: f32,
 }
 
 #[derive(Clone, Copy)]
@@ -445,14 +446,17 @@ fn image_page_y(
     image: &VisibleImage,
     layout: &FrameLayout,
 ) -> f32 {
-    image.screen_row as f32 * layout.cell_h + layout.terminal_y_offset + image.cell_y_offset as f32
+    image.screen_row as f32 * layout.cell_h
+        + layout.terminal_y_offset
+        + layout.block_y_offset
+        + image.cell_y_offset as f32
 }
 
 fn terminal_row_y(
     row: u32,
     layout: &FrameLayout,
 ) -> f32 {
-    row as f32 * layout.cell_h + layout.tab_bar_h + layout.terminal_y_offset
+    row as f32 * layout.cell_h + layout.tab_bar_h + layout.terminal_y_offset + layout.block_y_offset
 }
 
 fn snapshot_row_y(
@@ -463,7 +467,7 @@ fn snapshot_row_y(
     let terminal_offset = if snap.status_line_row == Some(row) {
         0.0
     } else {
-        layout.terminal_y_offset
+        layout.terminal_y_offset + layout.block_y_offset
     };
     row as f32 * layout.cell_h + layout.tab_bar_h + terminal_offset
 }
@@ -568,6 +572,7 @@ struct RowLayoutKey {
     gutter_px: u32,
     tab_bar_h: u32,
     terminal_y_offset: u32,
+    block_y_offset: u32,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -588,6 +593,7 @@ struct RowBlinkKey {
 struct RowGutterMarkerKey {
     prompt_start: bool,
     exit_status: Option<i32>,
+    block_separator: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -1213,6 +1219,7 @@ fn blank_cached_row(
         active_match: vec![false; cols],
         prompt_start: false,
         exit_status: None,
+        block_separator: false,
     }
 }
 
@@ -1222,6 +1229,40 @@ fn cached_rows_match_snapshot_shape(
 ) -> bool {
     rows.iter()
         .all(|row| row_paintable_cols(row) == snap.viewport_cols as usize)
+}
+
+fn terminal_block_y_offset_rows(
+    rows: &[RowSnapshot],
+    snap: &TermSnapshot,
+) -> u32 {
+    if snap.on_alt_screen || snap.viewport_offset != 0 {
+        return 0;
+    }
+    let row_content = rows
+        .iter()
+        .filter(|row| snap.status_line_row != Some(row.screen_row))
+        .filter(|row| row.screen_row < snap.viewport_rows)
+        .filter(|row| row_has_rendered_content(row))
+        .map(|row| row.screen_row + 1)
+        .max()
+        .unwrap_or(0);
+    let cursor_content = snap.cursor.map_or(
+        0,
+        |(row, _)| {
+            if row < snap.viewport_rows { row + 1 } else { 0 }
+        },
+    );
+    let content_rows = row_content.max(cursor_content);
+    if content_rows == 0 {
+        return 0;
+    }
+    snap.viewport_rows.saturating_sub(content_rows)
+}
+
+fn row_has_rendered_content(row: &RowSnapshot) -> bool {
+    row.block_separator
+        || row.cells.iter().any(|cell| cell != " ")
+        || row.has_link.iter().any(|&v| v)
 }
 
 pub struct Renderer {
@@ -1268,6 +1309,7 @@ pub struct Renderer {
     /// Materialized terminal rows reconstructed from dirty row snapshots.
     terminal_rows: Vec<RowSnapshot>,
     terminal_row_generations: Vec<u64>,
+    terminal_block_y_offset_rows: u32,
     row_geometry_cache: Vec<Option<CachedRowKey>>,
     terminal_layer: TerminalLayer,
     image_depth: ImageDepthLayer,
@@ -1633,6 +1675,7 @@ impl Renderer {
             gutter_enabled,
             terminal_rows: Vec::new(),
             terminal_row_generations: Vec::new(),
+            terminal_block_y_offset_rows: 0,
             row_geometry_cache: Vec::new(),
             terminal_layer,
             image_depth,
@@ -1814,18 +1857,22 @@ impl Renderer {
     ) {
         let mut layout = self.frame_layout(font_system, tabs);
         let command_editor = visible_command_editor(command_editor, snap);
+        let block_y_offset_rows = terminal_block_y_offset_rows(&snap.rows, snap);
+        layout.block_y_offset = block_y_offset_rows as f32 * layout.cell_h;
         if command_editor.is_some() {
-            let cursor_row = snap.cursor.map_or(0, |(row, _)| row);
+            let cursor_row = snap
+                .cursor
+                .map_or(0, |(row, _)| row.saturating_add(block_y_offset_rows));
             let placement = command_editor_placement_for_cursor(cursor_row, snap.viewport_rows);
             layout.terminal_y_offset = -(placement.terminal_row_offset as f32) * layout.cell_h;
         }
+        if !suspend_terminal_area {
+            self.apply_terminal_snapshot_rows(snap, block_y_offset_rows);
+        }
+        let terminal_rows = std::mem::take(&mut self.terminal_rows);
         self.image_atlas.begin_frame();
         let under_text_image_geometry = self.build_image_geometry(visible_images, &layout, true);
         let over_text_image_geometry = self.build_image_geometry(visible_images, &layout, false);
-        if !suspend_terminal_area {
-            self.apply_terminal_snapshot_rows(snap);
-        }
-        let terminal_rows = std::mem::take(&mut self.terminal_rows);
         let geometry = self.build_render_geometry(
             font_system,
             snap,
@@ -2016,8 +2063,12 @@ fn visible_command_editor<'a>(
     command_editor: Option<&'a commands41::CommandLineView>,
     snap: &TermSnapshot,
 ) -> Option<&'a commands41::CommandLineView> {
-    command_editor
-        .filter(|_| !snap.on_alt_screen && !snap.search_active && snap.viewport_offset == 0)
+    command_editor.filter(|_| {
+        !snap.command_editor_hidden
+            && !snap.on_alt_screen
+            && !snap.search_active
+            && snap.viewport_offset == 0
+    })
 }
 
 fn command_highlight_color(kind: commands41::HighlightKind) -> u32 {

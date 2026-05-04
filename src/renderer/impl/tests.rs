@@ -59,6 +59,7 @@ mod geometry_tests {
     use super::image_render_order;
     use super::image_vertex_z;
     use super::snapshot_row_y;
+    use super::terminal_block_y_offset_rows;
     use super::terminal_row_y;
     use super::visible_command_editor;
 
@@ -78,6 +79,7 @@ mod geometry_tests {
             active_match: vec![false; cols],
             prompt_start: false,
             exit_status: None,
+            block_separator: false,
         }
     }
 
@@ -109,10 +111,21 @@ mod geometry_tests {
             cursor_style: CursorStyle::default(),
             screen_reverse: false,
             on_alt_screen: false,
+            command_editor_hidden: false,
             synchronized_update_active: false,
             current_title: None,
             reset_cached_rows: true,
         }
+    }
+
+    #[test]
+    fn terminal_blocks_bottom_align_when_shorter_than_viewport() {
+        let mut snap = snapshot(4, 5);
+        snap.rows.truncate(2);
+        snap.rows[0].cells[0] = smol_str::SmolStr::new_inline("$");
+        snap.rows[1].cells[0] = smol_str::SmolStr::new_inline("x");
+
+        assert_eq!(terminal_block_y_offset_rows(&snap.rows, &snap), 3);
     }
 
     #[test]
@@ -231,6 +244,7 @@ mod geometry_tests {
             gutter_px: 0.0,
             tab_bar_h: 0.0,
             terminal_y_offset: 0.0,
+            block_y_offset: 0.0,
         };
         let mut images = [
             visible_image(1, 0, 8, 0, 0, 0),
@@ -254,6 +268,7 @@ mod geometry_tests {
             gutter_px: 0.0,
             tab_bar_h: 20.0,
             terminal_y_offset: -60.0,
+            block_y_offset: 0.0,
         };
 
         assert_eq!(terminal_row_y(5, &layout), 60.0);
@@ -270,6 +285,7 @@ mod geometry_tests {
             gutter_px: 0.0,
             tab_bar_h: 20.0,
             terminal_y_offset: -60.0,
+            block_y_offset: 0.0,
         };
 
         assert_eq!(snapshot_row_y(23, &snap, &layout), 420.0);
@@ -293,6 +309,10 @@ mod geometry_tests {
         assert!(visible_command_editor(Some(&view), &snap).is_some());
 
         snap.viewport_offset = 1;
+        assert!(visible_command_editor(Some(&view), &snap).is_none());
+
+        snap.viewport_offset = 0;
+        snap.command_editor_hidden = true;
         assert!(visible_command_editor(Some(&view), &snap).is_none());
     }
 

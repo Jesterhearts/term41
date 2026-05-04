@@ -324,7 +324,7 @@ struct CommandEditorContext {
 }
 
 fn command_editor_view_context(terminal: &Terminal) -> Option<CommandEditorContext> {
-    if terminal.on_alt_screen || command_editor_hidden_by_foreground_app(terminal) {
+    if terminal.on_alt_screen || command_editor_hidden_by_running_command(terminal) {
         return None;
     }
     Some(CommandEditorContext {
@@ -358,13 +358,14 @@ fn command_editor_view_open_for_input_tab(
         .is_some()
 }
 
-fn command_editor_hidden_by_foreground_app(terminal: &Terminal) -> bool {
-    if terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Output {
-        return false;
+fn command_editor_hidden_by_running_command(terminal: &Terminal) -> bool {
+    if terminal.metadata.shell_integration_phase == terminal41::ShellIntegrationPhase::Output {
+        return true;
     }
-    host::mouse_tracking_enabled(terminal.modes.mouse_tracking)
-        || terminal.active.app_cursor_keys
-        || terminal.active.app_keypad
+    terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Command
+        && (host::mouse_tracking_enabled(terminal.modes.mouse_tracking)
+            || terminal.active.app_cursor_keys
+            || terminal.active.app_keypad)
 }
 
 fn command_editor_input_context(

@@ -40,6 +40,8 @@ pub struct RowSnapshot {
     pub prompt_start: bool,
     /// Shell-integration: exit status of the command at this prompt.
     pub exit_status: Option<i32>,
+    /// Renderer-only row inserted between command blocks.
+    pub block_separator: bool,
 }
 
 /// Snapshot of the search bar state for rendering.
@@ -76,6 +78,8 @@ pub struct TermSnapshot {
     /// swapped and per-cell REVERSE is XORed with this.
     pub screen_reverse: bool,
     pub on_alt_screen: bool,
+    /// True while the command editor should not render or intercept input.
+    pub command_editor_hidden: bool,
     pub synchronized_update_active: bool,
     pub current_title: Option<String>,
     /// True when the consumer should discard any cached rows before applying
@@ -147,6 +151,7 @@ impl SnapshotState {
 struct SnapshotShape {
     total_rows: u32,
     viewport_rows: u32,
+    rendered_terminal_rows: u32,
     viewport_cols: u32,
     status_line_row: Option<u32>,
 }
@@ -171,10 +176,19 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
     let vp_cols = terminal.viewport.cols;
     let search_active = search_active(&terminal.search);
     let status_line_row = view::status_line_row(&terminal.active).map(|_| vp_rows);
-    let total_rows = vp_rows + u32::from(status_line_row.is_some());
+    let rendered_terminal_rows = if terminal.on_alt_screen {
+        vp_rows
+    } else {
+        (crate::screen::rendered_rows_len(&terminal.active) as u32)
+            .min(vp_rows)
+            .max(1)
+    };
+    let terminal_rows = vp_rows;
+    let total_rows = terminal_rows + u32::from(status_line_row.is_some());
     let shape = SnapshotShape {
         total_rows,
-        viewport_rows: vp_rows,
+        viewport_rows: terminal_rows,
+        rendered_terminal_rows,
         viewport_cols: vp_cols,
         status_line_row,
     };
@@ -189,9 +203,14 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
 
     let mut rows = Vec::new();
     debug_span!("copying visible rows").in_scope(|| {
-        for row in 0..vp_rows {
+        for row in 0..rendered_terminal_rows {
             let generation = row_generation(&terminal.snapshot, row);
-            rows.push(snapshot_visible_row(terminal, row, generation));
+            rows.push(snapshot_rendered_row(
+                terminal,
+                row,
+                rendered_terminal_rows,
+                generation,
+            ));
         }
     });
 
@@ -199,7 +218,7 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
         && let Some(status_row) = snapshot_status_line_row(
             terminal,
             vp_cols,
-            row_generation(&terminal.snapshot, vp_rows),
+            row_generation(&terminal.snapshot, terminal_rows),
         )
     {
         rows.push(status_row);
@@ -213,9 +232,13 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
 
     let cursor = if terminal.active.offset == 0 && terminal.active.cursor_visible {
         if let Some(col) = view::status_line_cursor_col(&terminal.active) {
-            Some((vp_rows, col))
+            Some((terminal_rows, col))
         } else {
-            Some((terminal.active.cursor.row, terminal.active.cursor.col))
+            let active_top = active_block_screen_top(terminal, terminal_rows);
+            Some((
+                active_top + terminal.active.cursor.row,
+                terminal.active.cursor.col,
+            ))
         }
     } else {
         None
@@ -225,7 +248,7 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
         generation: terminal.snapshot.generation,
         rows,
         total_rows,
-        viewport_rows: vp_rows,
+        viewport_rows: terminal_rows,
         viewport_cols: vp_cols,
         viewport_offset: terminal.active.offset,
         status_line_row,
@@ -238,12 +261,23 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
         cursor_style: terminal.cursor_style,
         screen_reverse: terminal.modes.screen_reverse,
         on_alt_screen: terminal.on_alt_screen,
+        command_editor_hidden: command_editor_hidden(terminal),
         synchronized_update_active: host::synchronized_update_active(
             terminal.modes.synchronized_update_since,
         ),
         current_title: terminal.metadata.current_title.clone(),
         reset_cached_rows,
     }
+}
+
+fn command_editor_hidden(terminal: &Terminal) -> bool {
+    if terminal.metadata.shell_integration_phase == crate::ShellIntegrationPhase::Output {
+        return true;
+    }
+    terminal.metadata.shell_integration_phase != crate::ShellIntegrationPhase::Command
+        && (host::mouse_tracking_enabled(terminal.modes.mouse_tracking)
+            || terminal.active.app_cursor_keys
+            || terminal.active.app_keypad)
 }
 
 fn ensure_snapshot_len(
@@ -263,12 +297,42 @@ fn row_generation(
     snapshot.row_generations[idx]
 }
 
-fn snapshot_visible_row(
+fn snapshot_rendered_row(
     terminal: &Terminal,
     row: u32,
+    terminal_rows: u32,
     generation: u64,
 ) -> RowSnapshot {
-    let grid_row = view::visible_row(&terminal.active, &terminal.viewport, row);
+    if terminal.on_alt_screen {
+        return snapshot_grid_row(
+            terminal,
+            row,
+            view::visible_row(&terminal.active, &terminal.viewport, row),
+            generation,
+            true,
+        );
+    }
+    match rendered_row(terminal, row, terminal_rows) {
+        RenderedRow::Separator => {
+            separator_terminal_row(row, terminal.viewport.cols, &terminal.palette, generation)
+        }
+        RenderedRow::Active {
+            block_row,
+            grid_row,
+        } => snapshot_grid_row(terminal, row, grid_row, generation, block_row == row),
+        RenderedRow::History(grid_row) => {
+            snapshot_grid_row(terminal, row, grid_row, generation, false)
+        }
+    }
+}
+
+fn snapshot_grid_row(
+    terminal: &Terminal,
+    row: u32,
+    grid_row: &crate::Row,
+    generation: u64,
+    active_selection_row: bool,
+) -> RowSnapshot {
     let is_double = !matches!(grid_row.line_attr, LineAttr::Normal);
     let cols = if is_double {
         terminal.viewport.cols / 2
@@ -288,42 +352,100 @@ fn snapshot_visible_row(
         line_attr: grid_row.line_attr,
         selected: (0..cols)
             .map(|c| {
-                is_cell_selected(
-                    terminal.selection.as_ref(),
-                    &terminal.active,
-                    &terminal.viewport,
-                    row,
-                    c,
-                )
+                active_selection_row
+                    && is_cell_selected(
+                        terminal.selection.as_ref(),
+                        &terminal.active,
+                        &terminal.viewport,
+                        row,
+                        c,
+                    )
             })
             .collect(),
         matched: (0..cols)
             .map(|c| {
-                is_cell_match(
-                    &terminal.search,
-                    &terminal.active,
-                    &terminal.viewport,
-                    row,
-                    c,
-                )
+                active_selection_row
+                    && is_cell_match(
+                        &terminal.search,
+                        &terminal.active,
+                        &terminal.viewport,
+                        row,
+                        c,
+                    )
             })
             .collect(),
         active_match: (0..cols)
             .map(|c| {
-                is_cell_active_match(
-                    &terminal.search,
-                    &terminal.active,
-                    &terminal.viewport,
-                    row,
-                    c,
-                )
+                active_selection_row
+                    && is_cell_active_match(
+                        &terminal.search,
+                        &terminal.active,
+                        &terminal.viewport,
+                        row,
+                        c,
+                    )
             })
             .collect(),
         prompt_start: grid_row.prompt_start,
         exit_status: grid_row.exit_status,
+        block_separator: false,
     };
     normalize_snapshot_row(&mut snapshot, terminal.viewport.cols, &terminal.palette);
     snapshot
+}
+
+enum RenderedRow<'a> {
+    Separator,
+    History(&'a crate::Row),
+    Active {
+        block_row: u32,
+        grid_row: &'a crate::Row,
+    },
+}
+
+fn rendered_row<'a>(
+    terminal: &'a Terminal,
+    screen_row: u32,
+    terminal_rows: u32,
+) -> RenderedRow<'a> {
+    let rendered_len = crate::screen::rendered_rows_len(&terminal.active) as u32;
+    let max_top = rendered_len.saturating_sub(terminal_rows);
+    let top = max_top.saturating_sub(terminal.active.offset);
+    let mut idx = top + screen_row;
+    for block in &terminal.active.scrollback_blocks {
+        let block_rows = crate::screen::command_block_rendered_rows_len(block) as u32;
+        if idx < block_rows {
+            return RenderedRow::History(&block.grid.rows[idx as usize]);
+        }
+        idx -= block_rows;
+        if idx == 0 {
+            return RenderedRow::Separator;
+        }
+        idx -= 1;
+    }
+    let local = idx.min(terminal.active.grid.rows.len().saturating_sub(1) as u32);
+    RenderedRow::Active {
+        block_row: local,
+        grid_row: &terminal.active.grid.rows[local as usize],
+    }
+}
+
+fn active_block_screen_top(
+    terminal: &Terminal,
+    terminal_rows: u32,
+) -> u32 {
+    let rendered_len = crate::screen::rendered_rows_len(&terminal.active) as u32;
+    let max_top = rendered_len.saturating_sub(terminal_rows);
+    let top = max_top.saturating_sub(terminal.active.offset);
+    let history_len = terminal
+        .active
+        .scrollback_blocks
+        .iter()
+        .map(|block| crate::screen::command_block_rendered_rows_len(block) as u32)
+        .filter(|&rows| rows > 0)
+        .map(|rows| rows + 1)
+        .sum::<u32>();
+    history_len.saturating_sub(top)
 }
 
 fn snapshot_status_line_row(
@@ -368,6 +490,7 @@ fn snapshot_status_line_row(
         active_match: vec![false; vp_cols as usize],
         prompt_start: false,
         exit_status: None,
+        block_separator: false,
     };
     normalize_snapshot_row(&mut snapshot, vp_cols, &terminal.palette);
     Some(snapshot)
@@ -385,6 +508,30 @@ fn normalize_snapshot_row(
     row.bg.resize(cols, palette.bg);
     row.underline_color.resize(cols, None);
     row.has_link.resize(cols, false);
+}
+
+fn blank_terminal_row(
+    screen_row: u32,
+    cols: u32,
+    palette: &ColorPalette,
+    generation: u64,
+) -> RowSnapshot {
+    let mut row = blank_status_line_row(cols as usize, palette, screen_row);
+    row.generation = generation;
+    row.fg.fill(palette.fg);
+    row.bg.fill(palette.bg);
+    row
+}
+
+fn separator_terminal_row(
+    screen_row: u32,
+    cols: u32,
+    palette: &ColorPalette,
+    generation: u64,
+) -> RowSnapshot {
+    let mut row = blank_terminal_row(screen_row, cols, palette, generation);
+    row.block_separator = true;
+    row
 }
 
 fn blank_cell() -> smol_str::SmolStr {
@@ -458,6 +605,7 @@ fn blank_status_line_row(
         active_match: vec![false; cols],
         cells: vec![smol_str::SmolStr::new_inline(" "); cols],
         exit_status: None,
+        block_separator: false,
         has_link: vec![false; cols],
         underline_color: vec![None; cols],
         prompt_start: false,
@@ -571,13 +719,13 @@ mod tests {
         let snap = snapshot_terminal(&mut terminal);
 
         assert!(snap.reset_cached_rows);
-        assert_eq!(snap.rows.len(), snap.total_rows as usize);
+        assert_eq!(snap.rows.len(), 1);
         assert_eq!(
             snap.rows
                 .iter()
                 .map(|row| row.screen_row)
                 .collect::<Vec<_>>(),
-            (0..snap.total_rows).collect::<Vec<_>>()
+            vec![0]
         );
     }
 
@@ -589,7 +737,7 @@ mod tests {
         let snap = snapshot_terminal(&mut terminal);
 
         assert!(!snap.reset_cached_rows);
-        assert_eq!(snap.rows.len(), snap.total_rows as usize);
+        assert_eq!(snap.rows.len(), first.rows.len());
         assert_eq!(
             snap.rows
                 .iter()
@@ -612,7 +760,7 @@ mod tests {
         let snap = snapshot_terminal(&mut terminal);
 
         assert!(!snap.reset_cached_rows);
-        assert_eq!(snap.rows.len(), snap.total_rows as usize);
+        assert_eq!(snap.rows.len(), 1);
         assert_eq!(snap.rows[0].screen_row, 0);
         assert_eq!(snap.rows[0].cells[0].as_str(), "A");
         assert_ne!(snap.rows[0].generation, first.rows[0].generation);
@@ -635,12 +783,10 @@ mod tests {
         processor.process_bytes(&mut terminal, b"\x1b[2A\rbcdefghijk\x1b[K");
         let snap = snapshot_terminal(&mut terminal);
 
-        assert!(!snap.reset_cached_rows);
+        assert!(snap.reset_cached_rows);
         assert_eq!(snapshot_row_text(&snap.rows[0]), "bcdef");
         assert_eq!(snapshot_row_text(&snap.rows[1]), "ghij ");
-        assert_eq!(snapshot_row_text(&snap.rows[2]), "     ");
         assert_ne!(snap.rows[1].generation, first.rows[1].generation);
-        assert_ne!(snap.rows[2].generation, first.rows[2].generation);
     }
 
     #[test]

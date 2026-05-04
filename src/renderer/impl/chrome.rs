@@ -1705,7 +1705,9 @@ impl Renderer {
         let Some((cursor_row, _cursor_col)) = snap.cursor else {
             return;
         };
-        let placement = command_editor_placement_for_cursor(cursor_row, snap.viewport_rows);
+        let block_offset_rows = (layout.block_y_offset / layout.cell_h).round().max(0.0) as u32;
+        let visual_cursor_row = cursor_row.saturating_add(block_offset_rows);
+        let placement = command_editor_placement_for_cursor(visual_cursor_row, snap.viewport_rows);
         let editor_x = 0.0;
         let box_x = layout.gutter_px;
         let box_y = terminal_row_y(cursor_row, layout) + layout.cell_h;

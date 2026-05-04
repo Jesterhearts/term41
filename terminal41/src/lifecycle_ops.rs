@@ -61,7 +61,7 @@ pub(crate) fn scroll_viewport_up(
     if screen::page_memory_active(screen) {
         return 0;
     }
-    let max = screen.grid.scrollback_len(viewport);
+    let max = screen::rendered_scrollback_len(screen, viewport);
     let delta = lines.min(max.saturating_sub(screen.offset));
     screen.offset += delta;
     delta
@@ -127,7 +127,7 @@ fn scroll_absolute_to_viewport_top(
     let max_top = grid_len - rows;
     let top = (target_local as usize).min(max_top);
     let offset = (grid_len - rows - top) as u32;
-    let max_offset = screen.grid.scrollback_len(viewport);
+    let max_offset = screen::rendered_scrollback_len(screen, viewport);
     screen.offset = offset.min(max_offset);
 }
 

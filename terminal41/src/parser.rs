@@ -131,6 +131,7 @@ fn clamp_cursor_to_row_width(
     screen: &mut Screen,
     viewport: &Viewport,
 ) {
+    screen::ensure_cursor_row_exists(screen, viewport);
     let cols = current_row_display_cols(screen, viewport);
     if screen.cursor.col >= cols {
         screen.cursor.col = cols.saturating_sub(1);
