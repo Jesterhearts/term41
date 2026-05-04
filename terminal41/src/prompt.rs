@@ -402,18 +402,26 @@ fn rendered_command_start_point(
     let info = rendered_row_info(screen, prompt.rendered_row as u32)?;
     for rendered_row in prompt.rendered_row as u32..info.block_end {
         let row = rendered_row_info(screen, rendered_row)?.row;
-        if let Some(col) = row.command_start_col {
+        if let Some(col) = valid_command_start_col(row) {
             return Some(TextPoint {
                 row: rendered_row as u64,
                 col,
             });
         }
     }
-    Some(text_point_from_row_start(prompt.rendered_row))
+    None
 }
 
 fn first_content_col(row: &crate::Row) -> u32 {
     row.cells.iter().position(|cell| cell != " ").unwrap_or(0) as u32
+}
+
+fn valid_command_start_col(row: &crate::Row) -> Option<u32> {
+    let col = row.command_start_col?;
+    if col == 0 && row.prompt_start && row.content_len() > 0 {
+        return None;
+    }
+    Some(col)
 }
 
 fn rendered_block_end_point(
@@ -541,6 +549,16 @@ pub fn command_text_for_prompt(
     screen: &Screen,
 ) -> Option<String> {
     if let Some(prompt_abs) = prompt.active_abs_row
+        && command_metas.get(&prompt_abs).is_some_and(|meta| {
+            meta.command_col.is_some_and(|col| {
+                col > 0
+                    || meta
+                        .command_row
+                        .and_then(|row| selection::absolute_row_to_local(screen, row))
+                        .and_then(|local| screen.grid.rows.get(local))
+                        .is_some_and(|row| !row.prompt_start || row.content_len() == 0)
+            })
+        })
         && let Some(text) = command_text_at(prompt_abs, command_metas, screen)
     {
         return Some(text);
@@ -967,6 +985,36 @@ mod tests {
         assert_eq!(
             selection::selection_text(Some(&selected), &term.active).as_deref(),
             Some("ab")
+        );
+    }
+
+    #[test]
+    fn command_text_for_prompt_requires_command_start_marker() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ ab\n\x1b]133;C\x07out0\n\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ next");
+        term.active.offset = screen::rendered_scrollback_len(&term.active, &term.inner.viewport);
+        let prompt = find_prompt_ref_for_screen_row(&term.active, &term.inner.viewport, 1)
+            .expect("completed block prompt");
+
+        assert_eq!(
+            command_text_for_prompt(prompt, &term.metadata.command_metas, &term.active),
+            None
+        );
+    }
+
+    #[test]
+    fn command_text_for_prompt_rejects_prompt_start_column_marker() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07\x1b]133;B\x07$ ab\n\x1b]133;C\x07out0\n\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ next");
+        term.active.offset = screen::rendered_scrollback_len(&term.active, &term.inner.viewport);
+        let prompt = find_prompt_ref_for_screen_row(&term.active, &term.inner.viewport, 1)
+            .expect("completed block prompt");
+
+        assert_eq!(
+            command_text_for_prompt(prompt, &term.metadata.command_metas, &term.active),
+            None
         );
     }
 

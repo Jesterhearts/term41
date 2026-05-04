@@ -227,6 +227,9 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::Focused(f) => {
+                if !f {
+                    self.keyboard.physical_modifiers = PhysicalModifierState::default();
+                }
                 handle_focus_event(
                     &mut self.input,
                     &mut self.render,
@@ -238,6 +241,11 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
+                sync_modifier_key_from_keyboard_event(
+                    &mut self.keyboard,
+                    event.physical_key,
+                    event.state,
+                );
                 if event.state != ElementState::Pressed {
                     return;
                 }

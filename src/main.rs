@@ -123,6 +123,7 @@ use winit::event_loop::EventLoop;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
+use winit::keyboard::KeyCode;
 use winit::keyboard::KeyLocation;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
@@ -731,6 +732,7 @@ struct RenderRuntime {
 
 struct KeyboardRuntime {
     modifiers: ModifiersState,
+    physical_modifiers: PhysicalModifierState,
     ime_preedit_active: bool,
 }
 
@@ -1366,6 +1368,18 @@ fn dec_function_key_selector(named: NamedKey) -> Option<u16> {
 }
 
 #[derive(Default, Copy, Clone)]
+struct PhysicalModifierState {
+    shift_left: bool,
+    shift_right: bool,
+    control_left: bool,
+    control_right: bool,
+    alt_left: bool,
+    alt_right: bool,
+    super_left: bool,
+    super_right: bool,
+}
+
+#[derive(Default, Copy, Clone)]
 struct MouseButtonState {
     left: bool,
     middle: bool,
@@ -1404,6 +1418,20 @@ impl MouseButtonState {
         } else {
             TermMouseButton::None
         }
+    }
+}
+
+impl PhysicalModifierState {
+    fn modifiers(self) -> ModifiersState {
+        let mut mods = ModifiersState::empty();
+        mods.set(ModifiersState::SHIFT, self.shift_left || self.shift_right);
+        mods.set(
+            ModifiersState::CONTROL,
+            self.control_left || self.control_right,
+        );
+        mods.set(ModifiersState::ALT, self.alt_left || self.alt_right);
+        mods.set(ModifiersState::SUPER, self.super_left || self.super_right);
+        mods
     }
 }
 
@@ -1685,6 +1713,7 @@ fn main() {
         },
         keyboard: KeyboardRuntime {
             modifiers: ModifiersState::default(),
+            physical_modifiers: PhysicalModifierState::default(),
             ime_preedit_active: false,
         },
         mouse: MouseRuntime {

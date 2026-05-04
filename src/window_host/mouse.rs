@@ -1119,18 +1119,23 @@ pub(crate) fn execute_popup_action(
 }
 
 pub(crate) fn mouse_modifiers(keyboard: &KeyboardRuntime) -> MouseModifiers {
+    let modifiers = effective_mouse_modifiers(keyboard);
     MouseModifiers {
-        shift: keyboard.modifiers.shift_key(),
-        alt: keyboard.modifiers.alt_key(),
-        ctrl: keyboard.modifiers.control_key(),
+        shift: modifiers.shift_key(),
+        alt: modifiers.alt_key(),
+        ctrl: modifiers.control_key(),
     }
+}
+
+pub(crate) fn effective_mouse_modifiers(keyboard: &KeyboardRuntime) -> ModifiersState {
+    keyboard.modifiers | keyboard.physical_modifiers.modifiers()
 }
 
 pub(crate) fn forward_mouse_to_app(
     keyboard: &KeyboardRuntime,
     input: &mut InputRuntime,
 ) -> bool {
-    let is_shift = keyboard.modifiers.shift_key();
+    let is_shift = effective_mouse_modifiers(keyboard).shift_key();
     active_input_target(input).is_some_and(|target| {
         let terminal = target.terminal.lock();
         host::mouse_tracking_enabled(terminal.modes.mouse_tracking)

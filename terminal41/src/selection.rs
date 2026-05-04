@@ -383,6 +383,9 @@ pub fn start_rendered_selection(
     viewport_row: u32,
     mode: SelectionMode,
 ) -> Option<Selection> {
+    if on_alt_screen {
+        return start_selection(screen, viewport, col, viewport_row, mode);
+    }
     let (origin, row) = rendered_selection_point_at_viewport_row(
         screen,
         viewport,
@@ -523,6 +526,9 @@ pub fn extend_rendered_selection(
     col: u32,
     viewport_row: u32,
 ) -> Option<Selection> {
+    if on_alt_screen {
+        return extend_selection(selection, screen, viewport, col, viewport_row);
+    }
     if !selection.rendered {
         return extend_selection(selection, screen, viewport, col, viewport_row);
     }
@@ -1258,6 +1264,45 @@ mod integration_tests {
         assert_eq!(
             selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
             Some("one\n\ntwo")
+        );
+    }
+
+    #[test]
+    fn rendered_mouse_selection_uses_active_grid_on_alt_screen() {
+        let mut term = TestTerm::new(10, 5, 100, 16, 8);
+        term.process(b"one");
+        term.process(b"\x1b]133;A\x07two");
+        term.process(b"\x1b]133;A\x07three");
+        term.process(b"\x1b[?1049h");
+        term.process(b"alpha\r\nbeta");
+
+        term.inner.selection = start_rendered_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.on_alt_screen,
+            0,
+            0,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_rendered_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.on_alt_screen,
+            3,
+            1,
+        );
+
+        assert_eq!(
+            term.inner
+                .selection
+                .as_ref()
+                .map(|selection| selection.rendered),
+            Some(false)
+        );
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("alpha\nbeta")
         );
     }
 

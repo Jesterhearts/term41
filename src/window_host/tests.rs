@@ -114,6 +114,59 @@ mod selection_autoscroll_tests {
     }
 
     #[test]
+    fn mouse_modifiers_include_keyboard_event_state_when_modifier_event_lags() {
+        let mut keyboard = KeyboardRuntime {
+            modifiers: ModifiersState::empty(),
+            physical_modifiers: PhysicalModifierState::default(),
+            ime_preedit_active: false,
+        };
+
+        sync_modifier_key_from_keyboard_event(
+            &mut keyboard,
+            PhysicalKey::Code(KeyCode::ShiftLeft),
+            ElementState::Pressed,
+        );
+
+        assert!(effective_mouse_modifiers(&keyboard).shift_key());
+        assert!(mouse_modifiers(&keyboard).shift);
+    }
+
+    #[test]
+    fn physical_shift_state_tracks_left_and_right_keys_independently() {
+        let mut keyboard = KeyboardRuntime {
+            modifiers: ModifiersState::empty(),
+            physical_modifiers: PhysicalModifierState::default(),
+            ime_preedit_active: false,
+        };
+
+        sync_modifier_key_from_keyboard_event(
+            &mut keyboard,
+            PhysicalKey::Code(KeyCode::ShiftLeft),
+            ElementState::Pressed,
+        );
+        sync_modifier_key_from_keyboard_event(
+            &mut keyboard,
+            PhysicalKey::Code(KeyCode::ShiftRight),
+            ElementState::Pressed,
+        );
+        sync_modifier_key_from_keyboard_event(
+            &mut keyboard,
+            PhysicalKey::Code(KeyCode::ShiftLeft),
+            ElementState::Released,
+        );
+
+        assert!(effective_mouse_modifiers(&keyboard).shift_key());
+
+        sync_modifier_key_from_keyboard_event(
+            &mut keyboard,
+            PhysicalKey::Code(KeyCode::ShiftRight),
+            ElementState::Released,
+        );
+
+        assert!(!effective_mouse_modifiers(&keyboard).shift_key());
+    }
+
+    #[test]
     fn copy_source_prefers_terminal_selection_over_editor_selection() {
         assert_eq!(
             selection_copy_source(true, true, true),

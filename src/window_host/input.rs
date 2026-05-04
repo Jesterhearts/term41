@@ -959,6 +959,31 @@ pub(crate) fn handle_modifiers_changed(
     write_host_bytes(target, bytes, false);
 }
 
+pub(crate) fn sync_modifier_key_from_keyboard_event(
+    keyboard: &mut KeyboardRuntime,
+    physical: PhysicalKey,
+    state: ElementState,
+) {
+    let pressed = state == ElementState::Pressed;
+    match physical {
+        PhysicalKey::Code(KeyCode::ShiftLeft) => keyboard.physical_modifiers.shift_left = pressed,
+        PhysicalKey::Code(KeyCode::ShiftRight) => keyboard.physical_modifiers.shift_right = pressed,
+        PhysicalKey::Code(KeyCode::ControlLeft) => {
+            keyboard.physical_modifiers.control_left = pressed;
+        }
+        PhysicalKey::Code(KeyCode::ControlRight) => {
+            keyboard.physical_modifiers.control_right = pressed;
+        }
+        PhysicalKey::Code(KeyCode::AltLeft) => keyboard.physical_modifiers.alt_left = pressed,
+        PhysicalKey::Code(KeyCode::AltRight) => keyboard.physical_modifiers.alt_right = pressed,
+        PhysicalKey::Code(KeyCode::SuperLeft) => keyboard.physical_modifiers.super_left = pressed,
+        PhysicalKey::Code(KeyCode::SuperRight) => {
+            keyboard.physical_modifiers.super_right = pressed;
+        }
+        _ => {}
+    }
+}
+
 pub(crate) fn handle_ime_commit(
     input: &mut InputRuntime,
     render: &mut RenderRuntime,
