@@ -432,9 +432,10 @@ Notes:
   plus `require("terminal")`.
 - `[shell_integration] hooks = true` opts in to runtime shell hooks for the
   default spawned shell. The hooks emit OSC 133 `A`, `B`, `C`, and `D` markers
-  for prompt start, command start, output start, and output end. The install is
-  per-child-process and temporary; term41 logs a warning when it cannot identify
-  the shell or has no hook implementation for it.
+  for prompt start, command start, output start, and output end, plus OSC 7
+  current-directory updates before each prompt. The install is per-child-process
+  and temporary; term41 logs a warning when it cannot identify the shell or has
+  no hook implementation for it.
 - `[command_editor]` enables the terminal-local command editor layer.
   `Ctrl+Shift+D` toggles the editor for the current runtime session without
   rewriting the config file.

@@ -19,6 +19,32 @@ if [ -z "${__TERM41_SHELL_INTEGRATION_INSTALLED:-}" ]; then
     printf '\033]133;%s\007' "$1"
   }
 
+  __term41_percent_encode_path() {
+    local __term41_input=$1
+    local __term41_output=
+    local __term41_i __term41_char __term41_hex
+    local LC_ALL=C
+    for ((__term41_i = 0; __term41_i < ${#__term41_input}; __term41_i++)); do
+      __term41_char=${__term41_input:__term41_i:1}
+      case "$__term41_char" in
+        [A-Za-z0-9._~/-])
+          __term41_output="${__term41_output}${__term41_char}"
+          ;;
+        *)
+          __term41_hex=$(printf '%02X' "'$__term41_char")
+          __term41_output="${__term41_output}%${__term41_hex}"
+          ;;
+      esac
+    done
+    printf '%s' "$__term41_output"
+  }
+
+  __term41_emit_cwd() {
+    if [ -n "${PWD:-}" ]; then
+      printf '\033]7;file://localhost%s\007' "$(__term41_percent_encode_path "$PWD")"
+    fi
+  }
+
   __term41_prompt_command() {
     local __term41_status=$?
     __term41_in_prompt=1
@@ -27,6 +53,7 @@ if [ -z "${__TERM41_SHELL_INTEGRATION_INSTALLED:-}" ]; then
     fi
     __term41_command_running=0
     __term41_prompt_seen=1
+    __term41_emit_cwd
     __term41_in_prompt=0
     return "$__term41_status"
   }
@@ -71,6 +98,33 @@ if [[ -z ${__TERM41_SHELL_INTEGRATION_INSTALLED:-} ]]; then
   typeset -g __term41_prompt_seen=0
   typeset -g __term41_command_running=0
 
+  __term41_percent_encode_path() {
+    emulate -L zsh
+    local __term41_input=$1
+    local __term41_output=
+    local __term41_i __term41_char __term41_hex
+    local LC_ALL=C
+    for (( __term41_i = 1; __term41_i <= ${#__term41_input}; __term41_i++ )); do
+      __term41_char=${__term41_input[__term41_i]}
+      case "$__term41_char" in
+        [A-Za-z0-9._~/-])
+          __term41_output="${__term41_output}${__term41_char}"
+          ;;
+        *)
+          __term41_hex=$(printf '%02X' "'$__term41_char")
+          __term41_output="${__term41_output}%${__term41_hex}"
+          ;;
+      esac
+    done
+    printf '%s' "$__term41_output"
+  }
+
+  __term41_emit_cwd() {
+    if [[ -n ${PWD:-} ]]; then
+      printf '\e]7;file://localhost%s\a' "$(__term41_percent_encode_path "$PWD")"
+    fi
+  }
+
   __term41_precmd() {
     local __term41_status=$?
     if (( __term41_prompt_seen && __term41_command_running )); then
@@ -78,6 +132,7 @@ if [[ -z ${__TERM41_SHELL_INTEGRATION_INSTALLED:-} ]]; then
     fi
     __term41_command_running=0
     __term41_prompt_seen=1
+    __term41_emit_cwd
     printf '\e]133;A\a'
     return "$__term41_status"
   }
@@ -106,6 +161,35 @@ if not set -q __TERM41_SHELL_INTEGRATION_INSTALLED
         functions -c fish_prompt __term41_original_fish_prompt
     end
 
+    function __term41_percent_encode_path
+        set -l __term41_path $argv[1]
+        if test "$__term41_path" = /
+            printf /
+            return
+        end
+
+        set -l __term41_encoded
+        if string match -q '/*' -- "$__term41_path"
+            set __term41_encoded /
+            set __term41_path (string sub -s 2 -- "$__term41_path")
+        end
+
+        set -l __term41_parts (string split / -- "$__term41_path")
+        for __term41_i in (seq (count $__term41_parts))
+            if test $__term41_i -gt 1
+                set __term41_encoded "$__term41_encoded/"
+            end
+            set __term41_encoded "$__term41_encoded"(string escape --style=url -- $__term41_parts[$__term41_i])
+        end
+        printf %s "$__term41_encoded"
+    end
+
+    function __term41_emit_cwd
+        if test -n "$PWD"
+            printf '\e]7;file://localhost%s\a' (__term41_percent_encode_path "$PWD")
+        end
+    end
+
     function fish_prompt
         if functions -q __term41_original_fish_prompt
             __term41_original_fish_prompt
@@ -123,11 +207,13 @@ if not set -q __TERM41_SHELL_INTEGRATION_INSTALLED
         if test "$__term41_command_running" = 1
             printf '\e]133;D;%s\a' $__term41_status
         end
+        __term41_emit_cwd
         printf '\e]133;A\a'
         set -g __term41_command_running 0
         return $__term41_status
     end
 
+    __term41_emit_cwd
     printf '\e]133;A\a'
 end
 "#;
@@ -138,6 +224,45 @@ if (-not $global:__TERM41_SHELL_INTEGRATION_INSTALLED) {
     $global:__term41PromptSeen = $false
     $global:__term41CommandRunning = $false
     $global:__term41OriginalPrompt = (Get-Command prompt -CommandType Function).ScriptBlock
+
+    function global:__term41PercentEncodePath {
+        param([string] $Path)
+
+        $term41Builder = [System.Text.StringBuilder]::new()
+        foreach ($term41Byte in [System.Text.Encoding]::UTF8.GetBytes($Path)) {
+            $term41Allowed =
+                ($term41Byte -ge 0x30 -and $term41Byte -le 0x39) -or
+                ($term41Byte -ge 0x41 -and $term41Byte -le 0x5A) -or
+                ($term41Byte -ge 0x61 -and $term41Byte -le 0x7A) -or
+                $term41Byte -eq 0x2D -or
+                $term41Byte -eq 0x2E -or
+                $term41Byte -eq 0x2F -or
+                $term41Byte -eq 0x5F -or
+                $term41Byte -eq 0x7E
+
+            if ($term41Allowed) {
+                [void] $term41Builder.Append([char] $term41Byte)
+            } else {
+                [void] $term41Builder.Append('%')
+                [void] $term41Builder.Append($term41Byte.ToString('X2', [Globalization.CultureInfo]::InvariantCulture))
+            }
+        }
+
+        $term41Builder.ToString()
+    }
+
+    function global:__term41EmitCwd {
+        $term41Location = Get-Location
+        if ($null -eq $term41Location -or [string]::IsNullOrEmpty($term41Location.ProviderPath)) {
+            return
+        }
+
+        $term41Path = $term41Location.ProviderPath.Replace('\', '/')
+        if ($term41Path -match '^[A-Za-z]:/') {
+            $term41Path = "/$term41Path"
+        }
+        [Console]::Write("`e]7;file://localhost$(__term41PercentEncodePath $term41Path)`a")
+    }
 
     function global:prompt {
         $term41Success = $?
@@ -154,6 +279,7 @@ if (-not $global:__TERM41_SHELL_INTEGRATION_INSTALLED) {
         }
         $global:__term41PromptSeen = $true
         $global:__term41CommandRunning = $false
+        __term41EmitCwd
         [Console]::Write("`e]133;A`a")
         $term41PromptText = (& $global:__term41OriginalPrompt) -join ""
         "$term41PromptText`e]133;B`a"
@@ -505,6 +631,14 @@ mod tests {
             assert!(hook_emits_marker(hook, "B"));
             assert!(hook_emits_marker(hook, "C"));
             assert!(hook_emits_marker(hook, "D"));
+        }
+    }
+
+    #[test]
+    fn hook_snippets_emit_current_directory_updates() {
+        for hook in [BASH_HOOK, ZSH_HOOK, FISH_HOOK, POWERSHELL_HOOK] {
+            assert!(hook.contains("]7;file://localhost"));
+            assert!(hook.contains("percent_encode_path") || hook.contains("PercentEncodePath"));
         }
     }
 
