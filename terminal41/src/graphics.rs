@@ -937,7 +937,7 @@ fn handle_kitty_delete(
     let uppercase = cmd.delete.is_ascii_uppercase();
     match cmd.delete.to_ascii_lowercase() {
         b'a' | 0 => {
-            screen.images.clear();
+            crate::screen::clear_images(screen);
             if uppercase {
                 store.clear();
             }
@@ -945,15 +945,13 @@ fn handle_kitty_delete(
         b'i' => {
             let id = cmd.image_id;
             if cmd.placement_id != 0 {
-                screen.images.retain(|_, img| {
+                crate::screen::retain_images(screen, |img| {
                     !(img.kitty_image_id == Some(id)
                         && img.kitty_placement_id == Some(cmd.placement_id))
                 });
                 store.remove_virtual_placements(id, Some(cmd.placement_id));
             } else {
-                screen
-                    .images
-                    .retain(|_, img| img.kitty_image_id != Some(id));
+                crate::screen::retain_images(screen, |img| img.kitty_image_id != Some(id));
                 store.remove_virtual_placements(id, None);
             }
             if uppercase {
@@ -965,15 +963,13 @@ fn handle_kitty_delete(
                 return;
             };
             if cmd.placement_id != 0 {
-                screen.images.retain(|_, img| {
+                crate::screen::retain_images(screen, |img| {
                     !(img.kitty_image_id == Some(id)
                         && img.kitty_placement_id == Some(cmd.placement_id))
                 });
                 store.remove_virtual_placements(id, Some(cmd.placement_id));
             } else {
-                screen
-                    .images
-                    .retain(|_, img| img.kitty_image_id != Some(id));
+                crate::screen::retain_images(screen, |img| img.kitty_image_id != Some(id));
                 store.remove_virtual_placements(id, None);
             }
             if uppercase {
@@ -1005,7 +1001,7 @@ fn handle_kitty_delete(
         b'r' => {
             let lo = cmd.src_x;
             let hi = cmd.src_y;
-            screen.images.retain(|_, img| {
+            crate::screen::retain_images(screen, |img| {
                 img.kitty_image_id
                     .map(|id| id < lo || id > hi)
                     .unwrap_or(true)
@@ -1028,7 +1024,7 @@ fn handle_kitty_delete(
                 .retain(|_, img| !placement_intersects_row(img, row, cell_height));
         }
         b'z' => {
-            screen.images.retain(|_, img| img.z_index != cmd.z_index);
+            crate::screen::retain_images(screen, |img| img.z_index != cmd.z_index);
         }
         _ => {}
     }

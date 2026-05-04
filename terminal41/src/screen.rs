@@ -33,6 +33,7 @@ pub(crate) struct ResizeScreenOutcome {
 #[derive(Debug)]
 pub struct CommandBlock {
     pub grid: Grid,
+    pub images: BTreeMap<u64, PlacedImage>,
 }
 
 /// Snapshot of cursor position and active colors, used by DECSC/DECRC
@@ -402,9 +403,11 @@ pub(super) fn start_command_block(
         .max(1)
         .min(completed.rows.len());
     completed.rows.truncate(completed_rows);
-    screen
-        .scrollback_blocks
-        .push(CommandBlock { grid: completed });
+    let images = completed_block_images(&mut screen.images, completed_rows);
+    screen.scrollback_blocks.push(CommandBlock {
+        grid: completed,
+        images,
+    });
     screen.active_command_block_started = true;
     screen.cursor.row = 0;
     screen.cursor.col = 0;
@@ -423,6 +426,23 @@ pub(super) fn clear_command_history_blocks(
     screen.offset = 0;
     screen.cursor.row = screen.cursor.row.min(viewport.rows.saturating_sub(1));
     removed
+}
+
+pub(super) fn clear_images(screen: &mut Screen) {
+    for block in &mut screen.scrollback_blocks {
+        block.images.clear();
+    }
+    screen.images.clear();
+}
+
+pub(super) fn retain_images(
+    screen: &mut Screen,
+    mut keep: impl FnMut(&PlacedImage) -> bool,
+) {
+    for block in &mut screen.scrollback_blocks {
+        block.images.retain(|_, img| keep(img));
+    }
+    screen.images.retain(|_, img| keep(img));
 }
 
 pub(super) fn rendered_rows_len(screen: &Screen) -> usize {
@@ -467,6 +487,16 @@ fn clear_command_block_metadata(grid: &mut Grid) {
         row.output_start = false;
         row.exit_status = None;
     }
+}
+
+fn completed_block_images(
+    images: &mut BTreeMap<u64, PlacedImage>,
+    completed_rows: usize,
+) -> BTreeMap<u64, PlacedImage> {
+    std::mem::take(images)
+        .into_iter()
+        .filter(|(_, image)| image.row < completed_rows)
+        .collect()
 }
 
 fn grid_content_rows_len(grid: &Grid) -> usize {
@@ -963,7 +993,9 @@ fn reflow_command_blocks(
     new_cols: u32,
 ) {
     for block in blocks {
+        let anchors = anchor_images(&block.grid.rows, &block.images);
         self::grid::reflow(&mut block.grid, new_cols);
+        restore_images(&block.grid.rows, &anchors, &mut block.images);
     }
 }
 

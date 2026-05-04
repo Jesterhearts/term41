@@ -4,6 +4,7 @@ use std::time::Instant;
 
 use crate::ColorPalette;
 use crate::CommandMeta;
+use crate::PlacedImage;
 use crate::Row;
 use crate::Screen;
 use crate::StatusDisplayKind;
@@ -182,8 +183,7 @@ pub(crate) fn visible_images(
     now: Instant,
 ) -> impl Iterator<Item = VisibleImage> {
     let view = selection::active_viewport(screen, viewport);
-    let viewport_top = view.top_index(screen.grid.rows.len());
-    let viewport_bottom = viewport_top + view.rows as usize;
+    let (viewport_top, viewport_bottom) = image_viewport_bounds(screen, view);
 
     let mut visible =
         visible_physical_images(screen, cell_height, viewport_top, viewport_bottom, now);
@@ -207,6 +207,13 @@ pub(crate) fn referenced_kitty_image_ids(
     palette: &ColorPalette,
 ) -> HashSet<u32> {
     let mut referenced = HashSet::new();
+    for block in &screen.scrollback_blocks {
+        for img in block.images.values() {
+            if let Some(image_id) = img.kitty_image_id {
+                referenced.insert(image_id);
+            }
+        }
+    }
     for img in screen.images.values() {
         if let Some(image_id) = img.kitty_image_id {
             referenced.insert(image_id);
@@ -235,31 +242,92 @@ fn visible_physical_images(
     viewport_bottom: usize,
     now: Instant,
 ) -> Vec<VisibleImage> {
-    screen
-        .images
-        .values()
-        .filter_map(move |img| {
-            let img_rows = img.display_height.div_ceil(cell_height).max(1) as usize;
-            let img_bottom = img.row + img_rows;
-            if img.row >= viewport_bottom || img_bottom <= viewport_top {
-                return None;
-            }
-            let elapsed = now.saturating_duration_since(img.placed_at);
-            Some(VisibleImage {
-                image: img.image.clone(),
-                id: img.id,
-                kitty_image_id: img.kitty_image_id,
-                screen_row: img.row as i32 - viewport_top as i32,
-                screen_col: img.col,
-                cell_x_offset: img.cell_x_offset,
-                cell_y_offset: img.cell_y_offset,
-                display_width: img.display_width,
-                display_height: img.display_height,
-                frame_index: img.image.frame_at(elapsed),
-                z_index: img.z_index,
-            })
-        })
-        .collect()
+    let mut visible = Vec::new();
+    if !command_blocks_rendered_for_images(screen) {
+        append_visible_physical_images(
+            &mut visible,
+            screen.images.values(),
+            0,
+            cell_height,
+            viewport_top,
+            viewport_bottom,
+            now,
+        );
+        return visible;
+    }
+
+    let mut rendered_base = 0usize;
+    for block in &screen.scrollback_blocks {
+        append_visible_physical_images(
+            &mut visible,
+            block.images.values(),
+            rendered_base,
+            cell_height,
+            viewport_top,
+            viewport_bottom,
+            now,
+        );
+        rendered_base += screen::command_block_rendered_rows_len(block) + 1;
+    }
+    append_visible_physical_images(
+        &mut visible,
+        screen.images.values(),
+        rendered_base,
+        cell_height,
+        viewport_top,
+        viewport_bottom,
+        now,
+    );
+    visible
+}
+
+fn append_visible_physical_images<'a>(
+    visible: &mut Vec<VisibleImage>,
+    images: impl Iterator<Item = &'a PlacedImage>,
+    rendered_base: usize,
+    cell_height: u32,
+    viewport_top: usize,
+    viewport_bottom: usize,
+    now: Instant,
+) {
+    for img in images {
+        let img_rows = img.display_height.div_ceil(cell_height).max(1) as usize;
+        let rendered_row = rendered_base + img.row;
+        let img_bottom = rendered_row + img_rows;
+        if rendered_row >= viewport_bottom || img_bottom <= viewport_top {
+            continue;
+        }
+        let elapsed = now.saturating_duration_since(img.placed_at);
+        visible.push(VisibleImage {
+            image: img.image.clone(),
+            id: img.id,
+            kitty_image_id: img.kitty_image_id,
+            screen_row: rendered_row as i32 - viewport_top as i32,
+            screen_col: img.col,
+            cell_x_offset: img.cell_x_offset,
+            cell_y_offset: img.cell_y_offset,
+            display_width: img.display_width,
+            display_height: img.display_height,
+            frame_index: img.image.frame_at(elapsed),
+            z_index: img.z_index,
+        });
+    }
+}
+
+fn image_viewport_bounds(
+    screen: &Screen,
+    viewport: Viewport,
+) -> (usize, usize) {
+    if !command_blocks_rendered_for_images(screen) {
+        let top = viewport.top_index(screen.grid.rows.len());
+        return (top, top + viewport.rows as usize);
+    }
+
+    let rendered_len = screen::rendered_rows_len(screen);
+    let visible_rows = rendered_len.min(viewport.rows as usize).max(1);
+    let max_top = rendered_len.saturating_sub(visible_rows);
+    let top = max_top.saturating_sub(screen.offset as usize);
+    (top, top + visible_rows)
 }
 
 fn append_placeholder_references(
@@ -268,7 +336,29 @@ fn append_placeholder_references(
     kitty_images: &image41::kitty::KittyImageStore,
     palette: &ColorPalette,
 ) {
-    for row in &screen.grid.rows {
+    for block in &screen.scrollback_blocks {
+        append_placeholder_references_from_rows(
+            referenced,
+            block.grid.rows.iter(),
+            kitty_images,
+            palette,
+        );
+    }
+    append_placeholder_references_from_rows(
+        referenced,
+        screen.grid.rows.iter(),
+        kitty_images,
+        palette,
+    );
+}
+
+fn append_placeholder_references_from_rows<'a>(
+    referenced: &mut HashSet<u32>,
+    rows: impl Iterator<Item = &'a Row>,
+    kitty_images: &image41::kitty::KittyImageStore,
+    palette: &ColorPalette,
+) {
+    for row in rows {
         let mut previous: Option<PlaceholderCell> = None;
         for col in 0..row.cells.len() {
             let Some(cell) = decode_placeholder_cell(row, col, previous, palette) else {
@@ -294,14 +384,92 @@ fn append_unicode_placeholder_images(
     palette: &ColorPalette,
     now: Instant,
 ) {
-    let viewport_top = viewport.top_index(screen.grid.rows.len());
-    let viewport_bottom = viewport_top + viewport.rows as usize;
+    let (viewport_top, viewport_bottom) = image_viewport_bounds(screen, viewport);
     let mut emitted = HashSet::new();
 
-    for row_index in viewport_top..viewport_bottom.min(screen.grid.rows.len()) {
-        let row = &screen.grid.rows[row_index];
+    if !command_blocks_rendered_for_images(screen) {
+        append_unicode_placeholder_images_from_rows(
+            visible,
+            &mut emitted,
+            screen.grid.rows.iter().enumerate(),
+            viewport_top,
+            viewport_bottom,
+            viewport.cols,
+            cell_height,
+            cell_width,
+            kitty_images,
+            palette,
+            now,
+        );
+        return;
+    }
+
+    let mut rendered_base = 0usize;
+    for block in &screen.scrollback_blocks {
+        append_unicode_placeholder_images_from_rows(
+            visible,
+            &mut emitted,
+            block
+                .grid
+                .rows
+                .iter()
+                .enumerate()
+                .map(|(row, grid_row)| (rendered_base + row, grid_row)),
+            viewport_top,
+            viewport_bottom,
+            viewport.cols,
+            cell_height,
+            cell_width,
+            kitty_images,
+            palette,
+            now,
+        );
+        rendered_base += screen::command_block_rendered_rows_len(block) + 1;
+    }
+    append_unicode_placeholder_images_from_rows(
+        visible,
+        &mut emitted,
+        screen
+            .grid
+            .rows
+            .iter()
+            .enumerate()
+            .map(|(row, grid_row)| (rendered_base + row, grid_row)),
+        viewport_top,
+        viewport_bottom,
+        viewport.cols,
+        cell_height,
+        cell_width,
+        kitty_images,
+        palette,
+        now,
+    );
+}
+
+fn command_blocks_rendered_for_images(screen: &Screen) -> bool {
+    !screen.scrollback_blocks.is_empty() && !screen::page_memory_active(screen)
+}
+
+#[allow(clippy::too_many_arguments)]
+fn append_unicode_placeholder_images_from_rows<'a>(
+    visible: &mut Vec<VisibleImage>,
+    emitted: &mut HashSet<(u32, u32, usize, u32)>,
+    rows: impl Iterator<Item = (usize, &'a Row)>,
+    viewport_top: usize,
+    viewport_bottom: usize,
+    viewport_cols: u32,
+    cell_height: u32,
+    cell_width: u32,
+    kitty_images: &image41::kitty::KittyImageStore,
+    palette: &ColorPalette,
+    now: Instant,
+) {
+    for (row_index, row) in rows {
+        if row_index < viewport_top || row_index >= viewport_bottom {
+            continue;
+        }
         let mut previous: Option<PlaceholderCell> = None;
-        for col in 0..row.cells.len().min(viewport.cols as usize) {
+        for col in 0..row.cells.len().min(viewport_cols as usize) {
             let Some(cell) = decode_placeholder_cell(row, col, previous, palette) else {
                 previous = None;
                 continue;
@@ -660,6 +828,7 @@ pub(crate) fn track_scroll(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::test_support::TestTerm;
 
     fn visible_image(
         id: u64,
@@ -680,6 +849,45 @@ mod tests {
             frame_index: 0,
             z_index,
         }
+    }
+
+    fn placed_test_image(
+        term: &mut TestTerm,
+        row: usize,
+    ) -> u64 {
+        let id = term.images.next_image_id;
+        term.images.next_image_id += 1;
+        term.active.images.insert(
+            id,
+            PlacedImage {
+                image: image41::DecodedImage::single_frame(1, 16, vec![0, 0, 0, 255]),
+                id,
+                kitty_image_id: None,
+                kitty_placement_id: None,
+                row,
+                col: 0,
+                display_width: 1,
+                display_height: 16,
+                cell_x_offset: 0,
+                cell_y_offset: 0,
+                z_index: 0,
+                placed_at: Instant::now(),
+            },
+        );
+        id
+    }
+
+    fn term_visible_images(term: &TestTerm) -> Vec<VisibleImage> {
+        crate::view::visible_images(
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.cell_height(),
+            term.inner.cell_width(),
+            &term.inner.images.kitty_images,
+            &term.inner.palette,
+            Instant::now(),
+        )
+        .collect()
     }
 
     #[test]
@@ -705,5 +913,53 @@ mod tests {
 
         let ids: Vec<u64> = images.iter().map(|image| image.id).collect();
         assert_eq!(ids, vec![1, 2]);
+    }
+
+    #[test]
+    fn physical_images_move_into_completed_command_blocks() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+
+        term.process(b"old");
+        let image_id = placed_test_image(&mut term, 0);
+        term.process(b"\x1b]133;A\x07new");
+
+        assert!(!term.active.images.contains_key(&image_id));
+        assert!(
+            term.active.scrollback_blocks[0]
+                .images
+                .contains_key(&image_id)
+        );
+
+        term.process(b"\r\none\r\ntwo\r\nthree");
+        assert!(
+            term_visible_images(&term)
+                .iter()
+                .all(|image| image.id != image_id),
+            "completed block image should scroll out with its block"
+        );
+
+        let viewport = term.inner.viewport;
+        crate::view::scroll_viewport_up(&mut term.inner.active, &viewport, 2);
+        let images = term_visible_images(&term);
+        let image = images
+            .iter()
+            .find(|image| image.id == image_id)
+            .expect("completed block image visible after scrolling back");
+        assert_eq!(image.screen_row, 0);
+    }
+
+    #[test]
+    fn placeholder_images_render_from_completed_command_blocks() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+
+        term.process(b"\x1b_Ga=T,f=32,s=1,v=1,i=42,U=1,c=1,r=1;/wAA/w==\x1b\\");
+        term.process("\x1b[38;5;42m\u{10EEEE}\u{0305}\u{0305}\x1b[39m".as_bytes());
+        term.process(b"\x1b]133;A\x07new");
+
+        let images = term_visible_images(&term);
+        assert_eq!(images.len(), 1);
+        assert_eq!(images[0].kitty_image_id, Some(42));
+        assert_eq!(images[0].screen_row, 0);
+        assert_eq!(images[0].screen_col, 0);
     }
 }
