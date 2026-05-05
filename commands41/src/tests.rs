@@ -4,6 +4,7 @@ fn settings(words: &[&str]) -> EditorSettings {
     EditorSettings {
         completion_words: words.iter().map(|word| (*word).to_owned()).collect(),
         command_words: Vec::new(),
+        command_completions: Vec::new(),
         history_entries: Vec::new(),
         current_dir: None,
         max_history: 20,
@@ -14,6 +15,7 @@ fn command_settings(words: &[&str]) -> EditorSettings {
     EditorSettings {
         completion_words: Vec::new(),
         command_words: words.iter().map(|word| (*word).to_owned()).collect(),
+        command_completions: Vec::new(),
         history_entries: Vec::new(),
         current_dir: None,
         max_history: 20,
@@ -24,6 +26,7 @@ fn path_settings(current_dir: PathBuf) -> EditorSettings {
     EditorSettings {
         completion_words: Vec::new(),
         command_words: Vec::new(),
+        command_completions: Vec::new(),
         history_entries: Vec::new(),
         current_dir: Some(current_dir),
         max_history: 20,
@@ -1252,6 +1255,101 @@ fn command_words_complete_after_shell_separator() {
     );
 
     assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
+}
+
+#[test]
+fn structured_command_completion_completes_target_command() {
+    let settings = EditorSettings {
+        command_completions: vec![CommandCompletion {
+            command: "cargo".to_owned(),
+            subcommands: Vec::new(),
+        }],
+        ..EditorSettings::default()
+    };
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("car".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("go"));
+}
+
+#[test]
+fn structured_command_completion_completes_subcommand() {
+    let settings = EditorSettings {
+        command_completions: vec![CommandCompletion {
+            command: "cargo".to_owned(),
+            subcommands: vec![
+                SubcommandCompletion {
+                    name: "build".to_owned(),
+                    arguments: vec!["--release".to_owned()],
+                },
+                SubcommandCompletion {
+                    name: "bench".to_owned(),
+                    arguments: vec!["--all".to_owned()],
+                },
+            ],
+        }],
+        ..EditorSettings::default()
+    };
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo b".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("uild"));
+    assert_eq!(editor.view(&settings).candidates, ["build", "bench"]);
+}
+
+#[test]
+fn structured_command_completion_completes_subcommand_argument() {
+    let settings = EditorSettings {
+        command_completions: vec![CommandCompletion {
+            command: "cargo".to_owned(),
+            subcommands: vec![SubcommandCompletion {
+                name: "build".to_owned(),
+                arguments: vec!["--release".to_owned(), "--workspace".to_owned()],
+            }],
+        }],
+        ..EditorSettings::default()
+    };
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo build --w".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        editor.view(&settings).completion.as_deref(),
+        Some("orkspace")
+    );
+}
+
+#[test]
+fn structured_command_completion_resets_after_shell_separator() {
+    let settings = EditorSettings {
+        command_completions: vec![CommandCompletion {
+            command: "cargo".to_owned(),
+            subcommands: vec![SubcommandCompletion {
+                name: "build".to_owned(),
+                arguments: vec!["--release".to_owned()],
+            }],
+        }],
+        ..EditorSettings::default()
+    };
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo build | --r".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion, None);
 }
 
 #[test]

@@ -1,0 +1,29 @@
+{
+  "commands": [
+    {
+      "command": "cargo",
+      "subcommands": {
+        "build": ["--all-features", "--release", "--workspace"],
+        "check": ["--all-targets", "--workspace"],
+        "clippy": ["--all-targets", "--fix", "--workspace"],
+        "fmt": ["--all", "--check"],
+        "run": ["--bin", "--example", "--release"],
+        "test": ["--all-targets", "--release", "--workspace"]
+      }
+    },
+    {
+      "command": "git",
+      "subcommands": {
+        "add": ["--all", "--patch"],
+        "branch": ["--all", "--delete", "--show-current"],
+        "commit": ["--amend", "--message", "--no-edit"],
+        "diff": ["--cached", "--stat", "--staged"],
+        "log": ["--graph", "--oneline", "--stat"],
+        "pull": ["--ff-only", "--rebase"],
+        "push": ["--force-with-lease", "--set-upstream"],
+        "status": ["--branch", "--porcelain", "--short"],
+        "switch": ["--create", "--detach"]
+      }
+    }
+  ]
+}

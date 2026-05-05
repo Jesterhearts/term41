@@ -1658,6 +1658,8 @@ process_info = true
         assert!(!cfg.command_editor.enabled);
         assert!(!cfg.command_editor.vim_mode);
         assert!(cfg.command_editor.completions.is_empty());
+        assert!(cfg.command_editor.completion_files.is_empty());
+        assert!(cfg.command_editor.command_completions.is_empty());
         assert_eq!(
             cfg.command_editor.binary_dirs,
             CommandEditorConfig::default().binary_dirs
@@ -1676,6 +1678,7 @@ process_info = true
 enabled = true
 vim_mode = true
 completions = ["cargo", "git"]
+completion_files = ["~/completions/cargo.json"]
 binary_dirs = ["~/custom-bin"]
 merge_extra_dirs = false
 deep_history_integration = true
@@ -1686,6 +1689,11 @@ max_persistent_history_per_dir = 75
         assert!(cfg.command_editor.enabled);
         assert!(cfg.command_editor.vim_mode);
         assert_eq!(cfg.command_editor.completions, ["cargo", "git"]);
+        assert_eq!(
+            cfg.command_editor.completion_files,
+            [expand_path(PathBuf::from("~/completions/cargo.json"))]
+        );
+        assert!(cfg.command_editor.command_completions.is_empty());
         assert_eq!(
             cfg.command_editor.binary_dirs,
             [expand_path(PathBuf::from("~/custom-bin"))]

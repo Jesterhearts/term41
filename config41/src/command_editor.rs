@@ -1,7 +1,10 @@
+use std::collections::BTreeMap;
+use std::fs;
 use std::path::Path;
 use std::path::PathBuf;
 
 use serde::Deserialize;
+use serde::Deserializer;
 
 use crate::dedupe_paths;
 use crate::expand_path;
@@ -12,6 +15,8 @@ pub struct CommandEditorConfig {
     pub enabled: bool,
     pub vim_mode: bool,
     pub completions: Vec<String>,
+    pub completion_files: Vec<PathBuf>,
+    pub command_completions: Vec<CommandCompletionConfig>,
     pub binary_dirs: Vec<PathBuf>,
     pub merge_extra_dirs: bool,
     pub deep_history_integration: bool,
@@ -25,6 +30,8 @@ impl Default for CommandEditorConfig {
             enabled: false,
             vim_mode: false,
             completions: Vec::new(),
+            completion_files: Vec::new(),
+            command_completions: Vec::new(),
             binary_dirs: default_binary_dirs(),
             merge_extra_dirs: true,
             deep_history_integration: false,
@@ -32,6 +39,18 @@ impl Default for CommandEditorConfig {
             max_persistent_history_per_dir: 200,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCompletionConfig {
+    pub command: String,
+    pub subcommands: Vec<SubcommandCompletionConfig>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubcommandCompletionConfig {
+    pub name: String,
+    pub arguments: Vec<String>,
 }
 
 #[derive(Deserialize, Default)]
@@ -48,6 +67,10 @@ pub(crate) struct CommandEditorSettings {
     /// at runtime by the editor.
     #[serde(default)]
     completions: Option<Vec<String>>,
+    /// JSON files containing command-specific subcommand and argument
+    /// completion definitions.
+    #[serde(default)]
+    completion_files: Option<Vec<PathBuf>>,
     /// Extra executable directories scanned by the command editor.
     #[serde(default)]
     binary_dirs: Option<Vec<PathBuf>>,
@@ -79,10 +102,19 @@ pub(crate) fn build_command_editor(raw: Option<CommandEditorSettings>) -> Comman
         settings.binary_dirs.unwrap_or_default(),
         merge_extra_dirs,
     );
+    let completion_files = settings
+        .completion_files
+        .unwrap_or_default()
+        .into_iter()
+        .map(expand_path)
+        .collect::<Vec<_>>();
+    let command_completions = load_command_completion_files(&completion_files);
     CommandEditorConfig {
         enabled: settings.enabled.unwrap_or(defaults.enabled),
         vim_mode: settings.vim_mode.unwrap_or(defaults.vim_mode),
         completions: settings.completions.unwrap_or_default(),
+        completion_files,
+        command_completions,
         binary_dirs,
         merge_extra_dirs,
         deep_history_integration: settings
@@ -93,6 +125,246 @@ pub(crate) fn build_command_editor(raw: Option<CommandEditorSettings>) -> Comman
             .max_persistent_history_per_dir
             .unwrap_or(defaults.max_persistent_history_per_dir)
             .max(1),
+    }
+}
+
+fn load_command_completion_files(paths: &[PathBuf]) -> Vec<CommandCompletionConfig> {
+    let mut completions = Vec::new();
+    for path in paths {
+        let loaded = match load_command_completion_file(path) {
+            Ok(loaded) => loaded,
+            Err(error) => {
+                warn!(
+                    "failed to load command completion file {}: {error}",
+                    path.display()
+                );
+                continue;
+            }
+        };
+        for completion in loaded.into_command_completions() {
+            push_command_completion(&mut completions, completion);
+        }
+    }
+    completions
+}
+
+fn load_command_completion_file(
+    path: &Path
+) -> Result<CommandCompletionFile, CommandCompletionLoadError> {
+    let contents = fs::read_to_string(path).map_err(CommandCompletionLoadError::Io)?;
+    serde_json::from_str(&contents).map_err(CommandCompletionLoadError::Json)
+}
+
+#[derive(Debug)]
+enum CommandCompletionLoadError {
+    Io(std::io::Error),
+    Json(serde_json::Error),
+}
+
+impl std::fmt::Display for CommandCompletionLoadError {
+    fn fmt(
+        &self,
+        f: &mut std::fmt::Formatter<'_>,
+    ) -> std::fmt::Result {
+        match self {
+            Self::Io(error) => error.fmt(f),
+            Self::Json(error) => error.fmt(f),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum CommandCompletionFile {
+    Wrapped {
+        commands: Vec<JsonCommandCompletion>,
+    },
+    List(Vec<JsonCommandCompletion>),
+    Single(JsonCommandCompletion),
+}
+
+impl CommandCompletionFile {
+    fn into_command_completions(self) -> Vec<CommandCompletionConfig> {
+        match self {
+            Self::Wrapped { commands } | Self::List(commands) => {
+                normalize_command_completions(commands)
+            }
+            Self::Single(command) => normalize_command_completions([command]),
+        }
+    }
+}
+
+#[derive(Deserialize)]
+struct JsonCommandCompletion {
+    command: String,
+    #[serde(default, deserialize_with = "deserialize_json_subcommands")]
+    subcommands: Vec<JsonSubcommandCompletion>,
+}
+
+#[derive(Debug, Clone)]
+struct JsonSubcommandCompletion {
+    name: String,
+    arguments: Vec<String>,
+}
+
+fn deserialize_json_subcommands<'de, D>(
+    deserializer: D
+) -> Result<Vec<JsonSubcommandCompletion>, D::Error>
+where
+    D: Deserializer<'de>,
+{
+    let subcommands = JsonSubcommands::deserialize(deserializer)?;
+    Ok(match subcommands {
+        JsonSubcommands::List(items) => items
+            .into_iter()
+            .map(JsonSubcommandListEntry::into_subcommand)
+            .collect(),
+        JsonSubcommands::Map(items) => items
+            .into_iter()
+            .map(|(name, value)| value.into_subcommand(name))
+            .collect(),
+    })
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JsonSubcommands {
+    List(Vec<JsonSubcommandListEntry>),
+    Map(BTreeMap<String, JsonSubcommandValue>),
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JsonSubcommandListEntry {
+    Detail {
+        name: String,
+        #[serde(default)]
+        arguments: Vec<String>,
+    },
+    Name(String),
+}
+
+impl JsonSubcommandListEntry {
+    fn into_subcommand(self) -> JsonSubcommandCompletion {
+        match self {
+            Self::Detail { name, arguments } => JsonSubcommandCompletion { name, arguments },
+            Self::Name(name) => JsonSubcommandCompletion {
+                name,
+                arguments: Vec::new(),
+            },
+        }
+    }
+}
+
+#[derive(Deserialize)]
+#[serde(untagged)]
+enum JsonSubcommandValue {
+    Arguments(Vec<String>),
+    Detail {
+        #[serde(default)]
+        arguments: Vec<String>,
+    },
+}
+
+impl JsonSubcommandValue {
+    fn into_subcommand(
+        self,
+        name: String,
+    ) -> JsonSubcommandCompletion {
+        match self {
+            Self::Arguments(arguments) | Self::Detail { arguments } => {
+                JsonSubcommandCompletion { name, arguments }
+            }
+        }
+    }
+}
+
+fn normalize_command_completions(
+    commands: impl IntoIterator<Item = JsonCommandCompletion>
+) -> Vec<CommandCompletionConfig> {
+    let mut out = Vec::new();
+    for command in commands {
+        let command_name = command.command.trim();
+        if command_name.is_empty() {
+            continue;
+        }
+        push_command_completion(
+            &mut out,
+            CommandCompletionConfig {
+                command: command_name.to_owned(),
+                subcommands: normalize_subcommands(command.subcommands),
+            },
+        );
+    }
+    out
+}
+
+fn normalize_subcommands(
+    subcommands: impl IntoIterator<Item = JsonSubcommandCompletion>
+) -> Vec<SubcommandCompletionConfig> {
+    let mut out = Vec::new();
+    for subcommand in subcommands {
+        let name = subcommand.name.trim();
+        if name.is_empty() {
+            continue;
+        }
+        push_subcommand_completion(
+            &mut out,
+            SubcommandCompletionConfig {
+                name: name.to_owned(),
+                arguments: dedupe_strings(subcommand.arguments),
+            },
+        );
+    }
+    out
+}
+
+fn push_command_completion(
+    out: &mut Vec<CommandCompletionConfig>,
+    completion: CommandCompletionConfig,
+) {
+    if let Some(existing) = out
+        .iter_mut()
+        .find(|existing| existing.command == completion.command)
+    {
+        for subcommand in completion.subcommands {
+            push_subcommand_completion(&mut existing.subcommands, subcommand);
+        }
+    } else {
+        out.push(completion);
+    }
+}
+
+fn push_subcommand_completion(
+    out: &mut Vec<SubcommandCompletionConfig>,
+    completion: SubcommandCompletionConfig,
+) {
+    if let Some(existing) = out
+        .iter_mut()
+        .find(|existing| existing.name == completion.name)
+    {
+        for argument in completion.arguments {
+            push_string(&mut existing.arguments, argument);
+        }
+    } else {
+        out.push(completion);
+    }
+}
+
+fn dedupe_strings(values: impl IntoIterator<Item = String>) -> Vec<String> {
+    let mut out = Vec::new();
+    for value in values {
+        push_string(&mut out, value);
+    }
+    out
+}
+
+fn push_string(
+    out: &mut Vec<String>,
+    value: String,
+) {
+    if !value.is_empty() && !out.iter().any(|existing| existing == &value) {
+        out.push(value);
     }
 }
 
@@ -218,5 +490,107 @@ mod tests {
 
         assert_eq!(config.max_history, 1);
         assert_eq!(config.max_persistent_history_per_dir, 1);
+    }
+
+    #[test]
+    fn completion_files_load_wrapped_json_commands() {
+        let root = unique_test_dir("completion-wrapped");
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("commands.json");
+        fs::write(
+            &path,
+            r#"
+{
+  "commands": [
+    {
+      "command": "cargo",
+      "subcommands": [
+        { "name": "build", "arguments": ["--release", "--workspace"] }
+      ]
+    }
+  ]
+}
+"#,
+        )
+        .expect("write completion file");
+
+        let config = build_command_editor(Some(CommandEditorSettings {
+            completion_files: Some(vec![path.clone()]),
+            ..CommandEditorSettings::default()
+        }));
+
+        assert_eq!(config.completion_files, [path]);
+        assert_eq!(
+            config.command_completions,
+            [CommandCompletionConfig {
+                command: "cargo".to_owned(),
+                subcommands: vec![SubcommandCompletionConfig {
+                    name: "build".to_owned(),
+                    arguments: vec!["--release".to_owned(), "--workspace".to_owned()],
+                }],
+            }]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn completion_files_load_map_subcommands_and_merge_duplicates() {
+        let root = unique_test_dir("completion-map");
+        fs::create_dir_all(&root).expect("create temp dir");
+        let path = root.join("commands.json");
+        fs::write(
+            &path,
+            r#"
+[
+  {
+    "command": "cargo",
+    "subcommands": {
+      "build": ["--release"],
+      "test": { "arguments": ["--workspace"] }
+    }
+  },
+  {
+    "command": "cargo",
+    "subcommands": {
+      "build": ["--release", "--all-targets"]
+    }
+  }
+]
+"#,
+        )
+        .expect("write completion file");
+
+        let config = build_command_editor(Some(CommandEditorSettings {
+            completion_files: Some(vec![path]),
+            ..CommandEditorSettings::default()
+        }));
+
+        assert_eq!(
+            config.command_completions,
+            [CommandCompletionConfig {
+                command: "cargo".to_owned(),
+                subcommands: vec![
+                    SubcommandCompletionConfig {
+                        name: "build".to_owned(),
+                        arguments: vec!["--release".to_owned(), "--all-targets".to_owned()],
+                    },
+                    SubcommandCompletionConfig {
+                        name: "test".to_owned(),
+                        arguments: vec!["--workspace".to_owned()],
+                    },
+                ],
+            }]
+        );
+
+        let _ = fs::remove_dir_all(root);
+    }
+
+    fn unique_test_dir(label: &str) -> PathBuf {
+        let nonce = std::time::SystemTime::now()
+            .duration_since(std::time::UNIX_EPOCH)
+            .expect("system time after epoch")
+            .as_nanos();
+        std::env::temp_dir().join(format!("config41-{label}-{nonce}"))
     }
 }

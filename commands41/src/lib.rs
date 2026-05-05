@@ -38,6 +38,7 @@ const MAX_COMPLETION_CANDIDATES: usize = 5;
 pub struct EditorSettings {
     pub completion_words: Vec<String>,
     pub command_words: Vec<String>,
+    pub command_completions: Vec<CommandCompletion>,
     pub history_entries: Vec<HistoryEntry>,
     pub current_dir: Option<PathBuf>,
     pub max_history: usize,
@@ -48,11 +49,24 @@ impl Default for EditorSettings {
         Self {
             completion_words: Vec::new(),
             command_words: Vec::new(),
+            command_completions: Vec::new(),
             history_entries: Vec::new(),
             current_dir: None,
             max_history: DEFAULT_MAX_HISTORY,
         }
     }
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct CommandCompletion {
+    pub command: String,
+    pub subcommands: Vec<SubcommandCompletion>,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct SubcommandCompletion {
+    pub name: String,
+    pub arguments: Vec<String>,
 }
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -857,6 +871,9 @@ fn completion_suffix(
     }
     let candidates = if is_command_completion_word(buffer, word_start) {
         command_completion_candidates(&editor.history, settings)
+    } else if let Some(candidates) = structured_completion_candidates(settings, buffer, word_start)
+    {
+        candidates
     } else {
         word_completion_candidates(&editor.history, settings)
     };
@@ -988,6 +1005,9 @@ fn completion_matches(
     }
     let candidates = if is_command_completion_word(buffer, word_start) {
         command_word_completion_matches(&editor.history, settings, prefix)
+    } else if let Some(candidates) = structured_completion_candidates(settings, buffer, word_start)
+    {
+        prefix_completion_candidates(prefix, candidates)
     } else {
         word_completion_matches(&editor.history, settings, prefix)
     };
@@ -1022,7 +1042,14 @@ fn word_completion_matches(
     settings: &EditorSettings,
     query: &str,
 ) -> Vec<CompletionCandidate> {
-    word_completion_candidates(history, settings)
+    prefix_completion_candidates(query, word_completion_candidates(history, settings))
+}
+
+fn prefix_completion_candidates(
+    query: &str,
+    candidates: Vec<String>,
+) -> Vec<CompletionCandidate> {
+    candidates
         .into_iter()
         .filter(|candidate| candidate != query && candidate.starts_with(query))
         .map(CompletionCandidate::prefix)
@@ -1351,10 +1378,108 @@ fn command_completion_candidates(
     for word in &settings.completion_words {
         push_unique(&mut out, word);
     }
+    for completion in &settings.command_completions {
+        push_unique(&mut out, &completion.command);
+    }
     for word in shortest_first(&settings.command_words) {
         push_unique(&mut out, word);
     }
     out
+}
+
+fn structured_completion_candidates(
+    settings: &EditorSettings,
+    buffer: &str,
+    word_start: usize,
+) -> Option<Vec<String>> {
+    let words = shell_segment_words_before(buffer, word_start);
+    let command = words.first()?;
+    let completion = settings
+        .command_completions
+        .iter()
+        .find(|completion| completion.command == *command)?;
+
+    if words.len() == 1 {
+        return Some(
+            completion
+                .subcommands
+                .iter()
+                .map(|subcommand| subcommand.name.clone())
+                .collect(),
+        );
+    }
+
+    let subcommand = completion
+        .subcommands
+        .iter()
+        .find(|subcommand| subcommand.name == words[1])?;
+    Some(subcommand.arguments.clone())
+}
+
+fn shell_segment_words_before(
+    buffer: &str,
+    word_start: usize,
+) -> Vec<String> {
+    let Some(prefix) = buffer.get(..word_start) else {
+        return Vec::new();
+    };
+    let mut words = Vec::new();
+    let mut word = String::new();
+    let mut quote = None;
+    let mut escaped = false;
+
+    for ch in prefix.chars() {
+        if escaped {
+            word.push(ch);
+            escaped = false;
+            continue;
+        }
+
+        match quote {
+            Some('\'') => {
+                if ch == '\'' {
+                    quote = None;
+                } else {
+                    word.push(ch);
+                }
+            }
+            Some('"') => {
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == '"' {
+                    quote = None;
+                } else {
+                    word.push(ch);
+                }
+            }
+            Some(_) => {}
+            None => {
+                if ch == '\\' {
+                    escaped = true;
+                } else if ch == '\'' || ch == '"' {
+                    quote = Some(ch);
+                } else if ch.is_whitespace() {
+                    push_shell_word(&mut words, &mut word);
+                } else if is_operator_char(ch) {
+                    push_shell_word(&mut words, &mut word);
+                    words.clear();
+                } else {
+                    word.push(ch);
+                }
+            }
+        }
+    }
+    push_shell_word(&mut words, &mut word);
+    words
+}
+
+fn push_shell_word(
+    words: &mut Vec<String>,
+    word: &mut String,
+) {
+    if !word.is_empty() {
+        words.push(std::mem::take(word));
+    }
 }
 
 fn word_completion_candidates(

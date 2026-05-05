@@ -11,6 +11,7 @@ palette.workspace     = true
 parking_lot.workspace = true
 serde.workspace       = true
 serde_ignored         = "0.1.14"
+serde_json            = "1.0.149"
 shellexpand           = "3.1.2"
 smol_str.workspace    = true
 toml                  = "1.1.2"

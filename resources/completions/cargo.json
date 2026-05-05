@@ -1,0 +1,95 @@
+{
+  "commands": [
+    {
+      "command": "cargo",
+      "subcommands": {
+        "add": [
+          "--dev",
+          "--build",
+          "--optional",
+          "--features",
+          "--no-default-features",
+          "--rename",
+          "--package"
+        ],
+        "bench": [
+          "--all",
+          "--all-features",
+          "--features",
+          "--no-default-features",
+          "--package",
+          "--workspace"
+        ],
+        "build": [
+          "--all",
+          "--all-features",
+          "--bin",
+          "--example",
+          "--features",
+          "--lib",
+          "--no-default-features",
+          "--package",
+          "--release",
+          "--workspace"
+        ],
+        "check": [
+          "--all",
+          "--all-features",
+          "--all-targets",
+          "--features",
+          "--no-default-features",
+          "--package",
+          "--workspace"
+        ],
+        "clean": ["--doc", "--package", "--release"],
+        "clippy": [
+          "--all",
+          "--all-features",
+          "--all-targets",
+          "--fix",
+          "--features",
+          "--no-default-features",
+          "--package",
+          "--workspace"
+        ],
+        "doc": [
+          "--all",
+          "--all-features",
+          "--document-private-items",
+          "--features",
+          "--no-deps",
+          "--no-default-features",
+          "--open",
+          "--package",
+          "--workspace"
+        ],
+        "fmt": ["--all", "--check", "--package"],
+        "install": ["--bin", "--features", "--force", "--locked", "--path", "--version"],
+        "new": ["--bin", "--lib", "--name", "--vcs"],
+        "run": [
+          "--all-features",
+          "--bin",
+          "--example",
+          "--features",
+          "--no-default-features",
+          "--package",
+          "--release"
+        ],
+        "test": [
+          "--all",
+          "--all-features",
+          "--all-targets",
+          "--doc",
+          "--features",
+          "--lib",
+          "--no-default-features",
+          "--package",
+          "--release",
+          "--workspace"
+        ],
+        "update": ["--aggressive", "--dry-run", "--package", "--precise", "--workspace"],
+        "vendor": ["--locked", "--respect-source-config", "--sync", "--versioned-dirs"]
+      }
+    }
+  ]
+}

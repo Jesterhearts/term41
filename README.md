@@ -369,6 +369,9 @@ vsync = "auto"
 # enabled = true
 # vim_mode = false
 # completions = ["cargo", "git", "rg"]
+# JSON files with command-specific subcommand and argument completions.
+# Example files live in resources/completions.
+# completion_files = ["~/.config/term41/completions/cargo.json"]
 # Extra binary directories to scan for command-name completion. By default,
 # these are merged with term41's platform/user tool directory list.
 # binary_dirs = ["~/project/bin"]
@@ -443,8 +446,14 @@ Notes:
   It keeps keyboard handling unchanged while disabled, uses Up/Down for its own
   command history while active, and completes prefixes from recent history,
   configured words, executable commands discovered from `PATH` plus
-  `[command_editor]` `binary_dirs`, and paths relative to the shell's
-  OSC-reported current directory. The default binary-dir list is platform-based
+  `[command_editor]` `binary_dirs`, JSON command completion files, and paths
+  relative to the shell's OSC-reported current directory. JSON completion files
+  are configured with `completion_files = ["~/.config/term41/completions/cargo.json"]`
+  and may contain one command object, a list of command objects, or
+  `{ "commands": [...] }`. Each command object uses `command` and
+  `subcommands`; subcommands may be an array like
+  `{ "name": "build", "arguments": ["--release"] }` or a map like
+  `{ "build": ["--release"] }`. The default binary-dir list is platform-based
   and includes common user tool directories such as `~/.cargo/bin` and the
   `dirs` crate's per-user executable directory, usually `~/.local/bin` on
   Linux. User-supplied `binary_dirs` are merged into that list by default; set

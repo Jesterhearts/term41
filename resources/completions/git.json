@@ -1,0 +1,43 @@
+{
+  "commands": [
+    {
+      "command": "git",
+      "subcommands": {
+        "add": ["--all", "--dry-run", "--edit", "--intent-to-add", "--patch", "--update"],
+        "bisect": ["bad", "good", "log", "reset", "run", "skip", "start"],
+        "branch": [
+          "--all",
+          "--delete",
+          "--force",
+          "--list",
+          "--move",
+          "--remotes",
+          "--set-upstream-to",
+          "--show-current",
+          "--track",
+          "--verbose"
+        ],
+        "checkout": ["--branch", "--detach", "--force", "--ours", "--patch", "--theirs"],
+        "cherry-pick": ["--abort", "--continue", "--edit", "--mainline", "--no-commit", "--quit"],
+        "clean": ["--directories", "--dry-run", "--exclude", "--force", "--interactive"],
+        "clone": ["--branch", "--depth", "--filter", "--origin", "--recurse-submodules", "--single-branch"],
+        "commit": ["--all", "--amend", "--message", "--no-edit", "--signoff", "--verbose"],
+        "diff": ["--cached", "--check", "--name-only", "--name-status", "--stat", "--staged"],
+        "fetch": ["--all", "--depth", "--dry-run", "--prune", "--tags", "--verbose"],
+        "grep": ["--cached", "--count", "--files-with-matches", "--ignore-case", "--line-number"],
+        "log": ["--all", "--decorate", "--graph", "--max-count", "--oneline", "--patch", "--stat"],
+        "merge": ["--abort", "--continue", "--ff-only", "--no-ff", "--squash"],
+        "pull": ["--ff-only", "--rebase", "--tags", "--verbose"],
+        "push": ["--all", "--delete", "--dry-run", "--force-with-lease", "--set-upstream", "--tags"],
+        "rebase": ["--abort", "--continue", "--interactive", "--onto", "--quit", "--skip"],
+        "remote": ["add", "get-url", "prune", "remove", "rename", "set-url", "show", "update"],
+        "reset": ["--hard", "--mixed", "--patch", "--soft"],
+        "restore": ["--patch", "--source", "--staged", "--worktree"],
+        "stash": ["apply", "branch", "clear", "drop", "list", "pop", "push", "show"],
+        "status": ["--branch", "--ignored", "--porcelain", "--short", "--show-stash"],
+        "switch": ["--create", "--detach", "--force-create", "--guess", "--track"],
+        "tag": ["--annotate", "--delete", "--force", "--list", "--message", "--sign", "--verify"]
+      }
+    }
+  ]
+}

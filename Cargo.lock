@@ -661,6 +661,7 @@ dependencies = [
  "parking_lot",
  "serde",
  "serde_ignored",
+ "serde_json",
  "shellexpand",
  "smol_str 0.3.6",
  "toml 1.1.2+spec-1.1.0",

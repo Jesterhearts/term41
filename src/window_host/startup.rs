@@ -483,10 +483,29 @@ pub(crate) fn command_editor_settings(
     EditorSettings {
         completion_words: config.completions.clone(),
         command_words,
+        command_completions: command_completion_settings(config),
         history_entries,
         current_dir,
         max_history: config.max_history,
     }
+}
+
+fn command_completion_settings(config: &CommandEditorConfig) -> Vec<commands41::CommandCompletion> {
+    config
+        .command_completions
+        .iter()
+        .map(|completion| commands41::CommandCompletion {
+            command: completion.command.clone(),
+            subcommands: completion
+                .subcommands
+                .iter()
+                .map(|subcommand| commands41::SubcommandCompletion {
+                    name: subcommand.name.clone(),
+                    arguments: subcommand.arguments.clone(),
+                })
+                .collect(),
+        })
+        .collect()
 }
 
 pub(crate) fn enqueue_persistent_command_history(
