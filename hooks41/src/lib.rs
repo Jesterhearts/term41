@@ -224,6 +224,11 @@ if (-not $global:__TERM41_SHELL_INTEGRATION_INSTALLED) {
     $global:__term41PromptSeen = $false
     $global:__term41CommandRunning = $false
     $global:__term41OriginalPrompt = (Get-Command prompt -CommandType Function).ScriptBlock
+    $global:__term41OriginalPSConsoleHostReadLine = $null
+    $term41ReadLineCommand = Get-Command PSConsoleHostReadLine -CommandType Function -ErrorAction SilentlyContinue
+    if ($null -ne $term41ReadLineCommand) {
+        $global:__term41OriginalPSConsoleHostReadLine = $term41ReadLineCommand.ScriptBlock
+    }
 
     function global:__term41PercentEncodePath {
         param([string] $Path)
@@ -264,6 +269,27 @@ if (-not $global:__TERM41_SHELL_INTEGRATION_INSTALLED) {
         [Console]::Write("`e]7;file://localhost$(__term41PercentEncodePath $term41Path)`a")
     }
 
+    function global:__term41EmitCommandStart {
+        if (-not $global:__term41CommandRunning) {
+            [Console]::Write("`e]133;C`a")
+            $global:__term41CommandRunning = $true
+        }
+    }
+
+    function global:PSConsoleHostReadLine {
+        $term41Line = if ($null -ne $global:__term41OriginalPSConsoleHostReadLine) {
+            & $global:__term41OriginalPSConsoleHostReadLine
+        } else {
+            [Console]::ReadLine()
+        }
+
+        if (-not [string]::IsNullOrWhiteSpace($term41Line)) {
+            __term41EmitCommandStart
+        }
+
+        $term41Line
+    }
+
     function global:prompt {
         $term41Success = $?
         $term41Exit = if ($term41Success) {
@@ -289,8 +315,7 @@ if (-not $global:__TERM41_SHELL_INTEGRATION_INSTALLED) {
         Set-PSReadLineOption -AddToHistoryHandler {
             param([string] $line)
             if (-not [string]::IsNullOrWhiteSpace($line)) {
-                [Console]::Write("`e]133;C`a")
-                $global:__term41CommandRunning = $true
+                __term41EmitCommandStart
             }
             return $true
         }
@@ -646,6 +671,25 @@ mod tests {
     fn powershell_appends_command_start_to_prompt_text() {
         assert!(POWERSHELL_HOOK.contains(r#""$term41PromptText`e]133;B`a""#));
         assert!(!POWERSHELL_HOOK.contains(r#"[Console]::Write("`e]133;B`a")"#));
+    }
+
+    #[test]
+    fn powershell_wraps_command_line_acceptance_for_command_start() {
+        assert!(POWERSHELL_HOOK.contains("function global:PSConsoleHostReadLine"));
+        assert!(
+            POWERSHELL_HOOK.contains("Get-Command PSConsoleHostReadLine -CommandType Function")
+        );
+        assert!(POWERSHELL_HOOK.contains("__term41EmitCommandStart"));
+    }
+
+    #[test]
+    fn powershell_history_handler_uses_guarded_command_start() {
+        assert!(POWERSHELL_HOOK.contains("Set-PSReadLineOption -AddToHistoryHandler"));
+        assert!(POWERSHELL_HOOK.contains("__term41EmitCommandStart"));
+        assert!(!POWERSHELL_HOOK.contains(
+            r#"[Console]::Write("`e]133;C`a")
+                $global:__term41CommandRunning = $true"#
+        ));
     }
 
     fn hook_emits_marker(
