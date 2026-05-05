@@ -164,9 +164,9 @@ cargo bin dir:
 cargo install --git https://github.com/Jesterhearts/term41.git --tag 0.1.1 --locked term41
 ```
 
-The default install enables FFmpeg-backed GIF/video decoding and Wayland
-data-control clipboard support. If you want the smallest dependency surface, or
-the fastest build times:
+The default install enables FFmpeg-backed GIF/video decoding, Vulkan rendering,
+and Wayland data-control clipboard support. If you want the smallest dependency
+surface, or the fastest build times:
 
 ```sh
 cargo install --git https://github.com/Jesterhearts/term41.git --tag 0.1.1 --locked --no-default-features term41
@@ -183,10 +183,10 @@ cargo install --path . --locked
 | Feature                | Default | Description                                                                                                       |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------- |
 | `ffmpeg`               | on      | Enables GIF/video decode for inline images and animated backgrounds. Requires host `libav*` development packages. |
-| `vulkan`               | off     | Uses Vulkan instead of OpenGL for rendering.                                                                      |
+| `vulkan`               | on      | Uses Vulkan instead of OpenGL for rendering.                                                                      |
 | `wayland-data-control` | on      | Enables `zwlr_data_control_manager_v1` clipboard access on Wayland compositors that support it.                   |
 
-If you want a smaller build without ffmpeg or Wayland data-control:
+If you want a smaller build without ffmpeg, Vulkan, or Wayland data-control:
 
 ```sh
 cargo build --release --no-default-features

@@ -2,6 +2,53 @@
 
 All notable changes to `term41` are documented here.
 
+## [0.2.0] - 2026-05-05
+
+Generated from the changes between tag `0.1.1` and the pending `0.2.0`
+release.
+
+### Added
+
+- Added a command editor layer with command/path/history completion, multiline
+  editing, selection/copy support, undo/redo, and an optional Vim-style editing
+  mode.
+- Added a command palette with fuzzy matching, argument commands, configurable
+  unbound jump actions, and command completion metadata.
+- Added persistent per-directory command history backed by SQLite, plus deeper
+  shell history integration for bash, zsh, and PowerShell history sources.
+- Added opt-in shell integration hooks which emit prompt, command, exit-status,
+  and current-directory lifecycle markers.
+- Added scrollback-aware mouse selection across rendered command blocks,
+  including selection extension after viewport scroll.
+- Added SGR pixel mouse reporting (`?1016`).
+- Added image z-index ordering and page-position aware visible image ordering.
+- Added default Vulkan rendering through the `vulkan` Cargo feature.
+
+### Changed
+
+- Reworked scrollback around completed command blocks, sticky prompt rows,
+  command-block gutter markers, and command-block image anchoring.
+- Reflowed completed command blocks during resize instead of treating completed
+  output as fixed-width snapshots.
+- Routed command-editor interactions through the same input, mouse, paste, and
+  resize paths used by the rest of the terminal UI.
+- Reduced atlas memory usage and cached gutter markers with terminal rows.
+
+### Fixed
+
+- Fixed mixed-DPI flicker and a rare resize panic across mixed-DPI setups.
+- Fixed high CPU usage from shift-click selection.
+- Fixed soft-wrap row clearing and stale wrapped-row snapshot continuations.
+- Fixed Kitty placeholder image storage recovery.
+- Fixed prompt/gutter placement issues around sticky prompts, block cursors,
+  status layout, and gutter popup prompts.
+
+### Documentation
+
+- Updated README feature-default documentation to reflect Vulkan being enabled
+  by default.
+- Documented primary-screen clear padding behavior.
+
 ## [0.1.1] - 2026-04-26
 
 Generated from the changes between tags `0.1.0` and `0.1.1`.
@@ -93,4 +140,5 @@ Generated from the changes between tags `0.1.0` and `0.1.1`.
   normalization, text writes, snapshot generations, and scripting change
   delivery.
 
+[0.2.0]: https://github.com/Jesterhearts/term41/compare/0.1.1...0.2.0
 [0.1.1]: https://github.com/Jesterhearts/term41/compare/0.1.0...0.1.1
