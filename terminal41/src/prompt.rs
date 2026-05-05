@@ -784,6 +784,50 @@ pub fn command_block_document(
     CommandBlockDocument { blocks }
 }
 
+/// Find the command block for an exact prompt reference.
+pub fn command_block_for_prompt(
+    document: &CommandBlockDocument,
+    prompt: PromptRef,
+) -> Option<&CommandBlockView> {
+    document.blocks.iter().find(|block| block.prompt == prompt)
+}
+
+/// Find the command block for the nearest prompt at or above a viewport row.
+pub fn command_block_for_screen_row<'a>(
+    document: &'a CommandBlockDocument,
+    screen: &Screen,
+    viewport: &Viewport,
+    screen_row: u32,
+) -> Option<&'a CommandBlockView> {
+    let prompt = find_prompt_ref_for_screen_row(screen, viewport, screen_row)?;
+    command_block_for_prompt(document, prompt)
+}
+
+/// Find the nearest matching command block before a rendered document row.
+pub fn previous_command_block_matching(
+    document: &CommandBlockDocument,
+    rendered_top: usize,
+    keep: impl Fn(&CommandBlockView) -> bool,
+) -> Option<&CommandBlockView> {
+    document
+        .blocks
+        .iter()
+        .filter(|block| keep(block))
+        .filter(|block| (block.prompt.rendered_row as usize) < rendered_top)
+        .max_by_key(|block| block.prompt.rendered_row)
+}
+
+/// Find the next command block after a rendered document row.
+pub fn next_command_block_after(
+    document: &CommandBlockDocument,
+    rendered_top: usize,
+) -> Option<&CommandBlockView> {
+    document
+        .blocks
+        .iter()
+        .find(|block| (block.prompt.rendered_row as usize) > rendered_top)
+}
+
 fn command_block_prompts(screen: &Screen) -> Vec<PromptRef> {
     (0..screen::rendered_rows_len(screen) as u32)
         .filter_map(|rendered_row| {
@@ -938,14 +982,18 @@ mod tests {
     use super::command_and_output_text_at;
     use super::command_and_output_text_for_prompt;
     use super::command_block_document;
+    use super::command_block_for_prompt;
+    use super::command_block_for_screen_row;
     use super::command_block_view_for_prompt;
     use super::command_block_view_for_screen_row;
     use super::command_text_at;
     use super::command_text_for_prompt;
     use super::find_prompt_for_screen_row;
     use super::find_prompt_ref_for_screen_row;
+    use super::next_command_block_after;
     use super::output_text_at;
     use super::output_text_for_prompt;
+    use super::previous_command_block_matching;
     use super::select_command_at;
     use super::select_command_for_prompt;
     use crate::screen;
@@ -1274,6 +1322,42 @@ mod tests {
         assert_eq!(document.blocks[1].state, CommandBlockState::Editing);
         assert!(document.blocks[1].prompt.active_abs_row.is_some());
         assert!(document.blocks[0].prompt.rendered_row < document.blocks[1].prompt.rendered_row);
+    }
+
+    #[test]
+    fn command_block_queries_find_blocks_by_prompt_screen_row_and_position() {
+        let mut term = TestTerm::new(12, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07one\n\x1b]133;C\x07out\n\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07two");
+        term.active.offset = screen::rendered_scrollback_len(&term.active, &term.inner.viewport);
+
+        let document = command_block_document(&term.active, &term.metadata.command_metas);
+        let first = &document.blocks[0];
+        let second = &document.blocks[1];
+
+        assert_eq!(
+            command_block_for_prompt(&document, first.prompt).map(|block| block.prompt),
+            Some(first.prompt)
+        );
+        assert_eq!(
+            command_block_for_screen_row(&document, &term.active, &term.inner.viewport, 0)
+                .map(|block| block.prompt),
+            Some(first.prompt)
+        );
+        assert_eq!(
+            previous_command_block_matching(
+                &document,
+                second.prompt.rendered_row as usize,
+                |block| block.state == CommandBlockState::Succeeded,
+            )
+            .map(|block| block.prompt),
+            Some(first.prompt)
+        );
+        assert_eq!(
+            next_command_block_after(&document, first.prompt.rendered_row as usize)
+                .map(|block| block.prompt),
+            Some(second.prompt)
+        );
     }
 
     #[test]

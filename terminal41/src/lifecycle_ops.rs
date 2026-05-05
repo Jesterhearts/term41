@@ -112,15 +112,8 @@ fn scroll_to_prev_prompt_matching(
     keep: impl Fn(&prompt::CommandBlockView) -> bool,
 ) {
     let top = rendered_viewport_top(screen, viewport);
-    let target = document
-        .blocks
-        .iter()
-        .filter(|block| keep(block))
-        .map(|block| block.prompt.rendered_row as usize)
-        .filter(|&rendered_row| rendered_row < top)
-        .max();
-    if let Some(target) = target {
-        scroll_rendered_row_to_viewport_top(screen, viewport, target);
+    if let Some(block) = prompt::previous_command_block_matching(document, top, keep) {
+        scroll_rendered_row_to_viewport_top(screen, viewport, block.prompt.rendered_row as usize);
     }
 }
 
@@ -130,13 +123,8 @@ pub(crate) fn scroll_to_next_prompt(
     document: &prompt::CommandBlockDocument,
 ) {
     let top = rendered_viewport_top(screen, viewport);
-    let target = document
-        .blocks
-        .iter()
-        .map(|block| block.prompt.rendered_row as usize)
-        .find(|&rendered_row| rendered_row > top);
-    if let Some(target) = target {
-        scroll_rendered_row_to_viewport_top(screen, viewport, target);
+    if let Some(block) = prompt::next_command_block_after(document, top) {
+        scroll_rendered_row_to_viewport_top(screen, viewport, block.prompt.rendered_row as usize);
     }
 }
 
@@ -862,13 +850,10 @@ mod tests {
         keep: impl Fn(&prompt::CommandBlockView) -> bool,
     ) -> usize {
         let top = rendered_viewport_top(&term.inner.active, &term.inner.viewport);
-        prompt::command_block_document(&term.inner.active, &term.metadata.command_metas)
-            .blocks
-            .into_iter()
-            .filter(|block| keep(block))
+        let document =
+            prompt::command_block_document(&term.inner.active, &term.metadata.command_metas);
+        prompt::previous_command_block_matching(&document, top, keep)
             .map(|block| block.prompt.rendered_row as usize)
-            .filter(|&rendered_row| rendered_row < top)
-            .max()
             .expect("matching previous prompt")
     }
 

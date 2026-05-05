@@ -91,8 +91,8 @@ use terminal41::prompt::CommandBlockCommand;
 use terminal41::prompt::CommandTextSource;
 use terminal41::prompt::PromptRef;
 use terminal41::prompt::command_block_document;
-use terminal41::prompt::command_block_view_for_prompt;
-use terminal41::prompt::command_block_view_for_screen_row;
+use terminal41::prompt::command_block_for_prompt;
+use terminal41::prompt::command_block_for_screen_row;
 use terminal41::prompt::select_command_for_prompt;
 use terminal41::selection::SelectionMode;
 use terminal41::selection::active_screen_row_at_viewport_row;
@@ -860,11 +860,10 @@ fn format_duration(d: Duration) -> String {
 }
 
 fn popup_command_text(
+    document: &terminal41::prompt::CommandBlockDocument,
     prompt: PromptRef,
-    command_metas: &HashMap<u64, terminal41::CommandMeta>,
-    screen: &terminal41::Screen,
 ) -> Option<CommandBlockCommand> {
-    command_block_view_for_prompt(prompt, command_metas, screen).command
+    command_block_for_prompt(document, prompt)?.command.clone()
 }
 
 fn popup_rerun_command_text(command: CommandBlockCommand) -> String {

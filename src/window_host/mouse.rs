@@ -1025,12 +1025,10 @@ pub(crate) fn open_gutter_popup(
     };
     let mut guard = target.terminal.lock();
     let terminal = &mut *guard;
-    let Some(block) = command_block_view_for_screen_row(
-        &terminal.active,
-        &terminal.viewport,
-        screen_row,
-        &terminal.metadata.command_metas,
-    ) else {
+    let document = command_block_document(&terminal.active, &terminal.metadata.command_metas);
+    let Some(block) =
+        command_block_for_screen_row(&document, &terminal.active, &terminal.viewport, screen_row)
+    else {
         return;
     };
     select_command_for_prompt(
@@ -1070,7 +1068,8 @@ fn popup_rerun_command_for_tab(
 ) -> Option<(CommandBlockCommand, bool)> {
     let target = host.input.endpoints.get_mut(&tab_id)?;
     let mut terminal = target.terminal.lock();
-    let command = popup_command_text(prompt, &terminal.metadata.command_metas, &terminal.active)?;
+    let document = command_block_document(&terminal.active, &terminal.metadata.command_metas);
+    let command = popup_command_text(&document, prompt)?;
     let bracketed_paste_enabled = terminal.modes.bracketed_paste;
     terminal.selection = None;
     terminal.invalidate_snapshot_rows();
@@ -1126,12 +1125,9 @@ pub(crate) fn execute_popup_action(
             };
             let mut guard = target.terminal.lock();
             let terminal = &mut *guard;
-            let block = command_block_view_for_prompt(
-                popup.prompt,
-                &terminal.metadata.command_metas,
-                &terminal.active,
-            );
-            if let Some(command) = block.command {
+            let document =
+                command_block_document(&terminal.active, &terminal.metadata.command_metas);
+            if let Some(command) = popup_command_text(&document, popup.prompt) {
                 let text = popup_rerun_command_text(command);
                 copy_to_clipboard(&mut terminal.clipboard, &text);
             }
@@ -1143,12 +1139,11 @@ pub(crate) fn execute_popup_action(
                 return;
             };
             let mut terminal = target.terminal.lock();
-            let block = command_block_view_for_prompt(
-                popup.prompt,
-                &terminal.metadata.command_metas,
-                &terminal.active,
-            );
-            if let Some(text) = block.command_and_output {
+            let document =
+                command_block_document(&terminal.active, &terminal.metadata.command_metas);
+            if let Some(text) = command_block_for_prompt(&document, popup.prompt)
+                .and_then(|block| block.command_and_output.as_deref())
+            {
                 copy_to_clipboard(&mut terminal.clipboard, text.trim());
             }
             terminal.selection = None;
@@ -1159,12 +1154,11 @@ pub(crate) fn execute_popup_action(
                 return;
             };
             let mut terminal = target.terminal.lock();
-            let block = command_block_view_for_prompt(
-                popup.prompt,
-                &terminal.metadata.command_metas,
-                &terminal.active,
-            );
-            if let Some(text) = block.output {
+            let document =
+                command_block_document(&terminal.active, &terminal.metadata.command_metas);
+            if let Some(text) = command_block_for_prompt(&document, popup.prompt)
+                .and_then(|block| block.output.as_deref())
+            {
                 copy_to_clipboard(&mut terminal.clipboard, text.trim());
             }
             terminal.selection = None;
