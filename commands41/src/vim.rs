@@ -87,7 +87,7 @@ fn apply_vim_normal_key(
         }
         VimKey::Enter => {
             editor.vim_pending = None;
-            let command = submitted_command(&editor.buffer);
+            let command = submitted_command(&editor.buffer, settings.escape_character);
             push_history(editor, &command, settings.max_history);
             editor.clear();
             EditOutcome::Submitted(command)

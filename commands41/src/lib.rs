@@ -42,6 +42,7 @@ pub struct EditorSettings {
     pub history_entries: Vec<HistoryEntry>,
     pub current_dir: Option<PathBuf>,
     pub max_history: usize,
+    pub escape_character: char,
 }
 
 impl Default for EditorSettings {
@@ -53,6 +54,7 @@ impl Default for EditorSettings {
             history_entries: Vec::new(),
             current_dir: None,
             max_history: DEFAULT_MAX_HISTORY,
+            escape_character: '\\',
         }
     }
 }
@@ -316,7 +318,7 @@ pub fn apply_input(
         }
         EditorInput::Vim(key) => vim::apply_vim_key(editor, key, settings),
         EditorInput::Enter => {
-            let command = submitted_command(&editor.buffer);
+            let command = submitted_command(&editor.buffer, settings.escape_character);
             history::push(&mut editor.history, &command, settings.max_history);
             editor.clear();
             EditOutcome::Submitted(command)
@@ -832,15 +834,31 @@ fn complete_current_prefix(
     EditOutcome::Updated
 }
 
-fn submitted_command(buffer: &str) -> String {
-    buffer
+fn submitted_command(
+    buffer: &str,
+    escape_character: char,
+) -> String {
+    let mut lines = buffer
         .replace("\r\n", "\n")
         .replace('\r', "\n")
         .split('\n')
         .map(str::trim)
         .filter(|line| !line.is_empty())
-        .collect::<Vec<_>>()
-        .join("\n")
+        .map(str::to_owned)
+        .collect::<Vec<_>>();
+    append_line_continuations(&mut lines, escape_character);
+    lines.join("\n")
+}
+
+fn append_line_continuations(
+    lines: &mut [String],
+    escape_character: char,
+) {
+    let continuation_count = lines.len().saturating_sub(1);
+    for line in lines.iter_mut().take(continuation_count) {
+        line.push(' ');
+        line.push(escape_character);
+    }
 }
 
 fn push_history(
@@ -865,7 +883,7 @@ fn completion_suffix(
         return Some(suffix);
     }
 
-    let (word_start, prefix) = current_completion_word(buffer, cursor)?;
+    let (word_start, prefix) = current_completion_word(buffer, cursor, settings.escape_character)?;
     if prefix.is_empty() {
         return None;
     }
@@ -999,7 +1017,7 @@ fn completion_matches(
         return Some(matches);
     }
 
-    let (word_start, prefix) = current_completion_word(buffer, cursor)?;
+    let (word_start, prefix) = current_completion_word(buffer, cursor, settings.escape_character)?;
     if prefix.is_empty() {
         return None;
     }
@@ -1210,7 +1228,7 @@ fn path_completion_word_and_candidates(
     settings: &EditorSettings,
 ) -> Option<(String, Vec<PathCompletionCandidate>)> {
     let current_dir = settings.current_dir.as_deref()?;
-    let word = current_path_completion_word(buffer, cursor)?;
+    let word = current_path_completion_word(buffer, cursor, settings.escape_character)?;
     if word.decoded.is_empty()
         || !path_completion_allowed(buffer, word.start, &word.decoded, word.quote)
     {
@@ -1230,11 +1248,12 @@ fn path_completion_word_and_candidates(
 fn current_completion_word(
     buffer: &str,
     cursor: usize,
+    escape_character: char,
 ) -> Option<(usize, &str)> {
     if cursor > buffer.len() || !buffer.is_char_boundary(cursor) {
         return None;
     }
-    let scan = scan_completion_word(buffer, cursor);
+    let scan = scan_completion_word(buffer, cursor, escape_character);
     if !cursor_at_completion_word_end(buffer, cursor, scan) {
         return None;
     }
@@ -1252,6 +1271,7 @@ struct CompletionWordScan {
 fn scan_completion_word(
     buffer: &str,
     cursor: usize,
+    escape_character: char,
 ) -> CompletionWordScan {
     let mut start = 0;
     let mut quote = None;
@@ -1271,7 +1291,7 @@ fn scan_completion_word(
                 }
             }
             Some('"') => {
-                if ch == '\\' {
+                if ch == escape_character {
                     escaped = true;
                 } else if ch == '"' {
                     quote = None;
@@ -1279,7 +1299,7 @@ fn scan_completion_word(
             }
             Some(_) => {}
             None => {
-                if ch == '\\' {
+                if ch == escape_character {
                     escaped = true;
                 } else if ch == '\'' || ch == '"' {
                     quote = Some(ch);
@@ -1319,8 +1339,9 @@ fn cursor_at_completion_word_end(
 fn current_path_completion_word(
     buffer: &str,
     cursor: usize,
+    escape_character: char,
 ) -> Option<PathCompletionWord> {
-    let (start, raw) = current_completion_word(buffer, cursor)?;
+    let (start, raw) = current_completion_word(buffer, cursor, escape_character)?;
     if let Some(quote) = raw.chars().next().filter(|ch| *ch == '\'' || *ch == '"') {
         let quote_len = quote.len_utf8();
         let inner = &raw[quote_len..];
@@ -1329,40 +1350,51 @@ fn current_path_completion_word(
             raw: inner.to_owned(),
             decoded: inner.to_owned(),
             quote: Some(quote),
+            escape_character,
         });
     }
 
     Some(PathCompletionWord {
         start,
         raw: raw.to_owned(),
-        decoded: decode_unquoted_path_word(raw),
+        decoded: decode_unquoted_path_word(raw, escape_character),
         quote: None,
+        escape_character,
     })
 }
 
-fn decode_unquoted_path_word(raw: &str) -> String {
+fn decode_unquoted_path_word(
+    raw: &str,
+    escape_character: char,
+) -> String {
     let mut out = String::new();
     let mut chars = raw.chars().peekable();
     while let Some(ch) = chars.next() {
-        if ch != '\\' {
+        if ch != escape_character {
             out.push(ch);
             continue;
         }
 
         let Some(&next) = chars.peek() else {
-            out.push('\\');
+            out.push(escape_character);
             break;
         };
-        if backslash_escapes_path_char(next) {
+        if escape_character_escapes_path_char(escape_character, next) {
             out.push(chars.next().expect("peeked char exists"));
         } else {
-            out.push('\\');
+            out.push(escape_character);
         }
     }
     out
 }
 
-fn backslash_escapes_path_char(ch: char) -> bool {
+fn escape_character_escapes_path_char(
+    escape_character: char,
+    ch: char,
+) -> bool {
+    if escape_character != '\\' {
+        return true;
+    }
     ch.is_whitespace()
         || matches!(
             ch,
@@ -1392,7 +1424,7 @@ fn structured_completion_candidates(
     buffer: &str,
     word_start: usize,
 ) -> Option<Vec<String>> {
-    let words = shell_segment_words_before(buffer, word_start);
+    let words = shell_segment_words_before(buffer, word_start, settings.escape_character);
     let command = words.first()?;
     let completion = settings
         .command_completions
@@ -1419,6 +1451,7 @@ fn structured_completion_candidates(
 fn shell_segment_words_before(
     buffer: &str,
     word_start: usize,
+    escape_character: char,
 ) -> Vec<String> {
     let Some(prefix) = buffer.get(..word_start) else {
         return Vec::new();
@@ -1444,7 +1477,7 @@ fn shell_segment_words_before(
                 }
             }
             Some('"') => {
-                if ch == '\\' {
+                if ch == escape_character {
                     escaped = true;
                 } else if ch == '"' {
                     quote = None;
@@ -1454,7 +1487,7 @@ fn shell_segment_words_before(
             }
             Some(_) => {}
             None => {
-                if ch == '\\' {
+                if ch == escape_character {
                     escaped = true;
                 } else if ch == '\'' || ch == '"' {
                     quote = Some(ch);
@@ -1514,6 +1547,7 @@ struct PathCompletionRequest {
     entry_prefix: String,
     completed_prefix: String,
     quote: Option<char>,
+    escape_character: char,
 }
 
 #[derive(Debug, Clone)]
@@ -1528,6 +1562,7 @@ struct PathCompletionWord {
     raw: String,
     decoded: String,
     quote: Option<char>,
+    escape_character: char,
 }
 
 #[derive(Debug, Clone)]
@@ -1859,6 +1894,7 @@ fn path_completion_request(
         entry_prefix: entry_prefix.to_owned(),
         completed_prefix: raw_dir.to_owned(),
         quote: word.quote,
+        escape_character: word.escape_character,
     })
 }
 
@@ -1919,7 +1955,7 @@ fn path_completion_candidates(
         let completed_word = format!(
             "{}{}",
             request.completed_prefix,
-            encode_path_completion_text(&suffix, request.quote)
+            encode_path_completion_text(&suffix, request.quote, request.escape_character)
         );
         candidates.push(PathCompletionCandidate {
             completed_word,
@@ -1932,40 +1968,61 @@ fn path_completion_candidates(
 fn encode_path_completion_text(
     text: &str,
     quote: Option<char>,
+    escape_character: char,
 ) -> String {
     match quote {
-        Some('"') => escape_double_quoted_path_text(text),
+        Some('"') => escape_double_quoted_path_text(text, escape_character),
         Some('\'') => text.to_owned(),
-        None => escape_unquoted_path_text(text),
+        None => escape_unquoted_path_text(text, escape_character),
         Some(_) => text.to_owned(),
     }
 }
 
-fn escape_unquoted_path_text(text: &str) -> String {
+fn escape_unquoted_path_text(
+    text: &str,
+    escape_character: char,
+) -> String {
     let mut out = String::new();
     for ch in text.chars() {
-        if ch.is_whitespace()
-            || matches!(
-                ch,
-                '\\' | '\'' | '"' | '$' | '`' | '!' | '&' | ';' | '|' | '<' | '>' | '(' | ')'
-            )
-        {
-            out.push('\\');
+        if unquoted_path_char_needs_escape(ch, escape_character) {
+            out.push(escape_character);
         }
         out.push(ch);
     }
     out
 }
 
-fn escape_double_quoted_path_text(text: &str) -> String {
+fn unquoted_path_char_needs_escape(
+    ch: char,
+    escape_character: char,
+) -> bool {
+    ch.is_whitespace()
+        || ch == escape_character
+        || matches!(
+            ch,
+            '\'' | '"' | '$' | '!' | '&' | ';' | '|' | '<' | '>' | '(' | ')'
+        )
+}
+
+fn escape_double_quoted_path_text(
+    text: &str,
+    escape_character: char,
+) -> String {
     let mut out = String::new();
     for ch in text.chars() {
-        if matches!(ch, '\\' | '"' | '$' | '`') {
-            out.push('\\');
+        if double_quoted_path_char_needs_escape(ch, escape_character) {
+            out.push(escape_character);
         }
         out.push(ch);
     }
     out
+}
+
+fn double_quoted_path_char_needs_escape(
+    ch: char,
+    escape_character: char,
+) -> bool {
+    ch == '"' || ch == '$' || ch == escape_character || (escape_character == '\\' && ch == '`')
 }
 
 #[cfg(test)]

@@ -487,6 +487,7 @@ pub(crate) fn command_editor_settings(
         history_entries,
         current_dir,
         max_history: config.max_history,
+        escape_character: hooks41::current_shell_escape_character(),
     }
 }
 

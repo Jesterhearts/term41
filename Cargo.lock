@@ -4180,6 +4180,7 @@ dependencies = [
  "fontdb",
  "harfrust",
  "history41",
+ "hooks41",
  "ico",
  "image41",
  "infer",

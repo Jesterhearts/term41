@@ -84,6 +84,7 @@ font41.workspace               = true
 fontdb                         = "0.23.0"
 harfrust                       = "0.6.0"
 history41.workspace            = true
+hooks41.workspace              = true
 image41.workspace              = true
 infer.workspace                = true
 log.workspace                  = true

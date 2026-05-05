@@ -8,6 +8,7 @@ fn settings(words: &[&str]) -> EditorSettings {
         history_entries: Vec::new(),
         current_dir: None,
         max_history: 20,
+        escape_character: '\\',
     }
 }
 
@@ -19,6 +20,7 @@ fn command_settings(words: &[&str]) -> EditorSettings {
         history_entries: Vec::new(),
         current_dir: None,
         max_history: 20,
+        escape_character: '\\',
     }
 }
 
@@ -30,6 +32,14 @@ fn path_settings(current_dir: PathBuf) -> EditorSettings {
         history_entries: Vec::new(),
         current_dir: Some(current_dir),
         max_history: 20,
+        escape_character: '\\',
+    }
+}
+
+fn powershell_path_settings(current_dir: PathBuf) -> EditorSettings {
+    EditorSettings {
+        escape_character: '`',
+        ..path_settings(current_dir)
     }
 }
 
@@ -50,7 +60,7 @@ fn inserts_and_submits_command() {
 }
 
 #[test]
-fn submit_preserves_logical_newlines() {
+fn submit_adds_line_continuations_to_logical_newlines() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings::default();
     apply_input(
@@ -61,7 +71,26 @@ fn submit_preserves_logical_newlines() {
 
     assert_eq!(
         apply_input(&mut editor, EditorInput::Enter, &settings),
-        EditOutcome::Submitted("cargo\ntest\n--workspace".to_owned())
+        EditOutcome::Submitted("cargo \\\ntest \\\n--workspace".to_owned())
+    );
+}
+
+#[test]
+fn submit_uses_configured_line_continuation_escape() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings {
+        escape_character: '`',
+        ..EditorSettings::default()
+    };
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo\ntest".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Enter, &settings),
+        EditOutcome::Submitted("cargo `\ntest".to_owned())
     );
 }
 
@@ -1545,6 +1574,29 @@ fn completion_escapes_spaces_in_unquoted_paths() {
 }
 
 #[test]
+fn completion_uses_configured_escape_for_unquoted_paths() {
+    let root = unique_test_dir("powershell-unquoted-space-path");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("foo bar.txt"), "").expect("write temp file");
+    let settings = powershell_path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        editor.view(&settings).completion.as_deref(),
+        Some("` bar.txt")
+    );
+    apply_input(&mut editor, EditorInput::MoveRight, &settings);
+    assert_eq!(editor.view(&settings).text, "cat foo` bar.txt");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
 fn completion_unescapes_typed_unquoted_path_prefix() {
     let root = unique_test_dir("unescaped-prefix-path");
     fs::create_dir_all(&root).expect("create temp dir");
@@ -1560,6 +1612,46 @@ fn completion_unescapes_typed_unquoted_path_prefix() {
     assert_eq!(editor.view(&settings).completion.as_deref(), Some("ar.txt"));
     apply_input(&mut editor, EditorInput::MoveRight, &settings);
     assert_eq!(editor.view(&settings).text, "cat foo\\ bar.txt");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_decodes_configured_escape_in_unquoted_path_prefix() {
+    let root = unique_test_dir("powershell-unescaped-prefix-path");
+    fs::create_dir_all(&root).expect("create temp dir");
+    fs::write(root.join("foo bar.txt"), "").expect("write temp file");
+    let settings = powershell_path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cat foo` b".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("ar.txt"));
+    apply_input(&mut editor, EditorInput::MoveRight, &settings);
+    assert_eq!(editor.view(&settings).text, "cat foo` bar.txt");
+
+    let _ = fs::remove_dir_all(root);
+}
+
+#[test]
+fn completion_preserves_backslash_path_separator_with_configured_escape() {
+    let root = unique_test_dir("powershell-nested-backslash");
+    fs::create_dir_all(root.join("src")).expect("create temp dir");
+    fs::write(root.join("src/main.rs"), "").expect("write temp file");
+    let settings = powershell_path_settings(root.clone());
+    let mut editor = CommandEditor::new();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("vim src\\ma".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(editor.view(&settings).completion.as_deref(), Some("in.rs"));
+    apply_input(&mut editor, EditorInput::MoveRight, &settings);
+    assert_eq!(editor.view(&settings).text, "vim src\\main.rs");
 
     let _ = fs::remove_dir_all(root);
 }

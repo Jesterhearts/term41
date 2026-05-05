@@ -333,11 +333,29 @@ pub enum Shell {
     PowerShell,
 }
 
+impl Shell {
+    pub fn escape_character(self) -> char {
+        match self {
+            Self::PowerShell => '`',
+            Self::Bash | Self::Zsh | Self::Fish => '\\',
+        }
+    }
+}
+
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum ShellDetection {
     Supported { shell: Shell, path: OsString },
     Unsupported { name: String, path: OsString },
     Unknown,
+}
+
+impl ShellDetection {
+    pub fn escape_character(&self) -> char {
+        match self {
+            Self::Supported { shell, .. } => shell.escape_character(),
+            Self::Unsupported { .. } | Self::Unknown => '\\',
+        }
+    }
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -391,6 +409,10 @@ impl From<io::Error> for HookInstallError {
 
 pub fn detect_current_shell() -> ShellDetection {
     detect_shell_path(current_shell_path().as_deref())
+}
+
+pub fn current_shell_escape_character() -> char {
+    detect_current_shell().escape_character()
 }
 
 pub fn detect_shell_path(shell: Option<&OsStr>) -> ShellDetection {
@@ -620,6 +642,19 @@ mod tests {
                 path: OsString::from("pwsh.exe")
             }
         );
+    }
+
+    #[test]
+    fn shell_detection_exposes_shell_escape_character() {
+        assert_eq!(Shell::Bash.escape_character(), '\\');
+        assert_eq!(Shell::Zsh.escape_character(), '\\');
+        assert_eq!(Shell::Fish.escape_character(), '\\');
+        assert_eq!(Shell::PowerShell.escape_character(), '`');
+        assert_eq!(
+            detect_shell_path(Some(OsStr::new("pwsh.exe"))).escape_character(),
+            '`'
+        );
+        assert_eq!(ShellDetection::Unknown.escape_character(), '\\');
     }
 
     #[test]
