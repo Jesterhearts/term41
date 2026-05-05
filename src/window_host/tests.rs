@@ -726,7 +726,10 @@ mod popup_command_tests {
             &term.active,
         );
         match text {
-            Some(PopupCommandText::Observed(text)) => assert_eq!(text, "cargo test"),
+            Some(CommandBlockCommand {
+                text,
+                source: CommandTextSource::Observed,
+            }) => assert_eq!(text, "cargo test"),
             _ => panic!("expected observed command text"),
         }
     }
@@ -746,29 +749,39 @@ mod popup_command_tests {
             &term.active,
         );
         match text {
-            Some(PopupCommandText::Untrusted(text)) => assert_eq!(text, "cargo test"),
+            Some(CommandBlockCommand {
+                text,
+                source: CommandTextSource::UntrustedMetadata,
+            }) => assert_eq!(text, "cargo test"),
             _ => panic!("expected untrusted command text"),
         }
     }
 
     #[test]
     fn popup_rerun_text_trims_observed_command_without_enter() {
-        let text = popup_rerun_command_text(PopupCommandText::Observed(" cargo test \r".into()));
+        let text = popup_rerun_command_text(CommandBlockCommand {
+            text: " cargo test \r".into(),
+            source: CommandTextSource::Observed,
+        });
         assert_eq!(text, "cargo test");
     }
 
     #[test]
     fn popup_rerun_text_keeps_untrusted_metadata_for_bracketed_paste_review() {
-        let text = popup_rerun_command_text(PopupCommandText::Untrusted(
-            "cargo test\ncargo publish".into(),
-        ));
+        let text = popup_rerun_command_text(CommandBlockCommand {
+            text: "cargo test\ncargo publish".into(),
+            source: CommandTextSource::UntrustedMetadata,
+        });
         assert_eq!(text, "cargo test\ncargo publish");
     }
 
     #[test]
     fn popup_rerun_pastes_single_line_raw_without_bracketed_mode() {
         let paste = popup_rerun_paste(
-            PopupCommandText::Observed(" cargo test \r".into()),
+            CommandBlockCommand {
+                text: " cargo test \r".into(),
+                source: CommandTextSource::Observed,
+            },
             false,
             false,
         );
@@ -782,7 +795,10 @@ mod popup_command_tests {
     #[test]
     fn popup_rerun_pastes_to_editor_when_available() {
         let paste = popup_rerun_paste(
-            PopupCommandText::Untrusted("cargo test\ncargo publish".into()),
+            CommandBlockCommand {
+                text: "cargo test\ncargo publish".into(),
+                source: CommandTextSource::UntrustedMetadata,
+            },
             true,
             true,
         );
@@ -795,7 +811,14 @@ mod popup_command_tests {
 
     #[test]
     fn popup_rerun_pastes_bracketed_when_mode_is_enabled() {
-        let paste = popup_rerun_paste(PopupCommandText::Observed("cargo test".into()), false, true);
+        let paste = popup_rerun_paste(
+            CommandBlockCommand {
+                text: "cargo test".into(),
+                source: CommandTextSource::Observed,
+            },
+            false,
+            true,
+        );
         assert!(matches!(
             paste,
             Some((text, PopupRerunPasteTarget::Terminal(PasteMode::Bracketed)))
@@ -806,7 +829,10 @@ mod popup_command_tests {
     #[test]
     fn popup_rerun_rejects_multiline_without_bracketed_mode() {
         let paste = popup_rerun_paste(
-            PopupCommandText::Untrusted("cargo test\ncargo publish".into()),
+            CommandBlockCommand {
+                text: "cargo test\ncargo publish".into(),
+                source: CommandTextSource::UntrustedMetadata,
+            },
             false,
             false,
         );

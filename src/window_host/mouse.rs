@@ -1025,20 +1025,22 @@ pub(crate) fn open_gutter_popup(
     };
     let mut guard = target.terminal.lock();
     let terminal = &mut *guard;
-    let Some(prompt) =
-        find_prompt_ref_for_screen_row(&terminal.active, &terminal.viewport, screen_row)
-    else {
+    let Some(block) = command_block_view_for_screen_row(
+        &terminal.active,
+        &terminal.viewport,
+        screen_row,
+        &terminal.metadata.command_metas,
+    ) else {
         return;
     };
     select_command_for_prompt(
         &mut terminal.selection,
-        prompt,
+        block.prompt,
         &terminal.metadata.command_metas,
         &terminal.active,
     );
     terminal.invalidate_snapshot_rows();
-    let duration_text =
-        command_duration_for_prompt(prompt, &terminal.metadata.command_metas).map(format_duration);
+    let duration_text = block.duration.map(format_duration);
     drop(guard);
     if let Some(tab_id) = host.input.active_tab {
         clear_command_editor_selection_for_tab(host, tab_id);
@@ -1046,7 +1048,7 @@ pub(crate) fn open_gutter_popup(
     update_gutter_popup(
         &host.render,
         Some(renderer::GutterPopup {
-            prompt,
+            prompt: block.prompt,
             anchor_x: host.mouse.pos.0.max(0.0) as f32,
             anchor_y: host.mouse.pos.1.max(0.0) as f32,
             duration_text,
@@ -1065,7 +1067,7 @@ fn popup_rerun_command_for_tab(
     host: &mut WindowHost,
     tab_id: TabId,
     prompt: PromptRef,
-) -> Option<(PopupCommandText, bool)> {
+) -> Option<(CommandBlockCommand, bool)> {
     let target = host.input.endpoints.get_mut(&tab_id)?;
     let mut terminal = target.terminal.lock();
     let command = popup_command_text(prompt, &terminal.metadata.command_metas, &terminal.active)?;
@@ -1124,15 +1126,13 @@ pub(crate) fn execute_popup_action(
             };
             let mut guard = target.terminal.lock();
             let terminal = &mut *guard;
-            if let Some(text) = popup_command_text(
+            let block = command_block_view_for_prompt(
                 popup.prompt,
                 &terminal.metadata.command_metas,
                 &terminal.active,
-            ) {
-                let text = match text {
-                    PopupCommandText::Observed(text) => text.trim().to_owned(),
-                    PopupCommandText::Untrusted(text) => text,
-                };
+            );
+            if let Some(command) = block.command {
+                let text = popup_rerun_command_text(command);
                 copy_to_clipboard(&mut terminal.clipboard, &text);
             }
             terminal.selection = None;
@@ -1143,11 +1143,12 @@ pub(crate) fn execute_popup_action(
                 return;
             };
             let mut terminal = target.terminal.lock();
-            if let Some(text) = command_and_output_text_for_prompt(
+            let block = command_block_view_for_prompt(
                 popup.prompt,
                 &terminal.metadata.command_metas,
                 &terminal.active,
-            ) {
+            );
+            if let Some(text) = block.command_and_output {
                 copy_to_clipboard(&mut terminal.clipboard, text.trim());
             }
             terminal.selection = None;
@@ -1158,11 +1159,12 @@ pub(crate) fn execute_popup_action(
                 return;
             };
             let mut terminal = target.terminal.lock();
-            if let Some(text) = output_text_for_prompt(
+            let block = command_block_view_for_prompt(
                 popup.prompt,
                 &terminal.metadata.command_metas,
                 &terminal.active,
-            ) {
+            );
+            if let Some(text) = block.output {
                 copy_to_clipboard(&mut terminal.clipboard, text.trim());
             }
             terminal.selection = None;

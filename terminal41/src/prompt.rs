@@ -130,6 +130,45 @@ pub struct PromptRef {
     pub active_abs_row: Option<u64>,
 }
 
+/// Where command text in a [`CommandBlockView`] came from.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandTextSource {
+    /// Text was extracted from terminal cells.
+    Observed,
+    /// Text came from host-provided OSC metadata and should be treated as a
+    /// lower-trust fallback.
+    UntrustedMetadata,
+}
+
+/// Command text associated with a prompt-backed command block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandBlockCommand {
+    pub text: String,
+    pub source: CommandTextSource,
+}
+
+/// Coarse execution state for a prompt-backed command block.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum CommandBlockState {
+    Editing,
+    Running,
+    Succeeded,
+    Failed,
+    Finished,
+}
+
+/// Read-only, derived view of a prompt-backed command block.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandBlockView {
+    pub prompt: PromptRef,
+    pub command: Option<CommandBlockCommand>,
+    pub output: Option<String>,
+    pub command_and_output: Option<String>,
+    pub duration: Option<Duration>,
+    pub exit_status: Option<i32>,
+    pub state: CommandBlockState,
+}
+
 struct RenderedRowInfo<'a> {
     row: &'a crate::Row,
     rendered_row: u32,
@@ -656,6 +695,88 @@ pub fn command_duration_for_prompt(
     command_duration_at(prompt.active_abs_row?, command_metas)
 }
 
+/// Build a read-only derived view for the command block associated with a
+/// rendered prompt.
+pub fn command_block_view_for_prompt(
+    prompt: PromptRef,
+    command_metas: &HashMap<u64, CommandMeta>,
+    screen: &Screen,
+) -> CommandBlockView {
+    let meta = prompt
+        .active_abs_row
+        .and_then(|prompt_abs| command_metas.get(&prompt_abs));
+    let command = command_block_command_for_prompt(prompt, command_metas, screen);
+    let output = output_text_for_prompt(prompt, command_metas, screen);
+    let command_and_output = command_and_output_text_for_prompt(prompt, command_metas, screen);
+    let duration = command_duration_for_prompt(prompt, command_metas);
+    let exit_status = command_block_exit_status(prompt, screen);
+    let state = command_block_state(meta, exit_status);
+
+    CommandBlockView {
+        prompt,
+        command,
+        output,
+        command_and_output,
+        duration,
+        exit_status,
+        state,
+    }
+}
+
+fn command_block_command_for_prompt(
+    prompt: PromptRef,
+    command_metas: &HashMap<u64, CommandMeta>,
+    screen: &Screen,
+) -> Option<CommandBlockCommand> {
+    if let Some(text) = command_text_for_prompt(prompt, command_metas, screen) {
+        return Some(CommandBlockCommand {
+            text,
+            source: CommandTextSource::Observed,
+        });
+    }
+    let text = untrusted_command_line_at(prompt.active_abs_row?, command_metas)?;
+    Some(CommandBlockCommand {
+        text: text.to_owned(),
+        source: CommandTextSource::UntrustedMetadata,
+    })
+}
+
+fn command_block_exit_status(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<i32> {
+    rendered_row_info(screen, prompt.rendered_row as u32)?
+        .row
+        .exit_status
+}
+
+fn command_block_state(
+    meta: Option<&CommandMeta>,
+    exit_status: Option<i32>,
+) -> CommandBlockState {
+    if meta.is_some_and(|meta| meta.started_at.is_some() && meta.finished_at.is_none()) {
+        return CommandBlockState::Running;
+    }
+    match exit_status {
+        Some(0) => CommandBlockState::Succeeded,
+        Some(_) => CommandBlockState::Failed,
+        None if meta.is_some_and(|meta| meta.finished_at.is_some()) => CommandBlockState::Finished,
+        None => CommandBlockState::Editing,
+    }
+}
+
+/// Build a read-only derived command block view for the nearest prompt at or
+/// above a viewport row.
+pub fn command_block_view_for_screen_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    screen_row: u32,
+    command_metas: &HashMap<u64, CommandMeta>,
+) -> Option<CommandBlockView> {
+    let prompt = find_prompt_ref_for_screen_row(screen, viewport, screen_row)?;
+    Some(command_block_view_for_prompt(prompt, command_metas, screen))
+}
+
 /// Replace the current selection with the command text at a prompt row.
 pub fn select_command_at(
     selection: &mut Option<Selection>,
@@ -781,8 +902,13 @@ fn selection_head_for_rendered_range(
 mod tests {
     use std::path::PathBuf;
 
+    use super::CommandBlockState;
+    use super::CommandTextSource;
+    use super::PromptRef;
     use super::command_and_output_text_at;
     use super::command_and_output_text_for_prompt;
+    use super::command_block_view_for_prompt;
+    use super::command_block_view_for_screen_row;
     use super::command_text_at;
     use super::command_text_for_prompt;
     use super::find_prompt_for_screen_row;
@@ -1016,6 +1142,74 @@ mod tests {
             command_text_for_prompt(prompt, &term.metadata.command_metas, &term.active),
             None
         );
+    }
+
+    #[test]
+    fn command_block_view_prefers_observed_command_text() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        term.process(b"\x1b]633;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]633;B\x07");
+        term.process(b"cargo test");
+        term.process(b"\x1b]633;E;cargo\\x20metadata\x07");
+
+        let view = command_block_view_for_prompt(
+            PromptRef {
+                rendered_row: 0,
+                active_abs_row: Some(0),
+            },
+            &term.metadata.command_metas,
+            &term.active,
+        );
+
+        let command = view.command.expect("command text");
+        assert_eq!(command.text, "cargo test");
+        assert_eq!(command.source, CommandTextSource::Observed);
+        assert_eq!(view.state, CommandBlockState::Editing);
+    }
+
+    #[test]
+    fn command_block_view_falls_back_to_untrusted_metadata() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        term.process(b"\x1b]633;A\x07");
+        term.process(b"\x1b]633;E;cargo\\x20test\x07");
+
+        let view = command_block_view_for_prompt(
+            PromptRef {
+                rendered_row: 0,
+                active_abs_row: Some(0),
+            },
+            &term.metadata.command_metas,
+            &term.active,
+        );
+
+        let command = view.command.expect("command text");
+        assert_eq!(command.text, "cargo test");
+        assert_eq!(command.source, CommandTextSource::UntrustedMetadata);
+    }
+
+    #[test]
+    fn command_block_view_exposes_completed_block_output_and_exit_status() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07ab\n\x1b]133;C\x07out0\n\x1b]133;D;1\x07");
+        term.process(b"\x1b]133;A\x07$ next");
+        term.active.offset = screen::rendered_scrollback_len(&term.active, &term.inner.viewport);
+        let view = command_block_view_for_screen_row(
+            &term.active,
+            &term.inner.viewport,
+            1,
+            &term.metadata.command_metas,
+        )
+        .expect("completed block prompt");
+
+        assert_eq!(
+            view.command.as_ref().map(|command| command.text.as_str()),
+            Some("ab")
+        );
+        assert_eq!(view.output.as_deref(), Some("out0"));
+        assert_eq!(view.command_and_output.as_deref(), Some("ab\nout0"));
+        assert_eq!(view.exit_status, Some(1));
+        assert_eq!(view.state, CommandBlockState::Failed);
     }
 
     #[test]

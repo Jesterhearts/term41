@@ -87,14 +87,12 @@ use terminal41::TerminalThread;
 use terminal41::apply_host_input;
 use terminal41::host;
 use terminal41::io::clipboard::copy_to_clipboard;
+use terminal41::prompt::CommandBlockCommand;
+use terminal41::prompt::CommandTextSource;
 use terminal41::prompt::PromptRef;
-use terminal41::prompt::command_and_output_text_for_prompt;
-use terminal41::prompt::command_duration_for_prompt;
-use terminal41::prompt::command_text_for_prompt;
-use terminal41::prompt::find_prompt_ref_for_screen_row;
-use terminal41::prompt::output_text_for_prompt;
+use terminal41::prompt::command_block_view_for_prompt;
+use terminal41::prompt::command_block_view_for_screen_row;
 use terminal41::prompt::select_command_for_prompt;
-use terminal41::prompt::untrusted_command_line_at;
 use terminal41::selection::SelectionMode;
 use terminal41::selection::active_screen_row_at_viewport_row;
 use terminal41::selection::close_search;
@@ -800,11 +798,6 @@ const RESIZE_BORDER: f32 = 5.0;
 const TAB_MENU_WIDTH_CELLS: f32 = 16.0;
 const POPUP_WIDTH_CELLS: f32 = 20.0;
 
-enum PopupCommandText {
-    Observed(String),
-    Untrusted(String),
-}
-
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 enum PopupRerunPasteTarget {
     Editor,
@@ -869,23 +862,19 @@ fn popup_command_text(
     prompt: PromptRef,
     command_metas: &HashMap<u64, terminal41::CommandMeta>,
     screen: &terminal41::Screen,
-) -> Option<PopupCommandText> {
-    if let Some(command) = command_text_for_prompt(prompt, command_metas, screen) {
-        return Some(PopupCommandText::Observed(command));
-    }
-    untrusted_command_line_at(prompt.active_abs_row?, command_metas)
-        .map(|command| PopupCommandText::Untrusted(command.to_owned()))
+) -> Option<CommandBlockCommand> {
+    command_block_view_for_prompt(prompt, command_metas, screen).command
 }
 
-fn popup_rerun_command_text(command: PopupCommandText) -> String {
-    match command {
-        PopupCommandText::Observed(command) => command.trim().to_owned(),
-        PopupCommandText::Untrusted(command) => command,
+fn popup_rerun_command_text(command: CommandBlockCommand) -> String {
+    match command.source {
+        CommandTextSource::Observed => command.text.trim().to_owned(),
+        CommandTextSource::UntrustedMetadata => command.text,
     }
 }
 
 fn popup_rerun_paste(
-    command: PopupCommandText,
+    command: CommandBlockCommand,
     editor_available: bool,
     bracketed_paste_enabled: bool,
 ) -> Option<(String, PopupRerunPasteTarget)> {
