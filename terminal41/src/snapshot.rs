@@ -153,6 +153,7 @@ struct SnapshotShape {
     total_rows: u32,
     viewport_rows: u32,
     rendered_terminal_rows: u32,
+    rendered_view_top: u32,
     viewport_cols: u32,
     status_line_row: Option<u32>,
 }
@@ -184,12 +185,18 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
             .min(vp_rows)
             .max(1)
     };
+    let rendered_view_top = if terminal.on_alt_screen {
+        0
+    } else {
+        rendered_view_top(terminal, rendered_terminal_rows)
+    };
     let terminal_rows = vp_rows;
     let total_rows = terminal_rows + u32::from(status_line_row.is_some());
     let shape = SnapshotShape {
         total_rows,
         viewport_rows: terminal_rows,
         rendered_terminal_rows,
+        rendered_view_top,
         viewport_cols: vp_cols,
         status_line_row,
     };
@@ -436,9 +443,7 @@ fn rendered_row<'a>(
     screen_row: u32,
     terminal_rows: u32,
 ) -> RenderedRow<'a> {
-    let rendered_len = crate::screen::rendered_rows_len(&terminal.active) as u32;
-    let max_top = rendered_len.saturating_sub(terminal_rows);
-    let top = max_top.saturating_sub(terminal.active.offset);
+    let top = rendered_view_top(terminal, terminal_rows);
     let mut idx = top + screen_row;
     let rendered_row = idx;
     for block in &terminal.active.scrollback_blocks {
@@ -467,9 +472,7 @@ fn active_block_screen_top(
     terminal: &Terminal,
     terminal_rows: u32,
 ) -> u32 {
-    let rendered_len = crate::screen::rendered_rows_len(&terminal.active) as u32;
-    let max_top = rendered_len.saturating_sub(terminal_rows);
-    let top = max_top.saturating_sub(terminal.active.offset);
+    let top = rendered_view_top(terminal, terminal_rows);
     let history_len = terminal
         .active
         .scrollback_blocks
@@ -478,6 +481,15 @@ fn active_block_screen_top(
         .map(|rows| rows + 1)
         .sum::<u32>();
     history_len.saturating_sub(top)
+}
+
+fn rendered_view_top(
+    terminal: &Terminal,
+    terminal_rows: u32,
+) -> u32 {
+    let rendered_len = crate::screen::rendered_rows_len(&terminal.active) as u32;
+    let max_top = rendered_len.saturating_sub(terminal_rows);
+    max_top.saturating_sub(terminal.active.offset)
 }
 
 fn snapshot_status_line_row(
@@ -824,6 +836,39 @@ mod tests {
         assert_eq!(snapshot_row_text(&snap.rows[0]), "bcdef");
         assert_eq!(snapshot_row_text(&snap.rows[1]), "ghij ");
         assert_ne!(snap.rows[1].generation, first.rows[1].generation);
+    }
+
+    #[test]
+    fn active_block_growth_resets_rows_when_rendered_top_shifts() {
+        let mut terminal = Terminal::new(
+            20,
+            3,
+            10,
+            StatusLineMode::Off,
+            FeaturePermissions::default(),
+            TerminalLimits::default(),
+            16,
+            8,
+            ColorPalette::default(),
+        );
+        let mut processor = TerminalProcessor::new();
+
+        processor.process_bytes(&mut terminal, b"old one");
+        processor.process_bytes(&mut terminal, b"\x1b]133;A\x07old two");
+        processor.process_bytes(&mut terminal, b"\x1b]133;A\x07sudo foo");
+        let first = snapshot_terminal(&mut terminal);
+
+        assert_eq!(first.rows.len(), 3);
+        assert_eq!(snapshot_row_text(&first.rows[2]).trim_end(), "sudo foo");
+
+        processor.process_bytes(&mut terminal, b"\r\n[sudo] password: ");
+        let snap = snapshot_terminal(&mut terminal);
+
+        assert!(snap.reset_cached_rows);
+        assert_eq!(
+            snapshot_row_text(&snap.rows[2]).trim_end(),
+            "[sudo] password:"
+        );
     }
 
     #[test]
