@@ -314,14 +314,12 @@ fn snapshot_rendered_row(
     generation: u64,
 ) -> RowSnapshot {
     if terminal.on_alt_screen {
-        return snapshot_grid_row(
-            terminal,
-            row,
-            view::visible_row(&terminal.active, &terminal.viewport, row),
-            generation,
-            Some(row),
-            None,
-        );
+        return match visible_grid_row(terminal, row) {
+            Some(grid_row) => {
+                snapshot_grid_row(terminal, row, grid_row, generation, Some(row), None)
+            }
+            None => blank_terminal_row(row, terminal.viewport.cols, &terminal.palette, generation),
+        };
     }
     match rendered_row(terminal, row, terminal_rows) {
         RenderedRow::Separator => {
@@ -351,6 +349,14 @@ fn snapshot_rendered_row(
             Some(rendered_row),
         ),
     }
+}
+
+fn visible_grid_row(
+    terminal: &Terminal,
+    row: u32,
+) -> Option<&crate::Row> {
+    let base = terminal.viewport.top_index(terminal.active.grid.rows.len());
+    terminal.active.grid.rows.get(base + row as usize)
 }
 
 fn snapshot_grid_row(
@@ -891,6 +897,24 @@ mod tests {
         assert_eq!(row.bg.len(), 5);
         assert_eq!(row.underline_color.len(), 5);
         assert_eq!(row.has_link.len(), 5);
+    }
+
+    #[test]
+    fn alt_screen_taller_resize_snapshots_missing_rows_as_blank() {
+        let mut terminal = terminal();
+        let mut processor = TerminalProcessor::new();
+        processor.process_bytes(&mut terminal, b"\x1b[?1049hA");
+
+        terminal.resize(5, 5);
+
+        assert!(terminal.on_alt_screen);
+        assert!(terminal.active.grid.rows.len() < terminal.viewport.rows as usize);
+        let snap = snapshot_terminal(&mut terminal);
+
+        assert_eq!(snap.viewport_rows, 5);
+        assert_eq!(snap.rows.len(), 5);
+        assert_eq!(snapshot_row_text(&snap.rows[0]), "A    ");
+        assert_eq!(snapshot_row_text(&snap.rows[4]), "     ");
     }
 
     #[test]
