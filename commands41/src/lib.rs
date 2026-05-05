@@ -840,7 +840,7 @@ fn submitted_command(buffer: &str) -> String {
         .map(str::trim)
         .filter(|line| !line.is_empty())
         .collect::<Vec<_>>()
-        .join(" ")
+        .join("\n")
 }
 
 fn push_history(

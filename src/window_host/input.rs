@@ -208,6 +208,16 @@ pub(crate) fn write_host_bytes(
     }
 }
 
+pub(super) fn command_submission_bytes(command: &str) -> Vec<u8> {
+    let mut bytes = Vec::with_capacity(command.len() + 1);
+    bytes.extend(command.bytes().map(|byte| match byte {
+        b'\n' => b'\r',
+        byte => byte,
+    }));
+    bytes.push(b'\r');
+    bytes
+}
+
 pub(crate) fn emit_host_input(
     target: &mut InputEndpoint,
     input: HostInput<'_>,
@@ -443,8 +453,7 @@ pub(crate) fn handle_command_editor_key(
         match outcome {
             EditOutcome::Submitted(command) => {
                 let history_command = command.clone();
-                let mut bytes = command.into_bytes();
-                bytes.push(b'\r');
+                let bytes = command_submission_bytes(&command);
                 write_host_bytes(target, bytes, true);
                 let view = command_editor_view(&target.command_editor, &settings, config.vim_mode);
                 (true, view, Some(history_command))

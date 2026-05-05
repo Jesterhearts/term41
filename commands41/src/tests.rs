@@ -50,7 +50,7 @@ fn inserts_and_submits_command() {
 }
 
 #[test]
-fn submit_replaces_newlines_with_spaces() {
+fn submit_preserves_logical_newlines() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings::default();
     apply_input(
@@ -61,7 +61,7 @@ fn submit_replaces_newlines_with_spaces() {
 
     assert_eq!(
         apply_input(&mut editor, EditorInput::Enter, &settings),
-        EditOutcome::Submitted("cargo test --workspace".to_owned())
+        EditOutcome::Submitted("cargo\ntest\n--workspace".to_owned())
     );
 }
 

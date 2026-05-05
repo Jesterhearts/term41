@@ -563,6 +563,14 @@ mod command_editor_input_tests {
     }
 
     #[test]
+    fn submitted_editor_newlines_are_sent_as_enters() {
+        assert_eq!(
+            command_submission_bytes("cargo\ntest\n--workspace"),
+            b"cargo\rtest\r--workspace\r"
+        );
+    }
+
+    #[test]
     fn vim_mode_maps_plain_keys_to_vim_inputs() {
         assert_eq!(
             command_editor_input(&Key::Character("i".into()), ModifiersState::empty(), true),
