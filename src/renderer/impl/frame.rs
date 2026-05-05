@@ -251,6 +251,7 @@ impl Renderer {
                     if !force_terminal_layer_repaint {
                         push_terminal_dirty_rect(
                             &mut geometry,
+                            snap,
                             row,
                             layout,
                             self.surface_config.width,
@@ -265,6 +266,7 @@ impl Renderer {
                 if snap.search_active && row == snap.viewport_rows - 1 {
                     push_terminal_dirty_rect(
                         &mut geometry,
+                        snap,
                         row,
                         layout,
                         self.surface_config.width,
@@ -299,6 +301,7 @@ impl Renderer {
                 if !force_terminal_layer_repaint {
                     push_terminal_dirty_rect(
                         &mut geometry,
+                        snap,
                         row,
                         layout,
                         self.surface_config.width,

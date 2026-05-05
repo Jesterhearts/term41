@@ -1077,12 +1077,13 @@ fn append_cached_row_geometry(
 
 fn push_terminal_dirty_rect(
     geometry: &mut RenderGeometry,
+    snap: &TermSnapshot,
     row: u32,
     layout: &FrameLayout,
     surface_width: u32,
     surface_height: u32,
 ) {
-    let y = terminal_row_y(row, layout);
+    let y = snapshot_row_y(row, snap, layout);
     let top = y.max(0.0);
     let bottom = (y + layout.cell_h).min(surface_height as f32);
     let h = (bottom - top).max(0.0);

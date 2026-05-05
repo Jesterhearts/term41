@@ -46,6 +46,7 @@ mod geometry_tests {
     use super::ImageQuad;
     use super::PageDrawRange;
     use super::PageGeometryUpload;
+    use super::RenderGeometry;
     use super::RowGeometry;
     use super::RowSnapshot;
     use super::TermSnapshot;
@@ -59,6 +60,7 @@ mod geometry_tests {
     use super::image_batch_for_page;
     use super::image_render_order;
     use super::image_vertex_z;
+    use super::push_terminal_dirty_rect;
     use super::row_hidden_by_sticky_prompt;
     use super::snapshot_row_y;
     use super::terminal_block_y_offset_rows;
@@ -323,6 +325,28 @@ mod geometry_tests {
 
         assert_eq!(snapshot_row_y(23, &snap, &layout), 420.0);
         assert_eq!(snapshot_row_y(24, &snap, &layout), 500.0);
+    }
+
+    #[test]
+    fn status_dirty_rect_uses_status_row_position() {
+        let mut snap = snapshot(80, 24);
+        snap.status_line_row = Some(24);
+        let layout = FrameLayout {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            baseline: 14.0,
+            gutter_px: 0.0,
+            tab_bar_h: 20.0,
+            terminal_y_offset: -60.0,
+            block_y_offset: 80.0,
+        };
+        let mut geometry = RenderGeometry::default();
+
+        push_terminal_dirty_rect(&mut geometry, &snap, 24, &layout, 800, 1000);
+
+        assert_eq!(geometry.terminal_dirty_rects.len(), 1);
+        assert_eq!(geometry.terminal_dirty_rects[0].y, 500.0);
+        assert_eq!(geometry.terminal_dirty_rects[0].h, 20.0);
     }
 
     #[test]
