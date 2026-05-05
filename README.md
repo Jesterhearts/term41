@@ -410,6 +410,10 @@ keybindings = [
 Notes:
 
 - `keybindings` replaces the default binding set rather than merging with it.
+- Unbound actions can still be listed in `keybindings` and appear in the
+  command palette. Shell-integration jump actions include
+  `JumpToPreviousFailed`, `JumpToPreviousCommand`, and
+  `JumpToPreviousSuccessful`.
 - `strict_altscreen_scrollback = true` restores a zero-scrollback alternate
   screen.
 - `status_line = "indicator"` enables the emulator-owned DEC indicator line by

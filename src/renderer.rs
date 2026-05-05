@@ -825,6 +825,9 @@ impl RenderHost {
             | Action::OpenSearch
             | Action::ScrollPrevPrompt
             | Action::ScrollNextPrompt
+            | Action::JumpToPreviousFailed
+            | Action::JumpToPreviousCommand
+            | Action::JumpToPreviousSuccessful
             | Action::OpenNewWindow => {}
             Action::NewTab => {
                 self.spawn_new_tab();

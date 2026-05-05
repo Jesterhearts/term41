@@ -39,6 +39,14 @@ pub enum Action {
     /// Scroll the viewport to the next OSC 133 prompt (below the current
     /// viewport top).
     ScrollNextPrompt,
+    /// Jump to the previous completed shell-integration command whose exit
+    /// status was non-zero. Unbound by default.
+    JumpToPreviousFailed,
+    /// Jump to the previous shell-integration command. Unbound by default.
+    JumpToPreviousCommand,
+    /// Jump to the previous completed shell-integration command whose exit
+    /// status was zero. Unbound by default.
+    JumpToPreviousSuccessful,
     /// Launch a detached copy of this binary with its working directory
     /// inherited from the current session — typically bound to
     /// `Ctrl+Shift+N`. The new process gets its own winit window.
@@ -88,6 +96,9 @@ impl Action {
             Action::OpenSearch,
             Action::ScrollPrevPrompt,
             Action::ScrollNextPrompt,
+            Action::JumpToPreviousFailed,
+            Action::JumpToPreviousCommand,
+            Action::JumpToPreviousSuccessful,
             Action::OpenNewWindow,
             Action::NewTab,
             Action::CloseActiveTab,
@@ -111,6 +122,9 @@ impl Action {
             Action::OpenSearch => "Open search",
             Action::ScrollPrevPrompt => "Scroll to previous prompt",
             Action::ScrollNextPrompt => "Scroll to next prompt",
+            Action::JumpToPreviousFailed => "Jump to previous failed",
+            Action::JumpToPreviousCommand => "Jump to previous command",
+            Action::JumpToPreviousSuccessful => "Jump to previous successful",
             Action::OpenNewWindow => "Open new window",
             Action::NewTab => "New tab",
             Action::CloseActiveTab => "Close active tab",
@@ -594,5 +608,21 @@ mod tests {
     fn command_palette_actions_exclude_palette_open_action() {
         assert!(!Action::command_palette_actions().contains(&Action::OpenCommandPalette));
         assert!(Action::command_palette_actions().contains(&Action::ToggleCommandEditor));
+    }
+
+    #[test]
+    fn command_palette_actions_include_unbound_jump_actions() {
+        let actions = Action::command_palette_actions();
+        assert!(actions.contains(&Action::JumpToPreviousFailed));
+        assert!(actions.contains(&Action::JumpToPreviousCommand));
+        assert!(actions.contains(&Action::JumpToPreviousSuccessful));
+    }
+
+    #[test]
+    fn unbound_jump_actions_can_be_configured() {
+        let b = cfg("Ctrl+Alt+F", Action::JumpToPreviousFailed);
+        assert_eq!(b.mods, ModifiersState::CONTROL | ModifiersState::ALT);
+        assert!(matches!(b.key, KeySpec::Char('F')));
+        assert_eq!(b.action, Action::JumpToPreviousFailed);
     }
 }

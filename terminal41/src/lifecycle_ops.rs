@@ -72,10 +72,42 @@ pub(crate) fn scroll_to_prev_prompt(
     screen: &mut Screen,
     viewport: &Viewport,
 ) {
+    scroll_to_prev_prompt_matching(screen, viewport, |_| true);
+}
+
+pub(crate) fn scroll_to_prev_failed_command(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    scroll_to_prev_prompt_matching(screen, viewport, |row| {
+        row.exit_status.is_some_and(|status| status != 0)
+    });
+}
+
+pub(crate) fn scroll_to_prev_command(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    scroll_to_prev_prompt_matching(screen, viewport, |_| true);
+}
+
+pub(crate) fn scroll_to_prev_successful_command(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    scroll_to_prev_prompt_matching(screen, viewport, |row| row.exit_status == Some(0));
+}
+
+fn scroll_to_prev_prompt_matching(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    keep: impl Fn(&Row) -> bool,
+) {
     let top = rendered_viewport_top(screen, viewport);
-    let target = rendered_prompt_rows(screen)
+    let target = rendered_prompt_rows(screen, keep)
         .into_iter()
-        .filter(|&row| row < top)
+        .filter(|prompt| prompt.rendered_row < top)
+        .map(|prompt| prompt.rendered_row)
         .max();
     if let Some(target) = target {
         scroll_rendered_row_to_viewport_top(screen, viewport, target);
@@ -87,9 +119,10 @@ pub(crate) fn scroll_to_next_prompt(
     viewport: &Viewport,
 ) {
     let top = rendered_viewport_top(screen, viewport);
-    let target = rendered_prompt_rows(screen)
+    let target = rendered_prompt_rows(screen, |_| true)
         .into_iter()
-        .find(|&row| row > top);
+        .find(|prompt| prompt.rendered_row > top)
+        .map(|prompt| prompt.rendered_row);
     if let Some(target) = target {
         scroll_rendered_row_to_viewport_top(screen, viewport, target);
     }
@@ -120,7 +153,15 @@ fn scroll_rendered_row_to_viewport_top(
     screen.offset = offset.min(max_offset);
 }
 
-fn rendered_prompt_rows(screen: &Screen) -> Vec<usize> {
+#[derive(Debug, Clone, Copy)]
+struct RenderedPromptRow {
+    rendered_row: usize,
+}
+
+fn rendered_prompt_rows(
+    screen: &Screen,
+    keep: impl Fn(&Row) -> bool,
+) -> Vec<RenderedPromptRow> {
     let mut prompts = Vec::new();
     let mut rendered_row = 0;
 
@@ -133,8 +174,10 @@ fn rendered_prompt_rows(screen: &Screen) -> Vec<usize> {
                 .iter()
                 .take(block_rows)
                 .enumerate()
-                .filter(|(_, row)| row.prompt_start)
-                .map(|(idx, _)| rendered_row + idx),
+                .filter(|(_, row)| row.prompt_start && keep(row))
+                .map(|(idx, _)| RenderedPromptRow {
+                    rendered_row: rendered_row + idx,
+                }),
         );
         rendered_row += block_rows + 1;
     }
@@ -147,8 +190,10 @@ fn rendered_prompt_rows(screen: &Screen) -> Vec<usize> {
             .iter()
             .take(active_rows)
             .enumerate()
-            .filter(|(_, row)| row.prompt_start)
-            .map(|(idx, _)| rendered_row + idx),
+            .filter(|(_, row)| row.prompt_start && keep(row))
+            .map(|(idx, _)| RenderedPromptRow {
+                rendered_row: rendered_row + idx,
+            }),
     );
 
     prompts
@@ -830,6 +875,45 @@ mod tests {
     use super::*;
     use crate::test_support::TestTerm;
 
+    fn emit_prompt(
+        term: &mut TestTerm,
+        label: &str,
+        output_lines: u32,
+        exit: i32,
+    ) {
+        term.process(b"\x1b]133;A\x1b\\");
+        term.process(label.as_bytes());
+        term.process(b"\x1b]133;B\x1b\\");
+        term.process(b"\n\x1b]133;C\x1b\\");
+        for i in 0..output_lines {
+            term.process(format!("out{i}\n").as_bytes());
+        }
+        term.process(format!("\x1b]133;D;{exit}\x1b\\").as_bytes());
+    }
+
+    fn previous_prompt_row(
+        term: &TestTerm,
+        keep: impl Fn(&Row) -> bool,
+    ) -> usize {
+        let top = rendered_viewport_top(&term.inner.active, &term.inner.viewport);
+        rendered_prompt_rows(&term.inner.active, keep)
+            .into_iter()
+            .filter(|prompt| prompt.rendered_row < top)
+            .map(|prompt| prompt.rendered_row)
+            .max()
+            .expect("matching previous prompt")
+    }
+
+    fn assert_top_is(
+        term: &TestTerm,
+        row: usize,
+    ) {
+        assert_eq!(
+            rendered_viewport_top(&term.inner.active, &term.inner.viewport),
+            row
+        );
+    }
+
     fn visible_image(
         id: u64,
         screen_row: i32,
@@ -961,5 +1045,52 @@ mod tests {
         assert_eq!(images[0].kitty_image_id, Some(42));
         assert_eq!(images[0].screen_row, 0);
         assert_eq!(images[0].screen_col, 0);
+    }
+
+    #[test]
+    fn scroll_to_prev_failed_command_skips_successful_commands() {
+        let mut term = TestTerm::new(10, 4, 200, 16, 8);
+        emit_prompt(&mut term, "$ ok1", 3, 0);
+        emit_prompt(&mut term, "$ bad", 3, 7);
+        emit_prompt(&mut term, "$ ok2", 3, 0);
+        emit_prompt(&mut term, "$ ok3", 3, 0);
+        let target = previous_prompt_row(&term, |row| {
+            row.exit_status.is_some_and(|status| status != 0)
+        });
+
+        scroll_to_prev_failed_command(&mut term.inner.active, &term.inner.viewport);
+
+        assert_top_is(&term, target);
+    }
+
+    #[test]
+    fn scroll_to_prev_successful_command_skips_failed_commands() {
+        let mut term = TestTerm::new(10, 4, 200, 16, 8);
+        emit_prompt(&mut term, "$ ok1", 3, 0);
+        emit_prompt(&mut term, "$ bad1", 3, 2);
+        emit_prompt(&mut term, "$ bad2", 3, 3);
+        emit_prompt(&mut term, "$ ok2", 3, 0);
+        let target = previous_prompt_row(&term, |row| row.exit_status == Some(0));
+
+        scroll_to_prev_successful_command(&mut term.inner.active, &term.inner.viewport);
+
+        assert_top_is(&term, target);
+    }
+
+    #[test]
+    fn scroll_to_prev_command_matches_previous_prompt_navigation() {
+        let mut command_term = TestTerm::new(10, 4, 200, 16, 8);
+        emit_prompt(&mut command_term, "$ one", 3, 0);
+        emit_prompt(&mut command_term, "$ two", 3, 4);
+        emit_prompt(&mut command_term, "$ three", 3, 0);
+        let mut prompt_term = TestTerm::new(10, 4, 200, 16, 8);
+        emit_prompt(&mut prompt_term, "$ one", 3, 0);
+        emit_prompt(&mut prompt_term, "$ two", 3, 4);
+        emit_prompt(&mut prompt_term, "$ three", 3, 0);
+
+        scroll_to_prev_command(&mut command_term.inner.active, &command_term.inner.viewport);
+        scroll_to_prev_prompt(&mut prompt_term.inner.active, &prompt_term.inner.viewport);
+
+        assert_eq!(command_term.active.offset, prompt_term.active.offset);
     }
 }

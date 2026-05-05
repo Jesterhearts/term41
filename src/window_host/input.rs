@@ -629,6 +629,27 @@ pub(crate) fn run_local_action(
             terminal.invalidate_snapshot_rows();
             true
         }
+        Action::JumpToPreviousFailed => {
+            let mut terminal = target.terminal.lock();
+            let viewport = terminal.viewport;
+            view::scroll_to_prev_failed_command(&mut terminal.active, &viewport);
+            terminal.invalidate_snapshot_rows();
+            true
+        }
+        Action::JumpToPreviousCommand => {
+            let mut terminal = target.terminal.lock();
+            let viewport = terminal.viewport;
+            view::scroll_to_prev_command(&mut terminal.active, &viewport);
+            terminal.invalidate_snapshot_rows();
+            true
+        }
+        Action::JumpToPreviousSuccessful => {
+            let mut terminal = target.terminal.lock();
+            let viewport = terminal.viewport;
+            view::scroll_to_prev_successful_command(&mut terminal.active, &viewport);
+            terminal.invalidate_snapshot_rows();
+            true
+        }
         Action::OpenNewWindow => {
             let cwd = target.terminal.lock().metadata.current_directory.clone();
             spawn_new_window(cwd);

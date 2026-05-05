@@ -109,6 +109,32 @@ pub fn scroll_to_next_prompt(
     lifecycle_ops::scroll_to_next_prompt(screen, viewport)
 }
 
+/// Move the viewport to the previous failed command above the current
+/// viewport top.
+pub fn scroll_to_prev_failed_command(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    lifecycle_ops::scroll_to_prev_failed_command(screen, viewport)
+}
+
+/// Move the viewport to the previous command above the current viewport top.
+pub fn scroll_to_prev_command(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    lifecycle_ops::scroll_to_prev_command(screen, viewport)
+}
+
+/// Move the viewport to the previous successful command above the current
+/// viewport top.
+pub fn scroll_to_prev_successful_command(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    lifecycle_ops::scroll_to_prev_successful_command(screen, viewport)
+}
+
 /// Scroll the viewport downward toward the live bottom. Returns the actual
 /// delta.
 pub fn scroll_viewport_down(
