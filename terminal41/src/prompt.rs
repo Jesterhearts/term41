@@ -169,6 +169,12 @@ pub struct CommandBlockView {
     pub state: CommandBlockState,
 }
 
+/// Read-only, derived command-block stream.
+#[derive(Clone, Debug, PartialEq, Eq)]
+pub struct CommandBlockDocument {
+    pub blocks: Vec<CommandBlockView>,
+}
+
 struct RenderedRowInfo<'a> {
     row: &'a crate::Row,
     rendered_row: u32,
@@ -765,6 +771,30 @@ fn command_block_state(
     }
 }
 
+/// Build a read-only document of all prompt-backed command blocks in rendered
+/// order.
+pub fn command_block_document(
+    screen: &Screen,
+    command_metas: &HashMap<u64, CommandMeta>,
+) -> CommandBlockDocument {
+    let blocks = command_block_prompts(screen)
+        .into_iter()
+        .map(|prompt| command_block_view_for_prompt(prompt, command_metas, screen))
+        .collect();
+    CommandBlockDocument { blocks }
+}
+
+fn command_block_prompts(screen: &Screen) -> Vec<PromptRef> {
+    (0..screen::rendered_rows_len(screen) as u32)
+        .filter_map(|rendered_row| {
+            let info = rendered_row_info(screen, rendered_row)?;
+            info.row
+                .prompt_start
+                .then(|| prompt_ref_for_rendered_row(screen, info))
+        })
+        .collect()
+}
+
 /// Build a read-only derived command block view for the nearest prompt at or
 /// above a viewport row.
 pub fn command_block_view_for_screen_row(
@@ -907,6 +937,7 @@ mod tests {
     use super::PromptRef;
     use super::command_and_output_text_at;
     use super::command_and_output_text_for_prompt;
+    use super::command_block_document;
     use super::command_block_view_for_prompt;
     use super::command_block_view_for_screen_row;
     use super::command_text_at;
@@ -1210,6 +1241,39 @@ mod tests {
         assert_eq!(view.command_and_output.as_deref(), Some("ab\nout0"));
         assert_eq!(view.exit_status, Some(1));
         assert_eq!(view.state, CommandBlockState::Failed);
+    }
+
+    #[test]
+    fn command_block_document_lists_completed_and_active_blocks() {
+        let mut term = TestTerm::new(12, 4, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07one\n\x1b]133;C\x07out\n\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07two");
+
+        let document = command_block_document(&term.active, &term.metadata.command_metas);
+
+        assert_eq!(document.blocks.len(), 2);
+        assert_eq!(
+            document.blocks[0]
+                .command
+                .as_ref()
+                .map(|command| command.text.as_str()),
+            Some("one")
+        );
+        assert_eq!(document.blocks[0].exit_status, Some(0));
+        assert_eq!(document.blocks[0].state, CommandBlockState::Succeeded);
+        assert_eq!(document.blocks[0].prompt.active_abs_row, None);
+
+        assert_eq!(
+            document.blocks[1]
+                .command
+                .as_ref()
+                .map(|command| command.text.as_str()),
+            Some("two")
+        );
+        assert_eq!(document.blocks[1].exit_status, None);
+        assert_eq!(document.blocks[1].state, CommandBlockState::Editing);
+        assert!(document.blocks[1].prompt.active_abs_row.is_some());
+        assert!(document.blocks[0].prompt.rendered_row < document.blocks[1].prompt.rendered_row);
     }
 
     #[test]
