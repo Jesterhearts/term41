@@ -140,5 +140,5 @@ Generated from the changes between tags `0.1.0` and `0.1.1`.
   normalization, text writes, snapshot generations, and scripting change
   delivery.
 
-[0.2.0]: https://github.com/Jesterhearts/term41/compare/0.1.1...0.2.0
-[0.1.1]: https://github.com/Jesterhearts/term41/compare/0.1.0...0.1.1
+[0.2.0]: https://gitlab.com/Jesterhearts/term41/compare/0.1.1...0.2.0
+[0.1.1]: https://gitlab.com/Jesterhearts/term41/compare/0.1.0...0.1.1
