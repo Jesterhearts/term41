@@ -383,6 +383,16 @@ fn command_editor_input_context(
     }
 }
 
+fn command_editor_visible_for_terminal(
+    terminal: &Terminal,
+    command_editor_open: bool,
+) -> bool {
+    command_editor_open
+        && terminal.active.offset == 0
+        && !search_active(&terminal.search)
+        && command_editor_view_context(terminal).is_some()
+}
+
 fn reset_viewport_and_invalidate(terminal: &mut Terminal) {
     let offset = terminal.active.offset;
     view::reset_viewport(&mut terminal.active);
@@ -952,10 +962,7 @@ fn command_editor_terminal_row_offset(
     terminal: &Terminal,
     command_editor_view_present: bool,
 ) -> u32 {
-    if command_editor_view_present
-        && !search_active(&terminal.search)
-        && command_editor_view_context(terminal).is_some()
-    {
+    if command_editor_visible_for_terminal(terminal, command_editor_view_present) {
         let cursor_row = command_editor_visual_cursor_row(terminal);
         command_editor_terminal_row_offset_for_cursor(cursor_row, terminal.viewport.rows)
     } else {

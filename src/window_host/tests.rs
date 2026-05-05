@@ -410,6 +410,10 @@ mod command_editor_context_tests {
             COMMAND_EDITOR_BOX_ROWS
         );
 
+        term.active.offset = 1;
+        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
+        term.active.offset = 0;
+
         open_search(&mut term.search);
         assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
 

@@ -143,13 +143,9 @@ pub(crate) fn command_editor_offset_at_mouse(
     }
     let (visual_cursor_row, viewport_rows, viewport_cols) = {
         let terminal = target.terminal.lock();
-        if !matches!(
-            terminal.metadata.shell_integration_phase,
-            terminal41::ShellIntegrationPhase::Command | terminal41::ShellIntegrationPhase::None
-        ) {
+        if !command_editor_visible_for_terminal(&terminal, command_editor_open) {
             return None;
         }
-        command_editor_input_context(&terminal, command_editor_open)?;
         (
             command_editor_visual_cursor_row(&terminal),
             terminal.viewport.rows.max(1),
