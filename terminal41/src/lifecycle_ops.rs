@@ -13,6 +13,7 @@ use crate::VisibleImage;
 use crate::color::palette_color;
 use crate::feature;
 use crate::image::KITTY_UNICODE_PLACEHOLDER;
+use crate::prompt;
 use crate::resize_screen;
 use crate::screen;
 use crate::screen::ResizeScreenOutcome;
@@ -71,43 +72,52 @@ pub(crate) fn scroll_viewport_up(
 pub(crate) fn scroll_to_prev_prompt(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
-    scroll_to_prev_prompt_matching(screen, viewport, |_| true);
+    scroll_to_prev_prompt_matching(screen, viewport, document, |_| true);
 }
 
 pub(crate) fn scroll_to_prev_failed_command(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
-    scroll_to_prev_prompt_matching(screen, viewport, |row| {
-        row.exit_status.is_some_and(|status| status != 0)
+    scroll_to_prev_prompt_matching(screen, viewport, document, |block| {
+        block.state == prompt::CommandBlockState::Failed
     });
 }
 
 pub(crate) fn scroll_to_prev_command(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
-    scroll_to_prev_prompt_matching(screen, viewport, |_| true);
+    scroll_to_prev_prompt_matching(screen, viewport, document, |_| true);
 }
 
 pub(crate) fn scroll_to_prev_successful_command(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
-    scroll_to_prev_prompt_matching(screen, viewport, |row| row.exit_status == Some(0));
+    scroll_to_prev_prompt_matching(screen, viewport, document, |block| {
+        block.state == prompt::CommandBlockState::Succeeded
+    });
 }
 
 fn scroll_to_prev_prompt_matching(
     screen: &mut Screen,
     viewport: &Viewport,
-    keep: impl Fn(&Row) -> bool,
+    document: &prompt::CommandBlockDocument,
+    keep: impl Fn(&prompt::CommandBlockView) -> bool,
 ) {
     let top = rendered_viewport_top(screen, viewport);
-    let target = rendered_prompt_rows(screen, keep)
-        .into_iter()
-        .filter(|prompt| prompt.rendered_row < top)
-        .map(|prompt| prompt.rendered_row)
+    let target = document
+        .blocks
+        .iter()
+        .filter(|block| keep(block))
+        .map(|block| block.prompt.rendered_row as usize)
+        .filter(|&rendered_row| rendered_row < top)
         .max();
     if let Some(target) = target {
         scroll_rendered_row_to_viewport_top(screen, viewport, target);
@@ -117,12 +127,14 @@ fn scroll_to_prev_prompt_matching(
 pub(crate) fn scroll_to_next_prompt(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
     let top = rendered_viewport_top(screen, viewport);
-    let target = rendered_prompt_rows(screen, |_| true)
-        .into_iter()
-        .find(|prompt| prompt.rendered_row > top)
-        .map(|prompt| prompt.rendered_row);
+    let target = document
+        .blocks
+        .iter()
+        .map(|block| block.prompt.rendered_row as usize)
+        .find(|&rendered_row| rendered_row > top);
     if let Some(target) = target {
         scroll_rendered_row_to_viewport_top(screen, viewport, target);
     }
@@ -151,52 +163,6 @@ fn scroll_rendered_row_to_viewport_top(
     let offset = max_top.saturating_sub(top) as u32;
     let max_offset = screen::rendered_scrollback_len(screen, viewport);
     screen.offset = offset.min(max_offset);
-}
-
-#[derive(Debug, Clone, Copy)]
-struct RenderedPromptRow {
-    rendered_row: usize,
-}
-
-fn rendered_prompt_rows(
-    screen: &Screen,
-    keep: impl Fn(&Row) -> bool,
-) -> Vec<RenderedPromptRow> {
-    let mut prompts = Vec::new();
-    let mut rendered_row = 0;
-
-    for block in &screen.scrollback_blocks {
-        let block_rows = screen::command_block_rendered_rows_len(block);
-        prompts.extend(
-            block
-                .grid
-                .rows
-                .iter()
-                .take(block_rows)
-                .enumerate()
-                .filter(|(_, row)| row.prompt_start && keep(row))
-                .map(|(idx, _)| RenderedPromptRow {
-                    rendered_row: rendered_row + idx,
-                }),
-        );
-        rendered_row += block_rows + 1;
-    }
-
-    let active_rows = screen::active_block_rendered_rows_len(screen);
-    prompts.extend(
-        screen
-            .grid
-            .rows
-            .iter()
-            .take(active_rows)
-            .enumerate()
-            .filter(|(_, row)| row.prompt_start && keep(row))
-            .map(|(idx, _)| RenderedPromptRow {
-                rendered_row: rendered_row + idx,
-            }),
-    );
-
-    prompts
 }
 
 pub(crate) fn scroll_viewport_down(
@@ -893,13 +859,15 @@ mod tests {
 
     fn previous_prompt_row(
         term: &TestTerm,
-        keep: impl Fn(&Row) -> bool,
+        keep: impl Fn(&prompt::CommandBlockView) -> bool,
     ) -> usize {
         let top = rendered_viewport_top(&term.inner.active, &term.inner.viewport);
-        rendered_prompt_rows(&term.inner.active, keep)
+        prompt::command_block_document(&term.inner.active, &term.metadata.command_metas)
+            .blocks
             .into_iter()
-            .filter(|prompt| prompt.rendered_row < top)
-            .map(|prompt| prompt.rendered_row)
+            .filter(|block| keep(block))
+            .map(|block| block.prompt.rendered_row as usize)
+            .filter(|&rendered_row| rendered_row < top)
             .max()
             .expect("matching previous prompt")
     }
@@ -1054,11 +1022,13 @@ mod tests {
         emit_prompt(&mut term, "$ bad", 3, 7);
         emit_prompt(&mut term, "$ ok2", 3, 0);
         emit_prompt(&mut term, "$ ok3", 3, 0);
-        let target = previous_prompt_row(&term, |row| {
-            row.exit_status.is_some_and(|status| status != 0)
+        let target = previous_prompt_row(&term, |block| {
+            block.state == prompt::CommandBlockState::Failed
         });
 
-        scroll_to_prev_failed_command(&mut term.inner.active, &term.inner.viewport);
+        let document =
+            prompt::command_block_document(&term.inner.active, &term.metadata.command_metas);
+        scroll_to_prev_failed_command(&mut term.inner.active, &term.inner.viewport, &document);
 
         assert_top_is(&term, target);
     }
@@ -1070,9 +1040,13 @@ mod tests {
         emit_prompt(&mut term, "$ bad1", 3, 2);
         emit_prompt(&mut term, "$ bad2", 3, 3);
         emit_prompt(&mut term, "$ ok2", 3, 0);
-        let target = previous_prompt_row(&term, |row| row.exit_status == Some(0));
+        let target = previous_prompt_row(&term, |block| {
+            block.state == prompt::CommandBlockState::Succeeded
+        });
 
-        scroll_to_prev_successful_command(&mut term.inner.active, &term.inner.viewport);
+        let document =
+            prompt::command_block_document(&term.inner.active, &term.metadata.command_metas);
+        scroll_to_prev_successful_command(&mut term.inner.active, &term.inner.viewport, &document);
 
         assert_top_is(&term, target);
     }
@@ -1088,8 +1062,25 @@ mod tests {
         emit_prompt(&mut prompt_term, "$ two", 3, 4);
         emit_prompt(&mut prompt_term, "$ three", 3, 0);
 
-        scroll_to_prev_command(&mut command_term.inner.active, &command_term.inner.viewport);
-        scroll_to_prev_prompt(&mut prompt_term.inner.active, &prompt_term.inner.viewport);
+        let command_document = prompt::command_block_document(
+            &command_term.inner.active,
+            &command_term.metadata.command_metas,
+        );
+        let prompt_document = prompt::command_block_document(
+            &prompt_term.inner.active,
+            &prompt_term.metadata.command_metas,
+        );
+
+        scroll_to_prev_command(
+            &mut command_term.inner.active,
+            &command_term.inner.viewport,
+            &command_document,
+        );
+        scroll_to_prev_prompt(
+            &mut prompt_term.inner.active,
+            &prompt_term.inner.viewport,
+            &prompt_document,
+        );
 
         assert_eq!(command_term.active.offset, prompt_term.active.offset);
     }

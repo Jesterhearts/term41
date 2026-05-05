@@ -97,16 +97,18 @@ pub fn scroll_viewport_up(
 pub fn scroll_to_prev_prompt(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
-    lifecycle_ops::scroll_to_prev_prompt(screen, viewport)
+    lifecycle_ops::scroll_to_prev_prompt(screen, viewport, document)
 }
 
 /// Move the viewport to the next prompt below the current viewport top.
 pub fn scroll_to_next_prompt(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
-    lifecycle_ops::scroll_to_next_prompt(screen, viewport)
+    lifecycle_ops::scroll_to_next_prompt(screen, viewport, document)
 }
 
 /// Move the viewport to the previous failed command above the current
@@ -114,16 +116,18 @@ pub fn scroll_to_next_prompt(
 pub fn scroll_to_prev_failed_command(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
-    lifecycle_ops::scroll_to_prev_failed_command(screen, viewport)
+    lifecycle_ops::scroll_to_prev_failed_command(screen, viewport, document)
 }
 
 /// Move the viewport to the previous command above the current viewport top.
 pub fn scroll_to_prev_command(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
-    lifecycle_ops::scroll_to_prev_command(screen, viewport)
+    lifecycle_ops::scroll_to_prev_command(screen, viewport, document)
 }
 
 /// Move the viewport to the previous successful command above the current
@@ -131,8 +135,9 @@ pub fn scroll_to_prev_command(
 pub fn scroll_to_prev_successful_command(
     screen: &mut Screen,
     viewport: &Viewport,
+    document: &prompt::CommandBlockDocument,
 ) {
-    lifecycle_ops::scroll_to_prev_successful_command(screen, viewport)
+    lifecycle_ops::scroll_to_prev_successful_command(screen, viewport, document)
 }
 
 /// Scroll the viewport downward toward the live bottom. Returns the actual

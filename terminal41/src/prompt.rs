@@ -1284,7 +1284,8 @@ mod tests {
         emit_prompt(&mut term, "$ c", 3, 0);
         let before = term.active.offset;
         let viewport = term.inner.viewport;
-        view::scroll_to_prev_prompt(&mut term.inner.active, &viewport);
+        let document = command_block_document(&term.inner.active, &term.metadata.command_metas);
+        view::scroll_to_prev_prompt(&mut term.inner.active, &viewport, &document);
         assert!(term.active.offset > before);
     }
 
@@ -1294,7 +1295,8 @@ mod tests {
         term.process(b"plain\noutput\nwithout\nshell integration\n");
         let before = term.active.offset;
         let viewport = term.inner.viewport;
-        view::scroll_to_prev_prompt(&mut term.inner.active, &viewport);
+        let document = command_block_document(&term.inner.active, &term.metadata.command_metas);
+        view::scroll_to_prev_prompt(&mut term.inner.active, &viewport, &document);
         assert_eq!(term.active.offset, before);
     }
 
@@ -1307,7 +1309,8 @@ mod tests {
         term.active.offset = screen::rendered_scrollback_len(&term.active, &term.viewport);
         let start = term.active.offset;
         let viewport = term.inner.viewport;
-        view::scroll_to_next_prompt(&mut term.inner.active, &viewport);
+        let document = command_block_document(&term.inner.active, &term.metadata.command_metas);
+        view::scroll_to_next_prompt(&mut term.inner.active, &viewport, &document);
         assert!(term.active.offset < start);
     }
 
@@ -1317,7 +1320,8 @@ mod tests {
         emit_prompt(&mut term, "$ only", 3, 0);
         let before = term.active.offset;
         let viewport = term.inner.viewport;
-        view::scroll_to_next_prompt(&mut term.inner.active, &viewport);
+        let document = command_block_document(&term.inner.active, &term.metadata.command_metas);
+        view::scroll_to_next_prompt(&mut term.inner.active, &viewport, &document);
         assert_eq!(term.active.offset, before);
     }
 }

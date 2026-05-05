@@ -90,6 +90,7 @@ use terminal41::io::clipboard::copy_to_clipboard;
 use terminal41::prompt::CommandBlockCommand;
 use terminal41::prompt::CommandTextSource;
 use terminal41::prompt::PromptRef;
+use terminal41::prompt::command_block_document;
 use terminal41::prompt::command_block_view_for_prompt;
 use terminal41::prompt::command_block_view_for_screen_row;
 use terminal41::prompt::select_command_for_prompt;
