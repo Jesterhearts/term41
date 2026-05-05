@@ -161,7 +161,7 @@ Releases are source-only. To build and install from the GitHub tag into your
 cargo bin dir:
 
 ```sh
-cargo install --git https://github.com/Jesterhearts/term41.git --tag 0.1.1 --locked term41
+cargo install --git https://github.com/Jesterhearts/term41.git --tag 0.2.0 --locked term41
 ```
 
 The default install enables FFmpeg-backed GIF/video decoding, Vulkan rendering,
@@ -169,7 +169,7 @@ and Wayland data-control clipboard support. If you want the smallest dependency
 surface, or the fastest build times:
 
 ```sh
-cargo install --git https://github.com/Jesterhearts/term41.git --tag 0.1.1 --locked --no-default-features term41
+cargo install --git https://github.com/Jesterhearts/term41.git --tag 0.2.0 --locked --no-default-features term41
 ```
 
 From a local checkout, use:
@@ -517,6 +517,7 @@ Notes:
   mostly-vim emulation. I've probably missed just enough commands you use to
   annoy you, but it's everything I use so I don't know it. File a bug if you
   want more emulation!
+
 - Example scripts are available under `examples/`, including
   `examples/sys_info.lua` for Linux CPU and memory status text.
 
