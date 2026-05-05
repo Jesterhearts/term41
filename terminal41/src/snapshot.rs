@@ -43,6 +43,8 @@ pub struct RowSnapshot {
     pub exit_status: Option<i32>,
     /// Renderer-only row inserted between command blocks.
     pub block_separator: bool,
+    /// Renderer-only prompt row pinned over the viewport top.
+    pub sticky_prompt: bool,
 }
 
 /// Snapshot of the search bar state for rendering.
@@ -420,6 +422,7 @@ fn snapshot_grid_row(
         prompt_start: grid_row.prompt_start,
         exit_status: grid_row.exit_status,
         block_separator: false,
+        sticky_prompt: false,
     };
     normalize_snapshot_row(&mut snapshot, terminal.viewport.cols, &terminal.palette);
     snapshot
@@ -535,6 +538,7 @@ fn snapshot_status_line_row(
         prompt_start: false,
         exit_status: None,
         block_separator: false,
+        sticky_prompt: false,
     };
     normalize_snapshot_row(&mut snapshot, vp_cols, &terminal.palette);
     Some(snapshot)
@@ -650,6 +654,7 @@ fn blank_status_line_row(
         cells: vec![smol_str::SmolStr::new_inline(" "); cols],
         exit_status: None,
         block_separator: false,
+        sticky_prompt: false,
         has_link: vec![false; cols],
         underline_color: vec![None; cols],
         prompt_start: false,

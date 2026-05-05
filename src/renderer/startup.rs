@@ -400,6 +400,7 @@ fn blank_startup_row(
         prompt_start: false,
         exit_status: None,
         block_separator: false,
+        sticky_prompt: false,
     }
 }
 
@@ -864,6 +865,7 @@ fn label_row(
             .collect(),
         exit_status: None,
         block_separator: false,
+        sticky_prompt: false,
         has_link: vec![false; len],
         underline_color: vec![None; len],
         prompt_start,

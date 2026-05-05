@@ -16,31 +16,20 @@ pub(super) fn apply_to_snapshot(
     }
 
     sticky_prompt_row.screen_row = 0;
-    let mut rows = Vec::with_capacity(snap.rows.len() + 1);
-    rows.push(sticky_prompt_row);
-    for mut row in snap.rows.drain(..) {
-        if snap.status_line_row == Some(row.screen_row) || row.screen_row >= snap.viewport_rows {
-            rows.push(row);
-            continue;
-        }
-
-        let shifted_row = row.screen_row + 1;
-        if shifted_row < snap.viewport_rows {
-            row.screen_row = shifted_row;
-            rows.push(row);
+    let mut sticky_prompt_row = Some(sticky_prompt_row);
+    for row in &mut snap.rows {
+        if row.screen_row == 0 && snap.status_line_row != Some(row.screen_row) {
+            *row = sticky_prompt_row
+                .take()
+                .expect("sticky prompt row is replaced once");
+            break;
         }
     }
 
-    if let Some((row, col)) = snap.cursor {
-        if snap.status_line_row == Some(row) {
-            snap.cursor = Some((row, col));
-        } else {
-            let shifted_row = row + 1;
-            snap.cursor = (shifted_row < snap.viewport_rows).then_some((shifted_row, col));
-        }
+    if let Some(row) = sticky_prompt_row {
+        snap.rows.push(row);
+        snap.rows.sort_by_key(|row| row.screen_row);
     }
-
-    snap.rows = rows;
     snap.reset_cached_rows = true;
 }
 
@@ -83,9 +72,15 @@ fn sticky_prompt_row_at_top(
         }
 
         idx -= block_rows;
+        let completed_block_start = block_start;
         block_start += block_rows;
         if idx == 0 {
-            return None;
+            return sticky_prompt_in_rows(
+                &block.grid.rows,
+                block_rows,
+                completed_block_start,
+                None,
+            );
         }
         idx -= 1;
         block_start += 1;
@@ -213,6 +208,7 @@ fn row_snapshot_for_sticky_prompt(
         prompt_start: row.prompt_start,
         exit_status: row.exit_status,
         block_separator: false,
+        sticky_prompt: true,
     };
     normalize_renderer_snapshot_row(&mut snapshot, terminal.viewport.cols, terminal);
     snapshot
@@ -258,9 +254,13 @@ mod tests {
     }
 
     fn terminal_with_completed_block() -> Terminal {
+        terminal_with_completed_block_rows(4)
+    }
+
+    fn terminal_with_completed_block_rows(rows: u32) -> Terminal {
         let mut terminal = Terminal::new(
             8,
-            4,
+            rows,
             100,
             config41::StatusLineMode::Off,
             config41::FeaturePermissions::default(),
@@ -293,9 +293,9 @@ mod tests {
 
         assert_eq!(snapshot_row_text(&snap.rows[0]), "$ abc   ");
         assert!(snap.rows[0].prompt_start);
-        assert_eq!(snapshot_row_text(&snap.rows[1]), "out4    ");
-        assert_eq!(snapshot_row_text(&snap.rows[2]), "out5    ");
-        assert_eq!(snapshot_row_text(&snap.rows[3]), "out6    ");
+        assert_eq!(snapshot_row_text(&snap.rows[1]), "out5    ");
+        assert_eq!(snapshot_row_text(&snap.rows[2]), "out6    ");
+        assert_eq!(snapshot_row_text(&snap.rows[3]).trim_end(), "");
     }
 
     #[test]
@@ -308,5 +308,45 @@ mod tests {
         let snap = terminal_snapshot(&mut terminal);
 
         assert!(row_snapshot(&terminal, &snap).is_none());
+    }
+
+    #[test]
+    fn sticky_prompt_replaces_separator_at_live_bottom() {
+        let mut terminal = terminal_with_completed_block_rows(2);
+        terminal.active.offset = 0;
+        terminal.invalidate_snapshot_rows();
+
+        let mut snap = terminal_snapshot(&mut terminal);
+        let sticky_prompt = row_snapshot(&terminal, &snap);
+
+        assert!(snap.rows[0].block_separator);
+        assert!(sticky_prompt.is_some());
+
+        apply_to_snapshot(&mut snap, sticky_prompt);
+
+        assert_eq!(snapshot_row_text(&snap.rows[0]), "$ abc   ");
+        assert!(snap.rows[0].prompt_start);
+        assert_eq!(snapshot_row_text(&snap.rows[1]).trim_end(), "$");
+    }
+
+    #[test]
+    fn sticky_prompt_does_not_push_live_cursor_offscreen() {
+        let mut terminal = terminal_with_completed_block();
+        terminal.active.offset = 0;
+        terminal.invalidate_snapshot_rows();
+
+        let mut snap = terminal_snapshot(&mut terminal);
+        let sticky_prompt = row_snapshot(&terminal, &snap);
+
+        assert!(sticky_prompt.is_some());
+        assert_eq!(snap.cursor, Some((terminal.viewport.rows - 1, 2)));
+        assert_eq!(snapshot_row_text(snap.rows.last().unwrap()).trim_end(), "$");
+
+        apply_to_snapshot(&mut snap, sticky_prompt);
+
+        assert_eq!(snapshot_row_text(&snap.rows[0]), "$ abc   ");
+        assert!(snap.rows[0].prompt_start);
+        assert_eq!(snap.cursor, Some((terminal.viewport.rows - 1, 2)));
+        assert_eq!(snapshot_row_text(snap.rows.last().unwrap()).trim_end(), "$");
     }
 }

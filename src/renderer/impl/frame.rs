@@ -247,6 +247,21 @@ impl Renderer {
             }
             for snap_row in rows {
                 let row = snap_row.screen_row;
+                if row_hidden_by_sticky_prompt(snap_row, snap, layout) {
+                    if !force_terminal_layer_repaint {
+                        push_terminal_dirty_rect(
+                            &mut geometry,
+                            row,
+                            layout,
+                            self.surface_config.width,
+                            self.surface_config.height,
+                        );
+                    }
+                    if let Some(cache) = self.row_geometry_cache.get_mut(row as usize) {
+                        *cache = None;
+                    }
+                    continue;
+                }
                 if snap.search_active && row == snap.viewport_rows - 1 {
                     push_terminal_dirty_rect(
                         &mut geometry,

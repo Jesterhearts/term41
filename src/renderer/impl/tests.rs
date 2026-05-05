@@ -59,6 +59,7 @@ mod geometry_tests {
     use super::image_batch_for_page;
     use super::image_render_order;
     use super::image_vertex_z;
+    use super::row_hidden_by_sticky_prompt;
     use super::snapshot_row_y;
     use super::terminal_block_y_offset_rows;
     use super::terminal_row_y;
@@ -81,6 +82,7 @@ mod geometry_tests {
             prompt_start: false,
             exit_status: None,
             block_separator: false,
+            sticky_prompt: false,
         }
     }
 
@@ -321,6 +323,62 @@ mod geometry_tests {
 
         assert_eq!(snapshot_row_y(23, &snap, &layout), 420.0);
         assert_eq!(snapshot_row_y(24, &snap, &layout), 500.0);
+    }
+
+    #[test]
+    fn sticky_prompt_row_ignores_editor_offset() {
+        let mut snap = snapshot(80, 24);
+        snap.rows[0].prompt_start = true;
+        snap.rows[0].sticky_prompt = true;
+        let layout = FrameLayout {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            baseline: 14.0,
+            gutter_px: 0.0,
+            tab_bar_h: 20.0,
+            terminal_y_offset: -60.0,
+            block_y_offset: 0.0,
+        };
+
+        assert_eq!(snapshot_row_y(0, &snap, &layout), 20.0);
+        assert_eq!(snapshot_row_y(1, &snap, &layout), -20.0);
+    }
+
+    #[test]
+    fn natural_prompt_row_uses_editor_offset() {
+        let mut snap = snapshot(80, 24);
+        snap.rows[0].prompt_start = true;
+        let layout = FrameLayout {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            baseline: 14.0,
+            gutter_px: 0.0,
+            tab_bar_h: 20.0,
+            terminal_y_offset: -60.0,
+            block_y_offset: 0.0,
+        };
+
+        assert_eq!(snapshot_row_y(0, &snap, &layout), -40.0);
+    }
+
+    #[test]
+    fn row_shifted_under_sticky_prompt_is_hidden() {
+        let mut snap = snapshot(80, 24);
+        snap.rows[0].prompt_start = true;
+        snap.rows[0].sticky_prompt = true;
+        let layout = FrameLayout {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            baseline: 14.0,
+            gutter_px: 0.0,
+            tab_bar_h: 20.0,
+            terminal_y_offset: -60.0,
+            block_y_offset: 0.0,
+        };
+
+        assert!(row_hidden_by_sticky_prompt(&snap.rows[3], &snap, &layout));
+        assert!(!row_hidden_by_sticky_prompt(&snap.rows[0], &snap, &layout));
+        assert!(!row_hidden_by_sticky_prompt(&snap.rows[4], &snap, &layout));
     }
 
     #[test]

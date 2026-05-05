@@ -465,12 +465,44 @@ fn snapshot_row_y(
     snap: &TermSnapshot,
     layout: &FrameLayout,
 ) -> f32 {
-    let terminal_offset = if snap.status_line_row == Some(row) {
-        0.0
-    } else {
-        layout.terminal_y_offset + layout.block_y_offset
-    };
+    let terminal_offset =
+        if snap.status_line_row == Some(row) || sticky_prompt_row_at_top(row, snap) {
+            0.0
+        } else {
+            layout.terminal_y_offset + layout.block_y_offset
+        };
     row as f32 * layout.cell_h + layout.tab_bar_h + terminal_offset
+}
+
+fn sticky_prompt_row_at_top(
+    row: u32,
+    snap: &TermSnapshot,
+) -> bool {
+    row == 0
+        && snap
+            .rows
+            .iter()
+            .any(|snap_row| snap_row.screen_row == 0 && snap_row.sticky_prompt)
+}
+
+fn row_hidden_by_sticky_prompt(
+    snap_row: &RowSnapshot,
+    snap: &TermSnapshot,
+    layout: &FrameLayout,
+) -> bool {
+    if snap_row.sticky_prompt || snap.status_line_row == Some(snap_row.screen_row) {
+        return false;
+    }
+    if !sticky_prompt_row_at_top(0, snap) {
+        return false;
+    }
+
+    let sticky_top = layout.tab_bar_h;
+    let sticky_bottom = sticky_top + layout.cell_h;
+    let row_top = snapshot_row_y(snap_row.screen_row, snap, layout);
+    let row_bottom = row_top + layout.cell_h;
+
+    row_top < sticky_bottom && row_bottom > sticky_top
 }
 
 fn image_page_x(
@@ -1236,6 +1268,7 @@ fn blank_cached_row(
         prompt_start: false,
         exit_status: None,
         block_separator: false,
+        sticky_prompt: false,
     }
 }
 
