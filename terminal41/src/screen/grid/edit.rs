@@ -173,8 +173,13 @@ pub(crate) fn erase_in_line(
             }
         }
         1 => {
-            grid.rows[active].clear_range(0..col + 1, grid.default_fg, grid.default_bg);
-            clear_anchored_cells(images, active, active + 1, 0, col + 1);
+            let end = col.saturating_add(1).min(cols);
+            grid.rows[active].clear_range(0..end, grid.default_fg, grid.default_bg);
+            clear_anchored_cells(images, active, active + 1, 0, end);
+            if end == cols && grid.rows[active].wrapped {
+                grid.rows[active].wrapped = false;
+                clear_wrapped_continuation_rows(grid, images, active + 1, cols);
+            }
         }
         2 => {
             let had_wrapped_continuation = grid.rows[active].wrapped;

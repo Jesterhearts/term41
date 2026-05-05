@@ -1475,6 +1475,47 @@ mod command_block_tests {
     }
 
     #[test]
+    fn prompt_redraw_drops_stale_wrapped_command_tail_after_line_clear() {
+        let mut term = TestTerm::new(8, 6, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07$ old\x1b]133;B\x07");
+        term.process(b"\r\n\x1b]133;C\x07out\x1b]133;D;0\x07");
+        term.process(b"\r\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijk");
+        term.process(b"\x1b[1;8H\x1b[1K");
+        term.process(b"\r\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijk");
+        term.process(b"\r\n\x1b]133;C\x07running");
+
+        assert_eq!(term.active.scrollback_blocks.len(), 1);
+        assert!(row_text(&term.active.scrollback_blocks[0].grid.rows[0]).starts_with("$ old"));
+        assert!(
+            row_text(&term.active.grid.rows[0]).starts_with("$ abc"),
+            "{}",
+            row_text(&term.active.grid.rows[0])
+        );
+        assert!(
+            row_text(&term.active.grid.rows[1]).starts_with("ghijk"),
+            "{}",
+            row_text(&term.active.grid.rows[1])
+        );
+    }
+
+    #[test]
+    fn prompt_redraw_drops_unfinished_wrapped_command_block() {
+        let mut term = TestTerm::new(8, 6, 100, 16, 8);
+
+        term.process(b"\x1b]133;A\x07$ old\x1b]133;B\x07");
+        term.process(b"\r\n\x1b]133;C\x07out\x1b]133;D;0\x07");
+        term.process(b"\r\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijk");
+        term.process(b"\r\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijk");
+        term.process(b"\r\n\x1b]133;C\x07running");
+
+        assert_eq!(term.active.scrollback_blocks.len(), 1);
+        assert!(row_text(&term.active.scrollback_blocks[0].grid.rows[0]).starts_with("$ old"));
+        assert!(row_text(&term.active.grid.rows[0]).starts_with("$ abc"));
+        assert!(row_text(&term.active.grid.rows[1]).starts_with("ghijk"));
+    }
+
+    #[test]
     fn prompt_restart_preserves_finished_empty_command_block() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
 

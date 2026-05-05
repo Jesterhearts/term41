@@ -52,6 +52,14 @@ fn grow(
         let (d, s) = split_current_next(grid, dst, src);
         let s_content = s.content_len() as usize;
         let n = d.copy_from(s, src_col..s_content, dst_col);
+        move_markers_in_copied_range(
+            d,
+            s,
+            src_col,
+            src_col + n,
+            dst_col,
+            src_col + n >= s_content,
+        );
         dst_col += n;
         src_col += n;
 
@@ -71,6 +79,7 @@ fn grow(
             dst_col = 0;
             if dst == src {
                 grid.rows[dst].copy_within(src_col.., 0);
+                shift_markers_left(&mut grid.rows[dst], src_col);
                 let len = grid.rows[dst].len() as usize;
                 grid.rows[dst].clear_range(len - src_col..len, fg, bg);
                 dst_col = len - src_col;
@@ -95,7 +104,7 @@ fn shrink(
             if grid.rows[row].content_len() > new_width {
                 let cells = grid.rows[row].cells.split_off(new_width as usize);
                 let has_wide_cells = cells_contain_wide(&cells);
-                let overflow = Row {
+                let mut overflow = Row {
                     cells,
                     fg: grid.rows[row].fg.split_off(new_width as usize),
                     bg: grid.rows[row].bg.split_off(new_width as usize),
@@ -111,6 +120,7 @@ fn shrink(
                     line_attr: LineAttr::Normal,
                     has_wide_cells,
                 };
+                move_markers_after_split(&mut grid.rows[row], &mut overflow, new_width);
 
                 grid.rows[row].wrapped = true;
                 grid.rows.insert(row + 1, overflow);
@@ -139,6 +149,14 @@ fn shrink(
                     }
                     dst.fg[content..content + to_copy].copy_from_slice(&src.fg[..to_copy]);
                     dst.bg[content..content + to_copy].copy_from_slice(&src.bg[..to_copy]);
+                    move_markers_in_copied_range(
+                        dst,
+                        src,
+                        0,
+                        to_copy,
+                        content,
+                        to_copy >= next_content,
+                    );
                 }
 
                 if to_copy >= next_content {
@@ -148,6 +166,7 @@ fn shrink(
                     content += to_copy;
                 } else {
                     grid.rows[next].copy_within(to_copy.., 0);
+                    shift_markers_left(&mut grid.rows[next], to_copy);
                     let remaining = grid.rows[next].len() as usize - to_copy;
                     grid.rows[next].truncate(remaining as u32);
                     break;
@@ -155,6 +174,132 @@ fn shrink(
             }
         }
         row += 1;
+    }
+}
+
+fn move_markers_after_split(
+    row: &mut Row,
+    overflow: &mut Row,
+    split_col: u32,
+) {
+    let split_col = split_col as usize;
+    move_command_start_after_split(row, overflow, split_col);
+    move_output_start_after_split(row, overflow, split_col);
+}
+
+fn move_command_start_after_split(
+    row: &mut Row,
+    overflow: &mut Row,
+    split_col: usize,
+) {
+    let Some(col) = row.command_start_col else {
+        return;
+    };
+    let col = col as usize;
+    if col < split_col {
+        return;
+    }
+    row.command_start_col = None;
+    overflow.command_start_col = Some((col - split_col) as u32);
+}
+
+fn move_output_start_after_split(
+    row: &mut Row,
+    overflow: &mut Row,
+    split_col: usize,
+) {
+    if !row.output_start {
+        return;
+    }
+    let col = row.output_start_col.unwrap_or(0) as usize;
+    if col < split_col {
+        return;
+    }
+    row.output_start = false;
+    row.output_start_col = None;
+    overflow.output_start = true;
+    overflow.output_start_col = Some((col - split_col) as u32);
+}
+
+fn move_markers_in_copied_range(
+    dst: &mut Row,
+    src: &mut Row,
+    src_start: usize,
+    src_end: usize,
+    dst_start: usize,
+    include_end: bool,
+) {
+    move_command_start_in_copied_range(dst, src, src_start, src_end, dst_start, include_end);
+    move_output_start_in_copied_range(dst, src, src_start, src_end, dst_start, include_end);
+}
+
+fn point_in_copied_range(
+    col: usize,
+    start: usize,
+    end: usize,
+    include_end: bool,
+) -> bool {
+    col >= start && (col < end || (include_end && col == end))
+}
+
+fn move_command_start_in_copied_range(
+    dst: &mut Row,
+    src: &mut Row,
+    src_start: usize,
+    src_end: usize,
+    dst_start: usize,
+    include_end: bool,
+) {
+    let Some(col) = src.command_start_col else {
+        return;
+    };
+    let col = col as usize;
+    if !point_in_copied_range(col, src_start, src_end, include_end) {
+        return;
+    }
+    src.command_start_col = None;
+    dst.command_start_col = Some((dst_start + col.saturating_sub(src_start)) as u32);
+}
+
+fn move_output_start_in_copied_range(
+    dst: &mut Row,
+    src: &mut Row,
+    src_start: usize,
+    src_end: usize,
+    dst_start: usize,
+    include_end: bool,
+) {
+    if !src.output_start {
+        return;
+    }
+    let col = src.output_start_col.unwrap_or(0) as usize;
+    if !point_in_copied_range(col, src_start, src_end, include_end) {
+        return;
+    }
+    src.output_start = false;
+    src.output_start_col = None;
+    dst.output_start = true;
+    dst.output_start_col = Some((dst_start + col.saturating_sub(src_start)) as u32);
+}
+
+fn shift_markers_left(
+    row: &mut Row,
+    amount: usize,
+) {
+    if amount == 0 {
+        return;
+    }
+    if let Some(col) = row.command_start_col {
+        row.command_start_col = (col as usize >= amount).then_some(col - amount as u32);
+    }
+    if row.output_start {
+        let col = row.output_start_col.unwrap_or(0) as usize;
+        if col >= amount {
+            row.output_start_col = Some((col - amount) as u32);
+        } else {
+            row.output_start = false;
+            row.output_start_col = None;
+        }
     }
 }
 

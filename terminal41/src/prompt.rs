@@ -62,6 +62,11 @@ fn display_command_text_at(
     if let Some(command) = untrusted_command_line_at(prompt_abs, command_metas) {
         return flatten_status_command_text(command);
     }
+    if let Some(prompt) = prompt_ref_for_active_abs(screen, prompt_abs)
+        && let Some(command) = command_text_for_prompt(prompt, command_metas, screen)
+    {
+        return flatten_status_command_text(&command);
+    }
     let command = command_text_at(prompt_abs, command_metas, screen)?;
     flatten_status_command_text(&command)
 }
@@ -409,6 +414,28 @@ fn rendered_row_info(
     })
 }
 
+fn prompt_ref_for_active_abs(
+    screen: &Screen,
+    prompt_abs: u64,
+) -> Option<PromptRef> {
+    let popped = screen.grid.total_popped as u64;
+    let local = prompt_abs.checked_sub(popped)? as usize;
+    let row = screen.grid.rows.get(local)?;
+    if !row.prompt_start {
+        return None;
+    }
+    let rendered_row = screen
+        .scrollback_blocks
+        .iter()
+        .map(|block| screen::command_block_rendered_rows_len(block) + 1)
+        .sum::<usize>()
+        + local;
+    Some(PromptRef {
+        rendered_row: rendered_row as u64,
+        active_abs_row: Some(prompt_abs),
+    })
+}
+
 fn prompt_ref_for_rendered_row(
     screen: &Screen,
     info: RenderedRowInfo<'_>,
@@ -593,6 +620,9 @@ pub fn command_text_for_prompt(
     command_metas: &HashMap<u64, CommandMeta>,
     screen: &Screen,
 ) -> Option<String> {
+    if let Some(text) = rendered_command_text(prompt, screen) {
+        return Some(text);
+    }
     if let Some(prompt_abs) = prompt.active_abs_row
         && command_metas.get(&prompt_abs).is_some_and(|meta| {
             meta.command_col.is_some_and(|col| {
@@ -608,6 +638,13 @@ pub fn command_text_for_prompt(
     {
         return Some(text);
     }
+    None
+}
+
+fn rendered_command_text(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<String> {
     let text = extract_rendered_range_text(screen, rendered_command_text_range(prompt, screen)?);
     if text.is_empty() { None } else { Some(text) }
 }
@@ -641,11 +678,21 @@ pub fn output_text_for_prompt(
     command_metas: &HashMap<u64, CommandMeta>,
     screen: &Screen,
 ) -> Option<String> {
+    if let Some(text) = rendered_output_text(prompt, screen) {
+        return Some(text);
+    }
     if let Some(prompt_abs) = prompt.active_abs_row
         && let Some(text) = output_text_at(prompt_abs, command_metas, screen)
     {
         return Some(text);
     }
+    None
+}
+
+fn rendered_output_text(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<String> {
     let text = extract_rendered_range_text(screen, rendered_output_text_range(prompt, screen)?);
     if text.is_empty() { None } else { Some(text) }
 }
@@ -670,11 +717,21 @@ pub fn command_and_output_text_for_prompt(
     command_metas: &HashMap<u64, CommandMeta>,
     screen: &Screen,
 ) -> Option<String> {
+    if let Some(text) = rendered_command_and_output_text(prompt, screen) {
+        return Some(text);
+    }
     if let Some(prompt_abs) = prompt.active_abs_row
         && let Some(text) = command_and_output_text_at(prompt_abs, command_metas, screen)
     {
         return Some(text);
     }
+    None
+}
+
+fn rendered_command_and_output_text(
+    prompt: PromptRef,
+    screen: &Screen,
+) -> Option<String> {
     let text = extract_rendered_range_text(
         screen,
         rendered_command_and_output_text_range(prompt, screen)?,
@@ -893,23 +950,32 @@ pub fn select_command_for_prompt(
     command_metas: &HashMap<u64, CommandMeta>,
     screen: &Screen,
 ) {
-    if let Some(prompt_abs) = prompt.active_abs_row {
-        select_command_at(selection, prompt_abs, command_metas, screen);
+    if select_rendered_command_for_prompt(selection, prompt, screen) {
         return;
     }
+    if let Some(prompt_abs) = prompt.active_abs_row {
+        select_command_at(selection, prompt_abs, command_metas, screen);
+    }
+}
+
+fn select_rendered_command_for_prompt(
+    selection: &mut Option<Selection>,
+    prompt: PromptRef,
+    screen: &Screen,
+) -> bool {
     let Some(range) = rendered_command_text_range(prompt, screen) else {
-        return;
+        return false;
     };
     let text = extract_rendered_range_text(screen, range);
     if text.trim().is_empty() {
-        return;
+        return false;
     }
     let anchor = SelectionPoint {
         row: range.start.row,
         col: range.start.col,
     };
     let Some(head) = selection_head_for_rendered_range(screen, range) else {
-        return;
+        return false;
     };
     *selection = Some(Selection {
         anchor,
@@ -918,6 +984,7 @@ pub fn select_command_for_prompt(
         rendered: true,
         origin: anchor,
     });
+    true
 }
 
 fn selection_head_for_range(
@@ -1067,6 +1134,25 @@ mod tests {
         assert_eq!(
             term.indicator_status_text().as_deref(),
             Some("/ > tmp > project > cargo test --workspace")
+        );
+    }
+
+    #[test]
+    fn indicator_status_tracks_running_command_after_resize_wrap() {
+        let mut term = TestTerm::new(20, 4, 100, 16, 8);
+        term.metadata.current_directory = Some(PathBuf::from("/tmp/project"));
+        term.process(b"\x1b[1$~");
+        term.process(b"\x1b]133;A\x07");
+        term.process(b"$ ");
+        term.process(b"\x1b]133;B\x07");
+        term.process(b"abcdefghijkl");
+        term.process(b"\r\n\x1b]133;C\x07");
+
+        term.resize(8, 4);
+
+        assert_eq!(
+            term.indicator_status_text().as_deref(),
+            Some("/ > tmp > project > abcdefghijkl")
         );
     }
 
@@ -1322,6 +1408,120 @@ mod tests {
         assert_eq!(document.blocks[1].state, CommandBlockState::Editing);
         assert!(document.blocks[1].prompt.active_abs_row.is_some());
         assert!(document.blocks[0].prompt.rendered_row < document.blocks[1].prompt.rendered_row);
+    }
+
+    #[test]
+    fn command_block_document_keeps_wrapped_running_command_in_active_block() {
+        let mut term = TestTerm::new(8, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07one\n\x1b]133;C\x07out\n\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijk");
+        term.process(b"\r\n\x1b]133;C\x07");
+
+        let document = command_block_document(&term.active, &term.metadata.command_metas);
+
+        assert_eq!(document.blocks.len(), 2);
+        assert_eq!(
+            document.blocks[0]
+                .command
+                .as_ref()
+                .map(|command| command.text.as_str()),
+            Some("one")
+        );
+        assert_eq!(
+            document.blocks[1]
+                .command
+                .as_ref()
+                .map(|command| command.text.as_str()),
+            Some("abcdefghijk")
+        );
+        assert_eq!(document.blocks[1].state, CommandBlockState::Running);
+        assert_eq!(document.blocks[1].prompt.active_abs_row, Some(0));
+        assert!(document.blocks[0].prompt.rendered_row < document.blocks[1].prompt.rendered_row);
+    }
+
+    #[test]
+    fn command_block_document_tracks_active_command_rows_after_resize_wrap() {
+        let mut term = TestTerm::new(20, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07one\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijk");
+        term.process(b"\r\n\x1b]133;C\x07running");
+
+        term.resize(8, 6);
+        let document = command_block_document(&term.active, &term.metadata.command_metas);
+
+        assert_eq!(document.blocks.len(), 2);
+        assert_eq!(
+            document.blocks[1]
+                .command
+                .as_ref()
+                .map(|command| command.text.as_str()),
+            Some("abcdefghijk")
+        );
+        assert_eq!(document.blocks[1].output.as_deref(), Some("running"));
+        assert_eq!(document.blocks[1].state, CommandBlockState::Running);
+    }
+
+    #[test]
+    fn command_block_document_tracks_command_start_that_reflows_to_continuation_row() {
+        let mut term = TestTerm::new(20, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07prompt: \x1b]133;B\x07abcdef");
+
+        term.resize(8, 6);
+        let document = command_block_document(&term.active, &term.metadata.command_metas);
+
+        assert_eq!(document.blocks.len(), 1);
+        assert_eq!(
+            document.blocks[0]
+                .command
+                .as_ref()
+                .map(|command| command.text.as_str()),
+            Some("abcdef")
+        );
+    }
+
+    #[test]
+    fn command_block_document_tracks_output_start_that_reflows_to_continuation_row() {
+        let mut term = TestTerm::new(20, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07abcdef\x1b]133;C\x07output");
+
+        term.resize(8, 6);
+        let document = command_block_document(&term.active, &term.metadata.command_metas);
+
+        assert_eq!(document.blocks.len(), 1);
+        assert_eq!(
+            document.blocks[0]
+                .command
+                .as_ref()
+                .map(|command| command.text.as_str()),
+            Some("abcdef")
+        );
+        assert_eq!(document.blocks[0].output.as_deref(), Some("output"));
+    }
+
+    #[test]
+    fn select_command_for_prompt_tracks_active_command_rows_after_resize_wrap() {
+        let mut term = TestTerm::new(20, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07one\r\n\x1b]133;C\x07out\r\n\x1b]133;D;0\x07");
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijk");
+        term.process(b"\r\n\x1b]133;C\x07running");
+        term.resize(8, 6);
+        let document = command_block_document(&term.active, &term.metadata.command_metas);
+        let prompt = document.blocks[1].prompt;
+
+        let mut selected = None;
+        select_command_for_prompt(
+            &mut selected,
+            prompt,
+            &term.metadata.command_metas,
+            &term.active,
+        );
+
+        let selected = selected.expect("active rendered command selection");
+        assert!(selected.rendered);
+        assert_eq!(
+            selection::selection_text(Some(&selected), &term.active).as_deref(),
+            Some("abcdefghijk")
+        );
     }
 
     #[test]

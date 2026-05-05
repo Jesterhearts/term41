@@ -381,6 +381,10 @@ pub(super) fn start_command_block(
     if page_memory_active(screen) {
         return;
     }
+    if active_block_is_unfinished_prompt_or_command(screen) {
+        reset_active_command_block(screen, viewport);
+        return;
+    }
     if !active_block_has_pty_backed_content(screen) {
         clear_command_block_metadata(&mut screen.grid);
         screen.active_command_block_started = true;
@@ -408,6 +412,40 @@ pub(super) fn start_command_block(
         grid: completed,
         images,
     });
+    screen.active_command_block_started = true;
+    screen.cursor.row = 0;
+    screen.cursor.col = 0;
+    screen.offset = 0;
+}
+
+fn active_block_is_unfinished_prompt_or_command(screen: &Screen) -> bool {
+    screen.active_command_block_started
+        && grid_has_command_start(&screen.grid)
+        && !grid_has_command_boundary(&screen.grid)
+}
+
+fn grid_has_command_start(grid: &Grid) -> bool {
+    grid.rows.iter().any(|row| row.command_start_col.is_some())
+}
+
+fn grid_has_command_boundary(grid: &Grid) -> bool {
+    grid.rows
+        .iter()
+        .any(|row| row.output_start || row.exit_status.is_some())
+}
+
+fn reset_active_command_block(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    screen.grid.rows.clear();
+    screen.grid.rows.push_back(Row::new(
+        viewport.cols,
+        screen.grid.default_fg,
+        screen.grid.default_bg,
+    ));
+    screen.grid.total_popped = 0;
+    screen.images.clear();
     screen.active_command_block_started = true;
     screen.cursor.row = 0;
     screen.cursor.col = 0;

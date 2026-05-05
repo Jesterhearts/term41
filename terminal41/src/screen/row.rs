@@ -64,7 +64,8 @@ pub struct Row {
     /// command without including the prompt after active metadata rotates.
     pub command_start_col: Option<u32>,
     /// OSC 133 `C` was emitted on this row — command output starts here.
-    /// Mirrors `prompt_start`: head-of-logical-line only.
+    /// Reflow keeps this point with its rendered column when rows split or
+    /// merge.
     pub output_start: bool,
     /// Column where OSC 133 `C` was emitted on this row.
     pub output_start_col: Option<u32>,
