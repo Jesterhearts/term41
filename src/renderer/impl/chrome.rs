@@ -952,8 +952,7 @@ impl Renderer {
             layout.tab_bar_h,
         );
 
-        let dim = pack_color(&palette::Srgb::new(0, 0, 0), 120);
-        let panel_bg = pack_color(&palette::Srgb::new(24, 24, 32), 248);
+        let panel_bg = pack_color(&palette::Srgb::new(24, 24, 32), 255);
         let border = pack_color(&palette::Srgb::new(132, 132, 164), 255);
         let button_bg = pack_color(&palette::Srgb::new(46, 46, 58), 255);
         let button_hover = pack_color(&palette::Srgb::new(74, 74, 94), 255);
@@ -962,7 +961,6 @@ impl Renderer {
         let text_fg = pack_color(&palette::Srgb::new(238, 238, 244), 255);
         let hint_fg = pack_color(&palette::Srgb::new(202, 202, 214), 255);
 
-        push_rect(0.0, 0.0, surface_w, surface_h, dim, bg_vertices, bg_indices);
         push_rect(
             panel.0,
             panel.1,
@@ -1236,13 +1234,11 @@ impl Renderer {
         let panel_y = ((surface_h - panel_h + layout.tab_bar_h) * 0.5).max(layout.tab_bar_h);
         let panel = (panel_x, panel_y, panel_w, panel_h);
 
-        let dim = pack_color(&palette::Srgb::new(0, 0, 0), 120);
-        let panel_bg = pack_color(&palette::Srgb::new(24, 24, 32), 248);
+        let panel_bg = pack_color(&palette::Srgb::new(24, 24, 32), 255);
         let border = pack_color(&palette::Srgb::new(132, 132, 164), 255);
         let text_fg = pack_color(&palette::Srgb::new(238, 238, 244), 255);
         let hint_fg = pack_color(&palette::Srgb::new(202, 202, 214), 255);
 
-        push_rect(0.0, 0.0, surface_w, surface_h, dim, bg_vertices, bg_indices);
         push_bordered_panel(panel, panel_bg, border, bg_vertices, bg_indices);
 
         let text_cells = width_cells.saturating_sub(4);
