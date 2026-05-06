@@ -75,6 +75,106 @@ pub(crate) fn handle_permission_modal_key(
     settle_permission_modal(host, decision);
 }
 
+pub(crate) fn handle_history_confirmation_key(
+    host: &mut WindowHost,
+    key: &Key,
+) -> bool {
+    if !history_confirmation_is_open(&host.render) {
+        return false;
+    }
+    match key {
+        Key::Named(NamedKey::Enter) => confirm_history_clear(host),
+        Key::Named(NamedKey::Escape) => cancel_history_confirmation(host),
+        Key::Character(text) if text.eq_ignore_ascii_case("y") => confirm_history_clear(host),
+        Key::Character(text) if text.eq_ignore_ascii_case("n") => cancel_history_confirmation(host),
+        _ => return true,
+    }
+    true
+}
+
+pub(crate) fn handle_history_deletion_key(
+    host: &mut WindowHost,
+    key: &Key,
+) -> bool {
+    if !history_deletion_is_open(&host.render) {
+        return false;
+    }
+
+    match key {
+        Key::Named(NamedKey::Escape) => close_history_deletion(host),
+        Key::Named(NamedKey::Enter) => delete_displayed_history_entries(host),
+        Key::Named(NamedKey::ArrowUp) => scroll_host_history_deletion(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+            -1,
+        ),
+        Key::Named(NamedKey::ArrowDown) => scroll_host_history_deletion(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+            1,
+        ),
+        Key::Named(NamedKey::PageUp) => scroll_host_history_deletion(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+            -12,
+        ),
+        Key::Named(NamedKey::PageDown) => scroll_host_history_deletion(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+            12,
+        ),
+        Key::Named(NamedKey::Backspace) => update_history_deletion_query(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+            |query| {
+                query.pop();
+            },
+        ),
+        Key::Named(NamedKey::Space)
+            if !host.keyboard.modifiers.control_key()
+                && !host.keyboard.modifiers.alt_key()
+                && !host.keyboard.modifiers.super_key() =>
+        {
+            update_history_deletion_query(
+                &host.input,
+                &mut host.render,
+                &host.startup,
+                host.window.as_ref(),
+                |query| {
+                    query.push(' ');
+                },
+            );
+        }
+        Key::Character(text)
+            if !host.keyboard.modifiers.control_key()
+                && !host.keyboard.modifiers.alt_key()
+                && !host.keyboard.modifiers.super_key() =>
+        {
+            update_history_deletion_query(
+                &host.input,
+                &mut host.render,
+                &host.startup,
+                host.window.as_ref(),
+                |query| {
+                    query.push_str(text);
+                },
+            );
+        }
+        _ => {}
+    }
+    true
+}
+
 pub(crate) fn handle_command_palette_key(
     host: &mut WindowHost,
     tab_id: TabId,
@@ -573,6 +673,18 @@ pub(crate) fn run_local_action(
         toggle_command_editor(host);
         return true;
     }
+    if action == Action::ClearAllHistory {
+        open_clear_all_history_confirmation(host);
+        return true;
+    }
+    if action == Action::ClearDirectoryHistory {
+        open_clear_directory_history_confirmation(host, tab_id);
+        return true;
+    }
+    if action == Action::ClearHistoryEntries {
+        open_history_deletion(host);
+        return true;
+    }
     if action == Action::Copy {
         let editor_open = command_editor_is_open_for_tab(&host.render, tab_id);
         copy_active_selection_to_clipboard(
@@ -701,7 +813,10 @@ pub(crate) fn run_local_action(
         | Action::PasteAsBackground
         | Action::ClearPastedBackground
         | Action::ToggleCommandEditor
-        | Action::OpenCommandPalette => false,
+        | Action::OpenCommandPalette
+        | Action::ClearAllHistory
+        | Action::ClearDirectoryHistory
+        | Action::ClearHistoryEntries => false,
     }
 }
 
@@ -772,6 +887,10 @@ pub(crate) fn handle_key_event(
         return;
     }
 
+    if handle_history_confirmation_key(host, &key) {
+        return;
+    }
+
     if host.keyboard.ime_preedit_active && matches!(key, Key::Character(_)) {
         return;
     }
@@ -781,6 +900,10 @@ pub(crate) fn handle_key_event(
     };
 
     if handle_command_palette_key(host, active_tab_id, &key) {
+        return;
+    }
+
+    if handle_history_deletion_key(host, &key) {
         return;
     }
 

@@ -2,6 +2,7 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::thread;
+use std::thread::JoinHandle;
 use std::thread::Thread;
 use std::time::Duration;
 
@@ -17,6 +18,7 @@ const GLOBAL_HISTORY_RETENTION_MULTIPLIER: usize = 20;
 pub(crate) struct HistoryWriter {
     tx: Option<cueue::Writer<StoreCommandRequest>>,
     thread: Arc<OnceLock<Thread>>,
+    join_handle: Option<JoinHandle<()>>,
     dropped_writes: u64,
 }
 
@@ -38,6 +40,18 @@ impl HistoryWriter {
         }
     }
 
+    pub(crate) fn finish(mut self) {
+        self.tx.take();
+        if let Some(thread) = self.thread.get() {
+            thread.unpark();
+        }
+        if let Some(handle) = self.join_handle.take()
+            && let Err(error) = handle.join()
+        {
+            debug!("persistent command history writer join failed: {error:?}");
+        }
+    }
+
     fn record_drop(&mut self) {
         self.dropped_writes = self.dropped_writes.saturating_add(1);
         if self.dropped_writes == 1 || self.dropped_writes.is_multiple_of(100) {
@@ -55,6 +69,11 @@ impl Drop for HistoryWriter {
         if let Some(thread) = self.thread.get() {
             thread.unpark();
         }
+        if let Some(handle) = self.join_handle.take()
+            && let Err(error) = handle.join()
+        {
+            debug!("persistent command history writer join failed: {error:?}");
+        }
     }
 }
 
@@ -68,7 +87,7 @@ pub(crate) fn spawn_history_writer(store: HistoryStore) -> Option<HistoryWriter>
     };
     let thread = Arc::new(OnceLock::new());
     let writer_thread = thread.clone();
-    thread::Builder::new()
+    let join_handle = thread::Builder::new()
         .name("history-writer".into())
         .spawn(move || {
             writer_thread
@@ -84,6 +103,7 @@ pub(crate) fn spawn_history_writer(store: HistoryStore) -> Option<HistoryWriter>
     Some(HistoryWriter {
         tx: Some(tx),
         thread,
+        join_handle: Some(join_handle),
         dropped_writes: 0,
     })
 }

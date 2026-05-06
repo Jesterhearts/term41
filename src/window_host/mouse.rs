@@ -13,6 +13,9 @@ pub(crate) fn handle_cursor_moved(
         );
         return;
     }
+    if history_confirmation_is_open(&host.render) || history_deletion_is_open(&host.render) {
+        return;
+    }
     if host.modals.recording_popup.is_some() {
         return;
     }
@@ -416,6 +419,9 @@ pub(crate) fn handle_mouse_input(
             };
             settle_permission_modal(host, decision);
         }
+        return;
+    }
+    if history_confirmation_is_open(&host.render) || history_deletion_is_open(&host.render) {
         return;
     }
     if host.modals.recording_popup.is_some() {
@@ -867,6 +873,28 @@ pub(crate) fn handle_mouse_wheel(
     pixels: bool,
 ) {
     if host.modals.permission_modal.is_some() {
+        return;
+    }
+    if history_deletion_is_open(&host.render) {
+        let (_, cell_h, _, _) = layout_snapshot(&host.render);
+        let y_lines = if pixels {
+            let ch = cell_h.max(1) as i32;
+            -(raw_y as i32) / ch
+        } else {
+            -(raw_y as i32)
+        };
+        if y_lines != 0 {
+            scroll_host_history_deletion(
+                &host.input,
+                &mut host.render,
+                &host.startup,
+                host.window.as_ref(),
+                y_lines as isize,
+            );
+        }
+        return;
+    }
+    if history_confirmation_is_open(&host.render) {
         return;
     }
     if host.modals.recording_popup.is_some() {

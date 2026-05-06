@@ -200,6 +200,12 @@ pub(crate) struct PermissionModal {
 }
 
 #[derive(Clone)]
+pub(crate) struct HistoryConfirmationModal {
+    pub title: String,
+    pub message: String,
+}
+
+#[derive(Clone)]
 pub(crate) struct Toast {
     pub text: String,
 }
@@ -855,7 +861,10 @@ impl RenderHost {
             Action::ToggleOutputRecording
             | Action::CycleEmojiCompatibility
             | Action::ToggleCommandEditor
-            | Action::OpenCommandPalette => {}
+            | Action::OpenCommandPalette
+            | Action::ClearAllHistory
+            | Action::ClearDirectoryHistory
+            | Action::ClearHistoryEntries => {}
         }
     }
 
@@ -1495,6 +1504,8 @@ impl RenderHost {
             recording_popup,
             permission_modal,
             command_palette,
+            history_confirmation,
+            history_deletion,
             toast,
             preedit,
             command_editor,
@@ -1507,12 +1518,18 @@ impl RenderHost {
                 input_state.recording_popup.clone(),
                 input_state.permission_modal.clone(),
                 input_state.command_palette.clone(),
+                input_state.history_confirmation.clone(),
+                input_state.history_deletion.clone(),
                 input_state.toast.clone(),
                 input_state.preedit.clone(),
                 command_editor_view_for_input_tab(&input_state, active_tab_id).cloned(),
             )
         };
         let recording_popup = recording_popup.map(|popup| RecordingPopup { lines: popup.lines });
+        let history_confirmation = history_confirmation.map(|modal| HistoryConfirmationModal {
+            title: modal.title,
+            message: modal.message,
+        });
         let toast = toast.map(|toast| Toast { text: toast.text });
 
         let controls = WindowControls {
@@ -1572,6 +1589,8 @@ impl RenderHost {
             recording_popup.as_ref(),
             permission_modal.as_ref(),
             command_palette.as_ref(),
+            history_confirmation.as_ref(),
+            history_deletion.as_ref(),
             toast.as_ref(),
             preedit.as_ref(),
             command_editor.as_ref(),

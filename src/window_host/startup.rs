@@ -146,6 +146,14 @@ pub(crate) fn command_palette_is_open(render: &RenderRuntime) -> bool {
     render.input_state.lock().command_palette.is_some()
 }
 
+pub(crate) fn history_confirmation_is_open(render: &RenderRuntime) -> bool {
+    render.input_state.lock().history_confirmation.is_some()
+}
+
+pub(crate) fn history_deletion_is_open(render: &RenderRuntime) -> bool {
+    render.input_state.lock().history_deletion.is_some()
+}
+
 pub(crate) fn open_command_palette(
     input: &InputRuntime,
     render: &mut RenderRuntime,
@@ -196,6 +204,40 @@ pub(crate) fn update_command_palette_query(
     let mut query = view.query.clone();
     update(&mut query);
     set_command_palette_query(view, query);
+    drop(state);
+    notify_interaction_changed(input, render, startup, window);
+}
+
+pub(crate) fn update_history_deletion_query(
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+    update: impl FnOnce(&mut String),
+) {
+    let mut state = render.input_state.lock();
+    let Some(view) = state.history_deletion.as_mut() else {
+        return;
+    };
+    let mut query = view.query.clone();
+    update(&mut query);
+    set_history_deletion_query(view, query);
+    drop(state);
+    notify_interaction_changed(input, render, startup, window);
+}
+
+pub(crate) fn scroll_host_history_deletion(
+    input: &InputRuntime,
+    render: &mut RenderRuntime,
+    startup: &StartupState,
+    window: Option<&Arc<Window>>,
+    delta: isize,
+) {
+    let mut state = render.input_state.lock();
+    let Some(view) = state.history_deletion.as_mut() else {
+        return;
+    };
+    scroll_history_deletion_view(view, delta, 1);
     drop(state);
     notify_interaction_changed(input, render, startup, window);
 }
@@ -519,6 +561,158 @@ pub(crate) fn enqueue_persistent_command_history(
         return;
     };
     writer.enqueue(history_runtime::store_request(command, cwd, config));
+}
+
+pub(crate) fn flush_persistent_command_history(host: &mut WindowHost) {
+    let store = host.command.history_store.clone();
+    if let Some(writer) = host.command.history_writer.take() {
+        writer.finish();
+    }
+    host.command.history_writer = store.and_then(history_runtime::spawn_history_writer);
+}
+
+pub(crate) fn open_clear_all_history_confirmation(host: &mut WindowHost) {
+    if host.command.history_store.is_none() {
+        show_toast(host, "Persistent history is not available");
+        return;
+    }
+    host.modals.history_confirmation = Some(HistoryConfirmation::ClearAll);
+    update_history_confirmation_view(
+        host,
+        Some(HistoryConfirmationView {
+            title: "Clear all history?".to_owned(),
+            message: "Enter clears all persistent command history. Escape cancels.".to_owned(),
+        }),
+    );
+}
+
+pub(crate) fn open_clear_directory_history_confirmation(
+    host: &mut WindowHost,
+    tab_id: TabId,
+) {
+    if host.command.history_store.is_none() {
+        show_toast(host, "Persistent history is not available");
+        return;
+    }
+    let Some(target) = host.input.endpoints.get(&tab_id) else {
+        return;
+    };
+    let Some(cwd) = target.terminal.lock().metadata.current_directory.clone() else {
+        show_toast(host, "Current directory is not available");
+        return;
+    };
+    host.modals.history_confirmation = Some(HistoryConfirmation::ClearDirectory(cwd.clone()));
+    update_history_confirmation_view(
+        host,
+        Some(HistoryConfirmationView {
+            title: "Clear directory history?".to_owned(),
+            message: format!(
+                "Enter clears persistent history for {}. Escape cancels.",
+                cwd.display()
+            ),
+        }),
+    );
+}
+
+pub(crate) fn open_history_deletion(host: &mut WindowHost) {
+    let Some(store) = host.command.history_store.clone() else {
+        show_toast(host, "Persistent history is not available");
+        return;
+    };
+    flush_persistent_command_history(host);
+    match history41::all_commands(&store) {
+        Ok(entries) if entries.is_empty() => show_toast(host, "Persistent history is empty"),
+        Ok(entries) => {
+            host.render.input_state.lock().history_deletion = Some(history_deletion_view(entries));
+            notify_interaction_changed(
+                &host.input,
+                &mut host.render,
+                &host.startup,
+                host.window.as_ref(),
+            );
+        }
+        Err(error) => {
+            debug!("persistent command history query failed: {error}");
+            show_toast(host, "Could not load persistent history");
+        }
+    }
+}
+
+pub(crate) fn close_history_deletion(host: &mut WindowHost) {
+    host.render.input_state.lock().history_deletion = None;
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
+
+pub(crate) fn confirm_history_clear(host: &mut WindowHost) {
+    let Some(confirmation) = host.modals.history_confirmation.take() else {
+        return;
+    };
+    update_history_confirmation_view(host, None);
+    let Some(store) = host.command.history_store.clone() else {
+        show_toast(host, "Persistent history is not available");
+        return;
+    };
+    flush_persistent_command_history(host);
+    let result = match confirmation {
+        HistoryConfirmation::ClearAll => history41::clear_all(&store),
+        HistoryConfirmation::ClearDirectory(cwd) => history41::clear_cwd(&store, &cwd),
+    };
+    match result {
+        Ok(_) => {
+            refresh_command_editor_view(host);
+            show_toast(host, "History cleared");
+        }
+        Err(error) => {
+            debug!("persistent command history clear failed: {error}");
+            show_toast(host, "Could not clear history");
+        }
+    }
+}
+
+pub(crate) fn cancel_history_confirmation(host: &mut WindowHost) {
+    host.modals.history_confirmation = None;
+    update_history_confirmation_view(host, None);
+}
+
+pub(crate) fn delete_displayed_history_entries(host: &mut WindowHost) {
+    let Some(view) = host.render.input_state.lock().history_deletion.clone() else {
+        return;
+    };
+    close_history_deletion(host);
+    if view.query.trim().is_empty() {
+        show_toast(host, "History deletion canceled");
+        return;
+    }
+    let Some(store) = host.command.history_store.clone() else {
+        show_toast(host, "Persistent history is not available");
+        return;
+    };
+    let keys: Vec<_> = view
+        .displayed
+        .iter()
+        .filter_map(|idx| view.entries.get(*idx))
+        .map(|entry| entry.key.clone())
+        .collect();
+    if keys.is_empty() {
+        show_toast(host, "No matching history entries");
+        return;
+    }
+    flush_persistent_command_history(host);
+    match history41::delete_entries(&store, &keys) {
+        Ok(_) => {
+            refresh_command_editor_view(host);
+            show_toast(host, format!("Deleted {} history entries", keys.len()));
+        }
+        Err(error) => {
+            debug!("persistent command history delete failed: {error}");
+            show_toast(host, "Could not delete history entries");
+        }
+    }
 }
 
 pub(crate) fn toggle_command_editor(host: &mut WindowHost) {
@@ -848,6 +1042,19 @@ pub(crate) fn update_permission_modal_view(
     modal: Option<PermissionModal>,
 ) {
     host.render.input_state.lock().permission_modal = modal;
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
+
+pub(crate) fn update_history_confirmation_view(
+    host: &mut WindowHost,
+    modal: Option<HistoryConfirmationView>,
+) {
+    host.render.input_state.lock().history_confirmation = modal;
     notify_interaction_changed(
         &host.input,
         &mut host.render,

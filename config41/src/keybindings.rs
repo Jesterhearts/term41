@@ -81,6 +81,13 @@ pub enum Action {
     ToggleCommandEditor,
     /// Open the command palette.
     OpenCommandPalette,
+    /// Clear all persistent command history. Unbound by default.
+    ClearAllHistory,
+    /// Clear persistent command history for the current directory. Unbound
+    /// by default.
+    ClearDirectoryHistory,
+    /// Open a searchable persistent-history deletion view. Unbound by default.
+    ClearHistoryEntries,
 }
 
 impl Action {
@@ -110,6 +117,9 @@ impl Action {
             Action::ToggleOutputRecording,
             Action::CycleEmojiCompatibility,
             Action::ToggleCommandEditor,
+            Action::ClearAllHistory,
+            Action::ClearDirectoryHistory,
+            Action::ClearHistoryEntries,
         ]
     }
 
@@ -137,6 +147,9 @@ impl Action {
             Action::CycleEmojiCompatibility => "Cycle emoji compatibility",
             Action::ToggleCommandEditor => "Toggle command editor",
             Action::OpenCommandPalette => "Open command palette",
+            Action::ClearAllHistory => "Clear all history...",
+            Action::ClearDirectoryHistory => "Clear directory history...",
+            Action::ClearHistoryEntries => "Clear history entries...",
         }
     }
 }
@@ -616,6 +629,14 @@ mod tests {
         assert!(actions.contains(&Action::JumpToPreviousFailed));
         assert!(actions.contains(&Action::JumpToPreviousCommand));
         assert!(actions.contains(&Action::JumpToPreviousSuccessful));
+    }
+
+    #[test]
+    fn command_palette_actions_include_unbound_history_actions() {
+        let actions = Action::command_palette_actions();
+        assert!(actions.contains(&Action::ClearAllHistory));
+        assert!(actions.contains(&Action::ClearDirectoryHistory));
+        assert!(actions.contains(&Action::ClearHistoryEntries));
     }
 
     #[test]

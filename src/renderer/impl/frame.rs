@@ -173,6 +173,8 @@ impl Renderer {
         recording_popup: Option<&crate::renderer::RecordingPopup>,
         permission_modal: Option<&crate::renderer::PermissionModal>,
         command_palette: Option<&crate::CommandPaletteView>,
+        history_confirmation: Option<&crate::renderer::HistoryConfirmationModal>,
+        history_deletion: Option<&crate::HistoryDeletionView>,
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
         command_editor: Option<&commands41::CommandLineView>,
@@ -192,6 +194,8 @@ impl Renderer {
             recording_popup,
             permission_modal,
             command_palette,
+            history_confirmation,
+            history_deletion,
             toast,
             preedit,
             command_editor,
@@ -218,6 +222,8 @@ impl Renderer {
         recording_popup: Option<&crate::renderer::RecordingPopup>,
         permission_modal: Option<&crate::renderer::PermissionModal>,
         command_palette: Option<&crate::CommandPaletteView>,
+        history_confirmation: Option<&crate::renderer::HistoryConfirmationModal>,
+        history_deletion: Option<&crate::HistoryDeletionView>,
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
         command_editor: Option<&commands41::CommandLineView>,
@@ -404,6 +410,28 @@ impl Renderer {
                 &mut geometry.top_overlay_bg_vertices,
                 &mut geometry.top_overlay_bg_indices,
                 &mut geometry.top_overlay_fg,
+            );
+        }
+
+        if let Some(history_deletion) = history_deletion {
+            self.render_history_deletion(
+                font_system,
+                history_deletion,
+                layout,
+                &mut geometry.top_overlay_bg_vertices,
+                &mut geometry.top_overlay_bg_indices,
+                &mut geometry.top_overlay_fg,
+            );
+        }
+
+        if let Some(modal) = history_confirmation {
+            self.render_history_confirmation_modal(
+                font_system,
+                modal,
+                layout,
+                &mut geometry.overlay_bg_vertices,
+                &mut geometry.overlay_bg_indices,
+                &mut geometry.overlay_fg,
             );
         }
 

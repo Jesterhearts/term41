@@ -112,6 +112,20 @@ pub struct HistoryEntry {
     pub source: HistoryEntrySource,
 }
 
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub struct StoredHistoryEntry {
+    pub command: String,
+    pub cwd: PathBuf,
+    pub submitted_at: SystemTime,
+    pub key: HistoryEntryKey,
+}
+
+#[derive(Debug, Clone, PartialEq, Eq, PartialOrd, Ord, Hash)]
+pub struct HistoryEntryKey {
+    cwd_key: String,
+    command: String,
+}
+
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum HistoryEntrySource {
     Cwd,
@@ -207,6 +221,63 @@ pub fn recent_commands(
         append_global_fallback(&conn, &cwd.key, query.limit, &mut entries)?;
     }
     Ok(entries.into_iter().map(|(_, entry)| entry).collect())
+}
+
+pub fn all_commands(store: &HistoryStore) -> Result<Vec<StoredHistoryEntry>, HistoryError> {
+    let conn = open_store_connection(store)?;
+    let mut stmt = conn.prepare(
+        "\
+        SELECT cwd_key, display_cwd, command, submitted_millis
+        FROM commands_global
+        ORDER BY submitted_millis DESC, id DESC
+        ",
+    )?;
+    let rows = stmt.query_map([], stored_history_entry_from_row)?;
+    let mut out = Vec::new();
+    for row in rows {
+        out.push(row?);
+    }
+    Ok(out)
+}
+
+pub fn clear_all(store: &HistoryStore) -> Result<usize, HistoryError> {
+    let mut conn = open_store_connection(store)?;
+    let tx = conn.transaction()?;
+    let deleted = tx.execute("DELETE FROM commands_by_cwd", [])?
+        + tx.execute("DELETE FROM commands_global", [])?;
+    tx.commit()?;
+    Ok(deleted)
+}
+
+pub fn clear_cwd(
+    store: &HistoryStore,
+    cwd: &Path,
+) -> Result<usize, HistoryError> {
+    let cwd = resolve_cwd(cwd);
+    clear_cwd_key(store, &cwd.key)
+}
+
+pub fn delete_entries(
+    store: &HistoryStore,
+    keys: &[HistoryEntryKey],
+) -> Result<usize, HistoryError> {
+    if keys.is_empty() {
+        return Ok(0);
+    }
+
+    let mut keys = keys.to_vec();
+    keys.sort();
+    keys.dedup();
+
+    let mut conn = open_store_connection(store)?;
+    let tx = conn.transaction()?;
+    let mut deleted = 0;
+    for key in keys {
+        deleted += delete_cwd_command_rows(&tx, &key.cwd_key, &key.command)?;
+        deleted += delete_global_command_rows(&tx, &key.cwd_key, &key.command)?;
+    }
+    tx.commit()?;
+    Ok(deleted)
 }
 
 fn open_store_connection(store: &HistoryStore) -> Result<Connection, HistoryError> {
@@ -440,6 +511,19 @@ fn history_entry_from_row(
     })
 }
 
+fn stored_history_entry_from_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<StoredHistoryEntry> {
+    let cwd_key: String = row.get(0)?;
+    let display_cwd: String = row.get(1)?;
+    let command: String = row.get(2)?;
+    let submitted_millis: i64 = row.get(3)?;
+    Ok(StoredHistoryEntry {
+        command: command.clone(),
+        cwd: PathBuf::from(display_cwd),
+        submitted_at: sql_millis_to_system_time(submitted_millis),
+        key: HistoryEntryKey { cwd_key, command },
+    })
+}
+
 fn push_unique_entry(
     out: &mut HistoryEntryMap,
     entry: HistoryEntry,
@@ -469,6 +553,45 @@ fn trim_cwd_table(
         params![cwd_key, retention_offset(limit)],
     )?;
     Ok(())
+}
+
+fn clear_cwd_key(
+    store: &HistoryStore,
+    cwd_key: &str,
+) -> Result<usize, HistoryError> {
+    let mut conn = open_store_connection(store)?;
+    let tx = conn.transaction()?;
+    let deleted = tx.execute(
+        "DELETE FROM commands_by_cwd WHERE cwd_key = ?1",
+        params![cwd_key],
+    )? + tx.execute(
+        "DELETE FROM commands_global WHERE cwd_key = ?1",
+        params![cwd_key],
+    )?;
+    tx.commit()?;
+    Ok(deleted)
+}
+
+fn delete_cwd_command_rows(
+    tx: &Transaction<'_>,
+    cwd_key: &str,
+    command: &str,
+) -> Result<usize, HistoryError> {
+    Ok(tx.execute(
+        "DELETE FROM commands_by_cwd WHERE cwd_key = ?1 AND command = ?2",
+        params![cwd_key, command],
+    )?)
+}
+
+fn delete_global_command_rows(
+    tx: &Transaction<'_>,
+    cwd_key: &str,
+    command: &str,
+) -> Result<usize, HistoryError> {
+    Ok(tx.execute(
+        "DELETE FROM commands_global WHERE cwd_key = ?1 AND command = ?2",
+        params![cwd_key, command],
+    )?)
 }
 
 fn trim_global_table(
@@ -627,6 +750,94 @@ mod tests {
         let _ = fs::remove_dir_all(root);
     }
 
+    #[test]
+    fn all_commands_returns_persistent_entries_in_recent_order() {
+        let root = temp_root("all_commands_returns_persistent_entries_in_recent_order");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        let store = open(&root.join("history.sqlite3")).unwrap();
+
+        store_at(&store, "first", root.join("a"), 1);
+        store_at(&store, "second", root.join("b"), 2);
+
+        let entries = all_commands(&store).unwrap();
+
+        assert_eq!(stored_commands(&entries), ["second", "first"]);
+        assert_eq!(entries[0].cwd, root.join("b"));
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clear_all_removes_cwd_and_global_history() {
+        let root = temp_root("clear_all_removes_cwd_and_global_history");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        let store = open(&root.join("history.sqlite3")).unwrap();
+
+        store_at(&store, "first", root.join("a"), 1);
+        store_at(&store, "second", root.join("b"), 2);
+
+        clear_all(&store).unwrap();
+
+        assert!(all_commands(&store).unwrap().is_empty());
+        assert!(
+            recent_commands(&store, HistoryQuery::cwd(root.join("a"), 10))
+                .unwrap()
+                .is_empty()
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn clear_cwd_removes_directory_entries_from_cwd_and_global_tables() {
+        let root = temp_root("clear_cwd_removes_directory_entries_from_cwd_and_global_tables");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        let store = open(&root.join("history.sqlite3")).unwrap();
+
+        store_at(&store, "a command", root.join("a"), 1);
+        store_at(&store, "b command", root.join("b"), 2);
+
+        clear_cwd(&store, &root.join("a")).unwrap();
+
+        assert_eq!(
+            stored_commands(&all_commands(&store).unwrap()),
+            ["b command"]
+        );
+        assert_eq!(
+            commands(recent_commands(&store, HistoryQuery::cwd(root.join("a"), 10)).unwrap()),
+            ["b command"]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
+    #[test]
+    fn delete_entries_removes_matching_commands_only() {
+        let root = temp_root("delete_entries_removes_matching_commands_only");
+        fs::create_dir_all(root.join("a")).unwrap();
+        fs::create_dir_all(root.join("b")).unwrap();
+        let store = open(&root.join("history.sqlite3")).unwrap();
+
+        store_at(&store, "remove me", root.join("a"), 1);
+        store_at(&store, "keep me", root.join("b"), 2);
+        let entries = all_commands(&store).unwrap();
+        let remove_key = entries
+            .iter()
+            .find(|entry| entry.command == "remove me")
+            .unwrap()
+            .key
+            .clone();
+
+        delete_entries(&store, &[remove_key]).unwrap();
+
+        assert_eq!(stored_commands(&all_commands(&store).unwrap()), ["keep me"]);
+        assert_eq!(
+            commands(recent_commands(&store, HistoryQuery::cwd(root.join("a"), 10)).unwrap()),
+            ["keep me"]
+        );
+        let _ = fs::remove_dir_all(root);
+    }
+
     fn store_at(
         store: &HistoryStore,
         command: impl Into<String>,
@@ -658,6 +869,10 @@ mod tests {
 
     fn commands(entries: Vec<HistoryEntry>) -> Vec<String> {
         entries.into_iter().map(|entry| entry.command).collect()
+    }
+
+    fn stored_commands(entries: &[StoredHistoryEntry]) -> Vec<String> {
+        entries.iter().map(|entry| entry.command.clone()).collect()
     }
 
     fn temp_root(name: &str) -> PathBuf {
