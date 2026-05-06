@@ -24,6 +24,10 @@ assistance of LLMs, and term41 is the product of one such experiment. I know
 there are many other terminal emulators and this one is nothing special, but
 I've always wanted to write my own, with the features I prefer.
 
+## Do **You** Use This?
+Yes, it is my primary shell. I use it for quite a large portion of the day
+every day.
+
 ## Possible Objections
 
 1. You use AI.
