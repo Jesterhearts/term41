@@ -85,6 +85,7 @@ pub(crate) const GUTTER_MENU_ITEMS: &[GutterMenuItem] = &[
 
 pub(crate) const POPUP_WIDTH_CELLS: f32 = 20.0;
 const FRAME_DURATION: Duration = Duration::from_millis(1000 / 60);
+const SCRIPT_STATUS_GENERATION_BIT: u64 = 1 << 63;
 
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 enum CommandEditorConfigSync {
@@ -1915,7 +1916,7 @@ fn apply_script_status_line(
         text,
         snap.viewport_cols,
         screen_row,
-        generation,
+        script_status_row_generation(generation),
         &snap.palette,
     );
     if let Some(existing) = snap
@@ -1927,6 +1928,10 @@ fn apply_script_status_line(
     } else {
         snap.rows.push(row);
     }
+}
+
+fn script_status_row_generation(generation: u64) -> u64 {
+    generation | SCRIPT_STATUS_GENERATION_BIT
 }
 
 /// Encode an RGBA byte buffer to PNG at `path`. Always RGBA8 — the
@@ -1956,6 +1961,53 @@ fn should_suspend_terminal_area(
     reset_cached_rows: bool,
 ) -> bool {
     synchronized_update_active && !reset_cached_rows && last_rendered_tab_id == Some(active_tab_id)
+}
+
+#[cfg(test)]
+mod script_status_tests {
+    use config41::ColorPalette;
+    use config41::CursorStyle;
+    use terminal41::TermSnapshot;
+
+    use super::*;
+
+    fn snapshot_with_status_row(generation: u64) -> TermSnapshot {
+        let palette = ColorPalette::default();
+        TermSnapshot {
+            generation,
+            rows: vec![local_status_line_row("", 8, 2, generation, &palette)],
+            total_rows: 3,
+            viewport_rows: 2,
+            viewport_cols: 8,
+            viewport_offset: 0,
+            status_line_row: Some(2),
+            drcs_glyphs: Default::default(),
+            dec_color: terminal41::dec_color_state_from_palette(&palette),
+            palette,
+            search_active: false,
+            search: None,
+            cursor: None,
+            cursor_style: CursorStyle::default(),
+            screen_reverse: false,
+            on_alt_screen: false,
+            command_editor_hidden: false,
+            synchronized_update_active: false,
+            current_title: None,
+            reset_cached_rows: false,
+        }
+    }
+
+    #[test]
+    fn script_status_generation_cannot_collide_with_terminal_status_row_generation() {
+        let mut snap = snapshot_with_status_row(1);
+
+        apply_script_status_line(&mut snap, Some("ok"), 1);
+
+        let status_row = snap.rows.last().expect("status row");
+        assert_eq!(&status_row.cells.concat()[..2], "ok");
+        assert_ne!(status_row.generation, 1);
+        assert_eq!(status_row.generation, SCRIPT_STATUS_GENERATION_BIT | 1);
+    }
 }
 
 #[cfg(test)]
