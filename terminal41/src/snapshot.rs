@@ -948,6 +948,29 @@ mod tests {
     }
 
     #[test]
+    fn bottom_aligned_active_block_input_bumps_rendered_row_generation() {
+        let mut terminal = terminal();
+        let mut processor = TerminalProcessor::new();
+
+        processor.process_bytes(&mut terminal, b"old");
+        processor.process_bytes(&mut terminal, b"\x1b]133;A\x07new");
+        let first = snapshot_terminal(&mut terminal);
+        let first_active = first.rows.last().unwrap();
+
+        assert_eq!(snapshot_row_text(first_active), "new  ");
+        assert_eq!(first_active.screen_row, 2);
+
+        processor.process_bytes(&mut terminal, b"!");
+        let snap = snapshot_terminal(&mut terminal);
+        let active = snap.rows.last().unwrap();
+
+        assert!(!snap.reset_cached_rows);
+        assert_eq!(snapshot_row_text(active), "new! ");
+        assert_eq!(active.screen_row, 2);
+        assert_ne!(active.generation, first_active.generation);
+    }
+
+    #[test]
     fn active_block_selection_uses_active_row_after_multiple_blocks() {
         let mut terminal = Terminal::new(
             5,

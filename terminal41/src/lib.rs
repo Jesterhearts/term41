@@ -314,6 +314,56 @@ fn shift_command_meta_rows(
     meta.finished_row = meta.finished_row.map(|row| row.saturating_add(delta));
 }
 
+fn active_cursor_snapshot_row(
+    active: &screen::Screen,
+    viewport: &Viewport,
+) -> Option<u32> {
+    rendered_active_row_to_snapshot_row(active, viewport, active.cursor.row)
+}
+
+fn rendered_active_row_to_snapshot_row(
+    active: &screen::Screen,
+    viewport: &Viewport,
+    active_row: u32,
+) -> Option<u32> {
+    let rendered_row = rendered_active_block_top(active).saturating_add(active_row);
+    let rendered_top = rendered_view_top_for_snapshot_dirty(active, viewport);
+    let rendered_bottom = rendered_top.saturating_add(viewport.rows);
+    (rendered_row >= rendered_top && rendered_row < rendered_bottom)
+        .then(|| rendered_row - rendered_top)
+}
+
+fn rendered_active_block_top(active: &screen::Screen) -> u32 {
+    active
+        .scrollback_blocks
+        .iter()
+        .map(|block| screen::command_block_rendered_rows_len(block) as u32)
+        .fold(0_u32, |top, rows| {
+            top.saturating_add(rows.saturating_add(1))
+        })
+}
+
+fn rendered_view_top_for_snapshot_dirty(
+    active: &screen::Screen,
+    viewport: &Viewport,
+) -> u32 {
+    let rendered_len = screen::rendered_rows_len(active) as u32;
+    let max_top = rendered_len.saturating_sub(viewport.rows);
+    max_top.saturating_sub(active.offset)
+}
+
+fn mark_snapshot_cursor_rows(
+    snapshot: &mut SnapshotState,
+    before: SnapshotDirtyBaseline,
+    after: SnapshotDirtyBaseline,
+) {
+    match (before.cursor_snapshot_row, after.cursor_snapshot_row) {
+        (Some(before_row), Some(after_row)) => snapshot.mark_rows(before_row, after_row),
+        (Some(row), None) | (None, Some(row)) => snapshot.mark_row(row),
+        (None, None) => {}
+    }
+}
+
 fn action_clears_history_blocks(action: &TerminalAction<'_>) -> bool {
     matches!(
         action,
@@ -569,6 +619,7 @@ struct SnapshotDirtyBaseline {
     active_display: screen::ActiveDisplay,
     cursor_row: u32,
     cursor_col: u32,
+    cursor_snapshot_row: Option<u32>,
     scroll_bottom: u32,
     grid_rows_len: usize,
     total_popped: usize,
@@ -1139,6 +1190,7 @@ impl Terminal {
             active_display: self.active.active_display,
             cursor_row: self.active.cursor.row,
             cursor_col: self.active.cursor.col,
+            cursor_snapshot_row: active_cursor_snapshot_row(&self.active, &self.viewport),
             scroll_bottom: self.active.scroll_bottom,
             grid_rows_len: self.active.grid.rows.len(),
             total_popped: self.active.grid.total_popped,
@@ -1255,7 +1307,7 @@ impl Terminal {
 
         match before.active_display {
             screen::ActiveDisplay::Main => {
-                self.snapshot.mark_rows(before.cursor_row, after.cursor_row)
+                mark_snapshot_cursor_rows(&mut self.snapshot, before, after);
             }
             screen::ActiveDisplay::Status => {
                 if let Some(row) = before.status_line_row.or(after.status_line_row) {
