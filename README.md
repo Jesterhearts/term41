@@ -182,6 +182,19 @@ From a local checkout, use:
 cargo install --path . --locked
 ```
 
+To install the desktop launcher and icon assets for the current user:
+
+```sh
+scripts/install_desktop_assets.sh
+```
+
+The launcher uses an installed `term41` binary when one is found. To point the
+desktop entry at a specific build or wrapper command:
+
+```sh
+scripts/install_desktop_assets.sh --exec "$HOME/.cargo/bin/term41"
+```
+
 ### Cargo Features
 
 | Feature                | Default | Description                                                                                                       |
