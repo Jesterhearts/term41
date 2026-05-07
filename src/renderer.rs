@@ -1912,11 +1912,17 @@ fn apply_script_status_line(
     let Some(screen_row) = snap.status_line_row else {
         return;
     };
+    let base_generation = snap
+        .rows
+        .iter()
+        .find(|row| row.screen_row == screen_row)
+        .map(|row| row.generation)
+        .unwrap_or(snap.generation);
     let row = local_status_line_row(
         text,
         snap.viewport_cols,
         screen_row,
-        script_status_row_generation(generation),
+        script_status_row_generation(generation, base_generation),
         &snap.palette,
     );
     if let Some(existing) = snap
@@ -1930,8 +1936,15 @@ fn apply_script_status_line(
     }
 }
 
-fn script_status_row_generation(generation: u64) -> u64 {
-    generation | SCRIPT_STATUS_GENERATION_BIT
+fn script_status_row_generation(
+    script_generation: u64,
+    base_generation: u64,
+) -> u64 {
+    SCRIPT_STATUS_GENERATION_BIT
+        | script_generation
+            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
+            .wrapping_add(base_generation)
+            & !SCRIPT_STATUS_GENERATION_BIT
 }
 
 /// Encode an RGBA byte buffer to PNG at `path`. Always RGBA8 — the
@@ -2006,7 +2019,21 @@ mod script_status_tests {
         let status_row = snap.rows.last().expect("status row");
         assert_eq!(&status_row.cells.concat()[..2], "ok");
         assert_ne!(status_row.generation, 1);
-        assert_eq!(status_row.generation, SCRIPT_STATUS_GENERATION_BIT | 1);
+        assert_eq!(status_row.generation, script_status_row_generation(1, 1));
+    }
+
+    #[test]
+    fn script_status_generation_tracks_base_status_row_generation() {
+        let mut before = snapshot_with_status_row(1);
+        let mut after = snapshot_with_status_row(2);
+
+        apply_script_status_line(&mut before, Some("ok"), 1);
+        apply_script_status_line(&mut after, Some("ok"), 1);
+
+        assert_ne!(
+            before.rows.last().expect("before status row").generation,
+            after.rows.last().expect("after status row").generation
+        );
     }
 }
 
