@@ -365,7 +365,7 @@ fn snapshot_grid_row(
     grid_row: &crate::Row,
     generation: u64,
     active_screen_row: Option<u32>,
-    rendered_row: Option<u32>,
+    rendered_row: Option<u64>,
 ) -> RowSnapshot {
     let is_double = !matches!(grid_row.line_attr, LineAttr::Normal);
     let cols = if is_double {
@@ -437,11 +437,11 @@ fn snapshot_grid_row(
 enum RenderedRow<'a> {
     Separator,
     History {
-        rendered_row: u32,
+        rendered_row: u64,
         grid_row: &'a crate::Row,
     },
     Active {
-        rendered_row: u32,
+        rendered_row: u64,
         block_row: u32,
         grid_row: &'a crate::Row,
     },
@@ -454,22 +454,25 @@ fn rendered_row<'a>(
 ) -> RenderedRow<'a> {
     let top = rendered_view_top(terminal, terminal_rows);
     let mut idx = top + screen_row;
-    let rendered_row = idx;
+    let mut rendered_base = 0_u64;
     for block in &terminal.active.scrollback_blocks {
         let block_rows = crate::screen::command_block_rendered_rows_len(block) as u32;
         if idx < block_rows {
             return RenderedRow::History {
-                rendered_row,
+                rendered_row: rendered_base + idx as u64,
                 grid_row: &block.grid.rows[idx as usize],
             };
         }
         idx -= block_rows;
+        rendered_base += block_rows as u64;
         if idx == 0 {
             return RenderedRow::Separator;
         }
         idx -= 1;
+        rendered_base += 1;
     }
     let local = idx.min(terminal.active.grid.rows.len().saturating_sub(1) as u32);
+    let rendered_row = rendered_base + terminal.active.grid.total_popped as u64 + u64::from(local);
     RenderedRow::Active {
         rendered_row,
         block_row: local,

@@ -54,7 +54,7 @@ pub(super) fn row_snapshot(
 
 #[derive(Clone, Copy)]
 struct StickyPromptRow<'a> {
-    rendered_row: u32,
+    rendered_row: u64,
     active_row: Option<u32>,
     row: &'a terminal41::Row,
 }
@@ -64,7 +64,7 @@ fn sticky_prompt_row_at_top(
     top: u32,
 ) -> Option<StickyPromptRow<'_>> {
     let mut idx = top;
-    let mut block_start = 0;
+    let mut block_start = 0_u64;
     for block in &terminal.active.scrollback_blocks {
         let block_rows = block.grid.rows.len() as u32;
         if idx < block_rows {
@@ -73,7 +73,7 @@ fn sticky_prompt_row_at_top(
 
         idx -= block_rows;
         let completed_block_start = block_start;
-        block_start += block_rows;
+        block_start += block_rows as u64;
         if idx == 0 {
             return sticky_prompt_in_rows(
                 &block.grid.rows,
@@ -91,8 +91,8 @@ fn sticky_prompt_row_at_top(
         sticky_prompt_in_rows(
             &terminal.active.grid.rows,
             idx,
-            block_start,
-            Some(block_start),
+            block_start + terminal.active.grid.total_popped as u64,
+            Some(block_start + terminal.active.grid.total_popped as u64),
         )
     } else {
         None
@@ -102,17 +102,17 @@ fn sticky_prompt_row_at_top(
 fn sticky_prompt_in_rows<'a>(
     rows: &'a std::collections::VecDeque<terminal41::Row>,
     local_top: u32,
-    block_start: u32,
-    active_block_start: Option<u32>,
+    block_start: u64,
+    active_block_start: Option<u64>,
 ) -> Option<StickyPromptRow<'a>> {
     let prompt_local = rows
         .iter()
         .take(local_top as usize)
         .rposition(|row| row.prompt_start)?;
-    let rendered_row = block_start + prompt_local as u32;
+    let rendered_row = block_start + prompt_local as u64;
     Some(StickyPromptRow {
         rendered_row,
-        active_row: active_block_start.map(|start| rendered_row - start),
+        active_row: active_block_start.map(|start| (rendered_row - start) as u32),
         row: &rows[prompt_local],
     })
 }
@@ -165,7 +165,7 @@ fn row_has_visible_content(row: &terminal41::Row) -> bool {
 fn row_snapshot_for_sticky_prompt(
     terminal: &Terminal,
     row: &terminal41::Row,
-    rendered_row: u32,
+    rendered_row: u64,
     active_row: Option<u32>,
     generation: u64,
 ) -> RowSnapshot {
@@ -230,11 +230,11 @@ fn normalize_renderer_snapshot_row(
 
 fn sticky_prompt_generation(
     snapshot_generation: u64,
-    rendered_row: u32,
+    rendered_row: u64,
 ) -> u64 {
     snapshot_generation
         .wrapping_mul(1_099_511_628_211)
-        .wrapping_add(rendered_row as u64)
+        .wrapping_add(rendered_row)
         .wrapping_add(1)
 }
 

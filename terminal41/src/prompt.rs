@@ -182,8 +182,8 @@ pub struct CommandBlockDocument {
 
 struct RenderedRowInfo<'a> {
     row: &'a crate::Row,
-    rendered_row: u32,
-    block_end: u32,
+    rendered_row: u64,
+    block_end: u64,
     active_local: Option<usize>,
 }
 
@@ -379,38 +379,38 @@ fn extract_range_text(
 
 fn rendered_row_info(
     screen: &Screen,
-    rendered_row: u32,
+    rendered_row: u64,
 ) -> Option<RenderedRowInfo<'_>> {
-    let mut idx = rendered_row;
-    let mut base = 0;
+    let mut base = 0_u64;
     for block in &screen.scrollback_blocks {
-        let block_rows = screen::command_block_rendered_rows_len(block) as u32;
-        if idx < block_rows {
+        let block_rows = screen::command_block_rendered_rows_len(block) as u64;
+        if rendered_row < base + block_rows {
+            let local = rendered_row - base;
             return Some(RenderedRowInfo {
-                row: &block.grid.rows[idx as usize],
+                row: &block.grid.rows[local as usize],
                 rendered_row,
                 block_end: base + block_rows,
                 active_local: None,
             });
         }
-        idx -= block_rows;
         base += block_rows;
-        if idx == 0 {
+        if rendered_row == base {
             return None;
         }
-        idx -= 1;
         base += 1;
     }
 
-    let active_rows = screen::active_block_rendered_rows_len(screen) as u32;
-    if idx >= active_rows {
+    let active_base = base + screen.grid.total_popped as u64;
+    let local = rendered_row.checked_sub(active_base)? as usize;
+    let active_rows = screen::active_block_rendered_rows_len(screen);
+    if local >= active_rows {
         return None;
     }
     Some(RenderedRowInfo {
-        row: &screen.grid.rows[idx as usize],
+        row: &screen.grid.rows[local],
         rendered_row,
-        block_end: base + active_rows,
-        active_local: Some(idx as usize),
+        block_end: active_base + active_rows as u64,
+        active_local: Some(local),
     })
 }
 
@@ -427,11 +427,11 @@ fn prompt_ref_for_active_abs(
     let rendered_row = screen
         .scrollback_blocks
         .iter()
-        .map(|block| screen::command_block_rendered_rows_len(block) + 1)
-        .sum::<usize>()
-        + local;
+        .map(|block| screen::command_block_rendered_rows_len(block) as u64 + 1)
+        .sum::<u64>()
+        + prompt_abs;
     Some(PromptRef {
-        rendered_row: rendered_row as u64,
+        rendered_row,
         active_abs_row: Some(prompt_abs),
     })
 }
@@ -452,8 +452,8 @@ fn rendered_output_start_point(
     prompt: PromptRef,
     screen: &Screen,
 ) -> Option<TextPoint> {
-    let info = rendered_row_info(screen, prompt.rendered_row as u32)?;
-    for rendered_row in prompt.rendered_row as u32..info.block_end {
+    let info = rendered_row_info(screen, prompt.rendered_row)?;
+    for rendered_row in prompt.rendered_row..info.block_end {
         let row = rendered_row_info(screen, rendered_row)?.row;
         if row.output_start {
             return Some(TextPoint {
@@ -471,8 +471,8 @@ fn rendered_command_start_point(
     prompt: PromptRef,
     screen: &Screen,
 ) -> Option<TextPoint> {
-    let info = rendered_row_info(screen, prompt.rendered_row as u32)?;
-    for rendered_row in prompt.rendered_row as u32..info.block_end {
+    let info = rendered_row_info(screen, prompt.rendered_row)?;
+    for rendered_row in prompt.rendered_row..info.block_end {
         let row = rendered_row_info(screen, rendered_row)?.row;
         if let Some(col) = valid_command_start_col(row) {
             return Some(TextPoint {
@@ -508,10 +508,10 @@ fn rendered_block_end_point(
 fn rendered_block_text_end(
     prompt: PromptRef,
     screen: &Screen,
-) -> Option<u32> {
-    let info = rendered_row_info(screen, prompt.rendered_row as u32)?;
+) -> Option<u64> {
+    let info = rendered_row_info(screen, prompt.rendered_row)?;
     let mut end = info.block_end;
-    while end > prompt.rendered_row as u32 + 1 {
+    while end > prompt.rendered_row + 1 {
         let Some(row) = rendered_row_info(screen, end - 1).map(|info| info.row) else {
             break;
         };
@@ -567,7 +567,7 @@ fn extract_rendered_range_text(
     };
     let mut out = String::new();
     for rendered_row in range.start.row..=end_abs {
-        let Some(info) = rendered_row_info(screen, rendered_row as u32) else {
+        let Some(info) = rendered_row_info(screen, rendered_row) else {
             continue;
         };
         let row = info.row;
@@ -808,7 +808,7 @@ fn command_block_exit_status(
     prompt: PromptRef,
     screen: &Screen,
 ) -> Option<i32> {
-    rendered_row_info(screen, prompt.rendered_row as u32)?
+    rendered_row_info(screen, prompt.rendered_row)?
         .row
         .exit_status
 }
@@ -886,7 +886,7 @@ pub fn next_command_block_after(
 }
 
 fn command_block_prompts(screen: &Screen) -> Vec<PromptRef> {
-    (0..screen::rendered_rows_len(screen) as u32)
+    (0..screen::rendered_rows_len(screen) as u64)
         .filter_map(|rendered_row| {
             let info = rendered_row_info(screen, rendered_row)?;
             info.row
@@ -1019,7 +1019,7 @@ fn selection_head_for_rendered_range(
 ) -> Option<SelectionPoint> {
     let end_abs = last_row_in_range(range)?;
     if range.end.col > 0 && range.end.row == end_abs {
-        let col = rendered_row_info(screen, end_abs as u32)
+        let col = rendered_row_info(screen, end_abs)
             .map(|info| range.end.col.min(info.row.len()))
             .unwrap_or(range.end.col);
         if col == 0 {
@@ -1030,7 +1030,7 @@ fn selection_head_for_rendered_range(
             col: col - 1,
         });
     }
-    let end_col = rendered_row_info(screen, end_abs as u32)
+    let end_col = rendered_row_info(screen, end_abs)
         .map(|info| info.row.content_len().saturating_sub(1))
         .unwrap_or(0);
     Some(SelectionPoint {

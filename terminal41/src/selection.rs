@@ -241,7 +241,7 @@ pub fn active_screen_row_at_viewport_row(
     Some(idx)
 }
 
-fn rendered_document_top(
+fn rendered_view_top(
     screen: &Screen,
     viewport: &Viewport,
 ) -> u32 {
@@ -254,37 +254,74 @@ fn rendered_document_top(
         .saturating_sub(row_offset)
 }
 
+fn completed_rendered_rows_len(screen: &Screen) -> u64 {
+    screen
+        .scrollback_blocks
+        .iter()
+        .map(|block| screen::command_block_rendered_rows_len(block) as u64 + 1)
+        .sum()
+}
+
+fn rendered_local_row_to_document_row(
+    screen: &Screen,
+    rendered_row: u32,
+) -> Option<u64> {
+    let mut idx = rendered_row;
+    let mut base = 0_u64;
+    for block in &screen.scrollback_blocks {
+        let block_rows = screen::command_block_rendered_rows_len(block) as u32;
+        if idx < block_rows {
+            return Some(base + idx as u64);
+        }
+        idx -= block_rows;
+        base += block_rows as u64;
+        if idx == 0 {
+            return Some(base);
+        }
+        idx -= 1;
+        base += 1;
+    }
+    let active_rows = screen::active_block_rendered_rows_len(screen) as u32;
+    (idx < active_rows)
+        .then(|| completed_rendered_rows_len(screen) + screen.grid.total_popped as u64 + idx as u64)
+}
+
 pub fn rendered_document_row_at_viewport_row(
     screen: &Screen,
     viewport: &Viewport,
     on_alt_screen: bool,
     viewport_row: u32,
-) -> Option<u32> {
+) -> Option<u64> {
     let screen_row =
         rendered_screen_row_at_viewport_row(screen, viewport, on_alt_screen, viewport_row)?;
-    if on_alt_screen || screen.scrollback_blocks.is_empty() {
-        return Some(screen_row);
+    if on_alt_screen {
+        return Some(screen_row as u64);
     }
-    Some(rendered_document_top(screen, viewport) + screen_row)
+    let rendered_row = rendered_view_top(screen, viewport) + screen_row;
+    rendered_local_row_to_document_row(screen, rendered_row)
 }
 
 fn rendered_row_ref(
     screen: &Screen,
-    rendered_row: u32,
+    rendered_row: u64,
 ) -> Option<&Row> {
-    let mut idx = rendered_row;
+    let idx = rendered_row;
+    let mut base = 0_u64;
     for block in &screen.scrollback_blocks {
-        let block_rows = screen::command_block_rendered_rows_len(block) as u32;
-        if idx < block_rows {
-            return block.grid.rows.get(idx as usize);
+        let block_rows = screen::command_block_rendered_rows_len(block) as u64;
+        if idx < base + block_rows {
+            let local = idx - base;
+            return block.grid.rows.get(local as usize);
         }
-        idx -= block_rows;
-        if idx == 0 {
+        base += block_rows;
+        if idx == base {
             return None;
         }
-        idx -= 1;
+        base += 1;
     }
-    screen.grid.rows.get(idx as usize)
+    let active_base = base + screen.grid.total_popped as u64;
+    let local = idx.checked_sub(active_base)? as usize;
+    screen.grid.rows.get(local)
 }
 
 fn rendered_selection_point_at_viewport_row<'a>(
@@ -539,7 +576,7 @@ pub fn extend_rendered_selection(
         viewport_row,
         col,
     )?;
-    let origin_row = rendered_row_ref(screen, selection.origin.row as u32)?;
+    let origin_row = rendered_row_ref(screen, selection.origin.row)?;
     let forward = (new_point.row, new_point.col) >= (selection.origin.row, selection.origin.col);
     let (anchor, head) = match selection.mode {
         SelectionMode::Char => (selection.origin, new_point),
@@ -659,7 +696,7 @@ pub fn is_cell_selected(
 
 pub fn is_rendered_cell_selected(
     selection: Option<&Selection>,
-    rendered_row: u32,
+    rendered_row: u64,
     screen_col: u32,
 ) -> bool {
     let Some(selection) = selection else {
@@ -669,7 +706,7 @@ pub fn is_rendered_cell_selected(
         return false;
     }
     selection.contains(SelectionPoint {
-        row: rendered_row as u64,
+        row: rendered_row,
         col: screen_col,
     })
 }
@@ -982,7 +1019,7 @@ fn rendered_selection_text(
 ) -> Option<String> {
     let mut out = String::new();
     for abs_row in start.row..=end.row {
-        let Some(row) = rendered_row_ref(screen, abs_row as u32) else {
+        let Some(row) = rendered_row_ref(screen, abs_row) else {
             if abs_row < end.row {
                 out.push('\n');
             }
@@ -1304,6 +1341,42 @@ mod integration_tests {
             selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
             Some("alpha\nbeta")
         );
+    }
+
+    #[test]
+    fn rendered_mouse_selection_uses_retained_active_rows_after_scrollback_recycling() {
+        let mut term = TestTerm::new(8, 3, 2, 16, 8);
+        for i in 0..8 {
+            term.process(format!("line{i}\r\n").as_bytes());
+        }
+        term.process(b"tail");
+        assert!(term.inner.active.grid.total_popped > 0);
+
+        let bottom_row = term.inner.viewport.rows - 1;
+        term.inner.selection = start_rendered_selection(
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.on_alt_screen,
+            0,
+            bottom_row,
+            SelectionMode::Char,
+        );
+        term.inner.selection = extend_rendered_selection(
+            &term.inner.selection.unwrap(),
+            &term.inner.active,
+            &term.inner.viewport,
+            term.inner.on_alt_screen,
+            3,
+            bottom_row,
+        );
+
+        assert_eq!(
+            selection_text(term.inner.selection.as_ref(), &term.inner.active).as_deref(),
+            Some("tail")
+        );
+
+        let snap = crate::snapshot::snapshot_terminal(&mut term.inner);
+        assert_eq!(&snap.rows.last().unwrap().selected[..4], &[true; 4]);
     }
 
     #[test]
