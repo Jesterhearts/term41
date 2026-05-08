@@ -62,6 +62,7 @@ mod geometry_tests {
     use super::image_vertex_z;
     use super::push_terminal_dirty_rect;
     use super::row_hidden_by_sticky_prompt;
+    use super::row_suspended_by_terminal_area;
     use super::snapshot_row_y;
     use super::terminal_block_y_offset_rows;
     use super::terminal_row_y;
@@ -347,6 +348,18 @@ mod geometry_tests {
         assert_eq!(geometry.terminal_dirty_rects.len(), 1);
         assert_eq!(geometry.terminal_dirty_rects[0].y, 500.0);
         assert_eq!(geometry.terminal_dirty_rects[0].h, 20.0);
+    }
+
+    #[test]
+    fn suspended_terminal_area_keeps_status_row_paintable() {
+        let mut snap = snapshot(80, 24);
+        snap.status_line_row = Some(24);
+        let mut status_row = blank_row(80);
+        status_row.screen_row = 24;
+
+        assert!(row_suspended_by_terminal_area(&snap.rows[0], &snap, true));
+        assert!(!row_suspended_by_terminal_area(&status_row, &snap, true));
+        assert!(!row_suspended_by_terminal_area(&snap.rows[0], &snap, false));
     }
 
     #[test]

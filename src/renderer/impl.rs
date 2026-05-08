@@ -505,6 +505,14 @@ fn row_hidden_by_sticky_prompt(
     row_top < sticky_bottom && row_bottom > sticky_top
 }
 
+fn row_suspended_by_terminal_area(
+    snap_row: &RowSnapshot,
+    snap: &TermSnapshot,
+    suspend_terminal_area: bool,
+) -> bool {
+    suspend_terminal_area && snap.status_line_row != Some(snap_row.screen_row)
+}
+
 fn image_page_x(
     image: &VisibleImage,
     layout: &FrameLayout,
@@ -1926,7 +1934,9 @@ impl Renderer {
             let placement = command_editor_placement_for_cursor(cursor_row, snap.viewport_rows);
             layout.terminal_y_offset = -(placement.terminal_row_offset as f32) * layout.cell_h;
         }
-        if !suspend_terminal_area {
+        if suspend_terminal_area {
+            self.apply_terminal_snapshot_status_row(snap);
+        } else {
             self.apply_terminal_snapshot_rows(snap, block_y_offset_rows);
         }
         let terminal_rows = std::mem::take(&mut self.terminal_rows);

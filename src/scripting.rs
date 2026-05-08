@@ -5,8 +5,11 @@ use std::path::PathBuf;
 use std::sync::Arc;
 use std::sync::OnceLock;
 use std::sync::mpsc;
+use std::sync::mpsc::RecvTimeoutError;
 use std::thread;
 use std::thread::Thread;
+use std::time::Duration;
+use std::time::Instant;
 
 use arc_swap::ArcSwap;
 use config41::ScriptPermissions;
@@ -19,6 +22,7 @@ use mlua::Value;
 use parking_lot::Mutex;
 
 const MAX_SCRIPT_TEXT_BYTES: usize = 4096;
+const SCRIPT_IDLE_UPDATE_INTERVAL: Duration = Duration::from_secs(1);
 
 #[derive(Debug, Clone, Default, PartialEq, Eq)]
 pub(crate) struct ScriptInput {
@@ -229,12 +233,48 @@ fn run_script(
     }
 
     publish_context_output(&context, &output, None, &render_thread_handle);
-    while let Ok(input) = rx.recv() {
-        context.lock().input = input;
+    let mut next_update = Instant::now();
+    loop {
+        match rx.recv_timeout(next_update.saturating_duration_since(Instant::now())) {
+            Ok(input) => {
+                set_latest_script_input(&context, input);
+                drain_pending_script_input(&context, &rx);
+            }
+            Err(RecvTimeoutError::Timeout) => {}
+            Err(RecvTimeoutError::Disconnected) => break,
+        }
+        let update_started = Instant::now();
         let result = call_update(&lua);
         let error = result.err().map(|e| e.to_string());
         publish_context_output(&context, &output, error, &render_thread_handle);
+        next_update = next_script_update_deadline(update_started, Instant::now());
     }
+}
+
+fn set_latest_script_input(
+    context: &Arc<Mutex<ScriptContext>>,
+    input: ScriptInput,
+) {
+    context.lock().input = input;
+}
+
+fn drain_pending_script_input(
+    context: &Arc<Mutex<ScriptContext>>,
+    rx: &mpsc::Receiver<ScriptInput>,
+) {
+    while let Ok(input) = rx.try_recv() {
+        set_latest_script_input(context, input);
+    }
+}
+
+fn next_script_update_deadline(
+    update_started: Instant,
+    update_finished: Instant,
+) -> Instant {
+    update_started
+        .checked_add(SCRIPT_IDLE_UPDATE_INTERVAL)
+        .filter(|deadline| *deadline > update_finished)
+        .unwrap_or(update_finished)
 }
 
 fn sandboxed_lua(permissions: ScriptPermissions) -> mlua::Result<Lua> {
@@ -547,6 +587,25 @@ terminal.set_status_text(terminal.current_cwd())
             }
         ));
         assert_eq!(output.load().status_text.as_deref(), Some("done"));
+    }
+
+    #[test]
+    fn next_script_update_deadline_throttles_fast_updates() {
+        let started = Instant::now();
+        let finished = started + Duration::from_millis(10);
+
+        assert_eq!(
+            next_script_update_deadline(started, finished),
+            started + SCRIPT_IDLE_UPDATE_INTERVAL
+        );
+    }
+
+    #[test]
+    fn next_script_update_deadline_keeps_slow_updates_continuous() {
+        let started = Instant::now();
+        let finished = started + SCRIPT_IDLE_UPDATE_INTERVAL + Duration::from_millis(10);
+
+        assert_eq!(next_script_update_deadline(started, finished), finished);
     }
 
     #[test]

@@ -55,6 +55,42 @@ impl Renderer {
         }
     }
 
+    pub(super) fn apply_terminal_snapshot_status_row(
+        &mut self,
+        snap: &TermSnapshot,
+    ) {
+        let Some(status_row_idx) = snap.status_line_row.map(|row| row as usize) else {
+            return;
+        };
+        let Some(row) = snap
+            .rows
+            .iter()
+            .find(|row| row.screen_row as usize == status_row_idx)
+        else {
+            return;
+        };
+        if status_row_idx >= self.terminal_rows.len() {
+            self.terminal_rows.resize_with(status_row_idx + 1, || {
+                blank_cached_row(0, snap.viewport_cols, &snap.palette)
+            });
+            self.terminal_row_generations
+                .resize(status_row_idx + 1, u64::MAX);
+            self.row_geometry_cache
+                .resize_with(status_row_idx + 1, || None);
+        }
+        self.terminal_rows[status_row_idx].screen_row = status_row_idx as u32;
+        if self
+            .terminal_row_generations
+            .get(status_row_idx)
+            .is_some_and(|generation| *generation == row.generation)
+        {
+            return;
+        }
+        self.terminal_rows[status_row_idx] = row.clone();
+        self.terminal_row_generations[status_row_idx] = row.generation;
+        invalidate_row_cache_with_neighbors(&mut self.row_geometry_cache, status_row_idx);
+    }
+
     pub(super) fn frame_layout(
         &self,
         font_system: &FontSystem,
@@ -241,110 +277,112 @@ impl Renderer {
         let rapid_blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 250) & 1 == 1;
         let font_generation = font_system.font_generation();
         let force_terminal_layer_repaint = layout.terminal_y_offset != 0.0;
+        let force_row_repaint_by_area = force_terminal_layer_repaint && !suspend_terminal_area;
 
-        if !suspend_terminal_area {
-            if force_terminal_layer_repaint {
-                push_terminal_area_dirty_rect(
+        if force_row_repaint_by_area {
+            push_terminal_area_dirty_rect(
+                &mut geometry,
+                layout,
+                self.surface_config.width,
+                self.surface_config.height,
+            );
+        }
+        for snap_row in rows {
+            if row_suspended_by_terminal_area(snap_row, snap, suspend_terminal_area) {
+                continue;
+            }
+            let row = snap_row.screen_row;
+            if row_hidden_by_sticky_prompt(snap_row, snap, layout) {
+                if !force_row_repaint_by_area {
+                    push_terminal_dirty_rect(
+                        &mut geometry,
+                        snap,
+                        row,
+                        layout,
+                        self.surface_config.width,
+                        self.surface_config.height,
+                    );
+                }
+                if let Some(cache) = self.row_geometry_cache.get_mut(row as usize) {
+                    *cache = None;
+                }
+                continue;
+            }
+            if snap.search_active && row == snap.viewport_rows - 1 {
+                push_terminal_dirty_rect(
                     &mut geometry,
+                    snap,
+                    row,
+                    layout,
+                    self.surface_config.width,
+                    self.surface_config.height,
+                );
+                if let Some(cache) = self.row_geometry_cache.get_mut(row as usize) {
+                    *cache = None;
+                }
+                continue;
+            }
+            let cache_key = self.row_render_key(
+                snap,
+                snap_row,
+                row,
+                cursor_state,
+                popup_clip.as_ref(),
+                blink_off,
+                rapid_blink_off,
+                font_generation,
+                layout,
+            );
+            if let Some(cached) = self
+                .row_geometry_cache
+                .get(row as usize)
+                .and_then(Option::as_ref)
+                && cached.key == cache_key
+                && !force_row_repaint_by_area
+            {
+                continue;
+            }
+
+            if !force_row_repaint_by_area {
+                push_terminal_dirty_rect(
+                    &mut geometry,
+                    snap,
+                    row,
                     layout,
                     self.surface_config.width,
                     self.surface_config.height,
                 );
             }
-            for snap_row in rows {
-                let row = snap_row.screen_row;
-                if row_hidden_by_sticky_prompt(snap_row, snap, layout) {
-                    if !force_terminal_layer_repaint {
-                        push_terminal_dirty_rect(
-                            &mut geometry,
-                            snap,
-                            row,
-                            layout,
-                            self.surface_config.width,
-                            self.surface_config.height,
-                        );
-                    }
-                    if let Some(cache) = self.row_geometry_cache.get_mut(row as usize) {
-                        *cache = None;
-                    }
-                    continue;
-                }
-                if snap.search_active && row == snap.viewport_rows - 1 {
-                    push_terminal_dirty_rect(
-                        &mut geometry,
-                        snap,
-                        row,
-                        layout,
-                        self.surface_config.width,
-                        self.surface_config.height,
-                    );
-                    if let Some(cache) = self.row_geometry_cache.get_mut(row as usize) {
-                        *cache = None;
-                    }
-                    continue;
-                }
-                let cache_key = self.row_render_key(
-                    snap,
-                    snap_row,
-                    row,
-                    cursor_state,
-                    popup_clip.as_ref(),
-                    blink_off,
-                    rapid_blink_off,
-                    font_generation,
-                    layout,
-                );
-                if let Some(cached) = self
-                    .row_geometry_cache
-                    .get(row as usize)
-                    .and_then(Option::as_ref)
-                    && cached.key == cache_key
-                    && !force_terminal_layer_repaint
-                {
-                    continue;
-                }
-
-                if !force_terminal_layer_repaint {
-                    push_terminal_dirty_rect(
-                        &mut geometry,
-                        snap,
-                        row,
-                        layout,
-                        self.surface_config.width,
-                        self.surface_config.height,
-                    );
-                }
-                let mut row_geometry = RowGeometry::default();
-                self.append_row_geometry(
-                    font_system,
-                    snap,
-                    snap_row,
-                    row,
-                    cursor_state,
-                    popup_clip.as_ref(),
-                    blink_off,
-                    rapid_blink_off,
-                    layout,
-                    &mut row_geometry,
-                );
-                let cache_key = self.row_render_key(
-                    snap,
-                    snap_row,
-                    row,
-                    cursor_state,
-                    popup_clip.as_ref(),
-                    blink_off,
-                    rapid_blink_off,
-                    font_generation,
-                    layout,
-                );
-                append_cached_row_geometry(&mut geometry, &row_geometry);
-                if row as usize >= self.row_geometry_cache.len() {
-                    self.row_geometry_cache
-                        .resize_with(row as usize + 1, || None);
-                }
-                self.row_geometry_cache[row as usize] = Some(CachedRowKey { key: cache_key });
+            let mut row_geometry = RowGeometry::default();
+            self.append_row_geometry(
+                font_system,
+                snap,
+                snap_row,
+                row,
+                cursor_state,
+                popup_clip.as_ref(),
+                blink_off,
+                rapid_blink_off,
+                layout,
+                &mut row_geometry,
+            );
+            let cache_key = self.row_render_key(
+                snap,
+                snap_row,
+                row,
+                cursor_state,
+                popup_clip.as_ref(),
+                blink_off,
+                rapid_blink_off,
+                font_generation,
+                layout,
+            );
+            append_cached_row_geometry(&mut geometry, &row_geometry);
+            if row as usize >= self.row_geometry_cache.len() {
+                self.row_geometry_cache
+                    .resize_with(row as usize + 1, || None);
             }
+            self.row_geometry_cache[row as usize] = Some(CachedRowKey { key: cache_key });
         }
 
         self.append_visual_bell_overlay(&mut geometry, snap, layout);
