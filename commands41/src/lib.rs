@@ -856,9 +856,19 @@ fn append_line_continuations(
 ) {
     let continuation_count = lines.len().saturating_sub(1);
     for line in lines.iter_mut().take(continuation_count) {
+        if line_ends_with_continuation(line, escape_character) {
+            continue;
+        }
         line.push(' ');
         line.push(escape_character);
     }
+}
+
+fn line_ends_with_continuation(
+    line: &str,
+    escape_character: char,
+) -> bool {
+    line.ends_with(escape_character)
 }
 
 fn push_history(

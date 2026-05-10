@@ -76,6 +76,22 @@ fn submit_adds_line_continuations_to_logical_newlines() {
 }
 
 #[test]
+fn submit_keeps_existing_line_continuations() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings::default();
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo \\\ntest \\\n--workspace".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Enter, &settings),
+        EditOutcome::Submitted("cargo \\\ntest \\\n--workspace".to_owned())
+    );
+}
+
+#[test]
 fn submit_uses_configured_line_continuation_escape() {
     let mut editor = CommandEditor::new();
     let settings = EditorSettings {
@@ -85,6 +101,25 @@ fn submit_uses_configured_line_continuation_escape() {
     apply_input(
         &mut editor,
         EditorInput::Insert("cargo\ntest".to_owned()),
+        &settings,
+    );
+
+    assert_eq!(
+        apply_input(&mut editor, EditorInput::Enter, &settings),
+        EditOutcome::Submitted("cargo `\ntest".to_owned())
+    );
+}
+
+#[test]
+fn submit_keeps_existing_configured_line_continuations() {
+    let mut editor = CommandEditor::new();
+    let settings = EditorSettings {
+        escape_character: '`',
+        ..EditorSettings::default()
+    };
+    apply_input(
+        &mut editor,
+        EditorInput::Insert("cargo `\ntest".to_owned()),
         &settings,
     );
 
