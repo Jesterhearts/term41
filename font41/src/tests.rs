@@ -1,4 +1,15 @@
 use super::*;
+use crate::families::FamilyVariants;
+use crate::families::NERD_SYMBOL_FAMILY;
+use crate::families::NERD_SYMBOL_FAMILY_MONO;
+use crate::families::cluster_prefers_color;
+use crate::families::cluster_prefers_nerd_symbol;
+use crate::families::nerd_symbol_family_priority;
+use crate::families::preferred_font_for_cell;
+use crate::metrics::ScaledCellMetrics;
+use crate::metrics::aggregate_cell_metrics;
+use crate::shape::cell_centering_y_offset;
+use crate::shape::glyph_cells_wide;
 
 fn face_info(
     families: &[&str],

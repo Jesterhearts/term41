@@ -7,6 +7,8 @@
 //! default-instance values; this keeps variable COLR fonts visible even
 //! though term41 does not thread variation coordinates through font41 yet.
 
+#![allow(clippy::too_many_arguments)]
+
 use std::collections::HashSet;
 
 use raqote::BlendMode;

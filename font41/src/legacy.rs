@@ -34,8 +34,10 @@
 //! [`rasterize`]; the atlas key naturally partitions legacy glyphs from
 //! font glyphs since `FONT_INDEX` can never collide with a fontdb slot.
 
+#![allow(clippy::too_many_arguments)]
+
 use super::RasterizedGlyph;
-use crate::downsample_alpha_u8;
+use crate::rasterize::downsample_alpha_u8;
 
 /// Sentinel `font_index` marking a shaped glyph that should be rasterised by
 /// [`rasterize`] instead of going through a loaded font. Set to `usize::MAX`
