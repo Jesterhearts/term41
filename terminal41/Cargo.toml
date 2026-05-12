@@ -12,6 +12,7 @@ bon                     = { version = "3.9.1", default-features = false, feature
 clip41.workspace        = true
 config41.workspace      = true
 font41.workspace        = true
+icu_properties.workspace = true
 image41.workspace       = true
 log.workspace           = true
 palette.workspace       = true

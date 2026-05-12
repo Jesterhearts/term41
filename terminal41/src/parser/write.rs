@@ -1,4 +1,10 @@
 use font41::attrs::CellAttrs;
+use icu_properties::props::BinaryProperty;
+use icu_properties::props::EmojiModifier;
+use icu_properties::props::EmojiModifierBase;
+use icu_properties::props::EmojiPresentation;
+use icu_properties::props::ExtendedPictographic;
+use icu_properties::props::RegionalIndicator;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
 use unicode_segmentation::UnicodeSegmentation;
@@ -730,13 +736,18 @@ fn should_try_extend_prev_cell(s: &str) -> bool {
 fn is_grapheme_extension_candidate(ch: char) -> bool {
     ch.width() == Some(0)
         || is_emoji_modifier(ch)
-        || is_emoji_presentation_scalar(ch)
+        || is_extended_pictographic(ch)
         || is_regional_indicator(ch)
 }
 
 #[inline(always)]
 fn is_regional_indicator(ch: char) -> bool {
-    ('\u{1F1E6}'..='\u{1F1FF}').contains(&ch)
+    RegionalIndicator::for_char(ch)
+}
+
+#[inline(always)]
+fn is_extended_pictographic(ch: char) -> bool {
+    ExtendedPictographic::for_char(ch)
 }
 
 #[inline(always)]
@@ -1152,56 +1163,15 @@ fn is_zero_width_emoji_control(ch: char) -> bool {
 }
 
 fn is_emoji_modifier(ch: char) -> bool {
-    ('\u{1F3FB}'..='\u{1F3FF}').contains(&ch)
+    EmojiModifier::for_char(ch)
 }
 
 fn is_emoji_modifier_base(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{261D}'
-            | '\u{26F9}'
-            | '\u{270A}'..='\u{270D}'
-            | '\u{1F385}'
-            | '\u{1F3C2}'..='\u{1F3C4}'
-            | '\u{1F3C7}'
-            | '\u{1F3CA}'..='\u{1F3CC}'
-            | '\u{1F442}'..='\u{1F443}'
-            | '\u{1F446}'..='\u{1F450}'
-            | '\u{1F466}'..='\u{1F469}'
-            | '\u{1F46E}'
-            | '\u{1F470}'..='\u{1F478}'
-            | '\u{1F47C}'
-            | '\u{1F481}'..='\u{1F483}'
-            | '\u{1F485}'..='\u{1F487}'
-            | '\u{1F48F}'
-            | '\u{1F491}'
-            | '\u{1F4AA}'
-            | '\u{1F574}'..='\u{1F575}'
-            | '\u{1F57A}'
-            | '\u{1F590}'
-            | '\u{1F595}'..='\u{1F596}'
-            | '\u{1F645}'..='\u{1F647}'
-            | '\u{1F64B}'..='\u{1F64F}'
-            | '\u{1F6A3}'
-            | '\u{1F6B4}'..='\u{1F6B6}'
-            | '\u{1F6C0}'
-            | '\u{1F6CC}'
-            | '\u{1F918}'..='\u{1F91F}'
-            | '\u{1F926}'
-            | '\u{1F930}'..='\u{1F939}'
-            | '\u{1F93D}'..='\u{1F93E}'
-            | '\u{1F9B5}'..='\u{1F9B6}'
-            | '\u{1F9B8}'..='\u{1F9B9}'
-            | '\u{1F9CD}'..='\u{1F9CF}'
-            | '\u{1FAF0}'..='\u{1FAF8}'
-    )
+    EmojiModifierBase::for_char(ch)
 }
 
 fn is_emoji_presentation_scalar(ch: char) -> bool {
-    matches!(
-        ch,
-        '\u{1F300}'..='\u{1FAFF}' | '\u{2600}'..='\u{27BF}' | '\u{2300}'..='\u{23FF}'
-    )
+    EmojiPresentation::for_char(ch)
 }
 
 fn soft_wrap(
@@ -1395,6 +1365,17 @@ mod tests {
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👩\u{200D}💻");
         assert_eq!(screen.grid.rows[r].cells[1].as_str(), "");
         assert_eq!(screen.grid.rows[r].cells[2].as_str(), " ");
+        assert_eq!(screen.cursor.col, 2);
+    }
+
+    #[test]
+    fn put_char_zwj_text_default_emoji_merges_into_previous_wide_cell() {
+        let (mut screen, mut viewport) = setup();
+        feed("👩\u{200D}♀\u{FE0F}".as_bytes(), &mut screen, &mut viewport);
+
+        let r = screen.grid.active_row_index(&screen.cursor, &viewport);
+        assert_eq!(screen.grid.rows[r].cells[0].as_str(), "👩\u{200D}♀\u{FE0F}");
+        assert_eq!(screen.grid.rows[r].cells[1].as_str(), "");
         assert_eq!(screen.cursor.col, 2);
     }
 

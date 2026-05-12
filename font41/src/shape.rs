@@ -3,11 +3,12 @@ use std::sync::Arc;
 use harfrust::Direction;
 use harfrust::Script;
 use harfrust::UnicodeBuffer;
+use icu_properties::props::BinaryProperty;
+use icu_properties::props::EmojiComponent;
+use icu_properties::props::EnumeratedProperty;
+use icu_properties::props::GeneralCategory;
 use log::trace;
 use smol_str::SmolStr;
-use unicode_properties::GeneralCategory;
-use unicode_properties::UnicodeEmoji;
-use unicode_properties::UnicodeGeneralCategory;
 
 use crate::FontSystem;
 use crate::ShapedGlyph;
@@ -143,11 +144,7 @@ fn row_text_and_col_map(cells: &[SmolStr]) -> (String, Vec<u16>) {
         let start = row_text.len();
         let mut chars = cell.chars();
         if let Some(ch) = chars.next()
-            && matches!(
-                ch.general_category(),
-                GeneralCategory::ModifierSymbol | GeneralCategory::ModifierLetter
-            )
-            && ch.is_emoji_component()
+            && is_orphaned_emoji_component(ch)
             && chars.next().is_none()
         {
             // Orphaned emoji components need their own cell broken from the previous one.
@@ -161,6 +158,13 @@ fn row_text_and_col_map(cells: &[SmolStr]) -> (String, Vec<u16>) {
     }
 
     (row_text, col_map)
+}
+
+fn is_orphaned_emoji_component(ch: char) -> bool {
+    matches!(
+        GeneralCategory::for_char(ch),
+        GeneralCategory::ModifierSymbol | GeneralCategory::ModifierLetter
+    ) && EmojiComponent::for_char(ch)
 }
 
 fn preferred_fonts_for_cells(
@@ -483,4 +487,16 @@ pub(crate) fn cell_centering_y_offset(
     let current_top = baseline - y_max;
     let desired_top = ((cell_height - glyph_height) * 0.5).max(0.0);
     current_top - desired_top
+}
+
+#[cfg(test)]
+mod emoji_component_tests {
+    use super::*;
+
+    #[test]
+    fn orphaned_emoji_component_requires_component_and_modifier_category() {
+        assert!(is_orphaned_emoji_component('\u{1F3FB}'));
+        assert!(!is_orphaned_emoji_component('7'));
+        assert!(!is_orphaned_emoji_component('A'));
+    }
 }

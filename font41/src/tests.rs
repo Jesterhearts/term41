@@ -99,6 +99,13 @@ fn nerd_font_private_use_symbols_stay_on_text_fallback_path() {
 }
 
 #[test]
+fn color_preference_uses_emoji_presentation_property() {
+    assert!(cluster_prefers_color("😀"));
+    assert!(!cluster_prefers_color("♻"));
+    assert!(cluster_prefers_color("♻\u{FE0F}"));
+}
+
+#[test]
 fn private_use_cells_prefer_symbol_font_before_primary_text_font() {
     let families = [FamilyVariants {
         regular: 1,

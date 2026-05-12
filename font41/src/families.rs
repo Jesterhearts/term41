@@ -1,6 +1,8 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 
+use icu_properties::props::BinaryProperty;
+use icu_properties::props::EmojiPresentation;
 use log::debug;
 use log::info;
 
@@ -293,35 +295,15 @@ fn is_private_use_codepoint(ch: char) -> bool {
     matches!(cp, 0xE000..=0xF8FF | 0xF0000..=0xFFFFD | 0x100000..=0x10FFFD)
 }
 
-/// Heuristic: true when a cluster is likely meant to render as a colour
-/// emoji. Covers the two common routes: explicit `VS16` selector, and
-/// default-emoji-presentation codepoints in the main emoji blocks. Keeps
-/// CJK and ordinary symbols (which `unicode-width` also reports as wide)
-/// out of the colour path.
+/// True when a cluster is likely meant to render as a colour emoji. Covers the
+/// two common routes: explicit `VS16` selector and default emoji presentation.
 pub(crate) fn cluster_prefers_color(cell: &str) -> bool {
     if cell.ends_with('\u{FE0F}') {
         return true;
     }
-    cell.chars().any(is_default_emoji_codepoint)
+    cell.chars().any(has_default_emoji_presentation)
 }
 
-fn is_default_emoji_codepoint(c: char) -> bool {
-    let cp = c as u32;
-    matches!(
-        cp,
-        0x1F300..=0x1F5FF
-            | 0x1F600..=0x1F64F
-            | 0x1F680..=0x1F6FF
-            | 0x1F700..=0x1F77F
-            | 0x1F780..=0x1F7FF
-            | 0x1F800..=0x1F8FF
-            | 0x1F900..=0x1F9FF
-            | 0x1FA00..=0x1FA6F
-            | 0x1FA70..=0x1FAFF
-            | 0x2600..=0x26FF
-            | 0x2700..=0x27BF
-            | 0x1F000..=0x1F0FF
-            | 0x1F100..=0x1F1FF
-            | 0x1F200..=0x1F2FF
-    )
+fn has_default_emoji_presentation(c: char) -> bool {
+    EmojiPresentation::for_char(c)
 }
