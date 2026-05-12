@@ -1,23 +1,23 @@
 use unicode_segmentation::UnicodeSegmentation;
 
-use super::CommandEditor;
-use super::EditOutcome;
-use super::EditorInput;
-use super::EditorSettings;
-use super::LineDirection;
-use super::apply_input;
-use super::begin_text_edit;
-use super::byte_index_at_grapheme_col;
-use super::clear_completion_state;
-use super::grapheme_count;
-use super::line_index_at_cursor;
-use super::line_ranges;
-use super::next_grapheme_boundary;
-use super::previous_grapheme_boundary;
-use super::push_history;
-use super::replace_selection_or_insert;
-use super::submitted_command;
-use super::undo_text_edit;
+use crate::CommandEditor;
+use crate::EditOutcome;
+use crate::EditorInput;
+use crate::EditorSettings;
+use crate::completion::clear_completion_state;
+use crate::editing::LineDirection;
+use crate::editing::apply_input;
+use crate::editing::begin_text_edit;
+use crate::editing::byte_index_at_grapheme_col;
+use crate::editing::grapheme_count;
+use crate::editing::line_index_at_cursor;
+use crate::editing::line_ranges;
+use crate::editing::next_grapheme_boundary;
+use crate::editing::previous_grapheme_boundary;
+use crate::editing::push_history;
+use crate::editing::replace_selection_or_insert;
+use crate::editing::submitted_command;
+use crate::undo::undo_text_edit;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum VimKey {
