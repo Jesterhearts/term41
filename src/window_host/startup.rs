@@ -1,4 +1,72 @@
-use super::*;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::thread;
+use std::time::Duration;
+use std::time::Instant;
+
+use clip41::ClipboardKind;
+use commands41::CommandLineView;
+use commands41::EditOutcome;
+use commands41::EditorSettings;
+use commands41::HistoryEntry;
+use commands41::clear_selection as clear_editor_selection;
+use commands41::selected_text;
+use config41::CommandEditorConfig;
+use config41::keybindings::Keybindings;
+use terminal41::selection::extend_rendered_selection;
+use terminal41::selection::selection_text;
+use terminal41::view;
+use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::ControlFlow;
+use winit::window::Window;
+
+use super::cell_at;
+use super::close_gutter_popup;
+use crate::AppEvent;
+use crate::CommandPaletteAccept;
+use crate::CommandPaletteInvocation;
+use crate::HistoryConfirmation;
+use crate::HistoryConfirmationView;
+use crate::InputEndpoint;
+use crate::InputRuntime;
+use crate::ModalRuntime;
+use crate::MouseRuntime;
+use crate::PermissionDecision;
+use crate::PermissionModalState;
+use crate::PermissionRequest;
+use crate::RecordingPopupState;
+use crate::RecordingPopupView;
+use crate::RenderRuntime;
+use crate::SELECTION_AUTOSCROLL_INTERVAL;
+use crate::SelectionAutoscroll;
+use crate::SelectionCopySource;
+use crate::StartupState;
+use crate::TabId;
+use crate::ToastView;
+use crate::WindowHost;
+use crate::command_editor_terminal_row_offset;
+use crate::command_editor_view;
+use crate::command_editor_view_context;
+use crate::command_editor_view_open_for_input_tab;
+use crate::command_palette_selected_invocation;
+use crate::command_palette_view;
+use crate::complete_command_palette_selection;
+use crate::history_deletion_view;
+use crate::history_runtime;
+use crate::move_command_palette_selection;
+use crate::renderer;
+use crate::renderer::PermissionChoice;
+use crate::renderer::PermissionModal;
+use crate::renderer::PreeditState;
+use crate::renderer::RenderEvent;
+use crate::renderer::TabContextMenu;
+use crate::scroll_history_deletion_view;
+use crate::selection_autoscroll_direction;
+use crate::selection_copy_source;
+use crate::set_command_palette_query;
+use crate::set_history_deletion_query;
+use crate::unpark_thread_if_started;
 
 pub(crate) fn send(
     render: &mut RenderRuntime,
@@ -185,7 +253,7 @@ pub(crate) fn move_host_command_palette_selection(
     let Some(view) = state.command_palette.as_mut() else {
         return;
     };
-    super::move_command_palette_selection(view, delta);
+    move_command_palette_selection(view, delta);
     drop(state);
     notify_interaction_changed(input, render, startup, window);
 }
@@ -252,7 +320,7 @@ pub(crate) fn complete_host_command_palette_selection(
     let Some(view) = state.command_palette.as_mut() else {
         return;
     };
-    if super::complete_command_palette_selection(view) {
+    if complete_command_palette_selection(view) {
         drop(state);
         notify_interaction_changed(input, render, startup, window);
     }
@@ -274,7 +342,7 @@ pub(crate) fn accept_command_palette_selection(
             Some(invocation)
         }
         CommandPaletteAccept::NeedsArgument => {
-            let completed = super::complete_command_palette_selection(view);
+            let completed = complete_command_palette_selection(view);
             drop(state);
             if completed {
                 notify_interaction_changed(input, render, startup, window);

@@ -1,4 +1,63 @@
+use std::collections::HashMap;
+
+use clip41::ClipboardKind;
+use commands41::CommandEditor;
+use commands41::CommandEditorCursorStyle;
+use commands41::CommandLineView;
+use commands41::EditorInput;
+use commands41::EditorSettings;
+use commands41::VimKey;
+use config41::StatusLineMode;
+use terminal41::PasteMode;
+use terminal41::Terminal;
+use terminal41::host;
+use terminal41::prompt::CommandBlockCommand;
+use terminal41::prompt::CommandTextSource;
+use terminal41::prompt::PromptRef;
+use terminal41::prompt::command_block_document;
+use terminal41::selection::open_search;
+use winit::event::ElementState;
+use winit::event::MouseButton;
+use winit::keyboard::Key;
+use winit::keyboard::KeyCode;
+use winit::keyboard::ModifiersState;
+use winit::keyboard::NamedKey;
+use winit::keyboard::PhysicalKey;
+
 use super::*;
+use crate::COMMAND_EDITOR_BOX_ROWS;
+use crate::CommandEditorContext;
+use crate::CommandEditorPlacement;
+use crate::CommandEditorPopupSide;
+use crate::KeyboardRuntime;
+use crate::MouseReportPosition;
+use crate::PermissionDecision;
+use crate::PhysicalModifierState;
+use crate::PopupRerunPasteTarget;
+use crate::SelectionAutoscroll;
+use crate::SelectionCopySource;
+use crate::TabId;
+use crate::command_editor_byte_index_at_cell;
+use crate::command_editor_input;
+use crate::command_editor_input_context;
+use crate::command_editor_mouse_paste_kind;
+use crate::command_editor_placement_for_cursor;
+use crate::command_editor_popup_side_for_row;
+use crate::command_editor_terminal_row_offset;
+use crate::command_editor_view;
+use crate::command_editor_view_context;
+use crate::command_editor_view_for_tab_state;
+use crate::command_editor_visual_cursor_row;
+use crate::ignored_command_editor_input_falls_through;
+use crate::mouse_report_position_from_pixels;
+use crate::permission_key_decision;
+use crate::plain_control_character_key;
+use crate::popup_command_text;
+use crate::popup_rerun_command_text;
+use crate::popup_rerun_paste;
+use crate::reset_viewport_and_invalidate;
+use crate::selection_autoscroll_direction;
+use crate::selection_copy_source;
 
 #[cfg(test)]
 mod selection_autoscroll_tests {

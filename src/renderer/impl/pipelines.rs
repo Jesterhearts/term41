@@ -1,4 +1,14 @@
-use super::*;
+use wgpu::TextureFormat;
+
+use super::BgVertex;
+use super::FgVertex;
+use super::IMAGE_DEPTH_FORMAT;
+use super::ImageVertex;
+#[cfg(feature = "vulkan")]
+use super::pipeline_cache_path;
+use crate::renderer::background::BgImageVertex;
+use crate::renderer::glyph_atlas::GlyphAtlas;
+use crate::renderer::image_atlas::ImageAtlas;
 
 pub(super) struct FgPipeline(pub(super) wgpu::RenderPipeline);
 pub(super) struct BgPipeline(pub(super) wgpu::RenderPipeline);

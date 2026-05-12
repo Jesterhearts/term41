@@ -1,4 +1,53 @@
-use super::*;
+use std::sync::Arc;
+
+use commands41::CommandEditor;
+use config41::keybindings::Action;
+use winit::application::ApplicationHandler;
+use winit::event::ElementState;
+use winit::event::Ime;
+use winit::event::MouseScrollDelta;
+use winit::event::WindowEvent;
+use winit::event_loop::ActiveEventLoop;
+use winit::event_loop::ControlFlow;
+use winit::keyboard::Key;
+use winit::platform::wayland::WindowAttributesExtWayland;
+use winit::window::Window;
+use winit::window::WindowId;
+
+use super::apply_terminal_effects;
+use super::dismiss_recording_popup;
+use super::handle_cursor_moved;
+use super::handle_focus_event;
+use super::handle_ime_commit;
+use super::handle_key_event;
+use super::handle_modifiers_changed;
+use super::handle_mouse_input;
+use super::handle_mouse_wheel;
+use super::present_startup_frame;
+use super::refresh_command_editor_view;
+use super::request_due_startup_redraw;
+use super::request_window_size_for_tab;
+use super::resolve_clipboard_request;
+use super::resolve_kitty_file_request;
+use super::run_selection_autoscroll;
+use super::send;
+use super::show_toast;
+use super::sync_modifier_key_from_keyboard_event;
+use super::update_preedit;
+use super::update_toast_view;
+use crate::APP_START_TIME;
+use crate::AppEvent;
+use crate::INITIAL_COLS;
+use crate::INITIAL_ROWS;
+use crate::InputEndpoint;
+use crate::PhysicalModifierState;
+use crate::RecordingPopupState;
+use crate::WindowHost;
+use crate::renderer::PreeditState;
+use crate::renderer::RenderEvent;
+use crate::renderer::background::startup_snapshot_path;
+use crate::renderer::compute_gutter_width;
+use crate::renderer::startup::StartupPresenter;
 
 impl ApplicationHandler<AppEvent> for WindowHost {
     fn about_to_wait(

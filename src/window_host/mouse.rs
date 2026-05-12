@@ -1,4 +1,100 @@
-use super::*;
+use std::sync::Arc;
+use std::time::Instant;
+
+use clip41::ClipboardKind;
+use commands41::EditorInput;
+use commands41::EditorSettings;
+use commands41::apply_input;
+use commands41::select_range;
+use commands41::selected_text;
+use commands41::set_cursor;
+use config41::keybindings::Action;
+use terminal41::HostInput;
+use terminal41::HostInputEffects;
+use terminal41::HostMouse;
+use terminal41::MouseButton as TermMouseButton;
+use terminal41::MouseEventKind;
+use terminal41::MouseModifiers;
+use terminal41::apply_host_input;
+use terminal41::host;
+use terminal41::io::clipboard::copy_to_clipboard;
+use terminal41::prompt::CommandBlockCommand;
+use terminal41::prompt::PromptRef;
+use terminal41::prompt::command_block_document;
+use terminal41::prompt::command_block_for_prompt;
+use terminal41::prompt::command_block_for_screen_row;
+use terminal41::prompt::select_command_for_prompt;
+use terminal41::selection::SelectionMode;
+use terminal41::selection::copy_selection;
+use terminal41::selection::extend_rendered_selection;
+use terminal41::selection::start_rendered_selection;
+use terminal41::view;
+use winit::event::MouseButton;
+use winit::keyboard::ModifiersState;
+use winit::window::Window;
+
+use super::active_input_target;
+use super::clear_command_editor_selection_for_tab;
+use super::clear_terminal_selection_for_tab;
+use super::command_editor_config;
+use super::command_editor_history_entries;
+use super::command_editor_settings;
+use super::copy_active_selection_to_clipboard;
+use super::emit_host_input;
+use super::extend_selection_to_mouse;
+use super::history_confirmation_is_open;
+use super::history_deletion_is_open;
+use super::layout_snapshot;
+use super::notify_interaction_changed;
+use super::refresh_selection_autoscroll_direction;
+use super::scroll_host_history_deletion;
+use super::send;
+use super::set_command_editor_view;
+use super::settle_permission_modal;
+use super::show_toast;
+use super::stop_selection_drag;
+use super::update_gutter_popup;
+use super::update_hovered_tab_bar_button;
+use super::update_permission_hover;
+use super::update_tab_context_menu;
+use super::write_host_bytes;
+use crate::InputRuntime;
+use crate::KeyboardRuntime;
+use crate::MULTI_CLICK_WINDOW;
+use crate::MouseReportPosition;
+use crate::MouseRuntime;
+use crate::PermissionDecision;
+use crate::PopupRerunPasteTarget;
+use crate::RESIZE_BORDER;
+use crate::RenderRuntime;
+use crate::TAB_MENU_WIDTH_CELLS;
+use crate::TabId;
+use crate::TabMenuActionLocal;
+use crate::WindowButton;
+use crate::WindowHost;
+use crate::WindowMetrics;
+use crate::command_editor_byte_index_at_cell;
+use crate::command_editor_mouse_paste_kind;
+use crate::command_editor_placement_for_cursor;
+use crate::command_editor_terminal_row_offset;
+use crate::command_editor_view;
+use crate::command_editor_view_context;
+use crate::command_editor_view_for_input_tab;
+use crate::command_editor_view_open_for_input_tab;
+use crate::command_editor_visible_for_terminal;
+use crate::command_editor_visual_cursor_row;
+use crate::format_duration;
+use crate::mouse_report_position_from_pixels;
+use crate::popup_command_text;
+use crate::popup_item_at;
+use crate::popup_rerun_command_text;
+use crate::popup_rerun_paste;
+use crate::renderer;
+use crate::renderer::PermissionChoice;
+use crate::renderer::RenderEvent;
+use crate::renderer::TabContextMenu;
+use crate::renderer::paint::build_tab_bar_layout;
+use crate::reset_viewport_and_invalidate;
 
 pub(crate) fn handle_cursor_moved(
     host: &mut WindowHost,
@@ -1484,7 +1580,7 @@ pub(crate) fn gutter_popup_item_at(
     y: f64,
 ) -> Option<usize> {
     let state = render.input_state.lock();
-    super::popup_item_at(
+    popup_item_at(
         state.gutter_popup.as_ref(),
         x,
         y,

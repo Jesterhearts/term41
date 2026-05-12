@@ -1,4 +1,109 @@
-use super::*;
+use std::path::PathBuf;
+use std::sync::Arc;
+use std::sync::mpsc;
+use std::thread;
+
+use clip41::ClipboardKind;
+use commands41::EditOutcome;
+use commands41::EditorInput;
+use commands41::apply_input;
+use config41::keybindings::Action;
+use terminal41::ClipboardRequest;
+use terminal41::HostInput;
+use terminal41::KittyFileRequest;
+use terminal41::TerminalEffects;
+use terminal41::apply_host_input;
+use terminal41::prompt::command_block_document;
+use terminal41::selection::close_search;
+use terminal41::selection::open_search;
+use terminal41::selection::search_active;
+use terminal41::selection::search_append;
+use terminal41::selection::search_backspace;
+use terminal41::selection::search_step_next;
+use terminal41::selection::search_step_prev;
+use terminal41::view;
+use winit::event::ElementState;
+use winit::keyboard::Key;
+use winit::keyboard::KeyCode;
+use winit::keyboard::KeyLocation;
+use winit::keyboard::ModifiersState;
+use winit::keyboard::NamedKey;
+use winit::keyboard::PhysicalKey;
+use winit::window::Window;
+
+use super::accept_command_palette_selection;
+use super::active_input_target;
+use super::cancel_history_confirmation;
+use super::clear_terminal_selection_for_tab;
+use super::close_command_palette;
+use super::close_history_deletion;
+use super::command_editor_config;
+use super::command_editor_history_entries;
+use super::command_editor_is_open_for_tab;
+use super::command_editor_settings;
+use super::command_palette_is_open;
+use super::complete_host_command_palette_selection;
+use super::confirm_history_clear;
+use super::copy_active_selection_to_clipboard;
+use super::delete_displayed_history_entries;
+use super::dismiss_recording_popup;
+use super::enqueue_persistent_command_history;
+use super::history_confirmation_is_open;
+use super::history_deletion_is_open;
+use super::keybindings;
+use super::move_host_command_palette_selection;
+use super::notify_interaction_changed;
+use super::open_clear_all_history_confirmation;
+use super::open_clear_directory_history_confirmation;
+use super::open_command_palette;
+use super::open_history_deletion;
+use super::refresh_command_editor_view_for_tab;
+use super::request_permission;
+use super::request_window_grid_size;
+use super::scroll_host_history_deletion;
+use super::send;
+use super::set_command_editor_view;
+use super::settle_permission_modal;
+use super::show_recording_completed_popup;
+use super::show_recording_error_popup;
+use super::show_recording_start_popup;
+use super::show_toast;
+use super::stop_selection_drag;
+use super::toggle_command_editor;
+use super::update_command_palette_query;
+use super::update_history_deletion_query;
+use crate::AppEvent;
+use crate::CommandPaletteArgument;
+use crate::CommandPaletteInvocation;
+use crate::InputEndpoint;
+use crate::InputRuntime;
+use crate::KeyboardRuntime;
+use crate::PermissionDecision;
+use crate::RecordingPopupState;
+use crate::RenderRuntime;
+use crate::StartupState;
+use crate::TabId;
+use crate::WindowHost;
+use crate::command_editor_input;
+use crate::command_editor_input_context;
+use crate::command_editor_view;
+use crate::dec_local_function_key_selector;
+use crate::dec_udk_selector;
+use crate::ignored_command_editor_input_falls_through;
+use crate::output_recording::next_recording_path;
+use crate::permission_key_decision;
+use crate::plain_control_character_key;
+use crate::renderer::RenderEvent;
+use crate::renderer::ctrl_byte;
+use crate::renderer::kitty_encode_ime_commit;
+use crate::renderer::kitty_encode_input;
+use crate::renderer::legacy_encode_named;
+use crate::renderer::legacy_encode_numpad_character;
+use crate::reset_tab_viewport_and_invalidate;
+use crate::reset_viewport_and_invalidate;
+use crate::resolve_command_palette_working_directory;
+use crate::spawn_new_window;
+use crate::unpark_thread_if_started;
 
 pub(crate) fn handle_recording_popup_key(
     host: &mut WindowHost,
@@ -873,7 +978,7 @@ fn host_command_palette_working_directory(
         .endpoints
         .get(&tab_id)
         .and_then(|target| target.terminal.lock().metadata.current_directory.clone());
-    super::resolve_command_palette_working_directory(current_dir, argument)
+    resolve_command_palette_working_directory(current_dir, argument)
 }
 
 pub(crate) fn handle_key_event(

@@ -1,4 +1,14 @@
-use super::*;
+use font41::FontSystem;
+use font41::attrs::CellAttrs;
+use palette::Srgb;
+use terminal41::RowSnapshot;
+use terminal41::TermSnapshot;
+use utils41::lerp_u8;
+
+use crate::renderer::paint::blink_animation_enabled;
+use crate::renderer::paint::bold_glyph_enabled;
+use crate::renderer::paint::resolve_painted_cell;
+use crate::renderer::paint::row_paintable_cols;
 
 /// `t = 0` returns `a`, `t = 1` returns `b`. Kept byte-space on purpose —
 /// the renderer already treats the existing cell fg/bg as sRGB8 throughout,
