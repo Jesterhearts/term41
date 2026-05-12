@@ -10,6 +10,7 @@ use crate::LineAttr;
 use crate::StatusDisplayKind;
 use crate::Terminal;
 use crate::host;
+use crate::prompt;
 use crate::selection::is_cell_active_match;
 use crate::selection::is_cell_match;
 use crate::selection::is_cell_selected;
@@ -510,8 +511,13 @@ fn snapshot_status_line_row(
     generation: u64,
 ) -> Option<RowSnapshot> {
     if view::status_display_kind(&terminal.active) == StatusDisplayKind::Indicator {
-        let text =
-            view::indicator_status_text(&terminal.metadata, &terminal.active).unwrap_or_default();
+        let status_source = indicator_status_source_screen(terminal);
+        let text = prompt::format_indicator_status(
+            terminal.metadata.current_directory.as_deref(),
+            terminal.metadata.current_prompt_row,
+            &terminal.metadata.command_metas,
+            status_source,
+        );
         return Some(status_line_indicator_row(
             &text,
             UdkIndicator {
@@ -551,6 +557,14 @@ fn snapshot_status_line_row(
     };
     normalize_snapshot_row(&mut snapshot, vp_cols, &terminal.palette);
     Some(snapshot)
+}
+
+fn indicator_status_source_screen(terminal: &Terminal) -> &crate::Screen {
+    if terminal.on_alt_screen {
+        &terminal.stash
+    } else {
+        &terminal.active
+    }
 }
 
 fn normalize_snapshot_row(
@@ -1082,6 +1096,64 @@ mod tests {
 
         assert_eq!(snap.total_rows, terminal.viewport.rows + 1);
         assert_eq!(snap.rows.last().unwrap().screen_row, terminal.viewport.rows);
+    }
+
+    #[test]
+    fn indicator_status_uses_primary_prompt_while_alt_screen_is_active() {
+        let mut terminal = Terminal::new(
+            20,
+            3,
+            10,
+            StatusLineMode::Indicator,
+            FeaturePermissions::default(),
+            TerminalLimits::default(),
+            16,
+            8,
+            ColorPalette::default(),
+        );
+        let mut processor = TerminalProcessor::new();
+        processor.process_bytes(
+            &mut terminal,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07vim\x1b]133;C\x07",
+        );
+        processor.process_bytes(&mut terminal, b"\x1b[?1049h");
+
+        let snap = snapshot_terminal(&mut terminal);
+        let status_row = snap.rows.last().expect("status row");
+
+        assert!(terminal.on_alt_screen);
+        assert_eq!(snap.status_line_row, Some(terminal.viewport.rows));
+        assert_eq!(snapshot_row_text(status_row).trim_end(), "vim");
+    }
+
+    #[test]
+    fn indicator_status_row_generation_advances_during_command_output() {
+        let mut terminal = Terminal::new(
+            20,
+            4,
+            10,
+            StatusLineMode::Indicator,
+            FeaturePermissions::default(),
+            TerminalLimits::default(),
+            16,
+            8,
+            ColorPalette::default(),
+        );
+        let mut processor = TerminalProcessor::new();
+        processor.process_bytes(
+            &mut terminal,
+            b"\x1b]133;A\x07$ \x1b]133;B\x07cargo\x1b]133;C\x07",
+        );
+        let first = snapshot_terminal(&mut terminal);
+        let first_status = first.rows.last().expect("status row");
+
+        processor.process_bytes(&mut terminal, b"out");
+        let snap = snapshot_terminal(&mut terminal);
+        let status_row = snap.rows.last().expect("status row");
+
+        assert_eq!(snap.status_line_row, Some(terminal.viewport.rows));
+        assert_eq!(snapshot_row_text(status_row).trim_end(), "cargo");
+        assert_ne!(status_row.generation, first_status.generation);
     }
 
     fn snapshot_row_text(row: &RowSnapshot) -> String {

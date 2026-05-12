@@ -3,6 +3,7 @@ use crate::MainCsiAction;
 use crate::MouseTracking;
 use crate::ParsedCsiAction;
 use crate::ShellIntegrationPhase;
+use crate::StatusDisplayKind;
 use crate::Terminal;
 use crate::dispatch;
 use crate::screen;
@@ -99,6 +100,18 @@ fn mark_snapshot_cursor_rows(
         (Some(before_row), Some(after_row)) => snapshot.mark_rows(before_row, after_row),
         (Some(row), None) | (None, Some(row)) => snapshot.mark_row(row),
         (None, None) => {}
+    }
+}
+
+fn mark_indicator_status_row(
+    terminal: &mut Terminal,
+    after: SnapshotDirtyBaseline,
+) {
+    if view::status_display_kind(&terminal.active) != StatusDisplayKind::Indicator {
+        return;
+    }
+    if let Some(row) = after.status_line_row {
+        terminal.snapshot.mark_row(row);
     }
 }
 
@@ -235,6 +248,7 @@ pub(crate) fn mark_snapshot_dirty_after(
             }
         }
     }
+    mark_indicator_status_row(terminal, after);
 
     if after.active_display != before.active_display {
         terminal.snapshot.mark_all();
