@@ -1,31 +1,46 @@
 #![allow(clippy::too_many_arguments)]
 
 use std::collections::HashMap;
+#[cfg(test)]
 use std::path::Path;
 use std::path::PathBuf;
-use std::time::Instant;
 
-use base64::Engine;
-use base64::engine::general_purpose::STANDARD as BASE64;
 use clip41::Clipboard;
+#[cfg(test)]
 use clip41::ClipboardKind;
+#[cfg(test)]
 use config41::ClipboardPermissions;
 use config41::ColorPalette;
 use config41::FeaturePermissions;
+#[cfg(test)]
 use config41::PermissionPolicy;
-use percent_encoding::percent_decode;
 
+use self::clipboard::ClipboardAction;
+use self::color_query::ColorQueryAction;
+use self::directory::DirectoryAction;
+use self::hyperlink::HyperlinkAction;
+use self::iterm::ItermAction;
+use self::shell_integration::ShellIntegrationAction;
+use self::shell_integration::VscodeShellIntegrationAction;
 use crate::C1Mode;
 use crate::CommandMeta;
+#[cfg(test)]
 use crate::Row;
 use crate::ShellIntegrationPhase;
-use crate::color;
-use crate::conformance;
 use crate::io::clipboard::ClipboardRequest;
 use crate::screen::Screen;
 use crate::screen::grid::Viewport;
+#[cfg(test)]
 use crate::screen::hyperlink::HyperlinkId;
 use crate::screen::hyperlink::HyperlinkRegistry;
+
+mod clipboard;
+mod color_query;
+mod directory;
+mod hyperlink;
+mod iterm;
+mod shell_integration;
+mod title;
 
 // -- OSC command numbers ------------------------------------------------------
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -57,54 +72,11 @@ enum ParsedOscAction<'a> {
     SetTitle(Option<&'a str>),
     SetDirectory(DirectoryAction),
     SetHyperlink(HyperlinkAction<'a>),
-    PaletteColorQuery { index: u8, index_text: &'a str },
-    ForegroundColorQuery,
-    BackgroundColorQuery,
-    CursorColorQuery,
+    ColorQuery(ColorQueryAction<'a>),
     Clipboard(ClipboardAction),
     ShellIntegration(ShellIntegrationAction),
     VscodeShellIntegration(VscodeShellIntegrationAction),
-    ReportItermCellSize,
-    ReportItermCapabilities,
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum DirectoryAction {
-    Clear,
-    Set(PathBuf),
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum HyperlinkAction<'a> {
-    Clear,
-    Open { id: Option<&'a str>, uri: &'a str },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ClipboardAction {
-    Read {
-        kind: ClipboardKind,
-        response_selector: Vec<u8>,
-    },
-    Write {
-        kinds: Vec<ClipboardKind>,
-        text: String,
-    },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum ShellIntegrationAction {
-    PromptStart,
-    CommandStart,
-    OutputStart,
-    CommandFinished { exit: i32 },
-}
-
-#[derive(Debug, Clone, PartialEq, Eq)]
-enum VscodeShellIntegrationAction {
-    Lifecycle(ShellIntegrationAction),
-    SetDirectory(DirectoryAction),
-    SetCommandLine(String),
+    Iterm(ItermAction),
 }
 
 impl TryFrom<u16> for OscCommand {
@@ -143,42 +115,6 @@ fn split_osc(payload: &[u8]) -> (&[u8], &[u8]) {
         Some(i) => (&payload[..i], &payload[i + 1..]),
         None => (payload, &[]),
     }
-}
-
-/// Resolve xterm OSC 52 selector characters into concrete clipboard kinds.
-///
-/// Selectors: `c` and digits `0`..`7` target the clipboard; `p`, `s`, `q`
-/// target the primary selection. An empty selector defaults to the clipboard
-/// (matches how most apps use OSC 52 in practice).
-fn resolve_selectors(pc: &[u8]) -> Vec<ClipboardKind> {
-    let mut seen_clipboard = false;
-    let mut seen_primary = false;
-    for &b in pc {
-        match b {
-            b'c' | b'0'..=b'7' => seen_clipboard = true,
-            b'p' | b's' | b'q' => seen_primary = true,
-            _ => {}
-        }
-    }
-    let mut out = Vec::new();
-    if pc.is_empty() || seen_clipboard {
-        out.push(ClipboardKind::Clipboard);
-    }
-    if seen_primary {
-        out.push(ClipboardKind::Primary);
-    }
-    out
-}
-
-/// Base64 decode with whitespace stripping — some apps fold long payloads
-/// with embedded newlines, and xterm tolerates that.
-fn decode_osc52(data: &[u8]) -> Option<Vec<u8>> {
-    let filtered: Vec<u8> = data
-        .iter()
-        .copied()
-        .filter(|b| !b.is_ascii_whitespace())
-        .collect();
-    BASE64.decode(&filtered).ok()
 }
 
 /// Dispatch an OSC payload to the appropriate handler. Unrecognised commands
@@ -251,234 +187,44 @@ fn parse_osc(payload: &[u8]) -> ParsedOscAction<'_> {
 
     match cmd {
         OscCommand::SetIconAndTitle | OscCommand::SetIcon | OscCommand::SetTitle => {
-            parse_osc_title(rest)
+            title::parse(rest)
+                .map(ParsedOscAction::SetTitle)
+                .unwrap_or(ParsedOscAction::Unsupported)
         }
-        OscCommand::SetDirectory => parse_osc_directory(rest),
-        OscCommand::Hyperlink => parse_osc_hyperlink(rest),
-        OscCommand::PaletteColor => parse_osc_palette_query(rest),
-        OscCommand::FgColor => parse_osc_color_query(rest, ParsedOscAction::ForegroundColorQuery),
-        OscCommand::BgColor => parse_osc_color_query(rest, ParsedOscAction::BackgroundColorQuery),
-        OscCommand::CursorColor => parse_osc_color_query(rest, ParsedOscAction::CursorColorQuery),
-        OscCommand::Clipboard => parse_osc_clipboard(rest),
+        OscCommand::SetDirectory => directory::parse_file_uri(rest)
+            .map(ParsedOscAction::SetDirectory)
+            .unwrap_or(ParsedOscAction::Unsupported),
+        OscCommand::Hyperlink => ParsedOscAction::SetHyperlink(hyperlink::parse(rest)),
+        OscCommand::PaletteColor => color_query::parse_palette(rest)
+            .map(ParsedOscAction::ColorQuery)
+            .unwrap_or(ParsedOscAction::Unsupported),
+        OscCommand::FgColor => parse_color_query(rest, ColorQueryAction::Foreground),
+        OscCommand::BgColor => parse_color_query(rest, ColorQueryAction::Background),
+        OscCommand::CursorColor => parse_color_query(rest, ColorQueryAction::Cursor),
+        OscCommand::Clipboard => clipboard::parse(rest)
+            .map(ParsedOscAction::Clipboard)
+            .unwrap_or(ParsedOscAction::Unsupported),
         OscCommand::ResetPalette
         | OscCommand::ResetFg
         | OscCommand::ResetBg
         | OscCommand::ResetCursorColor => ParsedOscAction::AcceptedNoop,
-        OscCommand::ShellIntegration => parse_osc_133(rest),
-        OscCommand::VscodeShellIntegration => parse_osc_633(rest),
-        OscCommand::Iterm2 if rest.starts_with(b"ReportCellSize") => {
-            ParsedOscAction::ReportItermCellSize
-        }
-        OscCommand::Iterm2 if rest == b"Capabilities" => ParsedOscAction::ReportItermCapabilities,
-        OscCommand::Iterm2 => ParsedOscAction::AcceptedNoop,
-    }
-}
-
-fn parse_osc_title(rest: &[u8]) -> ParsedOscAction<'_> {
-    if rest.is_empty() {
-        return ParsedOscAction::SetTitle(None);
-    }
-    match std::str::from_utf8(rest) {
-        Ok(title) => ParsedOscAction::SetTitle(Some(title)),
-        Err(_) => ParsedOscAction::Unsupported,
-    }
-}
-
-fn parse_osc_directory(rest: &[u8]) -> ParsedOscAction<'_> {
-    parse_file_uri_directory(rest)
-        .map(ParsedOscAction::SetDirectory)
-        .unwrap_or(ParsedOscAction::Unsupported)
-}
-
-fn parse_file_uri_directory(value: &[u8]) -> Option<DirectoryAction> {
-    if value.is_empty() {
-        return Some(DirectoryAction::Clear);
-    }
-
-    let uri = std::str::from_utf8(value).ok()?;
-    let rest = uri.strip_prefix("file://")?;
-    let path_start = rest.find('/').unwrap_or(rest.len());
-    let authority = &rest[..path_start];
-    let encoded_path = &rest[path_start..];
-    if encoded_path.is_empty() {
-        return None;
-    }
-
-    let decoded = percent_decode(encoded_path.as_bytes()).collect::<Vec<u8>>();
-    let path = std::str::from_utf8(&decoded).ok()?;
-    absolute_directory_action(normalize_file_uri_path(authority, path))
-}
-
-fn parse_absolute_or_file_directory(value: &[u8]) -> Option<DirectoryAction> {
-    if value.is_empty() {
-        return Some(DirectoryAction::Clear);
-    }
-
-    let path = std::str::from_utf8(value).ok()?;
-    if path.starts_with("file://") {
-        return parse_file_uri_directory(value);
-    }
-    absolute_directory_action(PathBuf::from(path))
-}
-
-fn absolute_directory_action(path: PathBuf) -> Option<DirectoryAction> {
-    Path::new(&path)
-        .is_absolute()
-        .then_some(DirectoryAction::Set(path))
-}
-
-fn normalize_file_uri_path(
-    authority: &str,
-    path: &str,
-) -> PathBuf {
-    #[cfg(unix)]
-    {
-        // PowerShell snippets commonly build OSC 7 as
-        // `file://$hostName/$escapedPath`. On Unix, `$escapedPath` already
-        // starts with `/`, producing `file://host//home/...`. Treat that as
-        // the local absolute path the shell intended to report.
-        if !authority.is_empty() && path.starts_with("//") {
-            return PathBuf::from(&path[1..]);
-        }
-    }
-
-    PathBuf::from(path)
-}
-
-fn parse_osc_hyperlink(rest: &[u8]) -> ParsedOscAction<'_> {
-    let (params, uri) = split_osc(rest);
-
-    if uri.is_empty() {
-        return ParsedOscAction::SetHyperlink(HyperlinkAction::Clear);
-    }
-
-    let Ok(uri) = std::str::from_utf8(uri) else {
-        return ParsedOscAction::SetHyperlink(HyperlinkAction::Clear);
-    };
-
-    let id = params.split(|&b| b == b':').find_map(|kv| {
-        let (key, value) = split_key_value(kv)?;
-        (key == b"id").then(|| std::str::from_utf8(value).ok())?
-    });
-
-    ParsedOscAction::SetHyperlink(HyperlinkAction::Open { id, uri })
-}
-
-fn parse_osc_palette_query(rest: &[u8]) -> ParsedOscAction<'_> {
-    let (idx_bytes, query) = split_osc(rest);
-    if query != b"?" {
-        return ParsedOscAction::Unsupported;
-    }
-    let Ok(index_text) = std::str::from_utf8(idx_bytes) else {
-        return ParsedOscAction::Unsupported;
-    };
-    let Ok(index) = index_text.parse::<u8>() else {
-        return ParsedOscAction::Unsupported;
-    };
-    ParsedOscAction::PaletteColorQuery { index, index_text }
-}
-
-fn parse_osc_color_query<'a>(
-    rest: &[u8],
-    query_action: ParsedOscAction<'a>,
-) -> ParsedOscAction<'a> {
-    if rest == b"?" {
-        query_action
-    } else {
-        ParsedOscAction::Unsupported
-    }
-}
-
-fn parse_osc_clipboard(rest: &[u8]) -> ParsedOscAction<'_> {
-    let (pc, pd) = split_osc(rest);
-    let kinds = resolve_selectors(pc);
-
-    if pd == b"?" {
-        let Some(&kind) = kinds.first() else {
-            return ParsedOscAction::Unsupported;
-        };
-        let response_selector = if pc.is_empty() {
-            b"c".to_vec()
-        } else {
-            pc.to_vec()
-        };
-        return ParsedOscAction::Clipboard(ClipboardAction::Read {
-            kind,
-            response_selector,
-        });
-    }
-
-    let Some(decoded) = decode_osc52(pd) else {
-        return ParsedOscAction::Unsupported;
-    };
-    let Ok(text) = std::str::from_utf8(&decoded) else {
-        return ParsedOscAction::Unsupported;
-    };
-    if kinds.is_empty() {
-        return ParsedOscAction::Unsupported;
-    }
-    ParsedOscAction::Clipboard(ClipboardAction::Write {
-        kinds,
-        text: text.to_owned(),
-    })
-}
-
-fn parse_osc_133(rest: &[u8]) -> ParsedOscAction<'_> {
-    let (kind, args) = split_osc(rest);
-    parse_shell_integration_lifecycle(kind, args)
-        .map(ParsedOscAction::ShellIntegration)
-        .unwrap_or(ParsedOscAction::Unsupported)
-}
-
-fn parse_osc_633(rest: &[u8]) -> ParsedOscAction<'_> {
-    let (kind, args) = split_osc(rest);
-    if let Some(action) = parse_shell_integration_lifecycle(kind, args) {
-        return ParsedOscAction::VscodeShellIntegration(VscodeShellIntegrationAction::Lifecycle(
-            action,
-        ));
-    }
-
-    match kind {
-        b"P" => parse_osc_633_property(args)
+        OscCommand::ShellIntegration => shell_integration::parse_osc_133(rest)
+            .map(ParsedOscAction::ShellIntegration)
+            .unwrap_or(ParsedOscAction::Unsupported),
+        OscCommand::VscodeShellIntegration => shell_integration::parse_osc_633(rest)
             .map(ParsedOscAction::VscodeShellIntegration)
             .unwrap_or(ParsedOscAction::Unsupported),
-        b"E" => parse_osc_633_command_line(args)
-            .map(|command_line| {
-                ParsedOscAction::VscodeShellIntegration(
-                    VscodeShellIntegrationAction::SetCommandLine(command_line),
-                )
-            })
-            .unwrap_or(ParsedOscAction::Unsupported),
-        _ => ParsedOscAction::Unsupported,
+        OscCommand::Iterm2 => ParsedOscAction::Iterm(iterm::parse(rest)),
     }
 }
 
-fn parse_shell_integration_lifecycle(
-    kind: &[u8],
-    args: &[u8],
-) -> Option<ShellIntegrationAction> {
-    match kind {
-        b"A" => Some(ShellIntegrationAction::PromptStart),
-        b"B" => Some(ShellIntegrationAction::CommandStart),
-        b"C" => Some(ShellIntegrationAction::OutputStart),
-        b"D" => Some(ShellIntegrationAction::CommandFinished {
-            exit: parse_shell_integration_exit(args),
-        }),
-        _ => None,
-    }
-}
-
-fn parse_osc_633_property(args: &[u8]) -> Option<VscodeShellIntegrationAction> {
-    let (key, value) = split_key_value(args)?;
-    if key != b"Cwd" {
-        return None;
-    }
-    parse_absolute_or_file_directory(value).map(VscodeShellIntegrationAction::SetDirectory)
-}
-
-fn parse_osc_633_command_line(args: &[u8]) -> Option<String> {
-    let (command_line, _) = split_osc(args);
-    decode_osc_633_command_line(command_line)
+fn parse_color_query<'a>(
+    rest: &[u8],
+    query_action: ColorQueryAction<'a>,
+) -> ParsedOscAction<'a> {
+    color_query::parse_current(rest, query_action)
+        .map(ParsedOscAction::ColorQuery)
+        .unwrap_or(ParsedOscAction::Unsupported)
 }
 
 fn split_key_value(bytes: &[u8]) -> Option<(&[u8], &[u8])> {
@@ -509,41 +255,15 @@ fn apply_parsed_osc(
 ) {
     match action {
         ParsedOscAction::Unsupported | ParsedOscAction::AcceptedNoop => {}
-        ParsedOscAction::SetTitle(title) => apply_osc_title(title, current_title),
-        ParsedOscAction::SetDirectory(action) => apply_directory(action, current_directory),
+        ParsedOscAction::SetTitle(title) => title::apply(title, current_title),
+        ParsedOscAction::SetDirectory(action) => directory::apply(action, current_directory),
         ParsedOscAction::SetHyperlink(action) => {
-            apply_hyperlink(action, hyperlinks, &mut active_screen.current_hyperlink);
+            hyperlink::apply(action, hyperlinks, &mut active_screen.current_hyperlink);
         }
-        ParsedOscAction::PaletteColorQuery { index, index_text } => {
-            let c = color::palette_color(palette, index);
-            let reply = rgb_reply(c.red, c.green, c.blue);
-            conformance::write_osc(
-                pending_output,
-                c1_mode,
-                format_args!("4;{index_text};{reply}"),
-            );
+        ParsedOscAction::ColorQuery(action) => {
+            color_query::apply(action, pending_output, c1_mode, palette);
         }
-        ParsedOscAction::ForegroundColorQuery => {
-            write_color_query_reply(
-                pending_output,
-                c1_mode,
-                OscCommand::FgColor as u8,
-                palette.fg,
-            );
-        }
-        ParsedOscAction::BackgroundColorQuery => {
-            write_color_query_reply(
-                pending_output,
-                c1_mode,
-                OscCommand::BgColor as u8,
-                palette.bg,
-            );
-        }
-        ParsedOscAction::CursorColorQuery => {
-            let c = palette.cursor.unwrap_or(palette.fg);
-            write_color_query_reply(pending_output, c1_mode, OscCommand::CursorColor as u8, c);
-        }
-        ParsedOscAction::Clipboard(action) => apply_clipboard_action(
+        ParsedOscAction::Clipboard(action) => clipboard::apply(
             action,
             clipboard,
             c1_mode,
@@ -551,7 +271,7 @@ fn apply_parsed_osc(
             clipboard_requests,
             &feature_permissions.clipboard,
         ),
-        ParsedOscAction::ShellIntegration(action) => apply_shell_integration_action(
+        ParsedOscAction::ShellIntegration(action) => shell_integration::apply(
             action,
             active_screen,
             viewport,
@@ -560,7 +280,7 @@ fn apply_parsed_osc(
             shell_integration_phase,
             command_metas,
         ),
-        ParsedOscAction::VscodeShellIntegration(action) => apply_vscode_shell_integration_action(
+        ParsedOscAction::VscodeShellIntegration(action) => shell_integration::apply_vscode(
             action,
             current_directory,
             active_screen,
@@ -570,318 +290,14 @@ fn apply_parsed_osc(
             shell_integration_phase,
             command_metas,
         ),
-        ParsedOscAction::ReportItermCellSize => {
-            conformance::write_osc(
-                pending_output,
-                c1_mode,
-                format_args!("1337;ReportCellSize={};{}", cell_height, cell_width),
-            );
-        }
-        ParsedOscAction::ReportItermCapabilities => {
-            let features = crate::iterm_features::term_features(feature_permissions);
-            conformance::write_osc(
-                pending_output,
-                c1_mode,
-                format_args!("1337;Capabilities={features}"),
-            );
-        }
-    }
-}
-
-fn apply_osc_title(
-    title: Option<&str>,
-    current_title: &mut Option<String>,
-) {
-    *current_title = title.map(ToOwned::to_owned);
-}
-
-fn apply_directory(
-    action: DirectoryAction,
-    current_directory: &mut Option<PathBuf>,
-) {
-    match action {
-        DirectoryAction::Clear => *current_directory = None,
-        DirectoryAction::Set(path) => *current_directory = Some(path),
-    }
-}
-
-fn apply_hyperlink(
-    action: HyperlinkAction<'_>,
-    registry: &mut HyperlinkRegistry,
-    current: &mut Option<HyperlinkId>,
-) {
-    match action {
-        HyperlinkAction::Clear => *current = None,
-        HyperlinkAction::Open { id, uri } => *current = Some(registry.intern(id, uri)),
-    }
-}
-
-fn write_color_query_reply(
-    pending_output: &mut Vec<u8>,
-    c1_mode: C1Mode,
-    cmd: u8,
-    current: palette::Srgb<u8>,
-) {
-    let reply = rgb_reply(current.red, current.green, current.blue);
-    conformance::write_osc(pending_output, c1_mode, format_args!("{cmd};{reply}"));
-}
-
-fn apply_clipboard_action(
-    action: ClipboardAction,
-    clipboard: &mut Clipboard,
-    c1_mode: C1Mode,
-    pending_output: &mut Vec<u8>,
-    clipboard_requests: &mut Vec<ClipboardRequest>,
-    clipboard_permissions: &ClipboardPermissions,
-) {
-    match action {
-        ClipboardAction::Read {
-            kind,
-            response_selector,
-        } => match clipboard_permissions.read {
-            PermissionPolicy::Allow => {
-                pending_output.extend(crate::io::clipboard::osc52_read_response(
-                    clipboard,
-                    kind,
-                    &response_selector,
-                    c1_mode,
-                ));
-            }
-            PermissionPolicy::Ask => clipboard_requests.push(ClipboardRequest::Read {
-                kind,
-                response_selector,
-                c1_mode,
-            }),
-            PermissionPolicy::Deny => {}
-        },
-        ClipboardAction::Write { kinds, text } => match clipboard_permissions.write {
-            PermissionPolicy::Allow => {
-                for kind in kinds {
-                    clipboard.set(kind, &text);
-                }
-            }
-            PermissionPolicy::Ask => {
-                clipboard_requests.push(ClipboardRequest::Write { kinds, text })
-            }
-            PermissionPolicy::Deny => {}
-        },
-    }
-}
-
-fn apply_vscode_shell_integration_action(
-    action: VscodeShellIntegrationAction,
-    current_directory: &mut Option<PathBuf>,
-    screen: &mut Screen,
-    viewport: &Viewport,
-    on_alt_screen: bool,
-    current_prompt_row: &mut Option<u64>,
-    shell_integration_phase: &mut ShellIntegrationPhase,
-    command_metas: &mut HashMap<u64, CommandMeta>,
-) {
-    match action {
-        VscodeShellIntegrationAction::Lifecycle(action) => apply_shell_integration_action(
+        ParsedOscAction::Iterm(action) => iterm::apply(
             action,
-            screen,
-            viewport,
-            on_alt_screen,
-            current_prompt_row,
-            shell_integration_phase,
-            command_metas,
+            pending_output,
+            c1_mode,
+            feature_permissions,
+            cell_width,
+            cell_height,
         ),
-        VscodeShellIntegrationAction::SetDirectory(action) => {
-            apply_directory(action, current_directory);
-        }
-        VscodeShellIntegrationAction::SetCommandLine(command_line) => {
-            apply_command_line_metadata(command_line, *current_prompt_row, command_metas);
-        }
-    }
-}
-
-fn apply_command_line_metadata(
-    command_line: String,
-    current_prompt_row: Option<u64>,
-    command_metas: &mut HashMap<u64, CommandMeta>,
-) {
-    let Some(prompt_abs) = current_prompt_row else {
-        return;
-    };
-    let Some(meta) = command_metas.get_mut(&prompt_abs) else {
-        return;
-    };
-    meta.untrusted_command_line = Some(command_line);
-}
-
-fn apply_shell_integration_action(
-    action: ShellIntegrationAction,
-    screen: &mut Screen,
-    viewport: &Viewport,
-    on_alt_screen: bool,
-    current_prompt_row: &mut Option<u64>,
-    shell_integration_phase: &mut ShellIntegrationPhase,
-    command_metas: &mut HashMap<u64, CommandMeta>,
-) {
-    match action {
-        ShellIntegrationAction::PromptStart => {
-            if !on_alt_screen {
-                crate::screen::start_command_block(screen, viewport);
-            }
-            let abs = mark_current_row(screen, viewport, |row| {
-                row.prompt_start = true;
-                row.command_start_col = None;
-                row.output_start_col = None;
-                // A fresh prompt invalidates any lingering exit_status from
-                // a prior occupant of this row (e.g. a recycled scrollback
-                // slot). The shell hasn't even shown the prompt yet.
-                row.exit_status = None;
-            });
-            *current_prompt_row = Some(abs);
-            *shell_integration_phase = ShellIntegrationPhase::Prompt;
-            // Seed the metadata entry so B/C/D/E can fill it in.
-            command_metas.insert(abs, CommandMeta::new());
-        }
-        ShellIntegrationAction::CommandStart => {
-            *shell_integration_phase = ShellIntegrationPhase::Command;
-            // Prompt end / command start. Record the cursor column so
-            // "select command" can skip the prompt decoration.
-            if let Some(prompt_abs) = *current_prompt_row {
-                let command_col = screen.cursor.col;
-                let abs = mark_current_row(screen, viewport, |row| {
-                    row.command_start_col = Some(command_col);
-                });
-                if let Some(meta) = command_metas.get_mut(&prompt_abs) {
-                    meta.command_col = Some(command_col);
-                    meta.command_row = Some(abs);
-                }
-            }
-        }
-        ShellIntegrationAction::OutputStart => {
-            *shell_integration_phase = ShellIntegrationPhase::Output;
-            let output_col = screen.cursor.col;
-            let abs = mark_current_row(screen, viewport, |row| {
-                row.output_start = true;
-                row.output_start_col = Some(output_col);
-            });
-            if let Some(prompt_abs) = *current_prompt_row
-                && let Some(meta) = command_metas.get_mut(&prompt_abs)
-            {
-                meta.output_row = Some(abs);
-                meta.output_col = Some(output_col);
-                meta.started_at = Some(Instant::now());
-            }
-        }
-        ShellIntegrationAction::CommandFinished { exit } => {
-            *shell_integration_phase = ShellIntegrationPhase::Finished;
-            if let Some(abs) = *current_prompt_row
-                && let Some(local) = absolute_to_local(screen, abs)
-            {
-                screen.grid.rows[local].exit_status = Some(exit);
-            }
-            if let Some(prompt_abs) = *current_prompt_row
-                && let Some(meta) = command_metas.get_mut(&prompt_abs)
-            {
-                meta.finished_row = Some(current_absolute_row(screen, viewport));
-                meta.finished_col = Some(screen.cursor.col);
-                meta.finished_at = Some(Instant::now());
-            }
-        }
-    }
-}
-
-/// Run `apply` on the row the cursor currently occupies and return that
-/// row's absolute index (stable under scrollback trimming). Factored out
-/// because every OSC 133 kind that stores a mark does the same lookup.
-fn mark_current_row(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    apply: impl FnOnce(&mut Row),
-) -> u64 {
-    crate::screen::ensure_cursor_row_exists(screen, viewport);
-    let local = crate::screen::active_row_index(screen, viewport);
-    apply(&mut screen.grid.rows[local]);
-    (screen.grid.total_popped + local) as u64
-}
-
-/// Return the absolute row index the cursor currently sits on, without
-/// mutating the row. Used by OSC 133 B to record the command start row.
-fn current_absolute_row(
-    screen: &Screen,
-    viewport: &Viewport,
-) -> u64 {
-    let local = crate::screen::active_row_index(screen, viewport);
-    (screen.grid.total_popped + local) as u64
-}
-
-/// Translate an absolute row index into a live grid offset, or `None` if
-/// the row has already fallen off the front of scrollback.
-fn absolute_to_local(
-    screen: &Screen,
-    abs: u64,
-) -> Option<usize> {
-    let popped = screen.grid.total_popped as u64;
-    let local = abs.checked_sub(popped)? as usize;
-    (local < screen.grid.rows.len()).then_some(local)
-}
-
-/// Parse the exit code from an OSC 133 `D` payload. Per the spec the first
-/// argument is the exit status; non-numeric or missing values are treated
-/// as success (`0`) so a shell that merely reports "command finished"
-/// without the numeric status doesn't accidentally paint every prompt red.
-fn parse_shell_integration_exit(args: &[u8]) -> i32 {
-    let (first, _) = split_osc(args);
-    std::str::from_utf8(first)
-        .ok()
-        .and_then(|s| s.parse::<i32>().ok())
-        .unwrap_or(0)
-}
-
-/// Format an 8-bit color channel as the 16-bit hex representation used in
-/// X11 color replies. Each 8-bit value is scaled to 16 bits by repeating the
-/// byte (e.g. 0xCC → 0xCCCC).
-fn rgb_reply(
-    r: u8,
-    g: u8,
-    b: u8,
-) -> String {
-    let r16 = (r as u16) << 8 | r as u16;
-    let g16 = (g as u16) << 8 | g as u16;
-    let b16 = (b as u16) << 8 | b as u16;
-    format!("rgb:{r16:04x}/{g16:04x}/{b16:04x}")
-}
-
-fn decode_osc_633_command_line(command_line: &[u8]) -> Option<String> {
-    let mut decoded = Vec::with_capacity(command_line.len());
-    let mut i = 0;
-    while i < command_line.len() {
-        if command_line[i] != b'\\' {
-            decoded.push(command_line[i]);
-            i += 1;
-            continue;
-        }
-
-        let escaped = *command_line.get(i + 1)?;
-        match escaped {
-            b'\\' => {
-                decoded.push(b'\\');
-                i += 2;
-            }
-            b'x' | b'X' => {
-                let hi = *command_line.get(i + 2)?;
-                let lo = *command_line.get(i + 3)?;
-                decoded.push((hex_nibble(hi)? << 4) | hex_nibble(lo)?);
-                i += 4;
-            }
-            _ => return None,
-        }
-    }
-    String::from_utf8(decoded).ok()
-}
-
-fn hex_nibble(byte: u8) -> Option<u8> {
-    match byte {
-        b'0'..=b'9' => Some(byte - b'0'),
-        b'a'..=b'f' => Some(byte - b'a' + 10),
-        b'A'..=b'F' => Some(byte - b'A' + 10),
-        _ => None,
     }
 }
 
