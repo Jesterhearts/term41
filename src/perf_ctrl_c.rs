@@ -1,6 +1,6 @@
 #[cfg(not(feature = "testonly-perf-ctrl-c"))]
 mod disabled {
-    use crate::TabId;
+    use crate::window_host::TabId;
 
     pub(crate) fn record_ctrl_c_hit(_tab_id: TabId) {}
 
@@ -26,7 +26,7 @@ mod enabled {
 
     use parking_lot::Mutex;
 
-    use crate::TabId;
+    use crate::window_host::TabId;
 
     const CTRL_C: u8 = 0x03;
     const MAX_PENDING_HITS: usize = 256;

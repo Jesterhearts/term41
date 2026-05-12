@@ -4,7 +4,7 @@ impl Renderer {
     pub(in crate::renderer::r#impl) fn render_command_palette(
         &mut self,
         font_system: &mut FontSystem,
-        palette_view: &crate::CommandPaletteView,
+        palette_view: &crate::window_host::CommandPaletteView,
         layout: &FrameLayout,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,

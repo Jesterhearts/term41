@@ -28,9 +28,6 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
-use crate::CommandEditorPopupSide;
-use crate::command_editor_placement_for_cursor;
-use crate::command_editor_popup_side_for_row;
 use crate::renderer::GUTTER_MENU_ITEMS;
 use crate::renderer::GutterPopup;
 use crate::renderer::POPUP_WIDTH_CELLS;
@@ -48,6 +45,9 @@ use crate::renderer::paint::row_paintable_cols;
 use crate::renderer::paint::status_line_label_row;
 use crate::renderer::paint::underline_style_for_render;
 use crate::renderer::paint::visible_row_cols;
+use crate::window_host::CommandEditorPopupSide;
+use crate::window_host::command_editor_placement_for_cursor;
+use crate::window_host::command_editor_popup_side_for_row;
 
 mod chrome;
 mod frame;
@@ -1911,9 +1911,9 @@ impl Renderer {
         gutter_popup: Option<&GutterPopup>,
         recording_popup: Option<&crate::renderer::RecordingPopup>,
         permission_modal: Option<&crate::renderer::PermissionModal>,
-        command_palette: Option<&crate::CommandPaletteView>,
+        command_palette: Option<&crate::window_host::CommandPaletteView>,
         history_confirmation: Option<&crate::renderer::HistoryConfirmationModal>,
-        history_deletion: Option<&crate::HistoryDeletionView>,
+        history_deletion: Option<&crate::window_host::HistoryDeletionView>,
         toast: Option<&crate::renderer::Toast>,
         preedit: Option<&crate::renderer::PreeditState>,
         command_editor: Option<&commands41::CommandLineView>,

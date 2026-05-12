@@ -40,13 +40,8 @@ use winit::event_loop::OwnedDisplayHandle;
 use winit::window::Window;
 
 use crate::APP_START_TIME;
-use crate::AppEvent;
 use crate::INITIAL_COLS;
 use crate::INITIAL_ROWS;
-use crate::InputState;
-use crate::Tab;
-use crate::TabId;
-use crate::command_editor_view_for_input_tab;
 use crate::output_recording::RecorderControl;
 use crate::renderer::r#impl::Renderer;
 pub(crate) use crate::renderer::r#impl::TabInfo;
@@ -61,6 +56,11 @@ use crate::renderer::paint::local_status_line_row;
 use crate::scripting::ScriptInput;
 use crate::scripting::ScriptOutput;
 use crate::scripting::ScriptRuntime;
+use crate::window_host::AppEvent;
+use crate::window_host::InputState;
+use crate::window_host::Tab;
+use crate::window_host::TabId;
+use crate::window_host::command_editor_view_for_input_tab;
 
 // ---------------------------------------------------------------------------
 // Gutter popup — shown on click of a shell-integration gutter marker

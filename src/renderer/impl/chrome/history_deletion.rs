@@ -5,7 +5,7 @@ impl Renderer {
     pub(in crate::renderer::r#impl) fn render_history_deletion(
         &mut self,
         font_system: &mut FontSystem,
-        history_view: &crate::HistoryDeletionView,
+        history_view: &crate::window_host::HistoryDeletionView,
         layout: &FrameLayout,
         bg_vertices: &mut Vec<BgVertex>,
         bg_indices: &mut Vec<u32>,
@@ -195,7 +195,7 @@ impl Renderer {
 }
 
 fn render_history_deletion_scrollbar(
-    history_view: &crate::HistoryDeletionView,
+    history_view: &crate::window_host::HistoryDeletionView,
     first_row: usize,
     visible_rows: usize,
     x: f32,
