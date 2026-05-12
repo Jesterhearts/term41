@@ -336,7 +336,7 @@ fn rendered_selection_point_at_viewport_row<'a>(
     let row = rendered_row_ref(screen, rendered_row)?;
     Some((
         SelectionPoint {
-            row: rendered_row as u64,
+            row: rendered_row,
             col,
         },
         row,

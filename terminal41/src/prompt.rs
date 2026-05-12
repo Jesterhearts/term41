@@ -441,7 +441,7 @@ fn prompt_ref_for_rendered_row(
     info: RenderedRowInfo<'_>,
 ) -> PromptRef {
     PromptRef {
-        rendered_row: info.rendered_row as u64,
+        rendered_row: info.rendered_row,
         active_abs_row: info
             .active_local
             .map(|local| (screen.grid.total_popped + local) as u64),
@@ -457,7 +457,7 @@ fn rendered_output_start_point(
         let row = rendered_row_info(screen, rendered_row)?.row;
         if row.output_start {
             return Some(TextPoint {
-                row: rendered_row as u64,
+                row: rendered_row,
                 col: row
                     .output_start_col
                     .unwrap_or_else(|| first_content_col(row)),
@@ -476,7 +476,7 @@ fn rendered_command_start_point(
         let row = rendered_row_info(screen, rendered_row)?.row;
         if let Some(col) = valid_command_start_col(row) {
             return Some(TextPoint {
-                row: rendered_row as u64,
+                row: rendered_row,
                 col,
             });
         }
@@ -500,9 +500,9 @@ fn rendered_block_end_point(
     prompt: PromptRef,
     screen: &Screen,
 ) -> Option<TextPoint> {
-    Some(text_point_from_row_start(
-        rendered_block_text_end(prompt, screen)? as u64,
-    ))
+    Some(text_point_from_row_start(rendered_block_text_end(
+        prompt, screen,
+    )?))
 }
 
 fn rendered_block_text_end(
