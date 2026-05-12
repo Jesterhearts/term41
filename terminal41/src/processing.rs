@@ -5,6 +5,7 @@ use crate::MouseEventKind;
 use crate::MouseModifiers;
 use crate::Terminal;
 use crate::TerminalEffects;
+use crate::apply;
 use crate::dcs;
 use crate::dispatch;
 use crate::host;
@@ -222,7 +223,7 @@ impl TerminalProcessor {
                         dcs::dispatch_hook(hook, terminal, &mut effects);
                     }
                     dcs::HookAccumulation::NotDcs(action) => {
-                        match terminal.apply(action, &mut effects) {
+                        match apply::apply(terminal, action, &mut effects) {
                             dispatch::PendingApplication::None => {}
                             dispatch::PendingApplication::Bytes(bytes) => {
                                 input.advance(parser.tell());

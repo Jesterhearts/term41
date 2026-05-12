@@ -303,6 +303,30 @@ impl Terminal {
         &self.images.kitty_images
     }
 
+    /// Place a fully-decoded sixel image at the current cursor position.
+    pub fn place_sixel_image(
+        &mut self,
+        image: image41::DecodedImage,
+    ) {
+        crate::apply::place_sixel_image(self, image);
+    }
+
+    /// Apply one approved kitty graphics file request.
+    pub fn apply_kitty_file_request(
+        &mut self,
+        request: crate::KittyFileRequest,
+    ) -> crate::TerminalEffects {
+        crate::apply::apply_kitty_file_request(self, request)
+    }
+
+    /// Reject one kitty graphics file request.
+    pub fn deny_kitty_file_request(
+        &mut self,
+        request: crate::KittyFileRequest,
+    ) -> crate::TerminalEffects {
+        crate::apply::deny_kitty_file_request(request)
+    }
+
     /// Whether a non-empty selection is active.
     pub fn has_selection(&self) -> bool {
         self.selection.as_ref().is_some_and(|s| !s.is_empty())

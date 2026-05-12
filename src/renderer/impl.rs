@@ -1919,7 +1919,7 @@ impl Renderer {
         command_editor: Option<&commands41::CommandLineView>,
         suspend_terminal_area: bool,
     ) {
-        let mut layout = self.frame_layout(font_system, tabs);
+        let mut layout = frame::frame_layout(self, font_system, tabs);
         let command_editor = visible_command_editor(command_editor, snap);
         let block_y_offset_rows = terminal_block_y_offset_rows(&snap.rows, snap);
         layout.block_y_offset = block_y_offset_rows as f32 * layout.cell_h;
@@ -1931,15 +1931,18 @@ impl Renderer {
             layout.terminal_y_offset = -(placement.terminal_row_offset as f32) * layout.cell_h;
         }
         if suspend_terminal_area {
-            self.apply_terminal_snapshot_status_row(snap);
+            frame::apply_terminal_snapshot_status_row(self, snap);
         } else {
-            self.apply_terminal_snapshot_rows(snap, block_y_offset_rows);
+            frame::apply_terminal_snapshot_rows(self, snap, block_y_offset_rows);
         }
         let terminal_rows = std::mem::take(&mut self.terminal_rows);
         self.image_atlas.begin_frame();
-        let under_text_image_geometry = self.build_image_geometry(visible_images, &layout, true);
-        let over_text_image_geometry = self.build_image_geometry(visible_images, &layout, false);
-        let geometry = self.build_render_geometry(
+        let under_text_image_geometry =
+            frame::build_image_geometry(self, visible_images, &layout, true);
+        let over_text_image_geometry =
+            frame::build_image_geometry(self, visible_images, &layout, false);
+        let geometry = frame::build_render_geometry(
+            self,
             font_system,
             snap,
             &terminal_rows,
@@ -1959,7 +1962,8 @@ impl Renderer {
             suspend_terminal_area,
         );
         self.terminal_rows = terminal_rows;
-        self.submit_render_passes(
+        frame::submit_render_passes(
+            self,
             acquired,
             geometry,
             under_text_image_geometry,

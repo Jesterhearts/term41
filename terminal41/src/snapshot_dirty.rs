@@ -102,143 +102,141 @@ fn mark_snapshot_cursor_rows(
     }
 }
 
-impl Terminal {
-    pub(crate) fn snapshot_dirty_baseline(&self) -> SnapshotDirtyBaseline {
-        let status_line_row = view::status_line_row(&self.active).map(|_| self.viewport.rows);
-        SnapshotDirtyBaseline {
-            active_display: self.active.active_display,
-            cursor_row: self.active.cursor.row,
-            cursor_col: self.active.cursor.col,
-            cursor_snapshot_row: active_cursor_snapshot_row(&self.active, &self.viewport),
-            scroll_bottom: self.active.scroll_bottom,
-            grid_rows_len: self.active.grid.rows.len(),
-            total_popped: self.active.grid.total_popped,
-            viewport_top: self.viewport.top_index(self.active.grid.rows.len()),
-            viewport_rows: self.viewport.rows,
-            viewport_cols: self.viewport.cols,
-            offset: self.active.offset,
-            total_rows: self.viewport.rows + u32::from(status_line_row.is_some()),
-            status_line_row,
-        }
+pub(crate) fn snapshot_dirty_baseline(terminal: &Terminal) -> SnapshotDirtyBaseline {
+    let status_line_row = view::status_line_row(&terminal.active).map(|_| terminal.viewport.rows);
+    SnapshotDirtyBaseline {
+        active_display: terminal.active.active_display,
+        cursor_row: terminal.active.cursor.row,
+        cursor_col: terminal.active.cursor.col,
+        cursor_snapshot_row: active_cursor_snapshot_row(&terminal.active, &terminal.viewport),
+        scroll_bottom: terminal.active.scroll_bottom,
+        grid_rows_len: terminal.active.grid.rows.len(),
+        total_popped: terminal.active.grid.total_popped,
+        viewport_top: terminal.viewport.top_index(terminal.active.grid.rows.len()),
+        viewport_rows: terminal.viewport.rows,
+        viewport_cols: terminal.viewport.cols,
+        offset: terminal.active.offset,
+        total_rows: terminal.viewport.rows + u32::from(status_line_row.is_some()),
+        status_line_row,
     }
+}
 
-    pub(crate) fn input_context_state(&self) -> InputContextState {
-        InputContextState {
-            on_alt_screen: self.on_alt_screen,
-            app_cursor_keys: self.active.app_cursor_keys,
-            app_keypad: self.active.app_keypad,
-            mouse_tracking: self.modes.mouse_tracking,
-            shell_integration_phase: self.metadata.shell_integration_phase,
-        }
+pub(crate) fn input_context_state(terminal: &Terminal) -> InputContextState {
+    InputContextState {
+        on_alt_screen: terminal.on_alt_screen,
+        app_cursor_keys: terminal.active.app_cursor_keys,
+        app_keypad: terminal.active.app_keypad,
+        mouse_tracking: terminal.modes.mouse_tracking,
+        shell_integration_phase: terminal.metadata.shell_integration_phase,
     }
+}
 
-    pub(crate) fn snapshot_dirty_scope(
-        &self,
-        action: &dispatch::TerminalAction<'_>,
-        before: SnapshotDirtyBaseline,
-    ) -> SnapshotDirtyScope {
-        match action {
-            dispatch::TerminalAction::Ignore => SnapshotDirtyScope::None,
-            dispatch::TerminalAction::Basic(action) => {
-                self.basic_action_dirty_scope(action, before)
-            }
-            dispatch::TerminalAction::Vt52(action) => match action {
-                dispatch::Vt52Action::AwaitCursorColumn => SnapshotDirtyScope::None,
-                dispatch::Vt52Action::CursorPosition { trailing_ascii, .. } => {
-                    if trailing_ascii.is_empty() {
-                        SnapshotDirtyScope::CursorRows
-                    } else {
-                        SnapshotDirtyScope::All
-                    }
-                }
-            },
-            dispatch::TerminalAction::Csi(_)
-            | dispatch::TerminalAction::Esc(_)
-            | dispatch::TerminalAction::Osc(_)
-            | dispatch::TerminalAction::Apc(_) => SnapshotDirtyScope::All,
+pub(crate) fn snapshot_dirty_scope(
+    terminal: &Terminal,
+    action: &dispatch::TerminalAction<'_>,
+    before: SnapshotDirtyBaseline,
+) -> SnapshotDirtyScope {
+    match action {
+        dispatch::TerminalAction::Ignore => SnapshotDirtyScope::None,
+        dispatch::TerminalAction::Basic(action) => {
+            basic_action_dirty_scope(terminal, action, before)
         }
-    }
-
-    fn basic_action_dirty_scope(
-        &self,
-        action: &dispatch::BasicAction<'_>,
-        before: SnapshotDirtyBaseline,
-    ) -> SnapshotDirtyScope {
-        if before.active_display == screen::ActiveDisplay::Status {
-            return SnapshotDirtyScope::CursorRows;
-        }
-        if before.cursor_row != before.scroll_bottom {
-            return SnapshotDirtyScope::CursorRows;
-        }
-
-        match action {
-            dispatch::BasicAction::Execute(b'\n' | b'\x0b' | b'\x0c') => SnapshotDirtyScope::All,
-            dispatch::BasicAction::PrintAscii(run) => {
-                let cols = self.viewport.cols.max(1);
-                if before.cursor_col.saturating_add(run.len() as u32) > cols {
-                    SnapshotDirtyScope::All
-                } else {
+        dispatch::TerminalAction::Vt52(action) => match action {
+            dispatch::Vt52Action::AwaitCursorColumn => SnapshotDirtyScope::None,
+            dispatch::Vt52Action::CursorPosition { trailing_ascii, .. } => {
+                if trailing_ascii.is_empty() {
                     SnapshotDirtyScope::CursorRows
-                }
-            }
-            dispatch::BasicAction::PrintText(run) => {
-                // UTF-8 byte length is a cheap conservative upper bound for
-                // terminal column width, so it can detect possible wrapping
-                // without recounting chars on every mixed text run.
-                if before.cursor_col.saturating_add(run.len() as u32) > self.viewport.cols.max(1) {
-                    SnapshotDirtyScope::All
                 } else {
-                    SnapshotDirtyScope::CursorRows
-                }
-            }
-            dispatch::BasicAction::Print(_) | dispatch::BasicAction::Print8Bit(_) => {
-                if before.cursor_col.saturating_add(1) > self.viewport.cols.max(1) {
                     SnapshotDirtyScope::All
-                } else {
-                    SnapshotDirtyScope::CursorRows
                 }
             }
-            dispatch::BasicAction::Execute(_) => SnapshotDirtyScope::CursorRows,
+        },
+        dispatch::TerminalAction::Csi(_)
+        | dispatch::TerminalAction::Esc(_)
+        | dispatch::TerminalAction::Osc(_)
+        | dispatch::TerminalAction::Apc(_) => SnapshotDirtyScope::All,
+    }
+}
+
+fn basic_action_dirty_scope(
+    terminal: &Terminal,
+    action: &dispatch::BasicAction<'_>,
+    before: SnapshotDirtyBaseline,
+) -> SnapshotDirtyScope {
+    if before.active_display == screen::ActiveDisplay::Status {
+        return SnapshotDirtyScope::CursorRows;
+    }
+    if before.cursor_row != before.scroll_bottom {
+        return SnapshotDirtyScope::CursorRows;
+    }
+
+    match action {
+        dispatch::BasicAction::Execute(b'\n' | b'\x0b' | b'\x0c') => SnapshotDirtyScope::All,
+        dispatch::BasicAction::PrintAscii(run) => {
+            let cols = terminal.viewport.cols.max(1);
+            if before.cursor_col.saturating_add(run.len() as u32) > cols {
+                SnapshotDirtyScope::All
+            } else {
+                SnapshotDirtyScope::CursorRows
+            }
+        }
+        dispatch::BasicAction::PrintText(run) => {
+            // UTF-8 byte length is a cheap conservative upper bound for
+            // terminal column width, so it can detect possible wrapping
+            // without recounting chars on every mixed text run.
+            if before.cursor_col.saturating_add(run.len() as u32) > terminal.viewport.cols.max(1) {
+                SnapshotDirtyScope::All
+            } else {
+                SnapshotDirtyScope::CursorRows
+            }
+        }
+        dispatch::BasicAction::Print(_) | dispatch::BasicAction::Print8Bit(_) => {
+            if before.cursor_col.saturating_add(1) > terminal.viewport.cols.max(1) {
+                SnapshotDirtyScope::All
+            } else {
+                SnapshotDirtyScope::CursorRows
+            }
+        }
+        dispatch::BasicAction::Execute(_) => SnapshotDirtyScope::CursorRows,
+    }
+}
+
+pub(crate) fn mark_snapshot_dirty_after(
+    terminal: &mut Terminal,
+    before: SnapshotDirtyBaseline,
+    scope: SnapshotDirtyScope,
+) {
+    if scope == SnapshotDirtyScope::None {
+        return;
+    }
+
+    let after = snapshot_dirty_baseline(terminal);
+    if scope == SnapshotDirtyScope::All
+        || before.grid_rows_len != after.grid_rows_len
+        || before.total_popped != after.total_popped
+        || before.viewport_top != after.viewport_top
+        || before.viewport_rows != after.viewport_rows
+        || before.viewport_cols != after.viewport_cols
+        || before.offset != after.offset
+        || before.total_rows != after.total_rows
+        || before.status_line_row != after.status_line_row
+    {
+        terminal.snapshot.mark_all();
+        return;
+    }
+
+    match before.active_display {
+        screen::ActiveDisplay::Main => {
+            mark_snapshot_cursor_rows(&mut terminal.snapshot, before, after);
+        }
+        screen::ActiveDisplay::Status => {
+            if let Some(row) = before.status_line_row.or(after.status_line_row) {
+                terminal.snapshot.mark_row(row);
+            }
         }
     }
 
-    pub(crate) fn mark_snapshot_dirty_after(
-        &mut self,
-        before: SnapshotDirtyBaseline,
-        scope: SnapshotDirtyScope,
-    ) {
-        if scope == SnapshotDirtyScope::None {
-            return;
-        }
-
-        let after = self.snapshot_dirty_baseline();
-        if scope == SnapshotDirtyScope::All
-            || before.grid_rows_len != after.grid_rows_len
-            || before.total_popped != after.total_popped
-            || before.viewport_top != after.viewport_top
-            || before.viewport_rows != after.viewport_rows
-            || before.viewport_cols != after.viewport_cols
-            || before.offset != after.offset
-            || before.total_rows != after.total_rows
-            || before.status_line_row != after.status_line_row
-        {
-            self.snapshot.mark_all();
-            return;
-        }
-
-        match before.active_display {
-            screen::ActiveDisplay::Main => {
-                mark_snapshot_cursor_rows(&mut self.snapshot, before, after);
-            }
-            screen::ActiveDisplay::Status => {
-                if let Some(row) = before.status_line_row.or(after.status_line_row) {
-                    self.snapshot.mark_row(row);
-                }
-            }
-        }
-
-        if after.active_display != before.active_display {
-            self.snapshot.mark_all();
-        }
+    if after.active_display != before.active_display {
+        terminal.snapshot.mark_all();
     }
 }

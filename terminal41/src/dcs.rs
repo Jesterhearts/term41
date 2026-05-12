@@ -2,6 +2,7 @@ use config41::TerminalLimits;
 
 use crate::Terminal;
 use crate::TerminalEffects;
+use crate::apply;
 use crate::charset;
 use crate::report;
 
@@ -250,7 +251,7 @@ fn apply_dcs_action(
         }
         ParsedDcsAction::Sixel { params, payload } => {
             let image = image41::sixel::parse_sixel(params, payload);
-            terminal.place_sixel_image(image);
+            apply::place_sixel_image(terminal, image);
         }
         ParsedDcsAction::AssignUserPreferredSupplementalSet { ps, payload } => {
             if let Some(upss) = charset::parse_upss_assignment(ps, &payload) {
@@ -266,7 +267,7 @@ fn apply_dcs_action(
                 .define(&params, &payload, terminal.protocol.limits);
         }
         ParsedDcsAction::DefineUserDefinedKeys { params, payload } => {
-            terminal.define_udk(params, &payload);
+            apply::define_udk(terminal, params, &payload);
         }
         ParsedDcsAction::RestoreCursorInformationReport { payload } => {
             report::restore_deccir(
@@ -284,10 +285,10 @@ fn apply_dcs_action(
             report::restore_dectsr(&payload, &mut terminal.active);
         }
         ParsedDcsAction::RestoreColorTable { payload } => {
-            terminal.restore_dec_color_table(&payload);
+            apply::restore_dec_color_table(terminal, &payload);
         }
         ParsedDcsAction::DefineMacro { params, payload } => {
-            terminal.define_macro(params, &payload);
+            apply::define_macro(terminal, params, &payload);
         }
     }
 }
