@@ -1,12 +1,21 @@
 pub mod background;
+mod command_editor_config;
+mod frame_state;
 pub mod glyph_atlas;
+mod grid;
+mod gutter_popup;
 pub mod image_atlas;
 mod r#impl;
 mod input_encoding;
 pub(crate) mod paint;
+mod pasted_background;
+mod permissions;
+mod script_status;
 mod shelf;
 pub(crate) mod startup;
 mod sticky_prompt;
+mod tab_ui;
+mod ui_state;
 
 use std::path::PathBuf;
 use std::sync::Arc;
@@ -20,7 +29,6 @@ use std::time::Instant;
 
 use clip41::Clipboard;
 use config41::BellMode;
-use config41::CommandEditorConfig;
 use config41::Config;
 use config41::DEFAULT_SCROLLBACK;
 use config41::config;
@@ -29,7 +37,6 @@ use font41::FontSystem;
 use parking_lot::Mutex;
 use pty_pipe41::Pty;
 use terminal41::StatusDisplayKind;
-use terminal41::TermSnapshot;
 use terminal41::Terminal;
 use terminal41::TerminalThread;
 use terminal41::VisibleImage;
@@ -43,6 +50,15 @@ use crate::APP_START_TIME;
 use crate::INITIAL_COLS;
 use crate::INITIAL_ROWS;
 use crate::output_recording::RecorderControl;
+use crate::renderer::command_editor_config::CommandEditorConfigSync;
+use crate::renderer::command_editor_config::synced_command_editor_config;
+use crate::renderer::frame_state::should_suspend_terminal_area;
+use crate::renderer::grid::resize_tab_to_grid;
+use crate::renderer::grid::update_terminal_cell_dimensions;
+pub(crate) use crate::renderer::gutter_popup::GUTTER_MENU_ITEMS;
+pub(crate) use crate::renderer::gutter_popup::GutterPopup;
+pub(crate) use crate::renderer::gutter_popup::POPUP_WIDTH_CELLS;
+pub(crate) use crate::renderer::gutter_popup::gutter_popup_origin;
 use crate::renderer::r#impl::Renderer;
 pub(crate) use crate::renderer::r#impl::TabInfo;
 use crate::renderer::r#impl::WindowControls;
@@ -52,7 +68,30 @@ pub(crate) use crate::renderer::input_encoding::kitty_encode_ime_commit;
 pub(crate) use crate::renderer::input_encoding::kitty_encode_input;
 pub(crate) use crate::renderer::input_encoding::legacy_encode_named;
 pub(crate) use crate::renderer::input_encoding::legacy_encode_numpad_character;
-use crate::renderer::paint::local_status_line_row;
+use crate::renderer::pasted_background::clear_pasted_backgrounds;
+pub(crate) use crate::renderer::pasted_background::effective_bg_path;
+use crate::renderer::pasted_background::encode_png_rgba;
+use crate::renderer::pasted_background::find_pasted_background;
+use crate::renderer::pasted_background::pasted_background_dir;
+use crate::renderer::pasted_background::pasted_background_path;
+pub(crate) use crate::renderer::pasted_background::term41_data_dir;
+pub(crate) use crate::renderer::permissions::PermissionChoice;
+pub(crate) use crate::renderer::permissions::PermissionModal;
+pub(crate) use crate::renderer::permissions::permission_button_layout;
+pub(crate) use crate::renderer::permissions::permission_feature_line;
+pub(crate) use crate::renderer::permissions::permission_modal_button_at;
+pub(crate) use crate::renderer::permissions::permission_panel_rect;
+use crate::renderer::script_status::apply_script_status_line;
+pub(crate) use crate::renderer::tab_ui::BUTTON_CELLS;
+pub(crate) use crate::renderer::tab_ui::BUTTONS_REGION_CELLS;
+pub(crate) use crate::renderer::tab_ui::TAB_MENU_ITEMS;
+pub(crate) use crate::renderer::tab_ui::TAB_MENU_WIDTH_CELLS;
+pub(crate) use crate::renderer::tab_ui::TabBarHover;
+pub(crate) use crate::renderer::tab_ui::TabContextMenu;
+pub(crate) use crate::renderer::ui_state::HistoryConfirmationModal;
+pub(crate) use crate::renderer::ui_state::PreeditState;
+pub(crate) use crate::renderer::ui_state::RecordingPopup;
+pub(crate) use crate::renderer::ui_state::Toast;
 use crate::scripting::ScriptInput;
 use crate::scripting::ScriptOutput;
 use crate::scripting::ScriptRuntime;
@@ -62,288 +101,7 @@ use crate::window_host::Tab;
 use crate::window_host::TabId;
 use crate::window_host::command_editor_view_for_input_tab;
 
-// ---------------------------------------------------------------------------
-// Gutter popup — shown on click of a shell-integration gutter marker
-// ---------------------------------------------------------------------------
-
-pub(crate) struct GutterMenuItem {
-    pub label: &'static str,
-}
-
-pub(crate) const GUTTER_MENU_ITEMS: &[GutterMenuItem] = &[
-    GutterMenuItem { label: "Rerun" },
-    GutterMenuItem {
-        label: "Copy command",
-    },
-    GutterMenuItem {
-        label: "Copy cmd+output",
-    },
-    GutterMenuItem {
-        label: "Copy output",
-    },
-];
-
-pub(crate) const POPUP_WIDTH_CELLS: f32 = 20.0;
 const FRAME_DURATION: Duration = Duration::from_millis(1000 / 60);
-const SCRIPT_STATUS_GENERATION_BIT: u64 = 1 << 63;
-
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum CommandEditorConfigSync {
-    PreserveRuntimeEnabled,
-    ApplyConfiguredEnabled,
-}
-
-fn synced_command_editor_config(
-    configured: &CommandEditorConfig,
-    runtime: &CommandEditorConfig,
-    sync: CommandEditorConfigSync,
-) -> CommandEditorConfig {
-    let mut next = configured.clone();
-    if sync == CommandEditorConfigSync::PreserveRuntimeEnabled {
-        next.enabled = runtime.enabled;
-    }
-    next
-}
-
-/// State of the gutter popup while it is open.
-#[derive(Clone)]
-pub(crate) struct GutterPopup {
-    /// Prompt whose marker was clicked.
-    pub prompt: terminal41::prompt::PromptRef,
-    /// Mouse X position where the popup was opened, in window pixels.
-    pub anchor_x: f32,
-    /// Mouse Y position where the popup was opened, in window pixels.
-    pub anchor_y: f32,
-    /// Duration formatted as a human-readable string, if available.
-    pub duration_text: Option<String>,
-    /// Currently hovered menu-item index (0..GUTTER_MENU_ITEMS.len()).
-    pub hovered_item: Option<usize>,
-}
-
-pub(crate) fn gutter_popup_origin(
-    popup: &GutterPopup,
-    popup_w: f32,
-    popup_h: f32,
-    cell_w: f32,
-    cell_h: f32,
-    gutter_w: f32,
-    window_w: f32,
-    window_h: f32,
-) -> (f32, f32) {
-    let max_x = (window_w - popup_w).max(gutter_w);
-    let x = (popup.anchor_x + cell_w * 0.5).max(gutter_w).min(max_x);
-    let max_y = (window_h - popup_h).max(cell_h);
-    let y = popup.anchor_y.min(max_y).max(cell_h);
-    (x, y)
-}
-
-// ---------------------------------------------------------------------------
-// CSD — client-side window decoration state
-// ---------------------------------------------------------------------------
-
-/// Number of cell-widths reserved for each window control button.
-pub(crate) const BUTTON_CELLS: f32 = 3.0;
-
-/// Total width of the window-control button region in cell-width units.
-pub(crate) const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum TabBarHover {
-    NewTab,
-    Minimize,
-    Maximize,
-    Close,
-}
-
-// ---------------------------------------------------------------------------
-// Tab context menu — right-click on a tab in the tab bar
-// ---------------------------------------------------------------------------
-
-pub(crate) struct TabMenuItem {
-    pub label: &'static str,
-}
-
-pub(crate) const TAB_MENU_ITEMS: &[TabMenuItem] = &[
-    TabMenuItem { label: "New tab" },
-    TabMenuItem { label: "Close tab" },
-    TabMenuItem {
-        label: "Close others",
-    },
-];
-
-pub(crate) const TAB_MENU_WIDTH_CELLS: f32 = 16.0;
-
-/// State of the tab context popup while it is open.
-#[derive(Clone)]
-pub(crate) struct TabContextMenu {
-    pub tab_idx: usize,
-    /// Pixel position where the popup was opened (used for placement).
-    pub x: f32,
-    /// Currently hovered menu-item index.
-    pub hovered_item: Option<usize>,
-}
-
-#[derive(Clone)]
-pub(crate) struct RecordingPopup {
-    pub lines: Vec<String>,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) enum PermissionChoice {
-    Allow,
-    Deny,
-}
-
-#[derive(Clone)]
-pub(crate) struct PermissionModal {
-    pub feature: String,
-    pub hovered: Option<PermissionChoice>,
-}
-
-#[derive(Clone)]
-pub(crate) struct HistoryConfirmationModal {
-    pub title: String,
-    pub message: String,
-}
-
-#[derive(Clone)]
-pub(crate) struct Toast {
-    pub text: String,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq)]
-pub(crate) struct PermissionButtonLayout {
-    pub yes: (f32, f32, f32, f32),
-    pub no: (f32, f32, f32, f32),
-}
-
-pub(crate) fn permission_modal_button_at(
-    feature: &str,
-    x: f32,
-    y: f32,
-    cell_w: f32,
-    cell_h: f32,
-    surface_w: f32,
-    surface_h: f32,
-    tab_bar_h: f32,
-) -> Option<PermissionChoice> {
-    let layout = permission_button_layout(feature, cell_w, cell_h, surface_w, surface_h, tab_bar_h);
-    if point_in_rect(x, y, layout.yes) {
-        return Some(PermissionChoice::Allow);
-    }
-    if point_in_rect(x, y, layout.no) {
-        return Some(PermissionChoice::Deny);
-    }
-    None
-}
-
-pub(crate) fn permission_button_layout(
-    feature: &str,
-    cell_w: f32,
-    cell_h: f32,
-    surface_w: f32,
-    surface_h: f32,
-    tab_bar_h: f32,
-) -> PermissionButtonLayout {
-    let panel = permission_panel_rect(feature, cell_w, cell_h, surface_w, surface_h, tab_bar_h);
-    let button_y = panel.1 + 4.0 * cell_h;
-    let yes_w = 7.0 * cell_w;
-    let no_w = 6.0 * cell_w;
-    let gap = 2.0 * cell_w;
-    let buttons_w = yes_w + gap + no_w;
-    let yes_x = panel.0 + (panel.2 - buttons_w) * 0.5;
-    let no_x = yes_x + yes_w + gap;
-    PermissionButtonLayout {
-        yes: (yes_x, button_y, yes_w, cell_h),
-        no: (no_x, button_y, no_w, cell_h),
-    }
-}
-
-pub(crate) fn permission_panel_rect(
-    feature: &str,
-    cell_w: f32,
-    cell_h: f32,
-    surface_w: f32,
-    surface_h: f32,
-    tab_bar_h: f32,
-) -> (f32, f32, f32, f32) {
-    let feature_line = permission_feature_line(feature);
-    let max_chars = feature_line
-        .chars()
-        .count()
-        .max("Would you like to allow this?".chars().count())
-        .max("[y]es   [n]o".chars().count());
-    let panel_w = (max_chars as f32 + 4.0) * cell_w;
-    let panel_h = 6.0 * cell_h;
-    let panel_x = ((surface_w - panel_w) * 0.5).max(0.0);
-    let panel_y = ((surface_h - panel_h + tab_bar_h) * 0.5).max(tab_bar_h);
-    (panel_x, panel_y, panel_w, panel_h)
-}
-
-pub(crate) fn permission_feature_line(feature: &str) -> String {
-    format!(
-        "A program would like to use {}.",
-        permission_feature_label(feature)
-    )
-}
-
-fn permission_feature_label(feature: &str) -> String {
-    let mut label = String::new();
-    for (len, ch) in feature.chars().enumerate() {
-        if len >= 32 {
-            label.push_str("...");
-            break;
-        }
-        if ch.is_control() {
-            label.push(' ');
-        } else {
-            label.push(ch);
-        }
-    }
-    label
-}
-
-fn point_in_rect(
-    x: f32,
-    y: f32,
-    rect: (f32, f32, f32, f32),
-) -> bool {
-    let (rx, ry, rw, rh) = rect;
-    x >= rx && x < rx + rw && y >= ry && y < ry + rh
-}
-
-fn resize_tab_to_grid(
-    tab: &mut Tab,
-    cols: u32,
-    rows: u32,
-) {
-    let pty_rows = {
-        let mut terminal = tab.terminal.lock();
-        terminal.resize(cols, rows);
-        crate::unpark_thread_if_started(&tab.terminal_thread.thread_handle);
-        terminal.viewport.rows
-    };
-    tab.pty.resize(cols as u16, pty_rows as u16);
-}
-
-fn update_terminal_cell_dimensions(
-    tab: &Tab,
-    cell_width: u32,
-    cell_height: u32,
-) {
-    let mut terminal = tab.terminal.lock();
-    let terminal41::Terminal {
-        cell_width: terminal_cell_width,
-        cell_height: terminal_cell_height,
-        ..
-    } = &mut *terminal;
-    settings::set_cell_dimensions(
-        terminal_cell_width,
-        terminal_cell_height,
-        cell_width,
-        cell_height,
-    );
-}
 
 // ---------------------------------------------------------------------------
 // RenderEvent — window thread → render thread (via cueue ring buffer)
@@ -427,13 +185,6 @@ pub struct RenderHost {
     input_state: Arc<Mutex<InputState>>,
 
     should_exit: bool,
-}
-
-/// Snapshot of the IME's current composition.
-#[derive(Debug, Clone, Default)]
-pub(crate) struct PreeditState {
-    pub text: String,
-    pub cursor: Option<(usize, usize)>,
 }
 
 // ---------------------------------------------------------------------------
@@ -1835,346 +1586,5 @@ impl RenderHost {
             return;
         }
         self.activate_tab_idx(tab_idx.min(self.tabs.len() - 1));
-    }
-}
-
-/// Directory where `PasteAsBackground` persists images.
-/// `~/.local/share/term41/` on Linux, `~/Library/Application Support/term41/`
-/// on macOS, `%APPDATA%\term41\` on Windows. Returns `None` on platforms
-/// where `dirs` can't resolve a data dir (rare — usually broken environment).
-fn pasted_background_dir() -> Option<PathBuf> {
-    term41_data_dir()
-}
-
-pub(crate) fn term41_data_dir() -> Option<PathBuf> {
-    dirs::data_dir().map(|d| d.join("term41"))
-}
-
-/// Build the full pasted-background path for a given file extension.
-fn pasted_background_path(ext: &str) -> Option<PathBuf> {
-    pasted_background_dir().map(|d| d.join(format!("pasted_background.{ext}")))
-}
-
-/// Find an existing pasted-background file, regardless of extension.
-/// Returns the first match found; there should only ever be one because
-/// `clear_pasted_backgrounds` deletes all variants before a new save.
-fn find_pasted_background() -> Option<PathBuf> {
-    let dir = pasted_background_dir()?;
-    let entries = std::fs::read_dir(&dir).ok()?;
-    for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| n.starts_with("pasted_background."))
-        {
-            return Some(entry.path());
-        }
-    }
-    None
-}
-
-/// Delete every `pasted_background.*` file in the data directory so a
-/// fresh paste doesn't leave a stale file from a previous format.
-fn clear_pasted_backgrounds() {
-    let Some(dir) = pasted_background_dir() else {
-        return;
-    };
-    let Ok(entries) = std::fs::read_dir(&dir) else {
-        return;
-    };
-    for entry in entries.flatten() {
-        if entry
-            .file_name()
-            .to_str()
-            .is_some_and(|n| n.starts_with("pasted_background."))
-        {
-            let _ = std::fs::remove_file(entry.path());
-        }
-    }
-}
-
-/// Resolve which background image to actually load: pasted-image-on-disk
-/// always wins over the config-supplied path. The "pasted always wins
-/// until cleared" rule keeps the precedence one-line debuggable —
-/// "does a pasted file exist?" is the whole question.
-pub(crate) fn effective_bg_path(config: &Config) -> Option<PathBuf> {
-    find_pasted_background().or_else(|| config.background_image.clone())
-}
-
-fn apply_script_status_line(
-    snap: &mut TermSnapshot,
-    status_text: Option<&str>,
-    generation: u64,
-) {
-    let Some(text) = status_text else {
-        return;
-    };
-    let Some(screen_row) = snap.status_line_row else {
-        return;
-    };
-    let base_generation = snap
-        .rows
-        .iter()
-        .find(|row| row.screen_row == screen_row)
-        .map(|row| row.generation)
-        .unwrap_or(snap.generation);
-    let row = local_status_line_row(
-        text,
-        snap.viewport_cols,
-        screen_row,
-        script_status_row_generation(generation, base_generation),
-        &snap.palette,
-    );
-    if let Some(existing) = snap
-        .rows
-        .iter_mut()
-        .find(|row| row.screen_row == screen_row)
-    {
-        *existing = row;
-    } else {
-        snap.rows.push(row);
-    }
-}
-
-fn script_status_row_generation(
-    script_generation: u64,
-    base_generation: u64,
-) -> u64 {
-    SCRIPT_STATUS_GENERATION_BIT
-        | script_generation
-            .wrapping_mul(0x9E37_79B9_7F4A_7C15)
-            .wrapping_add(base_generation)
-            & !SCRIPT_STATUS_GENERATION_BIT
-}
-
-/// Encode an RGBA byte buffer to PNG at `path`. Always RGBA8 — the
-/// clipboard hands us pixels in that layout and the renderer reads them
-/// back the same way, so there's no need for a more flexible encoder.
-fn encode_png_rgba(
-    path: &std::path::Path,
-    width: u32,
-    height: u32,
-    rgba: &[u8],
-) -> std::io::Result<()> {
-    let file = std::fs::File::create(path)?;
-    let mut encoder = png::Encoder::new(file, width, height);
-    encoder.set_color(png::ColorType::Rgba);
-    encoder.set_depth(png::BitDepth::Eight);
-    let mut writer = encoder.write_header().map_err(std::io::Error::other)?;
-    writer
-        .write_image_data(rgba)
-        .map_err(std::io::Error::other)?;
-    Ok(())
-}
-
-fn should_suspend_terminal_area(
-    active_tab_id: TabId,
-    last_rendered_tab_id: Option<TabId>,
-    synchronized_update_active: bool,
-    reset_cached_rows: bool,
-) -> bool {
-    synchronized_update_active && !reset_cached_rows && last_rendered_tab_id == Some(active_tab_id)
-}
-
-#[cfg(test)]
-mod script_status_tests {
-    use config41::ColorPalette;
-    use config41::CursorStyle;
-    use terminal41::TermSnapshot;
-
-    use super::*;
-
-    fn snapshot_with_status_row(generation: u64) -> TermSnapshot {
-        let palette = ColorPalette::default();
-        TermSnapshot {
-            generation,
-            rows: vec![local_status_line_row("", 8, 2, generation, &palette)],
-            total_rows: 3,
-            viewport_rows: 2,
-            viewport_cols: 8,
-            viewport_offset: 0,
-            status_line_row: Some(2),
-            drcs_glyphs: Default::default(),
-            dec_color: terminal41::dec_color_state_from_palette(&palette),
-            palette,
-            search_active: false,
-            search: None,
-            cursor: None,
-            cursor_style: CursorStyle::default(),
-            screen_reverse: false,
-            on_alt_screen: false,
-            command_editor_hidden: false,
-            synchronized_update_active: false,
-            current_title: None,
-            reset_cached_rows: false,
-        }
-    }
-
-    #[test]
-    fn script_status_generation_cannot_collide_with_terminal_status_row_generation() {
-        let mut snap = snapshot_with_status_row(1);
-
-        apply_script_status_line(&mut snap, Some("ok"), 1);
-
-        let status_row = snap.rows.last().expect("status row");
-        assert_eq!(&status_row.cells.concat()[..2], "ok");
-        assert_ne!(status_row.generation, 1);
-        assert_eq!(status_row.generation, script_status_row_generation(1, 1));
-    }
-
-    #[test]
-    fn script_status_generation_tracks_base_status_row_generation() {
-        let mut before = snapshot_with_status_row(1);
-        let mut after = snapshot_with_status_row(2);
-
-        apply_script_status_line(&mut before, Some("ok"), 1);
-        apply_script_status_line(&mut after, Some("ok"), 1);
-
-        assert_ne!(
-            before.rows.last().expect("before status row").generation,
-            after.rows.last().expect("after status row").generation
-        );
-    }
-}
-
-#[cfg(test)]
-mod command_editor_config_sync_tests {
-    use super::*;
-
-    #[test]
-    fn normal_sync_preserves_runtime_enabled_state() {
-        let mut configured = CommandEditorConfig {
-            enabled: false,
-            ..CommandEditorConfig::default()
-        };
-        configured.vim_mode = true;
-        let runtime = CommandEditorConfig {
-            enabled: true,
-            ..CommandEditorConfig::default()
-        };
-
-        let synced = synced_command_editor_config(
-            &configured,
-            &runtime,
-            CommandEditorConfigSync::PreserveRuntimeEnabled,
-        );
-
-        assert!(synced.enabled);
-        assert!(synced.vim_mode);
-    }
-
-    #[test]
-    fn config_sync_applies_configured_enabled_state() {
-        let configured = CommandEditorConfig {
-            enabled: false,
-            ..CommandEditorConfig::default()
-        };
-        let runtime = CommandEditorConfig {
-            enabled: true,
-            ..CommandEditorConfig::default()
-        };
-
-        let synced = synced_command_editor_config(
-            &configured,
-            &runtime,
-            CommandEditorConfigSync::ApplyConfiguredEnabled,
-        );
-
-        assert!(!synced.enabled);
-    }
-}
-
-#[cfg(test)]
-mod synchronized_render_tests {
-    use super::*;
-
-    #[test]
-    fn synchronized_update_suspends_previously_rendered_terminal_area() {
-        assert!(should_suspend_terminal_area(
-            TabId(7),
-            Some(TabId(7)),
-            true,
-            false
-        ));
-    }
-
-    #[test]
-    fn synchronized_update_does_not_reuse_another_tabs_terminal_area() {
-        assert!(!should_suspend_terminal_area(
-            TabId(7),
-            Some(TabId(6)),
-            true,
-            false
-        ));
-    }
-
-    #[test]
-    fn terminal_area_not_suspended_when_synchronized_update_is_inactive() {
-        assert!(!should_suspend_terminal_area(
-            TabId(7),
-            Some(TabId(7)),
-            false,
-            false
-        ));
-    }
-
-    #[test]
-    fn terminal_area_not_suspended_when_cached_rows_must_reset() {
-        assert!(!should_suspend_terminal_area(
-            TabId(7),
-            Some(TabId(7)),
-            true,
-            true
-        ));
-    }
-}
-
-#[cfg(test)]
-mod permission_modal_tests {
-    use super::*;
-
-    #[test]
-    fn permission_buttons_are_centered_in_panel() {
-        let panel = permission_panel_rect("the clipboard", 10.0, 20.0, 800.0, 600.0, 20.0);
-        let buttons = permission_button_layout("the clipboard", 10.0, 20.0, 800.0, 600.0, 20.0);
-        let left_gap = buttons.yes.0 - panel.0;
-        let right_gap = panel.0 + panel.2 - (buttons.no.0 + buttons.no.2);
-        assert!((left_gap - right_gap).abs() < 0.01);
-    }
-
-    #[test]
-    fn permission_button_hit_testing_distinguishes_yes_and_no() {
-        let buttons = permission_button_layout("the clipboard", 10.0, 20.0, 800.0, 600.0, 20.0);
-        let yes = permission_modal_button_at(
-            "the clipboard",
-            buttons.yes.0 + 1.0,
-            buttons.yes.1 + 1.0,
-            10.0,
-            20.0,
-            800.0,
-            600.0,
-            20.0,
-        );
-        let no = permission_modal_button_at(
-            "the clipboard",
-            buttons.no.0 + 1.0,
-            buttons.no.1 + 1.0,
-            10.0,
-            20.0,
-            800.0,
-            600.0,
-            20.0,
-        );
-        assert_eq!(yes, Some(PermissionChoice::Allow));
-        assert_eq!(no, Some(PermissionChoice::Deny));
-    }
-
-    #[test]
-    fn permission_feature_line_sanitizes_untrusted_label() {
-        let line = permission_feature_line("clipboard\nread");
-        assert_eq!(line, "A program would like to use clipboard read.");
-
-        let long = permission_feature_line("abcdefghijklmnopqrstuvwxyz0123456789");
-        assert!(long.contains("abcdefghijklmnopqrstuvwxyz012345..."));
     }
 }
