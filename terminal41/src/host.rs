@@ -1,6 +1,8 @@
 //! Helpers for terminal-originated reports sent back to the foreground
 //! program.
 
+#![allow(clippy::too_many_arguments)]
+
 use std::time::Instant;
 
 use vte_mode41::C1Mode;

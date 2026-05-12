@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use std::time::Instant;
 
 use crate::CursorStyle;

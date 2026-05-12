@@ -1,3 +1,5 @@
+#![allow(clippy::too_many_arguments)]
+
 use crate::C1Mode;
 use crate::conformance;
 use crate::mode;
