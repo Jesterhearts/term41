@@ -2,6 +2,70 @@
 
 All notable changes to `term41` are documented here.
 
+## [0.2.1] - 2026-05-13
+
+Generated from the changes between tags `0.2.0` and `0.2.1`.
+
+### Added
+
+- Added persistent-history management actions for clearing all history, clearing
+  history for the current directory, and deleting fuzzy-filtered history entries.
+  These actions are available through the command palette and use confirmation
+  or deletion UI before mutating the history database.
+- Added a user-local desktop asset installer script which installs or removes
+  the `.desktop` launcher and hicolor icon assets, with options for custom
+  `Exec=` commands and custom XDG data directories.
+- Added command-block document and query helpers that expose command text,
+  output text, exit status, command state, and prompt references for navigation,
+  selection, and gutter/status UI.
+
+### Changed
+
+- Made prompt, command, failure, and success navigation operate from the
+  command-block document view instead of walking raw prompt marks directly.
+- Made command-editor multiline submission and path completion use the current
+  shell's escape character, including PowerShell backtick escaping, while
+  preserving line continuations that are already present.
+- Replaced hand-rolled emoji property ranges with `icu_properties` data for
+  emoji modifiers, emoji presentation, regional indicators, extended
+  pictographs, and font-shaping emoji components.
+- Kept the terminal contents visible behind confirmation-style modals.
+
+### Fixed
+
+- Fixed several DEC/status-line rendering and invalidation bugs, including blank
+  status bars, status bars that failed to update, dirty status-row clearing, and
+  script status-row cache invalidation.
+- Fixed active command rendering and metadata bugs around wrapped commands,
+  resized/reflowed command rows, and active commands whose final line could fail
+  to render.
+- Fixed mouse selection after active scrollback recycling and while reading
+  scrollback.
+- Fixed command-editor multiline submission so line continuations are not
+  blindly appended when a line already has the shell's continuation escape.
+
+### Documentation
+
+- Updated install instructions to use GitLab and the `0.2.1` release tag.
+- Documented the desktop asset installer workflow.
+- Corrected changelog compare links from GitHub to GitLab.
+- Added a short README note clarifying that term41 is used as the author's
+  primary shell.
+
+### Internal
+
+- Bumped workspace crate versions to `0.2.1`.
+- Split large modules into focused submodules across `commands41`, `config41`,
+  `font41`, `terminal41`, `renderer`, renderer chrome, selection, OSC handling,
+  and the window host.
+- Split terminal metadata, protocol state, snapshot dirtiness, effects, and
+  terminal application helpers into dedicated modules.
+- Split renderer frame construction into explicit geometry, layout, layer,
+  upload, row-cache, image, cursor, gutter, and vertex helpers.
+- Added and expanded tests for history deletion, command-block queries,
+  shell-specific command-editor escaping, status/script row generation, prompt
+  navigation, and renderer geometry behavior.
+
 ## [0.2.0] - 2026-05-05
 
 Generated from the changes between tag `0.1.1` and the pending `0.2.0`
@@ -140,5 +204,6 @@ Generated from the changes between tags `0.1.0` and `0.1.1`.
   normalization, text writes, snapshot generations, and scripting change
   delivery.
 
+[0.2.1]: https://gitlab.com/Jesterhearts/term41/compare/0.2.0...0.2.1
 [0.2.0]: https://gitlab.com/Jesterhearts/term41/compare/0.1.1...0.2.0
 [0.1.1]: https://gitlab.com/Jesterhearts/term41/compare/0.1.0...0.1.1
