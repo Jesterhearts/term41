@@ -104,7 +104,7 @@ pub(super) fn row_cursor_key(
     }
 }
 
-pub(super) fn gutter_fill_bg_for_col0(
+pub(in crate::renderer) fn gutter_fill_bg_for_col0(
     snap: &TermSnapshot,
     snap_row: &RowSnapshot,
     row: u32,

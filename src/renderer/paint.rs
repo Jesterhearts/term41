@@ -99,6 +99,19 @@ pub(crate) fn bold_glyph_enabled(snap: &TermSnapshot) -> bool {
     snap.dec_color.lookup_table != DecColorLookupTable::Alternate
 }
 
+pub(crate) fn command_highlight_rgb(kind: commands41::HighlightKind) -> Srgb<u8> {
+    match kind {
+        commands41::HighlightKind::Plain => Srgb::new(224, 228, 236),
+        commands41::HighlightKind::Command => Srgb::new(132, 210, 255),
+        commands41::HighlightKind::Keyword => Srgb::new(255, 196, 112),
+        commands41::HighlightKind::Builtin => Srgb::new(140, 230, 170),
+        commands41::HighlightKind::String => Srgb::new(232, 214, 128),
+        commands41::HighlightKind::Variable => Srgb::new(198, 170, 255),
+        commands41::HighlightKind::Operator => Srgb::new(255, 145, 145),
+        commands41::HighlightKind::Comment => Srgb::new(128, 140, 156),
+    }
+}
+
 pub(crate) fn status_line_label_row(
     text: &str,
     palette: &ColorPalette,

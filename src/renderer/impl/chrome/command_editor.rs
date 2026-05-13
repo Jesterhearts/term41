@@ -11,21 +11,18 @@ pub(in crate::renderer::r#impl) fn render_command_editor(
     bg_indices: &mut Vec<u32>,
     fg: &mut FgGeometry,
 ) {
-    let Some((cursor_row, _cursor_col)) = snap.cursor else {
+    let Some(box_layout) = command_editor_box_layout(snap, layout) else {
         return;
     };
-    let block_offset_rows = (layout.block_y_offset / layout.cell_h).round().max(0.0) as u32;
-    let visual_cursor_row = cursor_row.saturating_add(block_offset_rows);
-    let placement = command_editor_placement_for_cursor(visual_cursor_row, snap.viewport_rows);
-    let editor_x = 0.0;
-    let box_x = layout.gutter_px;
-    let box_y = terminal_row_y(cursor_row, layout) + layout.cell_h;
-    let box_w = snap.viewport_cols.max(1) as f32 * layout.cell_w;
-    let editor_w = layout.gutter_px + box_w;
-    let editor_rows = placement.rows.max(1) as usize;
-    let box_h = editor_rows as f32 * layout.cell_h;
-    let content_x = box_x;
     let border = 2.0;
+    let editor_x = box_layout.editor_x;
+    let box_x = box_layout.box_x;
+    let box_y = box_layout.box_y;
+    let box_w = box_layout.box_w;
+    let editor_w = box_layout.editor_w;
+    let editor_rows = box_layout.editor_rows;
+    let box_h = box_layout.box_h;
+    let content_x = box_layout.content_x;
     let lines = command_editor_line_ranges(&editor.text);
     let cursor = editor.cursor.min(editor.text.len());
     if !editor.text.is_char_boundary(cursor) {
@@ -209,7 +206,7 @@ pub(in crate::renderer::r#impl) fn render_command_editor(
     let list_w = list_cells as f32 * layout.cell_w;
     let list_h = editor.candidates.len() as f32 * layout.cell_h;
     let cursor_y = box_y + visible_cursor_line as f32 * layout.cell_h;
-    let editor_cursor_screen_row = placement.top_row + visible_cursor_line as u32;
+    let editor_cursor_screen_row = box_layout.placement.top_row + visible_cursor_line as u32;
     let list_y =
         match command_editor_popup_side_for_row(editor_cursor_screen_row, snap.viewport_rows) {
             CommandEditorPopupSide::Below => {

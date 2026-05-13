@@ -1,32 +1,47 @@
 use terminal41::RowSnapshot;
 use terminal41::TermSnapshot;
 
-pub(super) struct FrameLayout {
-    pub(super) cell_w: f32,
-    pub(super) cell_h: f32,
-    pub(super) baseline: f32,
-    pub(super) gutter_px: f32,
-    pub(super) tab_bar_h: f32,
-    pub(super) terminal_y_offset: f32,
-    pub(super) block_y_offset: f32,
+use crate::window_host::command_editor_placement_for_cursor;
+
+pub(in crate::renderer) struct FrameLayout {
+    pub(in crate::renderer) cell_w: f32,
+    pub(in crate::renderer) cell_h: f32,
+    pub(in crate::renderer) baseline: f32,
+    pub(in crate::renderer) gutter_px: f32,
+    pub(in crate::renderer) tab_bar_h: f32,
+    pub(in crate::renderer) terminal_y_offset: f32,
+    pub(in crate::renderer) block_y_offset: f32,
 }
 
 #[derive(Clone, Copy)]
-pub(super) struct ClipRect {
-    pub(super) left: f32,
-    pub(super) top: f32,
-    pub(super) right: f32,
-    pub(super) bottom: f32,
+pub(in crate::renderer) struct ClipRect {
+    pub(in crate::renderer) left: f32,
+    pub(in crate::renderer) top: f32,
+    pub(in crate::renderer) right: f32,
+    pub(in crate::renderer) bottom: f32,
 }
 
-pub(super) fn terminal_row_y(
+#[derive(Clone, Copy)]
+pub(in crate::renderer) struct CommandEditorBoxLayout {
+    pub(in crate::renderer) placement: crate::window_host::CommandEditorPlacement,
+    pub(in crate::renderer) editor_x: f32,
+    pub(in crate::renderer) box_x: f32,
+    pub(in crate::renderer) box_y: f32,
+    pub(in crate::renderer) box_w: f32,
+    pub(in crate::renderer) editor_w: f32,
+    pub(in crate::renderer) editor_rows: usize,
+    pub(in crate::renderer) box_h: f32,
+    pub(in crate::renderer) content_x: f32,
+}
+
+pub(in crate::renderer) fn terminal_row_y(
     row: u32,
     layout: &FrameLayout,
 ) -> f32 {
     row as f32 * layout.cell_h + layout.tab_bar_h + layout.terminal_y_offset + layout.block_y_offset
 }
 
-pub(super) fn snapshot_row_y(
+pub(in crate::renderer) fn snapshot_row_y(
     row: u32,
     snap: &TermSnapshot,
     layout: &FrameLayout,
@@ -40,7 +55,7 @@ pub(super) fn snapshot_row_y(
     row as f32 * layout.cell_h + layout.tab_bar_h + terminal_offset
 }
 
-pub(super) fn sticky_prompt_row_at_top(
+pub(in crate::renderer) fn sticky_prompt_row_at_top(
     row: u32,
     snap: &TermSnapshot,
 ) -> bool {
@@ -51,7 +66,7 @@ pub(super) fn sticky_prompt_row_at_top(
             .any(|snap_row| snap_row.screen_row == 0 && snap_row.sticky_prompt)
 }
 
-pub(super) fn row_hidden_by_sticky_prompt(
+pub(in crate::renderer) fn row_hidden_by_sticky_prompt(
     snap_row: &RowSnapshot,
     snap: &TermSnapshot,
     layout: &FrameLayout,
@@ -71,7 +86,7 @@ pub(super) fn row_hidden_by_sticky_prompt(
     row_top < sticky_bottom && row_bottom > sticky_top
 }
 
-pub(super) fn row_suspended_by_terminal_area(
+pub(in crate::renderer) fn row_suspended_by_terminal_area(
     snap_row: &RowSnapshot,
     snap: &TermSnapshot,
     suspend_terminal_area: bool,
@@ -79,7 +94,7 @@ pub(super) fn row_suspended_by_terminal_area(
     suspend_terminal_area && snap.status_line_row != Some(snap_row.screen_row)
 }
 
-pub(super) fn terminal_block_y_offset_rows(
+pub(in crate::renderer) fn terminal_block_y_offset_rows(
     rows: &[RowSnapshot],
     snap: &TermSnapshot,
 ) -> u32 {
@@ -115,13 +130,13 @@ pub(super) fn terminal_block_y_offset_rows(
     snap.viewport_rows.saturating_sub(content_rows)
 }
 
-pub(super) fn row_has_rendered_content(row: &RowSnapshot) -> bool {
+pub(in crate::renderer) fn row_has_rendered_content(row: &RowSnapshot) -> bool {
     row.block_separator
         || row.cells.iter().any(|cell| cell != " ")
         || row.has_link.iter().any(|&v| v)
 }
 
-pub(super) fn visible_command_editor<'a>(
+pub(in crate::renderer) fn visible_command_editor<'a>(
     command_editor: Option<&'a commands41::CommandLineView>,
     snap: &TermSnapshot,
 ) -> Option<&'a commands41::CommandLineView> {
@@ -130,5 +145,52 @@ pub(super) fn visible_command_editor<'a>(
             && !snap.on_alt_screen
             && !snap.search_active
             && snap.viewport_offset == 0
+    })
+}
+
+pub(in crate::renderer) fn apply_terminal_layout_offsets(
+    layout: &mut FrameLayout,
+    snap: &TermSnapshot,
+    command_editor: Option<&commands41::CommandLineView>,
+) -> u32 {
+    let block_y_offset_rows = terminal_block_y_offset_rows(&snap.rows, snap);
+    layout.block_y_offset = block_y_offset_rows as f32 * layout.cell_h;
+    layout.terminal_y_offset = 0.0;
+    if command_editor.is_some() {
+        let cursor_row = snap
+            .cursor
+            .map_or(0, |(row, _)| row.saturating_add(block_y_offset_rows));
+        let placement = command_editor_placement_for_cursor(cursor_row, snap.viewport_rows);
+        layout.terminal_y_offset = -(placement.terminal_row_offset as f32) * layout.cell_h;
+    }
+    block_y_offset_rows
+}
+
+pub(in crate::renderer) fn command_editor_box_layout(
+    snap: &TermSnapshot,
+    layout: &FrameLayout,
+) -> Option<CommandEditorBoxLayout> {
+    let (cursor_row, _cursor_col) = snap.cursor?;
+    let block_offset_rows = (layout.block_y_offset / layout.cell_h).round().max(0.0) as u32;
+    let visual_cursor_row = cursor_row.saturating_add(block_offset_rows);
+    let placement = command_editor_placement_for_cursor(visual_cursor_row, snap.viewport_rows);
+    let editor_x = 0.0;
+    let box_x = layout.gutter_px;
+    let box_y = terminal_row_y(cursor_row, layout) + layout.cell_h;
+    let box_w = snap.viewport_cols.max(1) as f32 * layout.cell_w;
+    let editor_w = layout.gutter_px + box_w;
+    let editor_rows = placement.rows.max(1) as usize;
+    let box_h = editor_rows as f32 * layout.cell_h;
+    let content_x = box_x;
+    Some(CommandEditorBoxLayout {
+        placement,
+        editor_x,
+        box_x,
+        box_y,
+        box_w,
+        editor_w,
+        editor_rows,
+        box_h,
+        content_x,
     })
 }

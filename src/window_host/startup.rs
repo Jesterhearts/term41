@@ -47,6 +47,7 @@ use super::close_gutter_popup;
 use super::command_editor_terminal_row_offset;
 use super::command_editor_view;
 use super::command_editor_view_context;
+use super::command_editor_view_for_input_tab;
 use super::command_editor_view_open_for_input_tab;
 use super::command_palette_selected_invocation;
 use super::command_palette_view;
@@ -172,6 +173,10 @@ pub(crate) fn present_startup_frame(
     };
     let (hovered_button, tab_context_menu, gutter_popup) =
         startup_interaction_snapshot(&host.render);
+    let command_editor = {
+        let input_state = host.render.input_state.lock();
+        command_editor_view_for_input_tab(&input_state, tab_id).cloned()
+    };
     let maximized = window.is_maximized();
     let Some(presenter) = host.startup.presenter.as_mut() else {
         return false;
@@ -186,6 +191,7 @@ pub(crate) fn present_startup_frame(
         hovered_button,
         tab_context_menu.as_ref(),
         gutter_popup.as_ref(),
+        command_editor.as_ref(),
         maximized,
     );
     schedule_startup_redraw(&mut host.startup, event_loop, delay);

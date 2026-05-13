@@ -34,12 +34,12 @@ use crate::renderer::gutter_popup_origin;
 use crate::renderer::image_atlas::ImageAtlas;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::centered_ink_origin_x;
+use crate::renderer::paint::command_highlight_rgb;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
 use crate::renderer::paint::underline_style_for_render;
 use crate::renderer::paint::visible_row_cols;
 use crate::window_host::CommandEditorPopupSide;
-use crate::window_host::command_editor_placement_for_cursor;
 use crate::window_host::command_editor_popup_side_for_row;
 
 mod chrome;
@@ -83,14 +83,18 @@ use images::image_vertex_z;
 use layers::IMAGE_DEPTH_FORMAT;
 use layers::ImageDepthLayer;
 use layers::TerminalLayer;
-use layout::ClipRect;
-use layout::FrameLayout;
-use layout::row_hidden_by_sticky_prompt;
-use layout::row_suspended_by_terminal_area;
-use layout::snapshot_row_y;
-use layout::terminal_block_y_offset_rows;
-use layout::terminal_row_y;
-use layout::visible_command_editor;
+pub(in crate::renderer) use layout::ClipRect;
+pub(in crate::renderer) use layout::CommandEditorBoxLayout;
+pub(in crate::renderer) use layout::FrameLayout;
+pub(in crate::renderer) use layout::apply_terminal_layout_offsets;
+pub(in crate::renderer) use layout::command_editor_box_layout;
+pub(in crate::renderer) use layout::row_hidden_by_sticky_prompt;
+pub(in crate::renderer) use layout::row_suspended_by_terminal_area;
+pub(in crate::renderer) use layout::snapshot_row_y;
+#[cfg(test)]
+pub(in crate::renderer) use layout::terminal_block_y_offset_rows;
+pub(in crate::renderer) use layout::terminal_row_y;
+pub(in crate::renderer) use layout::visible_command_editor;
 use pipelines::BgImagePipeline;
 use pipelines::BgPipeline;
 use pipelines::FgPipeline;
@@ -103,7 +107,7 @@ use row_cache::RowLayoutKey;
 use row_cache::RowRenderKey;
 use row_cache::blank_cached_row;
 use row_cache::cached_rows_match_snapshot_shape;
-use row_cache::gutter_fill_bg_for_col0;
+pub(in crate::renderer) use row_cache::gutter_fill_bg_for_col0;
 use row_cache::invalidate_row_cache_with_neighbors;
 use row_cache::row_blink_key;
 use row_cache::row_cursor_key;
@@ -746,15 +750,7 @@ impl Renderer {
     ) {
         let mut layout = frame::frame_layout(self, font_system, tabs);
         let command_editor = visible_command_editor(command_editor, snap);
-        let block_y_offset_rows = terminal_block_y_offset_rows(&snap.rows, snap);
-        layout.block_y_offset = block_y_offset_rows as f32 * layout.cell_h;
-        if command_editor.is_some() {
-            let cursor_row = snap
-                .cursor
-                .map_or(0, |(row, _)| row.saturating_add(block_y_offset_rows));
-            let placement = command_editor_placement_for_cursor(cursor_row, snap.viewport_rows);
-            layout.terminal_y_offset = -(placement.terminal_row_offset as f32) * layout.cell_h;
-        }
+        let block_y_offset_rows = apply_terminal_layout_offsets(&mut layout, snap, command_editor);
         if suspend_terminal_area {
             frame::apply_terminal_snapshot_status_row(self, snap);
         } else {
@@ -814,16 +810,7 @@ impl Renderer {
 }
 
 fn command_highlight_color(kind: commands41::HighlightKind) -> u32 {
-    let rgb = match kind {
-        commands41::HighlightKind::Plain => Srgb::new(224, 228, 236),
-        commands41::HighlightKind::Command => Srgb::new(132, 210, 255),
-        commands41::HighlightKind::Keyword => Srgb::new(255, 196, 112),
-        commands41::HighlightKind::Builtin => Srgb::new(140, 230, 170),
-        commands41::HighlightKind::String => Srgb::new(232, 214, 128),
-        commands41::HighlightKind::Variable => Srgb::new(198, 170, 255),
-        commands41::HighlightKind::Operator => Srgb::new(255, 145, 145),
-        commands41::HighlightKind::Comment => Srgb::new(128, 140, 156),
-    };
+    let rgb = command_highlight_rgb(kind);
     pack_color(&rgb, 255)
 }
 
