@@ -14,9 +14,17 @@ if [ -z "${__TERM41_SHELL_INTEGRATION_INSTALLED:-}" ]; then
   __term41_prompt_seen=0
   __term41_command_running=0
   __term41_in_prompt=0
+  __term41_use_ps0=0
+  __term41_last_histcmd=${HISTCMD:-0}
 
   __term41_emit_osc133() {
     printf '\033]133;%s\007' "$1"
+  }
+
+  __term41_bash_supports_ps0() {
+    [ "${BASH_VERSINFO[0]:-0}" -gt 4 ] || {
+      [ "${BASH_VERSINFO[0]:-0}" -eq 4 ] && [ "${BASH_VERSINFO[1]:-0}" -ge 4 ]
+    }
   }
 
   __term41_percent_encode_path() {
@@ -47,13 +55,22 @@ if [ -z "${__TERM41_SHELL_INTEGRATION_INSTALLED:-}" ]; then
 
   __term41_prompt_command() {
     local __term41_status=$?
+    local __term41_histcmd=${HISTCMD:-0}
     __term41_in_prompt=1
-    if [ "${__term41_prompt_seen:-0}" = 1 ] && [ "${__term41_command_running:-0}" = 1 ]; then
+    if [ "${__term41_prompt_seen:-0}" = 1 ] && {
+      [ "${__term41_command_running:-0}" = 1 ] || [ "$__term41_histcmd" != "${__term41_last_histcmd:-0}" ]
+    }; then
       __term41_emit_osc133 "D;${__term41_status}"
     fi
     __term41_command_running=0
     __term41_prompt_seen=1
+    __term41_last_histcmd=$__term41_histcmd
     __term41_emit_cwd
+    return "$__term41_status"
+  }
+
+  __term41_prompt_command_end() {
+    local __term41_status=$?
     __term41_in_prompt=0
     return "$__term41_status"
   }
@@ -62,33 +79,46 @@ if [ -z "${__TERM41_SHELL_INTEGRATION_INSTALLED:-}" ]; then
     if [ "${__term41_in_prompt:-0}" = 1 ]; then
       return
     fi
+    if [ "${BASH_COMMAND:-}" = "__term41_prompt_command" ]; then
+      return
+    fi
     if [ "${__term41_command_running:-0}" = 0 ]; then
-      __term41_emit_osc133 C
       __term41_command_running=1
+      if [ "${__term41_use_ps0:-0}" = 0 ]; then
+        __term41_emit_osc133 C
+      fi
     fi
   }
-
-  trap '__term41_preexec' DEBUG
 
   case "$PS1" in
     *"]133;B"*) ;;
     *) PS1='\[\033]133;A\007\]'"${PS1}"'\[\033]133;B\007\]' ;;
   esac
 
+  if __term41_bash_supports_ps0; then
+    __term41_use_ps0=1
+    case "${PS0-}" in
+      *"]133;C"*) ;;
+      *) PS0='\033]133;C\007'"${PS0-}" ;;
+    esac
+  fi
+
   __term41_prompt_decl="$(declare -p PROMPT_COMMAND 2>/dev/null)"
   case "$__term41_prompt_decl" in
     declare\ -a*|declare\ -ax*)
-      PROMPT_COMMAND=(__term41_prompt_command "${PROMPT_COMMAND[@]}")
+      PROMPT_COMMAND=(__term41_prompt_command "${PROMPT_COMMAND[@]}" __term41_prompt_command_end)
       ;;
     *)
       if [ -n "${PROMPT_COMMAND:-}" ]; then
-        PROMPT_COMMAND="__term41_prompt_command; ${PROMPT_COMMAND}"
+        PROMPT_COMMAND="__term41_prompt_command; ${PROMPT_COMMAND}; __term41_prompt_command_end"
       else
-        PROMPT_COMMAND=__term41_prompt_command
+        PROMPT_COMMAND="__term41_prompt_command; __term41_prompt_command_end"
       fi
       ;;
   esac
   unset __term41_prompt_decl
+
+  trap '__term41_preexec' DEBUG
 fi
 "#;
 
@@ -682,6 +712,21 @@ mod tests {
         let rc = fs::read_to_string(&installed.command.args[1]).unwrap();
         assert!(rc.contains(".bashrc"));
         assert!(rc.contains("term41.bash"));
+    }
+
+    #[test]
+    fn bash_hook_uses_ps0_for_command_start() {
+        assert!(BASH_HOOK.contains("__term41_bash_supports_ps0"));
+        assert!(BASH_HOOK.contains("PS0='\\033]133;C\\007'"));
+        assert!(BASH_HOOK.contains("__term41_use_ps0=1"));
+    }
+
+    #[test]
+    fn bash_debug_trap_keeps_ps0_command_start_single_sourced() {
+        assert!(BASH_HOOK.contains(r#"if [ "${__term41_use_ps0:-0}" = 0 ]; then"#));
+        assert!(BASH_HOOK.contains("trap '__term41_preexec' DEBUG"));
+        assert!(BASH_HOOK.contains(r#"[ "${BASH_COMMAND:-}" = "__term41_prompt_command" ]"#));
+        assert!(BASH_HOOK.contains("__term41_prompt_command_end"));
     }
 
     #[test]
