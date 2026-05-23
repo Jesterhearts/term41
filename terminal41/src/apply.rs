@@ -300,15 +300,11 @@ pub fn place_sixel_image(
         },
     );
 
-    // Advance cursor past the image, scrolling as needed.
-    for _ in 0..image_rows {
-        terminal.active.cursor.row += 1;
-        if terminal.active.cursor.row >= terminal.viewport.rows {
-            terminal.active.grid.push_visible_row(&terminal.viewport);
-            terminal.active.cursor.row = terminal.viewport.rows - 1;
-        }
-    }
-    terminal.active.cursor.col = 0;
+    crate::image::advance_cursor_after_inline_image(
+        &mut terminal.active,
+        &terminal.viewport,
+        image_rows,
+    );
 
     terminal.track_scroll(popped_before);
     snapshot_dirty::mark_snapshot_dirty_after(

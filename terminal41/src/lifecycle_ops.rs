@@ -134,7 +134,7 @@ fn rendered_viewport_top(
     screen: &Screen,
     viewport: &Viewport,
 ) -> usize {
-    let rendered_len = screen::rendered_rows_len(screen);
+    let rendered_len = screen::rendered_rows_len_for_viewport(screen, viewport);
     let max_top = rendered_len.saturating_sub(viewport.rows as usize);
     max_top.saturating_sub(screen.offset as usize)
 }
@@ -147,7 +147,7 @@ fn scroll_rendered_row_to_viewport_top(
     if screen::page_memory_active(screen) {
         return;
     }
-    let rendered_len = screen::rendered_rows_len(screen);
+    let rendered_len = screen::rendered_rows_len_for_viewport(screen, viewport);
     let max_top = rendered_len.saturating_sub(viewport.rows as usize);
     let top = target.min(max_top);
     let offset = max_top.saturating_sub(top) as u32;
@@ -324,7 +324,7 @@ fn image_viewport_bounds(
         return (top, top + viewport.rows as usize);
     }
 
-    let rendered_len = screen::rendered_rows_len(screen);
+    let rendered_len = screen::rendered_rows_len_for_viewport(screen, &viewport);
     let visible_rows = rendered_len.min(viewport.rows as usize).max(1);
     let max_top = rendered_len.saturating_sub(visible_rows);
     let top = max_top.saturating_sub(screen.offset as usize);
@@ -927,6 +927,24 @@ mod tests {
             Instant::now(),
         )
         .collect()
+    }
+
+    #[test]
+    fn sixel_cursor_advance_allocates_rows_before_scroll_calculation() {
+        let mut term = TestTerm::new(10, 4, 100, 16, 8);
+        term.process(b"old");
+        term.process(b"\x1b]133;A\x07new");
+        term.process(b"\x1b[3;1H");
+
+        term.inner
+            .place_sixel_image(image41::DecodedImage::single_frame(1, 32, vec![255; 128]));
+
+        let images = term_visible_images(&term);
+        assert_eq!(images.len(), 1);
+        assert_eq!(
+            images[0].screen_row, 1,
+            "two-row sixel placed on row 3 should scroll up and leave the cursor row visible"
+        );
     }
 
     #[test]

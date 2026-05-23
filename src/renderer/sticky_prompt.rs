@@ -138,10 +138,27 @@ fn rendered_rows_len(terminal: &Terminal) -> usize {
 }
 
 fn active_block_rendered_rows_len(terminal: &Terminal) -> usize {
+    let cursor_row = active_cursor_row_index(terminal).saturating_add(1);
     active_grid_content_rows_len(terminal)
-        .max(terminal.active.cursor.row as usize + 1)
+        .max(cursor_row)
         .max(1)
         .min(terminal.active.grid.rows.len())
+}
+
+fn active_cursor_row_index(terminal: &Terminal) -> usize {
+    if terminal.active.page_memory.is_some() {
+        return terminal
+            .viewport
+            .top_index(terminal.active.grid.rows.len())
+            .saturating_add(terminal.active.cursor.row as usize);
+    }
+    terminal
+        .active
+        .grid
+        .rows
+        .len()
+        .saturating_sub(terminal.viewport.rows as usize)
+        .saturating_add(terminal.active.cursor.row as usize)
 }
 
 fn active_grid_content_rows_len(terminal: &Terminal) -> usize {

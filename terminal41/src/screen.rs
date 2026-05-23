@@ -493,11 +493,24 @@ pub(super) fn rendered_rows_len(screen: &Screen) -> usize {
     completed_rows + active_block_rendered_rows_len(screen)
 }
 
+pub(super) fn rendered_rows_len_for_viewport(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> usize {
+    let completed_rows = screen
+        .scrollback_blocks
+        .iter()
+        .map(command_block_rendered_rows_len)
+        .map(|rows| rows + 1)
+        .sum::<usize>();
+    completed_rows + active_block_rendered_rows_len_for_viewport(screen, viewport)
+}
+
 pub(super) fn rendered_scrollback_len(
     screen: &Screen,
     viewport: &Viewport,
 ) -> u32 {
-    rendered_rows_len(screen).saturating_sub(viewport.rows as usize) as u32
+    rendered_rows_len_for_viewport(screen, viewport).saturating_sub(viewport.rows as usize) as u32
 }
 
 fn active_block_has_pty_backed_content(screen: &Screen) -> bool {
@@ -511,6 +524,17 @@ pub(super) fn command_block_rendered_rows_len(block: &CommandBlock) -> usize {
 pub(super) fn active_block_rendered_rows_len(screen: &Screen) -> usize {
     grid_content_rows_len(&screen.grid)
         .max(screen.cursor.row as usize + 1)
+        .max(1)
+        .min(screen.grid.rows.len())
+}
+
+pub(super) fn active_block_rendered_rows_len_for_viewport(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> usize {
+    let cursor_row = active_row_index(screen, viewport).saturating_add(1);
+    grid_content_rows_len(&screen.grid)
+        .max(cursor_row)
         .max(1)
         .min(screen.grid.rows.len())
 }

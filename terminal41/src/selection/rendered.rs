@@ -15,7 +15,7 @@ fn rendered_view_top(
     screen: &Screen,
     viewport: &Viewport,
 ) -> u32 {
-    let rendered_len = screen::rendered_rows_len(screen) as u32;
+    let rendered_len = screen::rendered_rows_len_for_viewport(screen, viewport) as u32;
     let visible_rows = rendered_len.min(viewport.rows).max(1);
     let row_offset = viewport.rows.saturating_sub(visible_rows);
     let max_top = rendered_len.saturating_sub(visible_rows);
@@ -34,6 +34,7 @@ fn completed_rendered_rows_len(screen: &Screen) -> u64 {
 
 fn rendered_local_row_to_document_row(
     screen: &Screen,
+    viewport: &Viewport,
     rendered_row: u32,
 ) -> Option<u64> {
     let mut idx = rendered_row;
@@ -51,7 +52,7 @@ fn rendered_local_row_to_document_row(
         idx -= 1;
         base += 1;
     }
-    let active_rows = screen::active_block_rendered_rows_len(screen) as u32;
+    let active_rows = screen::active_block_rendered_rows_len_for_viewport(screen, viewport) as u32;
     (idx < active_rows)
         .then(|| completed_rendered_rows_len(screen) + screen.grid.total_popped as u64 + idx as u64)
 }
@@ -68,7 +69,7 @@ pub fn rendered_document_row_at_viewport_row(
         return Some(screen_row as u64);
     }
     let rendered_row = rendered_view_top(screen, viewport) + screen_row;
-    rendered_local_row_to_document_row(screen, rendered_row)
+    rendered_local_row_to_document_row(screen, viewport, rendered_row)
 }
 
 pub(super) fn rendered_row_ref(

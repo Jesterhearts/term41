@@ -516,15 +516,7 @@ fn place_kitty_image_at(
 
     if move_cursor && screen::active_row_index(screen, viewport) == row && screen.cursor.col == col
     {
-        let advance_rows = image_rows;
-        for _ in 0..advance_rows {
-            screen.cursor.row += 1;
-            if screen.cursor.row >= viewport.rows {
-                screen.grid.push_visible_row(viewport);
-                screen.cursor.row = viewport.rows - 1;
-            }
-        }
-        screen.cursor.col = 0;
+        crate::image::advance_cursor_after_inline_image(screen, viewport, image_rows);
     }
 
     Ok(())
@@ -1192,14 +1184,7 @@ fn place_iterm_image(
     );
 
     if !cmd.do_not_move_cursor {
-        for _ in 0..image_rows {
-            screen.cursor.row += 1;
-            if screen.cursor.row >= viewport.rows {
-                screen.grid.push_visible_row(viewport);
-                screen.cursor.row = viewport.rows - 1;
-            }
-        }
-        screen.cursor.col = 0;
+        crate::image::advance_cursor_after_inline_image(screen, viewport, image_rows);
     }
 }
 

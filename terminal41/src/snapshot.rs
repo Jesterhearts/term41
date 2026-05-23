@@ -184,7 +184,7 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
     let rendered_terminal_rows = if terminal.on_alt_screen {
         vp_rows
     } else {
-        (crate::screen::rendered_rows_len(&terminal.active) as u32)
+        (crate::screen::rendered_rows_len_for_viewport(&terminal.active, &terminal.viewport) as u32)
             .min(vp_rows)
             .max(1)
     };
@@ -500,7 +500,8 @@ fn rendered_view_top(
     terminal: &Terminal,
     terminal_rows: u32,
 ) -> u32 {
-    let rendered_len = crate::screen::rendered_rows_len(&terminal.active) as u32;
+    let rendered_len =
+        crate::screen::rendered_rows_len_for_viewport(&terminal.active, &terminal.viewport) as u32;
     let max_top = rendered_len.saturating_sub(terminal_rows);
     max_top.saturating_sub(terminal.active.offset)
 }

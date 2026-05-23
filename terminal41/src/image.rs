@@ -4,6 +4,9 @@ use std::time::Instant;
 
 use image41::DecodedImage;
 
+use crate::screen;
+use crate::screen::Screen;
+use crate::screen::grid::Viewport;
 use crate::screen::row::Row;
 
 pub const KITTY_UNICODE_PLACEHOLDER: char = '\u{10EEEE}';
@@ -101,6 +104,34 @@ pub(super) fn remove_overlapping(
         // Keep only if disjoint on rows (half-open intervals).
         old_bottom <= top_row || img.row >= new_bottom
     });
+}
+
+/// Advance the cursor after an inline image that occupies terminal rows.
+///
+/// Active command blocks can be shorter than the viewport. When an image moves
+/// the cursor into a not-yet-materialized row, allocate that row immediately so
+/// rendered-row accounting sees the same cursor position the image protocol
+/// just established.
+pub(crate) fn advance_cursor_after_inline_image(
+    screen: &mut Screen,
+    viewport: &Viewport,
+    rows: u32,
+) {
+    if viewport.rows == 0 {
+        screen.cursor.col = 0;
+        return;
+    }
+
+    for _ in 0..rows {
+        screen.cursor.row += 1;
+        if screen.cursor.row >= viewport.rows {
+            screen.grid.push_visible_row(viewport);
+            screen.cursor.row = viewport.rows - 1;
+        } else {
+            screen::ensure_cursor_row_exists(screen, viewport);
+        }
+    }
+    screen.cursor.col = 0;
 }
 
 /// Translate images whose top row lies within `[abs_top, abs_bottom]` by

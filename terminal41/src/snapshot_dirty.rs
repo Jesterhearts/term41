@@ -57,7 +57,8 @@ fn active_cursor_snapshot_row(
     active: &screen::Screen,
     viewport: &Viewport,
 ) -> Option<u32> {
-    rendered_active_row_to_snapshot_row(active, viewport, active.cursor.row)
+    let active_row = screen::active_row_index(active, viewport) as u32;
+    rendered_active_row_to_snapshot_row(active, viewport, active_row)
 }
 
 fn rendered_active_row_to_snapshot_row(
@@ -86,7 +87,7 @@ fn rendered_view_top_for_snapshot_dirty(
     active: &screen::Screen,
     viewport: &Viewport,
 ) -> u32 {
-    let rendered_len = screen::rendered_rows_len(active) as u32;
+    let rendered_len = screen::rendered_rows_len_for_viewport(active, viewport) as u32;
     let max_top = rendered_len.saturating_sub(viewport.rows);
     max_top.saturating_sub(active.offset)
 }

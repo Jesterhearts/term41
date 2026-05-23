@@ -39,7 +39,7 @@ pub fn rendered_screen_row_at_viewport_row(
         return Some(viewport_row);
     }
 
-    let rendered_rows = screen::rendered_rows_len(screen) as u32;
+    let rendered_rows = screen::rendered_rows_len_for_viewport(screen, viewport) as u32;
     let visible_rows = rendered_rows.min(viewport.rows).max(1);
     let row_offset = viewport.rows.saturating_sub(visible_rows);
     if viewport_row < row_offset {
@@ -63,7 +63,7 @@ pub fn active_screen_row_at_viewport_row(
         return Some(screen_row);
     }
 
-    let rendered_len = screen::rendered_rows_len(screen) as u32;
+    let rendered_len = screen::rendered_rows_len_for_viewport(screen, viewport) as u32;
     let max_top = rendered_len.saturating_sub(viewport.rows);
     let top = max_top.saturating_sub(screen.offset);
     let mut idx = top + screen_row;
