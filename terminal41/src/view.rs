@@ -9,6 +9,7 @@ use crate::Viewport;
 use crate::VisibleImage;
 use crate::lifecycle_ops;
 use crate::prompt;
+use crate::screen;
 use crate::selection;
 
 /// Return the number of rows currently presented to the host, including any
@@ -56,6 +57,19 @@ pub fn indicator_status_text(
 /// active cursor; otherwise `None`.
 pub fn status_line_cursor_col(screen: &Screen) -> Option<u32> {
     lifecycle_ops::status_line_cursor_col(screen)
+}
+
+/// Return the cursor row as a physical viewport row (`0` = top).
+///
+/// Primary-screen command blocks may be stored as compact active blocks and
+/// bottom-aligned at render time. This helper returns the row the user sees,
+/// which is the coordinate UI placement code needs.
+pub fn cursor_viewport_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    on_alt_screen: bool,
+) -> u32 {
+    screen::cursor_viewport_row(screen, viewport, on_alt_screen)
 }
 
 /// Return the visible row at the given viewport row index (`0` = top).

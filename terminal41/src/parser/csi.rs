@@ -528,7 +528,7 @@ fn apply_main_csi(
                     conformance::write_csi(pending_output, modes.c1_mode, format_args!("0n"));
                 }
                 DsrParameters::Cpr => {
-                    let row = screen.cursor.row + 1;
+                    let row = screen::cursor_report_row(screen, &viewport, *on_alt_screen) + 1;
                     let col = screen.cursor.col + 1;
                     conformance::write_csi(
                         pending_output,
@@ -1121,7 +1121,7 @@ pub(crate) fn csi_apply(
         }
         ParsedCsiAction::PrivateDeviceStatusReport { selector } => {
             if selector == DsrParameters::Cpr as u16 {
-                let row = screen.cursor.row + 1;
+                let row = screen::cursor_report_row(screen, viewport, *on_alt_screen) + 1;
                 let col = screen.cursor.col + 1;
                 let page = screen
                     .page_memory
@@ -1192,7 +1192,9 @@ pub(crate) fn csi_apply(
         }
         ParsedCsiAction::ReportStatus { selector } => match selector {
             1 => {
-                if let Some(report) = crate::deccir_report(screen, viewport, modes, drcs) {
+                if let Some(report) =
+                    crate::deccir_report(screen, viewport, *on_alt_screen, modes, drcs)
+                {
                     conformance::write_dcs(
                         pending_output,
                         modes.c1_mode,

@@ -10,8 +10,8 @@ use commands41::EditorSettings;
 use commands41::VimKey;
 use terminal41::Terminal;
 use terminal41::host;
-use terminal41::selection::active_screen_row_at_viewport_row;
 use terminal41::selection::search_active;
+use terminal41::view;
 use unicode_segmentation::UnicodeSegmentation;
 use winit::event::MouseButton;
 use winit::keyboard::Key;
@@ -109,16 +109,7 @@ pub(crate) fn command_editor_terminal_row_offset(
 }
 
 pub(crate) fn command_editor_visual_cursor_row(terminal: &Terminal) -> u32 {
-    (0..terminal.viewport.rows.max(1))
-        .find(|&viewport_row| {
-            active_screen_row_at_viewport_row(
-                &terminal.active,
-                &terminal.viewport,
-                terminal.on_alt_screen,
-                viewport_row,
-            ) == Some(terminal.active.cursor.row)
-        })
-        .unwrap_or(terminal.active.cursor.row)
+    view::cursor_viewport_row(&terminal.active, &terminal.viewport, terminal.on_alt_screen)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]

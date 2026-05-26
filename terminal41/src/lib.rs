@@ -310,6 +310,48 @@ mod command_block_tests {
     }
 
     #[test]
+    fn cpr_reports_bottom_aligned_active_block_cursor_row() {
+        let mut term = TestTerm::new(10, 5, 100, 16, 8);
+
+        term.process(b"old");
+        term.process(b"\x1b]133;A\x07$ ");
+        term.process(b"\x1b[6n");
+
+        assert_eq!(term.take_pending_output(), b"\x1b[5;3R");
+    }
+
+    #[test]
+    fn cpr_reports_unshifted_cursor_before_command_block_rendering() {
+        let mut term = TestTerm::new(10, 5, 100, 16, 8);
+
+        term.process(b"\x1b[2;3H");
+        term.process(b"\x1b[6n");
+
+        assert_eq!(term.take_pending_output(), b"\x1b[2;3R");
+    }
+
+    #[test]
+    fn private_cpr_reports_bottom_aligned_active_block_cursor_row() {
+        let mut term = TestTerm::new(10, 5, 100, 16, 8);
+
+        term.process(b"old");
+        term.process(b"\x1b]133;A\x07$ ");
+        term.process(b"\x1b[?6n");
+
+        assert_eq!(term.take_pending_output(), b"\x1b[?5;3;1R");
+    }
+
+    #[test]
+    fn cpr_keeps_alt_screen_cursor_row_unshifted() {
+        let mut term = TestTerm::new(10, 5, 100, 16, 8);
+
+        term.process(b"\x1b[?1049h");
+        term.process(b"\x1b[6n");
+
+        assert_eq!(term.take_pending_output(), b"\x1b[1;1R");
+    }
+
+    #[test]
     fn resize_preserves_completed_command_blocks() {
         let mut term = TestTerm::new(10, 4, 100, 16, 8);
 

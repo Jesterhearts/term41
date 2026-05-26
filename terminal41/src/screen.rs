@@ -506,6 +506,54 @@ pub(super) fn rendered_rows_len_for_viewport(
     completed_rows + active_block_rendered_rows_len_for_viewport(screen, viewport)
 }
 
+pub(super) fn cursor_viewport_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    on_alt_screen: bool,
+) -> u32 {
+    if on_alt_screen || page_memory_active(screen) {
+        return screen.cursor.row.min(viewport.rows.saturating_sub(1));
+    }
+
+    let rendered_len = rendered_rows_len_for_viewport(screen, viewport) as u32;
+    let visible_rows = rendered_len.min(viewport.rows).max(1);
+    let row_offset = viewport.rows.saturating_sub(visible_rows);
+    let rendered_top = rendered_len.saturating_sub(visible_rows);
+    let rendered_cursor =
+        rendered_active_block_top(screen).saturating_add(active_row_index(screen, viewport) as u32);
+    row_offset
+        + rendered_cursor
+            .saturating_sub(rendered_top)
+            .min(visible_rows - 1)
+}
+
+/// Host reports use physical rows only after command-block rendering has
+/// started. Before that boundary, DEC/app cursor reports stay unshifted even
+/// if UI code bottom-aligns sparse primary-screen content.
+pub(super) fn cursor_report_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    on_alt_screen: bool,
+) -> u32 {
+    if on_alt_screen || page_memory_active(screen) || !command_block_rendering_active(screen) {
+        return screen.cursor.row.min(viewport.rows.saturating_sub(1));
+    }
+    cursor_viewport_row(screen, viewport, on_alt_screen)
+}
+
+fn command_block_rendering_active(screen: &Screen) -> bool {
+    screen.active_command_block_started || !screen.scrollback_blocks.is_empty()
+}
+
+fn rendered_active_block_top(screen: &Screen) -> u32 {
+    screen
+        .scrollback_blocks
+        .iter()
+        .map(command_block_rendered_rows_len)
+        .map(|rows| rows as u32 + 1)
+        .sum()
+}
+
 pub(super) fn rendered_scrollback_len(
     screen: &Screen,
     viewport: &Viewport,

@@ -295,10 +295,11 @@ fn encode_sdesig(
 pub(crate) fn deccir_report(
     screen: &Screen,
     viewport: &Viewport,
+    on_alt_screen: bool,
     modes: &TerminalModes,
     drcs: &DrcsStore,
 ) -> Option<String> {
-    let row = screen.cursor.row.min(viewport.rows.saturating_sub(1)) + 1;
+    let row = screen::cursor_report_row(screen, viewport, on_alt_screen) + 1;
     let col = screen.cursor.col.min(viewport.cols.saturating_sub(1)) + 1;
     let pgl = screen.charset.gl_slot() as u8;
     let pgr = screen.charset.gr_slot() as u8;

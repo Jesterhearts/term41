@@ -245,9 +245,8 @@ pub(crate) fn snapshot_terminal(terminal: &mut Terminal) -> TermSnapshot {
         if let Some(col) = view::status_line_cursor_col(&terminal.active) {
             Some((terminal_rows, col))
         } else {
-            let active_top = active_block_screen_top(terminal, terminal_rows);
             Some((
-                active_top + terminal.active.cursor.row,
+                active_cursor_snapshot_row(terminal, terminal_rows),
                 terminal.active.cursor.col,
             ))
         }
@@ -481,19 +480,26 @@ fn rendered_row<'a>(
     }
 }
 
-fn active_block_screen_top(
+fn active_cursor_snapshot_row(
     terminal: &Terminal,
     terminal_rows: u32,
 ) -> u32 {
-    let top = rendered_view_top(terminal, terminal_rows);
-    let history_len = terminal
+    let rendered_cursor =
+        active_block_rendered_top(terminal)
+            .saturating_add(
+                crate::screen::active_row_index(&terminal.active, &terminal.viewport) as u32,
+            );
+    rendered_cursor.saturating_sub(rendered_view_top(terminal, terminal_rows))
+}
+
+fn active_block_rendered_top(terminal: &Terminal) -> u32 {
+    terminal
         .active
         .scrollback_blocks
         .iter()
         .map(|block| crate::screen::command_block_rendered_rows_len(block) as u32)
         .map(|rows| rows + 1)
-        .sum::<u32>();
-    history_len.saturating_sub(top)
+        .sum::<u32>()
 }
 
 fn rendered_view_top(
@@ -865,6 +871,25 @@ mod tests {
         assert_eq!(snapshot_row_text(&snap.rows[0]), "bcdef");
         assert_eq!(snapshot_row_text(&snap.rows[1]), "ghij ");
         assert_ne!(snap.rows[1].generation, first.rows[1].generation);
+    }
+
+    #[test]
+    fn cursor_snapshot_uses_rendered_active_row_after_retained_scrollback() {
+        let mut terminal = terminal();
+        let mut processor = TerminalProcessor::new();
+
+        processor.process_bytes(&mut terminal, b"one\r\ntwo\r\nthree\r\nfour");
+        processor.process_bytes(&mut terminal, b"\x1b[H\x1b[J$ ");
+        let snap = snapshot_terminal(&mut terminal);
+        let prompt_row = snap
+            .rows
+            .iter()
+            .find(|row| snapshot_row_text(row).starts_with("$ "))
+            .expect("prompt row")
+            .screen_row;
+
+        assert_eq!(snap.cursor, Some((prompt_row, 2)));
+        assert!(prompt_row > terminal.active.cursor.row);
     }
 
     #[test]
