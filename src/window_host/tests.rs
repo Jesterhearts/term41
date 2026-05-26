@@ -457,12 +457,12 @@ mod command_editor_context_tests {
     }
 
     #[test]
-    fn command_editor_placement_stays_below_prompt_and_expands_to_available_rows() {
+    fn command_editor_placement_stays_below_prompt_and_uses_reserved_rows() {
         assert_eq!(
             command_editor_placement_for_cursor(0, 24),
             CommandEditorPlacement {
                 top_row: 1,
-                rows: 23,
+                rows: COMMAND_EDITOR_BOX_ROWS,
                 terminal_row_offset: 0,
             }
         );
@@ -471,7 +471,7 @@ mod command_editor_context_tests {
             command_editor_placement_for_cursor(20, 24),
             CommandEditorPlacement {
                 top_row: 21,
-                rows: 3,
+                rows: COMMAND_EDITOR_BOX_ROWS,
                 terminal_row_offset: 0,
             }
         );
@@ -480,8 +480,17 @@ mod command_editor_context_tests {
             command_editor_placement_for_cursor(23, 24),
             CommandEditorPlacement {
                 top_row: 21,
-                rows: 3,
+                rows: COMMAND_EDITOR_BOX_ROWS,
                 terminal_row_offset: 3,
+            }
+        );
+
+        assert_eq!(
+            command_editor_placement_for_cursor(0, 2),
+            CommandEditorPlacement {
+                top_row: 1,
+                rows: 1,
+                terminal_row_offset: 0,
             }
         );
     }

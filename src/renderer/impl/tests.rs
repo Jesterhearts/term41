@@ -52,6 +52,7 @@ mod geometry_tests {
     use super::TermSnapshot;
     use super::append_gutter_marker;
     use super::clip_image_quad;
+    use super::command_editor_box_layout;
     use super::drcs_geometry_class;
     use super::fg_batch_for_page;
     use super::fitted_ink_origin_y;
@@ -308,6 +309,27 @@ mod geometry_tests {
         };
 
         assert_eq!(terminal_row_y(5, &layout), 60.0);
+    }
+
+    #[test]
+    fn command_editor_box_layout_uses_reserved_rows_not_remaining_viewport() {
+        let mut snap = snapshot(80, 24);
+        snap.cursor = Some((0, 0));
+        let layout = FrameLayout {
+            cell_w: 10.0,
+            cell_h: 20.0,
+            baseline: 14.0,
+            gutter_px: 8.0,
+            tab_bar_h: 0.0,
+            terminal_y_offset: 0.0,
+            block_y_offset: 0.0,
+        };
+
+        let box_layout = command_editor_box_layout(&snap, &layout).expect("layout");
+
+        assert_eq!(box_layout.editor_rows, 3);
+        assert_eq!(box_layout.box_h, 60.0);
+        assert_eq!(box_layout.box_y, 20.0);
     }
 
     #[test]

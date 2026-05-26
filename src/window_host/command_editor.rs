@@ -140,13 +140,14 @@ pub(crate) fn command_editor_placement_for_cursor(
 ) -> CommandEditorPlacement {
     let viewport_rows = viewport_rows.max(1);
     let cursor_row = cursor_row.min(viewport_rows - 1);
+    let editor_rows = command_editor_reserved_rows(viewport_rows).max(1);
     let terminal_row_offset =
         command_editor_terminal_row_offset_for_cursor(cursor_row, viewport_rows);
     let screen_cursor_row = cursor_row.saturating_sub(terminal_row_offset);
     let top_row = screen_cursor_row.saturating_add(1).min(viewport_rows - 1);
     CommandEditorPlacement {
         top_row,
-        rows: viewport_rows.saturating_sub(top_row).max(1),
+        rows: editor_rows,
         terminal_row_offset,
     }
 }
@@ -168,12 +169,16 @@ fn command_editor_terminal_row_offset_for_cursor(
 ) -> u32 {
     let viewport_rows = viewport_rows.max(1);
     let cursor_row = cursor_row.min(viewport_rows - 1);
-    let desired_rows = COMMAND_EDITOR_BOX_ROWS.min(viewport_rows.saturating_sub(1));
+    let desired_rows = command_editor_reserved_rows(viewport_rows);
     cursor_row
         .saturating_add(1)
         .saturating_add(desired_rows)
         .saturating_sub(viewport_rows)
         .min(desired_rows)
+}
+
+fn command_editor_reserved_rows(viewport_rows: u32) -> u32 {
+    COMMAND_EDITOR_BOX_ROWS.min(viewport_rows.saturating_sub(1))
 }
 
 pub(crate) fn command_editor_mouse_paste_kind(
