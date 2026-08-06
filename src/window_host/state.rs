@@ -230,6 +230,13 @@ pub(crate) struct MouseRuntime {
     pub(crate) command_editor_drag_anchor: Option<usize>,
     pub(crate) selection_autoscroll_direction: Option<SelectionAutoscroll>,
     pub(crate) selection_autoscroll_next: Option<Instant>,
+    /// Sub-line wheel movement carried over between scroll events, as
+    /// `(horizontal, vertical)` lines.
+    ///
+    /// High-resolution wheels and touchpads deliver deltas much smaller than
+    /// one line, so each event has to hand its remainder to the next one or
+    /// every event rounds away to zero and scrolling never moves.
+    pub(crate) scroll_carry: (f64, f64),
 }
 
 pub(crate) struct WindowMetrics {

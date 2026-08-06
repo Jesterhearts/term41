@@ -652,6 +652,7 @@ fn main() {
             command_editor_drag_anchor: None,
             selection_autoscroll_direction: None,
             selection_autoscroll_next: None,
+            scroll_carry: (0.0, 0.0),
         },
         metrics: WindowMetrics {
             window_size: (0, 0),

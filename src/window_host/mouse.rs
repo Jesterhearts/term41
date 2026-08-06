@@ -962,6 +962,58 @@ pub(crate) fn handle_mouse_input(
     }
 }
 
+/// Convert a raw wheel delta into whole scroll lines, carrying the sub-line
+/// remainder in `carry` so it survives into the next event.
+///
+/// Both delta kinds routinely arrive smaller than one line. winit divides a
+/// high-resolution wheel's `value120` ticks by 120, so a single detent step can
+/// be as little as ~0.083 lines, and pixel deltas from touchpads are a handful
+/// of pixels against a cell tens of pixels tall. Rounding each event on its own
+/// truncates all of those to zero and the view never moves at all.
+///
+/// The returned vertical delta is negated into the caller's convention:
+/// negative scrolls up into scrollback, positive scrolls down toward the live
+/// bottom.
+pub(crate) fn wheel_scroll_lines(
+    carry: &mut (f64, f64),
+    (raw_x, raw_y): (f64, f64),
+    (cell_w, cell_h): (u32, u32),
+    pixels: bool,
+) -> (i32, i32) {
+    let (delta_x, delta_y) = if pixels {
+        (
+            raw_x / f64::from(cell_w.max(1)),
+            raw_y / f64::from(cell_h.max(1)),
+        )
+    } else {
+        (raw_x, raw_y)
+    };
+    (
+        take_whole_lines(&mut carry.0, delta_x),
+        take_whole_lines(&mut carry.1, -delta_y),
+    )
+}
+
+/// Add `delta` lines to `carry` and return the whole lines that have
+/// accumulated, leaving the fraction behind for the next event.
+fn take_whole_lines(
+    carry: &mut f64,
+    delta: f64,
+) -> i32 {
+    if !delta.is_finite() {
+        return 0;
+    }
+    // Reversing direction should feel immediate instead of first paying off
+    // residue built up scrolling the other way.
+    if delta != 0.0 && *carry != 0.0 && carry.is_sign_positive() != delta.is_sign_positive() {
+        *carry = 0.0;
+    }
+    *carry += delta;
+    let whole = carry.trunc();
+    *carry -= whole;
+    whole as i32
+}
+
 pub(crate) fn handle_mouse_wheel(
     host: &mut WindowHost,
     raw_x: f64,
@@ -972,13 +1024,13 @@ pub(crate) fn handle_mouse_wheel(
         return;
     }
     if history_deletion_is_open(&host.render) {
-        let (_, cell_h, _, _) = layout_snapshot(&host.render);
-        let y_lines = if pixels {
-            let ch = cell_h.max(1) as i32;
-            -(raw_y as i32) / ch
-        } else {
-            -(raw_y as i32)
-        };
+        let (cell_w, cell_h, _, _) = layout_snapshot(&host.render);
+        let (_, y_lines) = wheel_scroll_lines(
+            &mut host.mouse.scroll_carry,
+            (raw_x, raw_y),
+            (cell_w, cell_h),
+            pixels,
+        );
         if y_lines != 0 {
             scroll_host_history_deletion(
                 &host.input,
@@ -998,13 +1050,17 @@ pub(crate) fn handle_mouse_wheel(
     }
     close_gutter_popup(&host.render, &mut host.input);
     let (cell_w, cell_h, _, _) = layout_snapshot(&host.render);
-    let (x_lines, y_lines) = if pixels {
-        let cw = cell_w as i32;
-        let ch = cell_h as i32;
-        ((raw_x as i32) / cw, -(raw_y as i32) / ch)
-    } else {
-        (raw_x as i32, -(raw_y as i32))
-    };
+    let (x_lines, y_lines) = wheel_scroll_lines(
+        &mut host.mouse.scroll_carry,
+        (raw_x, raw_y),
+        (cell_w, cell_h),
+        pixels,
+    );
+    trace!(
+        "wheel delta ({raw_x}, {raw_y}) pixels={pixels} cell=({cell_w}, {cell_h}) -> lines \
+         ({x_lines}, {y_lines}) carry {:?}",
+        host.mouse.scroll_carry
+    );
 
     if forward_mouse_to_app(&host.keyboard, &mut host.input)
         && let Some(pos) = app_mouse_report_position_at(host, host.mouse.pos.0, host.mouse.pos.1)

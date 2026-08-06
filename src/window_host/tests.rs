@@ -216,6 +216,85 @@ mod selection_autoscroll_tests {
 }
 
 #[cfg(test)]
+mod wheel_scroll_tests {
+    use super::*;
+
+    const CELL: (u32, u32) = (10, 20);
+
+    fn scroll_lines(
+        carry: &mut (f64, f64),
+        raw_y: f64,
+        pixels: bool,
+    ) -> i32 {
+        wheel_scroll_lines(carry, (0.0, raw_y), CELL, pixels).1
+    }
+
+    #[test]
+    fn high_resolution_wheel_ticks_accumulate_into_whole_lines() {
+        let mut carry = (0.0, 0.0);
+        // winit divides `value120` ticks by 120, so a hi-res wheel reports a
+        // detent as twelve steps of 1/12 of a line rather than one step of 1.
+        let steps: Vec<i32> = (0..12)
+            .map(|_| scroll_lines(&mut carry, 1.0 / 12.0, false))
+            .collect();
+
+        assert_eq!(steps.iter().sum::<i32>(), -1);
+        assert_eq!(steps.last(), Some(&-1));
+    }
+
+    #[test]
+    fn sub_cell_pixel_deltas_accumulate_into_whole_lines() {
+        let mut carry = (0.0, 0.0);
+        // Each event is 8px against a 20px cell: individually below one line.
+        assert_eq!(scroll_lines(&mut carry, 8.0, true), 0);
+        assert_eq!(scroll_lines(&mut carry, 8.0, true), 0);
+        assert_eq!(scroll_lines(&mut carry, 8.0, true), -1);
+    }
+
+    #[test]
+    fn whole_line_deltas_scroll_immediately() {
+        let mut carry = (0.0, 0.0);
+        assert_eq!(scroll_lines(&mut carry, 1.0, false), -1);
+        assert_eq!(scroll_lines(&mut carry, -3.0, false), 3);
+    }
+
+    #[test]
+    fn direction_reversal_drops_opposite_residue() {
+        let mut carry = (0.0, 0.0);
+        assert_eq!(scroll_lines(&mut carry, 0.5, false), 0);
+        // Without discarding the upward residue this first downward step would
+        // be swallowed paying it off.
+        assert_eq!(scroll_lines(&mut carry, -1.0, false), 1);
+    }
+
+    #[test]
+    fn horizontal_and_vertical_carry_independently() {
+        let mut carry = (0.0, 0.0);
+        assert_eq!(
+            wheel_scroll_lines(&mut carry, (0.5, 0.5), CELL, false),
+            (0, 0)
+        );
+        assert_eq!(
+            wheel_scroll_lines(&mut carry, (0.5, 0.0), CELL, false),
+            (1, 0)
+        );
+        assert_eq!(
+            wheel_scroll_lines(&mut carry, (0.0, 0.5), CELL, false),
+            (0, -1)
+        );
+    }
+
+    #[test]
+    fn zero_cell_size_does_not_divide_by_zero() {
+        let mut carry = (0.0, 0.0);
+        assert_eq!(
+            wheel_scroll_lines(&mut carry, (0.0, 40.0), (0, 0), true),
+            (0, -40)
+        );
+    }
+}
+
+#[cfg(test)]
 mod viewport_reset_tests {
     use super::*;
 
