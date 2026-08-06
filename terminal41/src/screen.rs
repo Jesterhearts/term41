@@ -682,6 +682,37 @@ pub(super) fn activate_page_memory(
     });
 }
 
+/// Drop page memory and return the grid to ordinary scrollback storage.
+///
+/// Page memory is the terminal's power-up-off state here, so a hard reset has
+/// to be able to get back to it -- while it is active, viewport scrolling is
+/// disabled entirely and nothing else ever clears it. Activation padded the
+/// grid out to the full page span, so that padding leaves with it; otherwise
+/// the leftover page storage would surface as scrollback the user never wrote.
+pub(super) fn deactivate_page_memory(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    let Some(page) = screen.page_memory.take() else {
+        return;
+    };
+    let page0_start = page.page_starts.first().copied().unwrap_or(0);
+    let keep = page0_start + viewport.rows as usize;
+    if screen.grid.rows.len() > keep {
+        clear_in_range(&mut screen.images, keep, screen.grid.rows.len());
+        screen.grid.rows.truncate(keep);
+    }
+    while screen.grid.rows.len() < viewport.rows as usize {
+        screen.grid.rows.push_back(Row::new(
+            viewport.cols,
+            screen.grid.default_fg,
+            screen.grid.default_bg,
+        ));
+    }
+    screen.cursor.row = screen.cursor.row.min(viewport.rows.saturating_sub(1));
+    screen.offset = 0;
+}
+
 pub(super) fn resize_page_memory(
     screen: &mut Screen,
     viewport: &Viewport,

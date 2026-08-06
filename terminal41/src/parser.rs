@@ -645,6 +645,10 @@ fn apply_hard_reset_state(
     for s in [&mut *screen, &mut *stash] {
         s.grid.default_fg = palette.fg;
         s.grid.default_bg = palette.bg;
+        // Nothing else ever leaves page memory, and while it is active the
+        // viewport cannot scroll at all, so a hard reset is the user's only
+        // way back to a scrollable terminal after a stray DECSLPP/DECSNLS.
+        screen::deactivate_page_memory(s, viewport);
         s.scrollback_blocks.clear();
         s.active_command_block_started = false;
         s.cursor = grid::Cursor::default();

@@ -1021,6 +1021,36 @@ mod tests {
     }
 
     #[test]
+    fn hard_reset_restores_scrolling_after_page_memory_activation() {
+        let mut term = TestTerm::new(20, 5, 1000, 16, 8);
+        for i in 0..20 {
+            term.process(format!("line{i}\r\n").as_bytes());
+        }
+        let viewport = term.inner.viewport;
+        assert!(scroll_viewport_up(&mut term.inner.active, &viewport, 5) > 0);
+        reset_viewport(&mut term.inner.active);
+
+        // DECSLPP switches the screen to VT420 page memory, which has no
+        // scrollback at all.
+        term.process(b"\x1b[24t");
+        let viewport = term.inner.viewport;
+        assert_eq!(scroll_viewport_up(&mut term.inner.active, &viewport, 5), 0);
+
+        term.process(b"\x1bc");
+        assert!(term.inner.active.page_memory.is_none());
+        assert!(
+            term.inner.active.grid.rows.len() < 144,
+            "hard reset should drop the page-memory padding rather than leave it as scrollback"
+        );
+
+        for i in 0..20 {
+            term.process(format!("after{i}\r\n").as_bytes());
+        }
+        let viewport = term.inner.viewport;
+        assert!(scroll_viewport_up(&mut term.inner.active, &viewport, 5) > 0);
+    }
+
+    #[test]
     fn scroll_to_prev_failed_command_skips_successful_commands() {
         let mut term = TestTerm::new(10, 4, 200, 16, 8);
         emit_prompt(&mut term, "$ ok1", 3, 0);
