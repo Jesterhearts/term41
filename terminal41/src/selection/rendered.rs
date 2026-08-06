@@ -24,21 +24,13 @@ fn rendered_view_top(
         .saturating_sub(row_offset)
 }
 
-fn completed_rendered_rows_len(screen: &Screen) -> u64 {
-    screen
-        .scrollback_blocks
-        .iter()
-        .map(|block| screen::command_block_rendered_rows_len(block) as u64 + 1)
-        .sum()
-}
-
 fn rendered_local_row_to_document_row(
     screen: &Screen,
     viewport: &Viewport,
     rendered_row: u32,
 ) -> Option<u64> {
     let mut idx = rendered_row;
-    let mut base = 0_u64;
+    let mut base = screen.rendered_row_base;
     for block in &screen.scrollback_blocks {
         let block_rows = screen::command_block_rendered_rows_len(block) as u32;
         if idx < block_rows {
@@ -53,8 +45,7 @@ fn rendered_local_row_to_document_row(
         base += 1;
     }
     let active_rows = screen::active_block_rendered_rows_len_for_viewport(screen, viewport) as u32;
-    (idx < active_rows)
-        .then(|| completed_rendered_rows_len(screen) + screen.grid.total_popped as u64 + idx as u64)
+    (idx < active_rows).then(|| screen::active_block_document_base(screen) + idx as u64)
 }
 
 pub fn rendered_document_row_at_viewport_row(
@@ -77,12 +68,12 @@ pub(super) fn rendered_row_ref(
     rendered_row: u64,
 ) -> Option<&Row> {
     let idx = rendered_row;
-    let mut base = 0_u64;
+    let mut base = screen.rendered_row_base;
     for block in &screen.scrollback_blocks {
         let block_rows = screen::command_block_rendered_rows_len(block) as u64;
         if idx < base + block_rows {
-            let local = idx - base;
-            return block.grid.rows.get(local as usize);
+            let local = idx.checked_sub(base)? as usize;
+            return block.grid.rows.get(local);
         }
         base += block_rows;
         if idx == base {
@@ -90,8 +81,7 @@ pub(super) fn rendered_row_ref(
         }
         base += 1;
     }
-    let active_base = base + screen.grid.total_popped as u64;
-    let local = idx.checked_sub(active_base)? as usize;
+    let local = idx.checked_sub(screen::active_block_document_base(screen))? as usize;
     screen.grid.rows.get(local)
 }
 

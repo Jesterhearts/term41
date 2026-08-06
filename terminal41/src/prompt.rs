@@ -381,11 +381,11 @@ fn rendered_row_info(
     screen: &Screen,
     rendered_row: u64,
 ) -> Option<RenderedRowInfo<'_>> {
-    let mut base = 0_u64;
+    let mut base = screen.rendered_row_base;
     for block in &screen.scrollback_blocks {
         let block_rows = screen::command_block_rendered_rows_len(block) as u64;
         if rendered_row < base + block_rows {
-            let local = rendered_row - base;
+            let local = rendered_row.checked_sub(base)?;
             return Some(RenderedRowInfo {
                 row: &block.grid.rows[local as usize],
                 rendered_row,
@@ -400,7 +400,7 @@ fn rendered_row_info(
         base += 1;
     }
 
-    let active_base = base + screen.grid.total_popped as u64;
+    let active_base = screen::active_block_document_base(screen);
     let local = rendered_row.checked_sub(active_base)? as usize;
     let active_rows = screen::active_block_rendered_rows_len(screen);
     if local >= active_rows {
@@ -424,14 +424,8 @@ fn prompt_ref_for_active_abs(
     if !row.prompt_start {
         return None;
     }
-    let rendered_row = screen
-        .scrollback_blocks
-        .iter()
-        .map(|block| screen::command_block_rendered_rows_len(block) as u64 + 1)
-        .sum::<u64>()
-        + prompt_abs;
     Some(PromptRef {
-        rendered_row,
+        rendered_row: screen::active_block_document_base(screen) + local as u64,
         active_abs_row: Some(prompt_abs),
     })
 }
@@ -886,7 +880,15 @@ pub fn next_command_block_after(
 }
 
 fn command_block_prompts(screen: &Screen) -> Vec<PromptRef> {
-    (0..screen::rendered_rows_len(screen) as u64)
+    // The completed blocks and the active block are two disjoint runs of
+    // document rows: the active block's numbering skips ahead by the rows its
+    // grid has recycled, so walking a single 0..len range would miss it.
+    let completed_base = screen.rendered_row_base;
+    let completed_end = completed_base + screen::completed_block_rendered_rows_len(screen);
+    let active_base = screen::active_block_document_base(screen);
+    let active_end = active_base + screen::active_block_rendered_rows_len(screen) as u64;
+    (completed_base..completed_end)
+        .chain(active_base..active_end)
         .filter_map(|rendered_row| {
             let info = rendered_row_info(screen, rendered_row)?;
             info.row

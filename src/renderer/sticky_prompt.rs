@@ -64,7 +64,7 @@ fn sticky_prompt_row_at_top(
     top: u32,
 ) -> Option<StickyPromptRow<'_>> {
     let mut idx = top;
-    let mut block_start = 0_u64;
+    let mut block_start = terminal.active.rendered_row_base;
     for block in &terminal.active.scrollback_blocks {
         let block_rows = block.grid.rows.len() as u32;
         if idx < block_rows {

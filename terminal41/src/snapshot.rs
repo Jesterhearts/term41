@@ -454,7 +454,7 @@ fn rendered_row<'a>(
 ) -> RenderedRow<'a> {
     let top = rendered_view_top(terminal, terminal_rows);
     let mut idx = top + screen_row;
-    let mut rendered_base = 0_u64;
+    let mut rendered_base = terminal.active.rendered_row_base;
     for block in &terminal.active.scrollback_blocks {
         let block_rows = crate::screen::command_block_rendered_rows_len(block) as u32;
         if idx < block_rows {

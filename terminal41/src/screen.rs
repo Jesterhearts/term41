@@ -132,6 +132,14 @@ pub struct Screen {
     /// Completed primary-screen command blocks. The writable active block is
     /// `grid`; alternate screens keep this empty and behave as a single block.
     pub scrollback_blocks: Vec<CommandBlock>,
+    /// Rendered-document row number of the first row of the first retained
+    /// command block.
+    ///
+    /// Rendered rows are stable identities that selections and search spans
+    /// hold onto, so evicting an old block must not renumber the blocks behind
+    /// it. Each eviction advances this base by the rows the block occupied,
+    /// leaving every surviving row's number untouched.
+    pub rendered_row_base: u64,
     /// Whether `grid` is an explicit shell-integration command block.
     pub active_command_block_started: bool,
     /// Cursor position within the active visible display.
@@ -245,6 +253,7 @@ impl Screen {
                 default_bg: bg,
             },
             scrollback_blocks: Vec::new(),
+            rendered_row_base: 0,
             active_command_block_started: false,
             cursor: Cursor::default(),
             fg,
@@ -412,10 +421,58 @@ pub(super) fn start_command_block(
         grid: completed,
         images,
     });
+    trim_scrollback_blocks(screen, viewport);
     screen.active_command_block_started = true;
     screen.cursor.row = 0;
     screen.cursor.col = 0;
     screen.offset = 0;
+}
+
+/// Evict whole command blocks from the front of the document until the rows it
+/// retains fit the scrollback budget.
+///
+/// The active grid enforces the same budget on itself, but completed blocks
+/// live outside it -- without this a long session accumulates every command it
+/// ever ran. Blocks are dropped whole because a block is one prompt/command/
+/// output unit; half a block is not something the user can read or rerun.
+///
+/// Retention is measured in stored rows rather than rendered rows so this stays
+/// O(blocks) and can run on every processed batch: stored rows are what the
+/// budget is actually about, and scanning each grid for its last row of content
+/// would put a full grid walk on the PTY path.
+pub(super) fn trim_scrollback_blocks(
+    screen: &mut Screen,
+    viewport: &Viewport,
+) {
+    let max_rows = viewport.rows as usize + screen.grid.scrollback_limit as usize;
+    let mut retained = retained_storage_rows(screen);
+    let mut evicted_blocks = 0;
+    let mut evicted_rows = 0_u64;
+    for block in &screen.scrollback_blocks {
+        if retained <= max_rows {
+            break;
+        }
+        let block_rows = command_block_rendered_rows_len(block) + 1;
+        retained -= block_rows;
+        evicted_rows += block_rows as u64;
+        evicted_blocks += 1;
+    }
+    if evicted_blocks == 0 {
+        return;
+    }
+    screen.scrollback_blocks.drain(..evicted_blocks);
+    screen.rendered_row_base += evicted_rows;
+}
+
+/// Rows the screen is holding on to: every completed block's rows and
+/// separator, plus the active grid's storage.
+fn retained_storage_rows(screen: &Screen) -> usize {
+    screen
+        .scrollback_blocks
+        .iter()
+        .map(|block| command_block_rendered_rows_len(block) + 1)
+        .sum::<usize>()
+        + screen.grid.rows.len()
 }
 
 fn active_block_is_unfinished_prompt_or_command(screen: &Screen) -> bool {
@@ -481,16 +538,6 @@ pub(super) fn retain_images(
         block.images.retain(|_, img| keep(img));
     }
     screen.images.retain(|_, img| keep(img));
-}
-
-pub(super) fn rendered_rows_len(screen: &Screen) -> usize {
-    let completed_rows = screen
-        .scrollback_blocks
-        .iter()
-        .map(command_block_rendered_rows_len)
-        .map(|rows| rows + 1)
-        .sum::<usize>();
-    completed_rows + active_block_rendered_rows_len(screen)
 }
 
 pub(super) fn rendered_rows_len_for_viewport(
@@ -563,6 +610,27 @@ pub(super) fn rendered_scrollback_len(
 
 fn active_block_has_pty_backed_content(screen: &Screen) -> bool {
     grid_has_pty_backed_content(&screen.grid)
+}
+
+/// Rendered-document row number of the first row of the active block.
+///
+/// Completed blocks occupy `rendered_row_base ..` in order, each followed by a
+/// separator row; `total_popped` then carries the active grid's own recycling
+/// so its rows keep their identity as it scrolls.
+pub(super) fn active_block_document_base(screen: &Screen) -> u64 {
+    screen.rendered_row_base
+        + completed_block_rendered_rows_len(screen)
+        + screen.grid.total_popped as u64
+}
+
+/// Rendered rows occupied by the retained completed blocks, separators
+/// included.
+pub(super) fn completed_block_rendered_rows_len(screen: &Screen) -> u64 {
+    screen
+        .scrollback_blocks
+        .iter()
+        .map(|block| command_block_rendered_rows_len(block) as u64 + 1)
+        .sum()
 }
 
 pub(super) fn command_block_rendered_rows_len(block: &CommandBlock) -> usize {
@@ -1188,6 +1256,110 @@ mod integration_tests {
             .iter()
             .map(|cell| cell.as_str())
             .collect()
+    }
+
+    fn run_command_block(
+        term: &mut TestTerm,
+        label: &str,
+        output_lines: u32,
+    ) {
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07");
+        term.process(label.as_bytes());
+        term.process(b"\r\n\x1b]133;C\x07");
+        for line in 0..output_lines {
+            term.process(format!("{label}-out{line}\r\n").as_bytes());
+        }
+        term.process(b"\x1b]133;D;0\x07");
+    }
+
+    fn retained_rows(term: &TestTerm) -> usize {
+        super::retained_storage_rows(&term.active)
+    }
+
+    #[test]
+    fn completed_command_blocks_are_evicted_to_respect_the_scrollback_limit() {
+        let mut term = TestTerm::new(20, 4, 12, 16, 8);
+        let budget = term.viewport.rows as usize + 12;
+
+        for command in 0..40 {
+            run_command_block(&mut term, &format!("$cmd{command}"), 3);
+            assert!(
+                retained_rows(&term) <= budget,
+                "retained {} rows against a budget of {budget} after command {command}",
+                retained_rows(&term)
+            );
+        }
+
+        assert!(!term.active.scrollback_blocks.is_empty());
+        assert!(term.active.rendered_row_base > 0);
+    }
+
+    #[test]
+    fn a_single_long_command_evicts_older_blocks_as_it_grows() {
+        let mut term = TestTerm::new(20, 4, 12, 16, 8);
+        let budget = term.viewport.rows as usize + 12;
+        for command in 0..5 {
+            run_command_block(&mut term, &format!("$cmd{command}"), 3);
+        }
+        assert!(!term.active.scrollback_blocks.is_empty());
+
+        term.process(b"\x1b]133;A\x07$long\x1b]133;B\x07\r\n\x1b]133;C\x07");
+        for line in 0..200 {
+            term.process(format!("long-out{line}\r\n").as_bytes());
+        }
+
+        assert!(
+            term.active.scrollback_blocks.is_empty(),
+            "a command that fills the whole budget should push every older block out"
+        );
+        assert!(retained_rows(&term) <= budget);
+    }
+
+    #[test]
+    fn evicting_blocks_keeps_surviving_rendered_row_identities_stable() {
+        let mut term = TestTerm::new(20, 4, 40, 16, 8);
+        for command in 0..6 {
+            run_command_block(&mut term, &format!("$cmd{command}"), 2);
+        }
+
+        let commands_by_rendered_row = |term: &TestTerm| {
+            crate::prompt::command_block_document(&term.active, &term.metadata.command_metas)
+                .blocks
+                .into_iter()
+                .map(|block| {
+                    (
+                        block.prompt.rendered_row,
+                        block.command.map(|command| command.text),
+                    )
+                })
+                .collect::<Vec<_>>()
+        };
+        let before = commands_by_rendered_row(&term);
+        assert!(before.len() > 3);
+        assert!(before.iter().all(|(_, command)| command.is_some()));
+
+        // Shrinking the budget evicts the oldest blocks. Every block that
+        // survives has to keep the rendered row it already had, because
+        // selections and search spans are holding those numbers.
+        crate::settings::set_scrollback_policy(&mut term.inner.active, &term.inner.viewport, 6);
+
+        assert!(term.active.rendered_row_base > 0);
+        let after = commands_by_rendered_row(&term);
+        assert!(
+            after.len() < before.len(),
+            "expected the shrunk budget to evict blocks"
+        );
+        assert!(after.len() > 1, "expected some blocks to survive");
+        for (rendered_row, command) in &after {
+            assert_eq!(
+                before
+                    .iter()
+                    .find(|(row, _)| row == rendered_row)
+                    .map(|(_, command)| command),
+                Some(command),
+                "rendered row {rendered_row} changed identity across eviction"
+            );
+        }
     }
 
     #[test]

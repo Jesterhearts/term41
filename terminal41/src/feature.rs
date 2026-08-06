@@ -178,4 +178,5 @@ pub(crate) fn apply_scrollback_limit(
             img.row -= popped;
         }
     }
+    screen::trim_scrollback_blocks(screen, viewport);
 }

@@ -379,10 +379,9 @@ impl Terminal {
     ) {
         lifecycle_ops::track_scroll(
             &mut self.active,
+            &self.viewport,
             &mut self.metadata.command_metas,
             popped_before,
         );
-
-        let _ = popped_before;
     }
 }

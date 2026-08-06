@@ -798,6 +798,11 @@ pub(crate) fn resize(
     viewport.cols = cols;
     viewport.rows = new_active_rows;
 
+    // Reflowing to a narrower window turns one stored row into several, so the
+    // retained blocks can land over budget even though no new output arrived.
+    screen::trim_scrollback_blocks(active, viewport);
+    screen::trim_scrollback_blocks(stash, viewport);
+
     ResizeOutcome {
         active: active_outcome,
         stash: stash_outcome,
@@ -812,6 +817,7 @@ pub(crate) struct ResizeOutcome {
 
 pub(crate) fn track_scroll(
     screen: &mut Screen,
+    viewport: &Viewport,
     command_metas: &mut HashMap<u64, CommandMeta>,
     popped_before: usize,
 ) {
@@ -824,6 +830,10 @@ pub(crate) fn track_scroll(
         let min_abs = screen.grid.total_popped as u64;
         command_metas.retain(|&abs, _| abs >= min_abs);
     }
+    // The active block only caps its own storage, so a command that keeps
+    // producing output has to push the older blocks out as it grows rather
+    // than waiting for the next prompt to reconcile the budget.
+    screen::trim_scrollback_blocks(screen, viewport);
 }
 
 #[cfg(test)]
