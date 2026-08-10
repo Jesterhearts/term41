@@ -24,30 +24,6 @@ fn rendered_view_top(
         .saturating_sub(row_offset)
 }
 
-fn rendered_local_row_to_document_row(
-    screen: &Screen,
-    viewport: &Viewport,
-    rendered_row: u32,
-) -> Option<u64> {
-    let mut idx = rendered_row;
-    let mut base = screen.rendered_row_base;
-    for block in &screen.scrollback_blocks {
-        let block_rows = screen::command_block_rendered_rows_len(block) as u32;
-        if idx < block_rows {
-            return Some(base + idx as u64);
-        }
-        idx -= block_rows;
-        base += block_rows as u64;
-        if idx == 0 {
-            return Some(base);
-        }
-        idx -= 1;
-        base += 1;
-    }
-    let active_rows = screen::active_block_rendered_rows_len_for_viewport(screen, viewport) as u32;
-    (idx < active_rows).then(|| screen::active_block_document_base(screen) + idx as u64)
-}
-
 pub fn rendered_document_row_at_viewport_row(
     screen: &Screen,
     viewport: &Viewport,
@@ -59,8 +35,8 @@ pub fn rendered_document_row_at_viewport_row(
     if on_alt_screen {
         return Some(screen_row as u64);
     }
-    let rendered_row = rendered_view_top(screen, viewport) + screen_row;
-    rendered_local_row_to_document_row(screen, viewport, rendered_row)
+    let local_row = rendered_view_top(screen, viewport) + screen_row;
+    screen::document_row_for_local_row(screen, viewport, local_row as usize)
 }
 
 pub(super) fn rendered_row_ref(

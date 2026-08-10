@@ -428,13 +428,23 @@ pub(super) fn start_command_block(
     screen.offset = 0;
 }
 
-/// Evict whole command blocks from the front of the document until the rows it
-/// retains fit the scrollback budget.
+/// Evict whole command blocks from the front of the document once the budget
+/// has no room left for them.
 ///
 /// The active grid enforces the same budget on itself, but completed blocks
 /// live outside it -- without this a long session accumulates every command it
 /// ever ran. Blocks are dropped whole because a block is one prompt/command/
 /// output unit; half a block is not something the user can read or rerun.
+///
+/// A block is only surplus when the rows behind it already fill the budget on
+/// their own. Evicting on "retained exceeds the budget" instead spends whole
+/// blocks to reclaim a handful of rows, and because the active grid is allowed
+/// to fill the entire budget by itself that check is true the moment any one
+/// command's output reaches the limit: the next prompt then closes that command
+/// into a block and immediately evicts it along with everything behind it,
+/// leaving a screen with no scrollback at all. Waiting until a block is fully
+/// surplus keeps the configured limit a floor the user actually gets, at the
+/// cost of retaining up to one extra block's worth of rows above it.
 ///
 /// Retention is measured in stored rows rather than rendered rows so this stays
 /// O(blocks) and can run on every processed batch: stored rows are what the
@@ -449,10 +459,10 @@ pub(super) fn trim_scrollback_blocks(
     let mut evicted_blocks = 0;
     let mut evicted_rows = 0_u64;
     for block in &screen.scrollback_blocks {
-        if retained <= max_rows {
+        let block_rows = command_block_rendered_rows_len(block) + 1;
+        if retained.saturating_sub(block_rows) < max_rows {
             break;
         }
-        let block_rows = command_block_rendered_rows_len(block) + 1;
         retained -= block_rows;
         evicted_rows += block_rows as u64;
         evicted_blocks += 1;
@@ -621,6 +631,67 @@ pub(super) fn active_block_document_base(screen: &Screen) -> u64 {
     screen.rendered_row_base
         + completed_block_rendered_rows_len(screen)
         + screen.grid.total_popped as u64
+}
+
+/// Translate a local row -- a zero-based index into the rows the screen still
+/// retains -- into the document row that names it.
+///
+/// The two spaces only coincide on a screen that has never evicted a block and
+/// whose active grid has never recycled a row. Anything that walks the visible
+/// document counts locally; anything that records a position (prompt refs,
+/// selections, search spans) records document rows.
+pub(super) fn document_row_for_local_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    local_row: usize,
+) -> Option<u64> {
+    let mut remaining = local_row;
+    let mut document_row = screen.rendered_row_base;
+    for block in &screen.scrollback_blocks {
+        let block_rows = command_block_rendered_rows_len(block);
+        if remaining < block_rows {
+            return Some(document_row + remaining as u64);
+        }
+        remaining -= block_rows;
+        document_row += block_rows as u64;
+        if remaining == 0 {
+            return Some(document_row);
+        }
+        remaining -= 1;
+        document_row += 1;
+    }
+    (remaining < active_block_rendered_rows_len_for_viewport(screen, viewport))
+        .then(|| active_block_document_base(screen) + remaining as u64)
+}
+
+/// Inverse of [`document_row_for_local_row`]: `None` once the document row has
+/// been evicted or has not been written yet.
+pub(super) fn local_row_for_document_row(
+    screen: &Screen,
+    viewport: &Viewport,
+    document_row: u64,
+) -> Option<usize> {
+    let mut local_row = 0_usize;
+    let mut block_base = screen.rendered_row_base;
+    if document_row < block_base {
+        return None;
+    }
+    for block in &screen.scrollback_blocks {
+        let block_rows = command_block_rendered_rows_len(block) as u64;
+        if document_row < block_base + block_rows {
+            return Some(local_row + (document_row - block_base) as usize);
+        }
+        block_base += block_rows;
+        local_row += block_rows as usize;
+        if document_row == block_base {
+            return Some(local_row);
+        }
+        block_base += 1;
+        local_row += 1;
+    }
+    let local = document_row.checked_sub(active_block_document_base(screen))? as usize;
+    (local < active_block_rendered_rows_len_for_viewport(screen, viewport))
+        .then_some(local_row + local)
 }
 
 /// Rendered rows occupied by the retained completed blocks, separators
@@ -1276,6 +1347,16 @@ mod integration_tests {
         super::retained_storage_rows(&term.active)
     }
 
+    /// Rows the oldest retained block would take with it, which is how far
+    /// retention is allowed to run past the budget: the block is only evicted
+    /// once the rows behind it fill the budget on their own.
+    fn oldest_block_rows(term: &TestTerm) -> usize {
+        term.active
+            .scrollback_blocks
+            .first()
+            .map_or(0, |block| super::command_block_rendered_rows_len(block) + 1)
+    }
+
     #[test]
     fn completed_command_blocks_are_evicted_to_respect_the_scrollback_limit() {
         let mut term = TestTerm::new(20, 4, 12, 16, 8);
@@ -1283,15 +1364,62 @@ mod integration_tests {
 
         for command in 0..40 {
             run_command_block(&mut term, &format!("$cmd{command}"), 3);
+            let ceiling = budget + oldest_block_rows(&term);
             assert!(
-                retained_rows(&term) <= budget,
-                "retained {} rows against a budget of {budget} after command {command}",
+                retained_rows(&term) <= ceiling,
+                "retained {} rows against a ceiling of {ceiling} after command {command}",
                 retained_rows(&term)
             );
         }
 
         assert!(!term.active.scrollback_blocks.is_empty());
         assert!(term.active.rendered_row_base > 0);
+    }
+
+    #[test]
+    fn eviction_stops_while_the_budget_still_has_room() {
+        let mut term = TestTerm::new(20, 4, 200, 16, 8);
+        for command in 0..20 {
+            run_command_block(&mut term, &format!("$cmd{command}"), 3);
+        }
+        let history = retained_rows(&term);
+
+        // Shrink the budget to well under the history the session built up.
+        // Blocks go whole, so retention lands somewhere in [budget, budget +
+        // oldest block] -- what it must not do is keep evicting past the
+        // budget and hand back a document shorter than the user asked for.
+        let budget = term.viewport.rows as usize + 12;
+        crate::settings::set_scrollback_policy(&mut term.inner.active, &term.inner.viewport, 12);
+
+        assert!(history > budget, "test needs more history than the budget");
+        assert!(
+            retained_rows(&term) >= budget,
+            "retained only {} rows of a {budget} row budget",
+            retained_rows(&term)
+        );
+        assert!(retained_rows(&term) <= budget + oldest_block_rows(&term));
+    }
+
+    /// A command whose output fills the budget on its own used to take the
+    /// whole document with it: the next prompt closed it into a block, the
+    /// block plus the fresh grid sat one row over budget, and evicting whole
+    /// blocks then left a screen with nothing to scroll back through.
+    #[test]
+    fn a_command_that_fills_the_budget_still_leaves_scrollback_behind() {
+        let mut term = TestTerm::new(20, 4, 12, 16, 8);
+        for command in 0..5 {
+            run_command_block(&mut term, &format!("$cmd{command}"), 3);
+        }
+
+        run_command_block(&mut term, "$long", 200);
+        // The shell draws its next prompt, closing the long command's block.
+        term.process(b"\x1b]133;A\x07$next\x1b]133;B\x07");
+
+        let viewport = term.inner.viewport;
+        assert!(
+            super::rendered_scrollback_len(&term.inner.active, &viewport) > 0,
+            "the long command's output should still be reachable by scrolling"
+        );
     }
 
     #[test]

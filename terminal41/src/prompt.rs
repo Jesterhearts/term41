@@ -196,15 +196,31 @@ pub fn find_prompt_ref_for_screen_row(
 ) -> Option<PromptRef> {
     let start =
         selection::rendered_document_row_at_viewport_row(screen, viewport, false, screen_row)?;
-    for rendered_row in (0..=start).rev() {
-        let Some(info) = rendered_row_info(screen, rendered_row) else {
-            continue;
-        };
-        if info.row.prompt_start {
-            return Some(prompt_ref_for_rendered_row(screen, info));
-        }
-    }
-    None
+    // Walk only rows the screen still holds. Document numbering leaves two
+    // gaps -- everything below `rendered_row_base` was evicted, and the active
+    // block's numbering skips the rows its grid has recycled -- and both grow
+    // without bound over a session, so scanning down from `start` one row at a
+    // time would spend most of its time on rows that cannot exist.
+    document_row_runs(screen)
+        .into_iter()
+        .flat_map(|run| run.start..run.end.min(start.saturating_add(1)))
+        .rev()
+        .find_map(|rendered_row| {
+            let info = rendered_row_info(screen, rendered_row)?;
+            info.row
+                .prompt_start
+                .then(|| prompt_ref_for_rendered_row(screen, info))
+        })
+}
+
+/// The two disjoint runs of document rows a screen currently holds: the
+/// retained completed blocks, then the active block.
+fn document_row_runs(screen: &Screen) -> [std::ops::Range<u64>; 2] {
+    let completed_base = screen.rendered_row_base;
+    let completed_end = completed_base + screen::completed_block_rendered_rows_len(screen);
+    let active_base = screen::active_block_document_base(screen);
+    let active_end = active_base + screen::active_block_rendered_rows_len(screen) as u64;
+    [completed_base..completed_end, active_base..active_end]
 }
 
 /// Return the absolute row where the command block ends.
@@ -857,38 +873,35 @@ pub fn command_block_for_screen_row<'a>(
 /// Find the nearest matching command block before a rendered document row.
 pub fn previous_command_block_matching(
     document: &CommandBlockDocument,
-    rendered_top: usize,
+    rendered_top: u64,
     keep: impl Fn(&CommandBlockView) -> bool,
 ) -> Option<&CommandBlockView> {
     document
         .blocks
         .iter()
         .filter(|block| keep(block))
-        .filter(|block| (block.prompt.rendered_row as usize) < rendered_top)
+        .filter(|block| block.prompt.rendered_row < rendered_top)
         .max_by_key(|block| block.prompt.rendered_row)
 }
 
 /// Find the next command block after a rendered document row.
 pub fn next_command_block_after(
     document: &CommandBlockDocument,
-    rendered_top: usize,
+    rendered_top: u64,
 ) -> Option<&CommandBlockView> {
     document
         .blocks
         .iter()
-        .find(|block| (block.prompt.rendered_row as usize) > rendered_top)
+        .find(|block| block.prompt.rendered_row > rendered_top)
 }
 
 fn command_block_prompts(screen: &Screen) -> Vec<PromptRef> {
     // The completed blocks and the active block are two disjoint runs of
     // document rows: the active block's numbering skips ahead by the rows its
     // grid has recycled, so walking a single 0..len range would miss it.
-    let completed_base = screen.rendered_row_base;
-    let completed_end = completed_base + screen::completed_block_rendered_rows_len(screen);
-    let active_base = screen::active_block_document_base(screen);
-    let active_end = active_base + screen::active_block_rendered_rows_len(screen) as u64;
-    (completed_base..completed_end)
-        .chain(active_base..active_end)
+    document_row_runs(screen)
+        .into_iter()
+        .flatten()
         .filter_map(|rendered_row| {
             let info = rendered_row_info(screen, rendered_row)?;
             info.row
@@ -1547,16 +1560,14 @@ mod tests {
             Some(first.prompt)
         );
         assert_eq!(
-            previous_command_block_matching(
-                &document,
-                second.prompt.rendered_row as usize,
-                |block| block.state == CommandBlockState::Succeeded,
-            )
+            previous_command_block_matching(&document, second.prompt.rendered_row, |block| {
+                block.state == CommandBlockState::Succeeded
+            })
             .map(|block| block.prompt),
             Some(first.prompt)
         );
         assert_eq!(
-            next_command_block_after(&document, first.prompt.rendered_row as usize)
+            next_command_block_after(&document, first.prompt.rendered_row)
                 .map(|block| block.prompt),
             Some(second.prompt)
         );

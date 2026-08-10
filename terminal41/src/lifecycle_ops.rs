@@ -113,9 +113,9 @@ fn scroll_to_prev_prompt_matching(
     document: &prompt::CommandBlockDocument,
     keep: impl Fn(&prompt::CommandBlockView) -> bool,
 ) {
-    let top = rendered_viewport_top(screen, viewport);
+    let top = document_viewport_top(screen, viewport);
     if let Some(block) = prompt::previous_command_block_matching(document, top, keep) {
-        scroll_rendered_row_to_viewport_top(screen, viewport, block.prompt.rendered_row as usize);
+        scroll_document_row_to_viewport_top(screen, viewport, block.prompt.rendered_row);
     }
 }
 
@@ -124,13 +124,14 @@ pub(crate) fn scroll_to_next_prompt(
     viewport: &Viewport,
     document: &prompt::CommandBlockDocument,
 ) {
-    let top = rendered_viewport_top(screen, viewport);
+    let top = document_viewport_top(screen, viewport);
     if let Some(block) = prompt::next_command_block_after(document, top) {
-        scroll_rendered_row_to_viewport_top(screen, viewport, block.prompt.rendered_row as usize);
+        scroll_document_row_to_viewport_top(screen, viewport, block.prompt.rendered_row);
     }
 }
 
-fn rendered_viewport_top(
+/// Local row currently drawn at the top of the viewport.
+fn local_viewport_top(
     screen: &Screen,
     viewport: &Viewport,
 ) -> usize {
@@ -139,17 +140,34 @@ fn rendered_viewport_top(
     max_top.saturating_sub(screen.offset as usize)
 }
 
-fn scroll_rendered_row_to_viewport_top(
+/// Document row currently drawn at the top of the viewport.
+///
+/// Command blocks are addressed by document row, so comparing them against a
+/// local row silently stops matching anything as soon as the screen has evicted
+/// a block or recycled an active-grid row.
+fn document_viewport_top(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> u64 {
+    let local_top = local_viewport_top(screen, viewport);
+    screen::document_row_for_local_row(screen, viewport, local_top)
+        .unwrap_or(screen.rendered_row_base)
+}
+
+fn scroll_document_row_to_viewport_top(
     screen: &mut Screen,
     viewport: &Viewport,
-    target: usize,
+    target: u64,
 ) {
     if screen::page_memory_active(screen) {
         return;
     }
+    let Some(local_target) = screen::local_row_for_document_row(screen, viewport, target) else {
+        return;
+    };
     let rendered_len = screen::rendered_rows_len_for_viewport(screen, viewport);
     let max_top = rendered_len.saturating_sub(viewport.rows as usize);
-    let top = target.min(max_top);
+    let top = local_target.min(max_top);
     let offset = max_top.saturating_sub(top) as u32;
     let max_offset = screen::rendered_scrollback_len(screen, viewport);
     screen.offset = offset.min(max_offset);
@@ -860,21 +878,21 @@ mod tests {
     fn previous_prompt_row(
         term: &TestTerm,
         keep: impl Fn(&prompt::CommandBlockView) -> bool,
-    ) -> usize {
-        let top = rendered_viewport_top(&term.inner.active, &term.inner.viewport);
+    ) -> u64 {
+        let top = document_viewport_top(&term.inner.active, &term.inner.viewport);
         let document =
             prompt::command_block_document(&term.inner.active, &term.metadata.command_metas);
         prompt::previous_command_block_matching(&document, top, keep)
-            .map(|block| block.prompt.rendered_row as usize)
+            .map(|block| block.prompt.rendered_row)
             .expect("matching previous prompt")
     }
 
     fn assert_top_is(
         term: &TestTerm,
-        row: usize,
+        row: u64,
     ) {
         assert_eq!(
-            rendered_viewport_top(&term.inner.active, &term.inner.viewport),
+            document_viewport_top(&term.inner.active, &term.inner.viewport),
             row
         );
     }
@@ -1094,6 +1112,45 @@ mod tests {
         scroll_to_prev_successful_command(&mut term.inner.active, &term.inner.viewport, &document);
 
         assert_top_is(&term, target);
+    }
+
+    /// Prompt navigation compares the viewport top against prompt rows, and
+    /// those are document rows. Once the screen has evicted a block the two
+    /// row spaces no longer coincide, and comparing the local top against
+    /// them put every prompt out of reach: nothing was ever "above" the
+    /// viewport, so the jump silently did nothing.
+    #[test]
+    fn prompt_navigation_still_walks_after_blocks_are_evicted() {
+        let mut term = TestTerm::new(10, 4, 20, 16, 8);
+        for command in 0..20 {
+            emit_prompt(&mut term, &format!("$ cmd{command}"), 3, 0);
+        }
+        assert!(
+            term.active.rendered_row_base > 0,
+            "test needs blocks to have been evicted"
+        );
+
+        let mut offsets = Vec::new();
+        for _ in 0..3 {
+            let document =
+                prompt::command_block_document(&term.inner.active, &term.metadata.command_metas);
+            let target = previous_prompt_row(&term, |_| true);
+            scroll_to_prev_prompt(&mut term.inner.active, &term.inner.viewport, &document);
+            assert_top_is(&term, target);
+            offsets.push(term.active.offset);
+        }
+        assert!(
+            offsets.windows(2).all(|pair| pair[1] > pair[0]),
+            "each jump should move further up: {offsets:?}"
+        );
+
+        let document =
+            prompt::command_block_document(&term.inner.active, &term.metadata.command_metas);
+        scroll_to_next_prompt(&mut term.inner.active, &term.inner.viewport, &document);
+        assert!(
+            term.active.offset < offsets[offsets.len() - 1],
+            "the next-prompt jump should come back down"
+        );
     }
 
     #[test]
