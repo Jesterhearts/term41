@@ -576,84 +576,9 @@ pub(crate) fn esc_apply(
         }
     }
 }
-
-#[cfg(test)]
-#[bon::builder]
-pub(crate) fn esc_dispatch(
-    screen: &mut Screen,
-    stash: &mut Screen,
-    viewport: &mut Viewport,
-    on_alt_screen: &mut bool,
-    modes: &mut TerminalModes,
-    kitty_keyboard: &mut KittyKeyboardState,
-    default_cursor_style: CursorStyle,
-    cursor_style: &mut CursorStyle,
-    saved_alt_cursor_style: &mut Option<CursorStyle>,
-    current_title: &mut Option<String>,
-    title_stack: &mut Vec<Option<String>>,
-    saved_modes: &mut std::collections::HashMap<mode::PrivateMode, bool>,
-    current_prompt_row: &mut Option<u64>,
-    shell_integration_phase: &mut ShellIntegrationPhase,
-    bell_pending: &mut bool,
-    palette: &mut ColorPalette,
-    base_palette: &ColorPalette,
-    dec_color: &mut DecColorState,
-    default_status_display: &mut StatusDisplayKind,
-    pending_output: &mut Vec<u8>,
-    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
-    macros: &mut MacroStore,
-    udks: &mut UdkState,
-    drcs: &mut DrcsStore,
-    intermediates: &[u8],
-    byte: u8,
-) {
-    let action = esc_parse(modes, drcs, intermediates, byte);
-    esc_apply()
-        .action(action)
-        .screen(screen)
-        .stash(stash)
-        .viewport(viewport)
-        .on_alt_screen(on_alt_screen)
-        .modes(modes)
-        .kitty_keyboard(kitty_keyboard)
-        .default_cursor_style(default_cursor_style)
-        .cursor_style(cursor_style)
-        .saved_alt_cursor_style(saved_alt_cursor_style)
-        .current_title(current_title)
-        .title_stack(title_stack)
-        .saved_modes(saved_modes)
-        .current_prompt_row(current_prompt_row)
-        .shell_integration_phase(shell_integration_phase)
-        .bell_pending(bell_pending)
-        .palette(palette)
-        .base_palette(base_palette)
-        .dec_color(dec_color)
-        .default_status_display(default_status_display)
-        .pending_output(pending_output)
-        .vt52_cursor_addr(vt52_cursor_addr)
-        .macros(macros)
-        .udks(udks)
-        .drcs(drcs)
-        .call();
-}
-
 #[cfg(test)]
 mod tests {
-    use config41::default_bg;
-    use config41::default_fg;
-    use vtepp::Action;
-    use vtepp::Parser;
-
     use super::*;
-    use crate::FeaturePermissions;
-    use crate::dec::color::effective_palette;
-    use crate::dec_color_state_from_palette;
-    use crate::parser::csi_dispatch;
-    use crate::parser::execute;
-    use crate::parser::put_8bit_byte;
-    use crate::parser::put_ascii_run;
-    use crate::parser::put_printable;
-    use crate::parser::put_text_run;
     use crate::parser::test_support::*;
 
     fn set_cursor_col(
@@ -960,135 +885,14 @@ mod tests {
     #[test]
     fn scs_gr_translation_applies_to_split_utf8_codepoint() {
         let (mut screen, mut viewport) = setup();
-        let base_pal = ColorPalette::default();
-        let mut dec_color = dec_color_state_from_palette(&base_pal);
-        let mut pal = effective_palette(&base_pal, &dec_color);
-        let mut parser = Parser::new();
-        let mut stash = Screen::new(
-            viewport.cols,
-            viewport.rows,
-            0,
-            default_fg(),
-            default_bg(),
-            default_fg(),
-            default_bg(),
-        );
-        let mut on_alt_screen = false;
-        let mut modes = TerminalModes::new();
-        let mut kitty_keyboard = KittyKeyboardState::new();
-        let mut pending_output = Vec::new();
-        let mut pending_resize = None;
-        let default_cursor_style = CursorStyle::default();
-        let mut cursor_style = CursorStyle::default();
-        let mut saved_alt_cursor_style = None;
-        let mut bell_pending = false;
-        let mut current_title = None;
-        let mut title_stack = Vec::new();
-        let mut saved_modes = std::collections::HashMap::new();
-        let mut current_prompt_row = None;
-        let mut shell_integration_phase = ShellIntegrationPhase::None;
-        let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-        let mut default_status_display = StatusDisplayKind::None;
-        let feature_permissions = FeaturePermissions::default();
-        let mut macros = MacroStore::default();
-        let mut drcs = DrcsStore::default();
-        let mut udks = UdkState::default();
 
-        for chunk in [b"\x1b)>\x1b~\xc3".as_slice(), b"\xa1".as_slice()] {
-            for action in parser.parse(chunk) {
-                match action {
-                    Action::PrintAscii(run) => {
-                        put_ascii_run(&mut screen, &viewport, run, modes.insert_mode)
-                    }
-                    Action::PrintText(run) => {
-                        put_text_run(&mut screen, &viewport, run, modes.insert_mode)
-                    }
-                    Action::Print(s) => put_printable(&mut screen, &viewport, s, modes.insert_mode),
-                    Action::Print8Bit(byte) => {
-                        put_8bit_byte(&mut screen, &viewport, byte, modes.insert_mode)
-                    }
-                    Action::Execute(b) => execute(
-                        &mut screen,
-                        &viewport,
-                        b,
-                        &mut bell_pending,
-                        modes.newline_mode,
-                    ),
-                    Action::CsiDispatch {
-                        params,
-                        intermediates,
-                        action,
-                    } => {
-                        csi_dispatch()
-                            .screen(&mut screen)
-                            .stash(&mut stash)
-                            .viewport(&mut viewport)
-                            .on_alt_screen(&mut on_alt_screen)
-                            .modes(&mut modes)
-                            .kitty_keyboard(&mut kitty_keyboard)
-                            .pending_output(&mut pending_output)
-                            .pending_resize(&mut pending_resize)
-                            .default_cursor_style(default_cursor_style)
-                            .cursor_style(&mut cursor_style)
-                            .saved_alt_cursor_style(&mut saved_alt_cursor_style)
-                            .cell_width(8)
-                            .cell_height(16)
-                            .palette(&mut pal)
-                            .base_palette(&base_pal)
-                            .dec_color(&mut dec_color)
-                            .default_status_display(&mut default_status_display)
-                            .title_stack(&mut title_stack)
-                            .current_title(&mut current_title)
-                            .saved_modes(&mut saved_modes)
-                            .current_prompt_row(&mut current_prompt_row)
-                            .bell_pending(&mut bell_pending)
-                            .vt52_cursor_addr(&mut vt52_cursor_addr)
-                            .macros(&mut macros)
-                            .drcs(&mut drcs)
-                            .params(&params)
-                            .intermediates(intermediates.as_slice())
-                            .action(action)
-                            .feature_permissions(&feature_permissions)
-                            .udks(&mut udks)
-                            .call();
-                    }
-                    Action::EscDispatch {
-                        intermediates,
-                        byte,
-                    } => {
-                        esc_dispatch()
-                            .screen(&mut screen)
-                            .stash(&mut stash)
-                            .viewport(&mut viewport)
-                            .on_alt_screen(&mut on_alt_screen)
-                            .modes(&mut modes)
-                            .kitty_keyboard(&mut kitty_keyboard)
-                            .default_cursor_style(default_cursor_style)
-                            .cursor_style(&mut cursor_style)
-                            .saved_alt_cursor_style(&mut saved_alt_cursor_style)
-                            .current_title(&mut current_title)
-                            .title_stack(&mut title_stack)
-                            .saved_modes(&mut saved_modes)
-                            .current_prompt_row(&mut current_prompt_row)
-                            .shell_integration_phase(&mut shell_integration_phase)
-                            .bell_pending(&mut bell_pending)
-                            .palette(&mut pal)
-                            .base_palette(&base_pal)
-                            .dec_color(&mut dec_color)
-                            .default_status_display(&mut default_status_display)
-                            .pending_output(&mut pending_output)
-                            .vt52_cursor_addr(&mut vt52_cursor_addr)
-                            .macros(&mut macros)
-                            .drcs(&mut drcs)
-                            .intermediates(intermediates.as_slice())
-                            .byte(byte)
-                            .udks(&mut udks)
-                            .call();
-                    }
-                    _ => {}
-                }
-            }
-        }
+        // Two chunks so the UTF-8 codepoint is split across a PTY read
+        // boundary, which is what this is actually testing.
+        feed_chunks(
+            &[b"\x1b)>\x1b~\xc3".as_slice(), b"\xa1".as_slice()],
+            &mut screen,
+            &mut viewport,
+        );
 
         let r = screen.grid.active_row_index(&screen.cursor, &viewport);
         assert_eq!(screen.grid.rows[r].cells[0].as_str(), "\u{03B1}");

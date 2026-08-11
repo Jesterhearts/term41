@@ -110,6 +110,45 @@ impl TestTerm {
         (self.inner.active.cursor.row, self.inner.active.cursor.col)
     }
 
+    pub fn cursor_row(&self) -> u32 {
+        self.inner.active.cursor.row
+    }
+
+    pub fn cursor_col(&self) -> u32 {
+        self.inner.active.cursor.col
+    }
+
+    /// Current scroll region as `(top, bottom)`, both inclusive and 0-based.
+    pub fn scroll_region(&self) -> (u32, u32) {
+        (
+            self.inner.active.scroll_top,
+            self.inner.active.scroll_bottom,
+        )
+    }
+
+    pub fn app_cursor_keys(&self) -> bool {
+        self.inner.active.app_cursor_keys
+    }
+
+    pub fn autowrap(&self) -> bool {
+        self.inner.active.autowrap
+    }
+
+    /// Row at an absolute grid index, counting from the top of scrollback.
+    pub fn grid_row(
+        &self,
+        index: usize,
+    ) -> &Row {
+        &self.inner.active.grid.rows[index]
+    }
+
+    pub fn grid_row_mut(
+        &mut self,
+        index: usize,
+    ) -> &mut Row {
+        &mut self.inner.active.grid.rows[index]
+    }
+
     pub fn hyperlink_at(
         &self,
         row: u32,

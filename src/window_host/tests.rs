@@ -16,6 +16,7 @@ use terminal41::prompt::CommandTextSource;
 use terminal41::prompt::PromptRef;
 use terminal41::prompt::command_block_document;
 use terminal41::selection::open_search;
+use terminal41::view;
 use winit::event::ElementState;
 use winit::event::MouseButton;
 use winit::keyboard::Key;
@@ -316,13 +317,13 @@ mod viewport_reset_tests {
         let first = output.read().clone();
         let first_generations: Vec<u64> = first.rows.iter().map(|row| row.generation).collect();
 
-        terminal.active.offset = 1;
+        view::set_viewport_offset(&mut terminal.active, 1);
         reset_viewport_and_invalidate(&mut terminal);
         terminal41::publish_terminal_snapshot(&mut terminal, &mut publisher);
         output.update();
         let snap = output.read().clone();
 
-        assert_eq!(terminal.active.offset, 0);
+        assert_eq!(view::viewport_offset(&terminal.active), 0);
         assert!(!snap.reset_cached_rows);
         assert!(
             snap.rows
@@ -455,8 +456,8 @@ mod command_editor_context_tests {
 
         term.process(b"\x1b[?1h\x1b=");
 
-        assert!(term.active.app_cursor_keys);
-        assert!(term.active.app_keypad);
+        assert!(view::app_cursor_keys(&term.active));
+        assert!(view::app_keypad(&term.active));
         assert_eq!(
             command_editor_view_context(&term),
             Some(CommandEditorContext { current_dir: None })
@@ -492,19 +493,19 @@ mod command_editor_context_tests {
             COMMAND_EDITOR_BOX_ROWS
         );
 
-        term.active.cursor.row = 23;
+        term.process(b"\x1b[24;1H");
         assert_eq!(
             command_editor_terminal_row_offset(&term, true),
             COMMAND_EDITOR_BOX_ROWS
         );
 
-        term.active.cursor.row = 21;
+        term.process(b"\x1b[22;1H");
         assert_eq!(
             command_editor_terminal_row_offset(&term, true),
             COMMAND_EDITOR_BOX_ROWS
         );
 
-        term.active.cursor.row = 20;
+        term.process(b"\x1b[21;1H");
         assert_eq!(
             command_editor_terminal_row_offset(&term, true),
             COMMAND_EDITOR_BOX_ROWS
@@ -523,9 +524,9 @@ mod command_editor_context_tests {
             COMMAND_EDITOR_BOX_ROWS
         );
 
-        term.active.offset = 1;
+        view::set_viewport_offset(&mut term.active, 1);
         assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
-        term.active.offset = 0;
+        view::set_viewport_offset(&mut term.active, 0);
 
         open_search(&mut term.search);
         assert_eq!(command_editor_terminal_row_offset(&term, true), 0);

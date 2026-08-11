@@ -68,8 +68,8 @@ fn command_editor_hidden_by_running_command(terminal: &Terminal) -> bool {
     }
     terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Command
         && (host::mouse_tracking_enabled(terminal.modes.mouse_tracking)
-            || terminal.active.app_cursor_keys
-            || terminal.active.app_keypad)
+            || view::app_cursor_keys(&terminal.active)
+            || view::app_keypad(&terminal.active))
 }
 
 pub(crate) fn command_editor_input_context(
@@ -91,7 +91,7 @@ pub(crate) fn command_editor_visible_for_terminal(
     command_editor_open: bool,
 ) -> bool {
     command_editor_open
-        && terminal.active.offset == 0
+        && view::viewport_offset(&terminal.active) == 0
         && !search_active(&terminal.search)
         && command_editor_view_context(terminal).is_some()
 }

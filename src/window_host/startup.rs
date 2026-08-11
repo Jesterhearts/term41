@@ -73,7 +73,13 @@ pub(crate) fn send(
     render: &mut RenderRuntime,
     ev: RenderEvent,
 ) {
-    let _ = render.event_tx.push(ev);
+    // A full ring drops the event outright, which for these variants means a
+    // user action vanishing with no other symptom. Log it so the cause is
+    // recoverable from the session log instead of looking like a broken
+    // keybinding.
+    if let Err(dropped) = render.event_tx.push(ev) {
+        warn!("render event queue full; dropped {dropped:?}");
+    }
     if let Some(thread) = render.thread_handle.get() {
         thread.unpark();
     }
@@ -875,6 +881,10 @@ pub(crate) fn notify_interaction_changed(
     window: Option<&Arc<Window>>,
 ) {
     publish_active_input_snapshot(input);
+    // Deliberately silent, unlike `send`: this pushes nothing but a wakeup
+    // nudge, and a full ring already means the render thread has work queued
+    // and will be unparked below regardless. Warning here would also feed the
+    // log-toast forwarder, which lands back in this function.
     let _ = render.event_tx.push(RenderEvent::None);
     if let Some(thread) = render.thread_handle.get() {
         thread.unpark();
@@ -1203,6 +1213,19 @@ pub(crate) fn request_permission(
     feature: String,
     response_tx: mpsc::Sender<PermissionDecision>,
 ) {
+    // With no GPU renderer coming, the software presenter is what the user
+    // sees, and it has no permission-modal painter. Denying is the safe
+    // resolution -- the alternative is a prompt that is waiting on an answer
+    // to a question nobody can read.
+    if host.startup.gpu_unavailable {
+        error!(
+            "permission: denying \"{feature}\" because software rendering cannot display the \
+             permission prompt"
+        );
+        let _ = response_tx.send(PermissionDecision::Deny);
+        return;
+    }
+
     let request = PermissionRequest {
         feature,
         response_tx,

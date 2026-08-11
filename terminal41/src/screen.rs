@@ -128,10 +128,10 @@ impl StatusLine {
 #[derive(Debug)]
 pub struct Screen {
     /// Backing rows, including visible rows and scrollback.
-    pub grid: Grid,
+    pub(crate) grid: Grid,
     /// Completed primary-screen command blocks. The writable active block is
     /// `grid`; alternate screens keep this empty and behave as a single block.
-    pub scrollback_blocks: Vec<CommandBlock>,
+    pub(crate) scrollback_blocks: Vec<CommandBlock>,
     /// Rendered-document row number of the first row of the first retained
     /// command block.
     ///
@@ -139,95 +139,95 @@ pub struct Screen {
     /// hold onto, so evicting an old block must not renumber the blocks behind
     /// it. Each eviction advances this base by the rows the block occupied,
     /// leaving every surviving row's number untouched.
-    pub rendered_row_base: u64,
+    pub(crate) rendered_row_base: u64,
     /// Whether `grid` is an explicit shell-integration command block.
-    pub active_command_block_started: bool,
+    pub(crate) active_command_block_started: bool,
     /// Cursor position within the active visible display.
-    pub cursor: Cursor,
+    pub(crate) cursor: Cursor,
     /// Current foreground color for new cell writes.
-    pub fg: Srgb<u8>,
+    pub(crate) fg: Srgb<u8>,
     /// Current background color for new cell writes.
-    pub bg: Srgb<u8>,
+    pub(crate) bg: Srgb<u8>,
     /// Current text attributes (bold/italic/strikethrough) applied to new cell
     /// writes. Managed via SGR — updated by `apply_sgr`, snapshotted into
     /// `SavedCursor` on DECSC.
-    pub attrs: CellAttrs,
+    pub(crate) attrs: CellAttrs,
     /// Current underline color override. `None` = use foreground color.
-    pub underline_color: Option<Srgb<u8>>,
+    pub(crate) underline_color: Option<Srgb<u8>>,
     /// Top row of the scroll region (0-indexed, inclusive).
-    pub scroll_top: u32,
+    pub(crate) scroll_top: u32,
     /// Bottom row of the scroll region (0-indexed, inclusive).
-    pub scroll_bottom: u32,
+    pub(crate) scroll_bottom: u32,
     /// Left column of the horizontal margin region (0-indexed, inclusive).
     /// Only active when DECLRMM (mode 69) is set.
-    pub left_margin: u32,
+    pub(crate) left_margin: u32,
     /// Right column of the horizontal margin region (0-indexed, inclusive).
     /// Only active when DECLRMM (mode 69) is set.
-    pub right_margin: u32,
+    pub(crate) right_margin: u32,
     /// Viewport scroll-back offset. 0 = viewing the live terminal,
     /// positive = scrolled into history. Alt screens keep this at 0 since
     /// their grid has no scrollback.
-    pub offset: u32,
+    pub(crate) offset: u32,
     /// Images placed on this screen, keyed by terminal-local image id.
-    pub images: BTreeMap<u64, PlacedImage>,
+    pub(crate) images: BTreeMap<u64, PlacedImage>,
     /// Saved cursor slot for DECSC/DECRC and related private modes.
-    pub saved_cursor: Option<SavedCursor>,
+    pub(crate) saved_cursor: Option<SavedCursor>,
     /// Hyperlink id currently associated with new cell writes (set by OSC 8).
     /// Lives on the screen, not the terminal, so a link span open on the
     /// primary screen doesn't bleed into the alt screen and vice versa.
-    pub current_hyperlink: Option<HyperlinkId>,
+    pub(crate) current_hyperlink: Option<HyperlinkId>,
     /// DECTCEM (`?25`) cursor visibility. `true` by default (xterm's initial
     /// state); an app hides the cursor with `CSI ? 25 l` and restores it with
     /// `CSI ? 25 h`. Per-screen so an alt-screen full-screen TUI that hides
     /// the cursor doesn't leave the primary screen hidden on exit.
-    pub cursor_visible: bool,
+    pub(crate) cursor_visible: bool,
     /// Last character placed by `put_char` or `put_ascii_run`, used by REP
     /// (`CSI Ps b`) to repeat the preceding graphic character.
-    pub last_char: Option<SmolStr>,
+    pub(crate) last_char: Option<SmolStr>,
     /// Per-column tab stops. `tab_stops[c]` is `true` when column `c` is a
     /// tab stop. Defaults to every 8 columns (8, 16, 24, ...).
-    pub tab_stops: Vec<bool>,
+    pub(crate) tab_stops: Vec<bool>,
     /// DECOM — when set, cursor addressing (CUP, VPA) is relative to the
     /// scroll region rather than the full screen. Homes the cursor on toggle.
-    pub origin_mode: bool,
+    pub(crate) origin_mode: bool,
     /// `true` when DECNRCM is active and NRC designations should replace
     /// their ASCII positions.
-    pub nrc_mode: bool,
+    pub(crate) nrc_mode: bool,
     /// Current user-preferred supplemental set for `<` designations and
     /// DECRQUPSS reporting.
-    pub upss: UserPreferredSupplementalSet,
+    pub(crate) upss: UserPreferredSupplementalSet,
     /// Designated sets plus GL/GR invocation state for DEC/ISO-2022-style
     /// character-set handling.
-    pub charset: CharsetState,
+    pub(crate) charset: CharsetState,
     /// DECAWM (`?7`) — when true (default), printing past the right margin
     /// wraps to the next line. When false, the cursor stays at the right
     /// margin and overwrites the last column.
-    pub autowrap: bool,
+    pub(crate) autowrap: bool,
     /// DECCKM (`?1`) — when true, unmodified arrow keys send SS3 form
     /// (ESC O A/B/C/D) instead of CSI form (ESC [ A/B/C/D). Modified
     /// arrows still use the CSI modifier form. Default is false (normal
     /// cursor keys).
-    pub app_cursor_keys: bool,
+    pub(crate) app_cursor_keys: bool,
     /// DECSACE — whether DECCARA/DECRARA operate on a stream of character
     /// positions or on the full rectangular area.
-    pub attr_change_extent: AttrChangeExtent,
+    pub(crate) attr_change_extent: AttrChangeExtent,
     /// DECKPAM / DECKPNM — when true (application keypad mode), the
     /// numeric keypad sends SS3 sequences instead of their normal
     /// characters. Set by ESC = (DECKPAM) or DECNKM (`?66 h`); cleared
     /// by ESC > (DECKPNM) or DECNKM (`?66 l`).
-    pub app_keypad: bool,
+    pub(crate) app_keypad: bool,
     /// VT420 page-memory state. `None` keeps the legacy "visible rows are
     /// the live tail of the grid" behavior. When present, the visible
     /// screen is an explicit slice of rows within page memory.
-    pub page_memory: Option<PageMemory>,
+    pub(crate) page_memory: Option<PageMemory>,
     /// `DECSASD` — which display surface receives host output.
-    pub active_display: ActiveDisplay,
+    pub(crate) active_display: ActiveDisplay,
     /// `DECSSDT` — whether the status line is absent, emulator-owned, or
     /// host-writable.
-    pub status_display: StatusDisplayKind,
+    pub(crate) status_display: StatusDisplayKind,
     /// Dedicated one-row status-line storage. Present whenever
     /// `status_display != None`.
-    pub status_line: Option<StatusLine>,
+    pub(crate) status_line: Option<StatusLine>,
 }
 
 impl Screen {
@@ -550,7 +550,7 @@ pub(super) fn retain_images(
     screen.images.retain(|_, img| keep(img));
 }
 
-pub(super) fn rendered_rows_len_for_viewport(
+pub(crate) fn rendered_rows_len_for_viewport(
     screen: &Screen,
     viewport: &Viewport,
 ) -> usize {
@@ -704,7 +704,7 @@ pub(super) fn completed_block_rendered_rows_len(screen: &Screen) -> u64 {
         .sum()
 }
 
-pub(super) fn command_block_rendered_rows_len(block: &CommandBlock) -> usize {
+pub(crate) fn command_block_rendered_rows_len(block: &CommandBlock) -> usize {
     block.grid.rows.len()
 }
 
@@ -715,7 +715,7 @@ pub(super) fn active_block_rendered_rows_len(screen: &Screen) -> usize {
         .min(screen.grid.rows.len())
 }
 
-pub(super) fn active_block_rendered_rows_len_for_viewport(
+pub(crate) fn active_block_rendered_rows_len_for_viewport(
     screen: &Screen,
     viewport: &Viewport,
 ) -> usize {

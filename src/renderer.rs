@@ -35,12 +35,10 @@ use config41::config;
 use config41::keybindings::Action;
 use font41::FontSystem;
 use parking_lot::Mutex;
-use pty_pipe41::Pty;
 use terminal41::StatusDisplayKind;
-use terminal41::Terminal;
-use terminal41::TerminalThread;
 use terminal41::VisibleImage;
 use terminal41::settings;
+use terminal41::view;
 use tracing::debug_span;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
@@ -49,7 +47,6 @@ use winit::window::Window;
 use crate::APP_START_TIME;
 use crate::INITIAL_COLS;
 use crate::INITIAL_ROWS;
-use crate::output_recording::RecorderControl;
 use crate::renderer::command_editor_config::CommandEditorConfigSync;
 use crate::renderer::command_editor_config::synced_command_editor_config;
 use crate::renderer::frame_state::should_suspend_terminal_area;
@@ -95,11 +92,15 @@ pub(crate) use crate::renderer::ui_state::Toast;
 use crate::scripting::ScriptInput;
 use crate::scripting::ScriptOutput;
 use crate::scripting::ScriptRuntime;
+use crate::session;
+use crate::window_host::ActionOwner;
 use crate::window_host::AppEvent;
 use crate::window_host::InputState;
 use crate::window_host::Tab;
 use crate::window_host::TabId;
+use crate::window_host::action_owner;
 use crate::window_host::command_editor_view_for_input_tab;
+use crate::window_host::report_unhandled_action;
 
 const FRAME_DURATION: Duration = Duration::from_millis(1000 / 60);
 
@@ -112,7 +113,7 @@ const FRAME_DURATION: Duration = Duration::from_millis(1000 / 60);
 /// Only contains types that are small or cheap to clone — the heavyweight
 /// `(Arc<Window>, OwnedDisplayHandle)` for renderer init is sent through a
 /// separate one-shot mpsc channel.
-#[derive(Clone, Default)]
+#[derive(Clone, Debug, Default)]
 pub enum RenderEvent {
     #[default]
     None,
@@ -320,7 +321,7 @@ impl RenderHost {
             self.update_ime_cursor_area();
 
             if self.renderer.is_none() {
-                let prepared_renderer = tracing::debug_span!("prepare_renderer").in_scope(|| {
+                let prepared = tracing::debug_span!("prepare_renderer").in_scope(|| {
                     pollster::block_on(Renderer::prepare(
                         display.clone(),
                         self.config.power_preference,
@@ -330,6 +331,13 @@ impl RenderHost {
                         window.inner_size(),
                     ))
                 });
+                let Some(prepared_renderer) = prepared else {
+                    // Nothing has been handed over yet, so the window thread
+                    // still owns a working software presenter. Leave it in
+                    // place instead of taking the session down with us.
+                    error!("gpu: initialization failed; continuing with software rendering");
+                    self.run_software_loop();
+                };
 
                 let _ = self.proxy.send_event(AppEvent::ReleaseStartupSurface);
                 let startup_tabs = startup_release_rx.recv().ok();
@@ -345,7 +353,7 @@ impl RenderHost {
                         pasted.display()
                     );
                 }
-                self.renderer = Some(tracing::debug_span!("create_renderer").in_scope(|| {
+                let renderer = tracing::debug_span!("create_renderer").in_scope(|| {
                     Renderer::from_prepared(
                         prepared_renderer,
                         window.clone(),
@@ -353,7 +361,14 @@ impl RenderHost {
                         self.config.gutter,
                         self.config.vsync,
                     )
-                }));
+                });
+                let Some(renderer) = renderer else {
+                    // The startup surface was released to make room for this
+                    // one, so there is no longer anything to fall back to.
+                    error!("gpu: cannot create a drawing surface for this window; exiting");
+                    std::process::exit(1);
+                };
+                self.renderer = Some(renderer);
                 if let Some(startup_tabs) = startup_tabs {
                     self.accept_startup_tabs(startup_tabs);
                 }
@@ -369,6 +384,37 @@ impl RenderHost {
                     frames as f64 / APP_START_TIME.get().unwrap().elapsed().as_secs_f64()
                 );
             }
+        }
+
+        std::process::exit(0);
+    }
+
+    /// Service events without a GPU renderer. The window thread keeps
+    /// presenting through its [`StartupPresenter`], so this thread only has to
+    /// drain events, reload config, and track font metrics.
+    ///
+    /// Reached either because the `software-only` feature is enabled or
+    /// because GPU initialization failed before the startup surface was
+    /// released. Note that the software presenter draws terminal content,
+    /// tab bar, gutter, and command editor only -- overlays such as search,
+    /// the command palette, modals, and toasts have no software path.
+    fn run_software_loop(&mut self) -> ! {
+        // Tell the window thread the presenter is now permanent, so UI it
+        // cannot draw degrades instead of waiting to be seen.
+        let _ = self.proxy.send_event(AppEvent::GpuRendererUnavailable);
+
+        loop {
+            std::thread::park();
+            self.drain_render_events();
+            self.drain_child_exit_notifications();
+            self.reload_config_if_requested();
+            self.sync_loaded_font_metrics();
+
+            if self.should_exit || self.event_rx.is_abandoned() {
+                break;
+            }
+
+            self.update_ime_cursor_area();
         }
 
         std::process::exit(0);
@@ -398,21 +444,7 @@ impl RenderHost {
         self.window_size = (initial_size.width, initial_size.height);
         self.handle_resize(initial_size.width, initial_size.height);
 
-        loop {
-            std::thread::park();
-            self.drain_render_events();
-            self.drain_child_exit_notifications();
-            self.reload_config_if_requested();
-            self.sync_loaded_font_metrics();
-
-            if self.should_exit || self.event_rx.is_abandoned() {
-                break;
-            }
-
-            self.update_ime_cursor_area();
-        }
-
-        std::process::exit(0);
+        self.run_software_loop()
     }
 
     fn drain_render_events(&mut self) {
@@ -575,18 +607,16 @@ impl RenderHost {
         &mut self,
         action: Action,
     ) {
+        // The window thread only forwards what it does not own, so anything
+        // arriving here should be render-owned. Checking rather than listing
+        // the window's actions in a do-nothing arm is what keeps a new action
+        // from falling between the two dispatch sites unnoticed.
+        if action_owner(action) != ActionOwner::Render {
+            report_unhandled_action(action, ActionOwner::Window);
+            return;
+        }
+
         match action {
-            Action::ScrollPageUp
-            | Action::ScrollPageDown
-            | Action::Copy
-            | Action::Paste
-            | Action::OpenSearch
-            | Action::ScrollPrevPrompt
-            | Action::ScrollNextPrompt
-            | Action::JumpToPreviousFailed
-            | Action::JumpToPreviousCommand
-            | Action::JumpToPreviousSuccessful
-            | Action::OpenNewWindow => {}
             Action::NewTab => {
                 self.spawn_new_tab();
             }
@@ -610,13 +640,8 @@ impl RenderHost {
             Action::ClearPastedBackground => {
                 self.handle_clear_pasted_background();
             }
-            Action::ToggleOutputRecording
-            | Action::CycleEmojiCompatibility
-            | Action::ToggleCommandEditor
-            | Action::OpenCommandPalette
-            | Action::ClearAllHistory
-            | Action::ClearDirectoryHistory
-            | Action::ClearHistoryEntries => {}
+            // Render-owned but without a handler yet.
+            unhandled => report_unhandled_action(unhandled, ActionOwner::Render),
         }
     }
 
@@ -872,102 +897,47 @@ impl RenderHost {
         };
 
         let scrollback = if let Some(tab) = self.active_tab() {
-            tab.terminal.lock().active.grid.scrollback_limit
+            view::scrollback_limit(&tab.terminal.lock().active)
         } else {
             DEFAULT_SCROLLBACK
         };
-        let mut terminal = Terminal::new(
-            cols,
-            rows,
-            scrollback,
-            self.config.status_line,
-            self.config.feature_permissions.clone(),
-            self.config.limits,
-            self.font_system.cell_height,
-            self.font_system.cell_width,
-            self.config.palette.clone(),
-        );
-        settings::set_emoji_compatibility_mode(
-            &mut terminal.emoji_compatibility_mode,
-            self.config.compatibility.emoji,
-        );
-        settings::set_default_cursor_style(
-            &mut terminal.default_cursor_style,
-            &mut terminal.cursor_style,
-            self.config.cursor_style,
-        );
 
-        let terminal_thread = TerminalThread::new();
-        let term_thread_handle = terminal_thread.thread_handle.clone();
-        let pty_rows = terminal.viewport.rows;
-        let term_features =
-            terminal41::iterm_features::term_features(&self.config.feature_permissions);
-
-        let (pty, writer, pty_reader) = match Pty::spawn(
-            id,
-            cols as u16,
-            pty_rows as u16,
-            self.font_system.cell_width as u16,
-            self.font_system.cell_height as u16,
-            Some(term_features),
-            None,
-            self.config.shell_integration.hooks,
-            cwd,
-            terminal_thread.thread_handle.clone(),
+        let session = match session::spawn_session(
+            session::SessionRequest {
+                id,
+                cols,
+                rows,
+                cell_width: self.font_system.cell_width,
+                cell_height: self.font_system.cell_height,
+                scrollback_lines: scrollback,
+                cwd,
+                command: None,
+                window_sync_epoch: self.window_resize_epoch,
+                startup_redraw: None,
+            },
+            &self.config,
+            self.render_thread_handle.clone(),
+            self.proxy.clone(),
             self.child_exit_tx.clone(),
         ) {
-            Ok(pair) => pair,
+            Ok(session) => session,
             Err(e) => {
                 warn!("failed to spawn new tab: {e}");
                 return;
             }
         };
-        let recorder = RecorderControl::new();
 
-        let (snapshot_publisher, snapshot_output) =
-            terminal41::terminal_snapshot_buffer(&mut terminal);
-        let terminal = Arc::new(Mutex::new(terminal));
-        terminal_thread.spawn(
-            format!("terminal-{}", id.0),
-            terminal.clone(),
-            pty_reader,
-            self.render_thread_handle.clone(),
-            snapshot_publisher,
-            None,
-            Box::new({
-                let recorder = recorder.clone();
-                move |bytes| {
-                    #[cfg(feature = "testonly-perf-ctrl-c")]
-                    crate::perf_ctrl_c::observe_pty_output(id, bytes);
-                    recorder.write_chunk(bytes);
-                }
-            }),
-            Box::new({
-                let proxy = self.proxy.clone();
-                move |effects| {
-                    let _ = proxy.send_event(AppEvent::ApplyTerminalEffects {
-                        tab_id: id,
-                        effects,
-                    });
-                }
-            }),
-        );
+        // The window thread owns the input half, so it arrives there as an
+        // event rather than by direct handoff.
         let _ = self.proxy.send_event(AppEvent::RegisterInputEndpoint {
             tab_id: id,
-            terminal: terminal.clone(),
-            terminal_thread: term_thread_handle,
-            writer,
-            recorder,
+            terminal: session.endpoint.terminal,
+            terminal_thread: session.endpoint.terminal_thread,
+            writer: session.endpoint.writer,
+            recorder: session.endpoint.recorder,
         });
 
-        self.tabs.push(Tab {
-            id,
-            terminal,
-            snapshot_output,
-            pty,
-            window_sync_epoch: self.window_resize_epoch,
-            terminal_thread,
-        });
+        self.tabs.push(session.tab);
         self.active_tab_id = id;
         self.sync_input_state();
         self.sync_active_input_tab();

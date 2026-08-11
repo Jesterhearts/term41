@@ -31,6 +31,7 @@ use winit::keyboard::NamedKey;
 use winit::keyboard::PhysicalKey;
 use winit::window::Window;
 
+use super::ActionOwner;
 use super::AppEvent;
 use super::CommandPaletteArgument;
 use super::CommandPaletteInvocation;
@@ -44,6 +45,7 @@ use super::StartupState;
 use super::TabId;
 use super::WindowHost;
 use super::accept_command_palette_selection;
+use super::action_owner;
 use super::active_input_target;
 use super::cancel_history_confirmation;
 use super::clear_terminal_selection_for_tab;
@@ -78,6 +80,7 @@ use super::open_history_deletion;
 use super::permission_key_decision;
 use super::plain_control_character_key;
 use super::refresh_command_editor_view_for_tab;
+use super::report_unhandled_action;
 use super::request_permission;
 use super::request_window_grid_size;
 use super::scroll_host_history_deletion;
@@ -581,33 +584,38 @@ pub(crate) fn handle_search_key(
             close_search(&mut terminal.search, &mut terminal.selection);
         }
         Key::Named(NamedKey::Backspace) => {
-            terminal.active.offset =
+            let offset =
                 search_backspace(&mut terminal.search, &terminal.active, &terminal.viewport);
+            view::set_viewport_offset(&mut terminal.active, offset);
         }
         Key::Named(NamedKey::Enter) => {
             if shift {
-                terminal.active.offset =
+                let offset =
                     search_step_prev(&mut terminal.search, &terminal.active, &terminal.viewport);
+                view::set_viewport_offset(&mut terminal.active, offset);
             } else {
-                terminal.active.offset =
+                let offset =
                     search_step_next(&mut terminal.search, &terminal.active, &terminal.viewport);
+                view::set_viewport_offset(&mut terminal.active, offset);
             }
         }
         Key::Named(NamedKey::Space) => {
-            terminal.active.offset = search_append(
+            let offset = search_append(
                 &mut terminal.search,
                 &terminal.active,
                 &terminal.viewport,
                 " ",
             );
+            view::set_viewport_offset(&mut terminal.active, offset);
         }
         Key::Character(s) => {
-            terminal.active.offset = search_append(
+            let offset = search_append(
                 &mut terminal.search,
                 &terminal.active,
                 &terminal.viewport,
                 s,
             );
+            view::set_viewport_offset(&mut terminal.active, offset);
         }
         _ => {}
     }
@@ -762,6 +770,12 @@ pub(crate) fn run_local_action(
     action: Action,
     tab_id: TabId,
 ) -> bool {
+    // Render-owned actions are forwarded by the caller. Checking ownership
+    // here rather than listing them in the match below means adding an action
+    // cannot silently land in a do-nothing arm on both threads.
+    if action_owner(action) == ActionOwner::Render {
+        return false;
+    }
     if matches!(action, Action::Copy) {
         stop_selection_drag(&mut host.mouse);
     }
@@ -891,10 +905,6 @@ pub(crate) fn run_local_action(
             spawn_new_window(cwd);
             true
         }
-        Action::CloseWindow => {
-            send(&mut host.render, RenderEvent::Action(Action::CloseWindow));
-            true
-        }
         Action::ToggleOutputRecording => {
             if target.recorder.is_active() {
                 if let Some(path) = target.recorder.stop() {
@@ -911,17 +921,13 @@ pub(crate) fn run_local_action(
             show_toast(host, format!("Emoji compatibility: {}", mode.label()));
             true
         }
-        Action::NewTab
-        | Action::CloseActiveTab
-        | Action::NextTab
-        | Action::PrevTab
-        | Action::PasteAsBackground
-        | Action::ClearPastedBackground
-        | Action::ToggleCommandEditor
-        | Action::OpenCommandPalette
-        | Action::ClearAllHistory
-        | Action::ClearDirectoryHistory
-        | Action::ClearHistoryEntries => false,
+        // Window-owned but without a handler yet. Reported rather than
+        // forwarded: the render thread does not own it either, so passing it
+        // on would only produce a second report there.
+        unhandled => {
+            report_unhandled_action(unhandled, ActionOwner::Window);
+            true
+        }
     }
 }
 
@@ -1133,8 +1139,8 @@ pub(crate) fn handle_key_event(
     let (app_cursor_keys, app_keypad, c1_mode) = {
         let terminal = target.terminal.lock();
         (
-            terminal.active.app_cursor_keys,
-            terminal.active.app_keypad,
+            view::app_cursor_keys(&terminal.active),
+            view::app_keypad(&terminal.active),
             terminal.modes.c1_mode,
         )
     };

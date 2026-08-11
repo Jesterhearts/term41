@@ -93,6 +93,9 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                 }
                 event_loop.set_control_flow(ControlFlow::Wait);
             }
+            AppEvent::GpuRendererUnavailable => {
+                self.startup.gpu_unavailable = true;
+            }
             AppEvent::ApplyTerminalEffects { tab_id, effects } => {
                 apply_terminal_effects(self, tab_id, effects);
             }

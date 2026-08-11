@@ -10,6 +10,7 @@
 use std::str::FromStr;
 
 use serde::Deserialize;
+use strum::VariantArray;
 use winit::keyboard::Key;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
@@ -17,7 +18,7 @@ use winit::keyboard::NamedKey;
 /// Things a keybinding can do. Renamed only with care — the names appear
 /// verbatim in `config.toml` (`action = "ScrollPageUp"`), so changing one
 /// silently breaks user configs.
-#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize)]
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Deserialize, strum::VariantArray)]
 pub enum Action {
     /// Scroll the viewport one screenful into history.
     ScrollPageUp,
@@ -94,33 +95,12 @@ impl Action {
     /// Actions shown by the command palette. This intentionally excludes
     /// [`Action::OpenCommandPalette`] because opening the palette from inside
     /// itself is not a useful command.
-    pub fn command_palette_actions() -> &'static [Action] {
-        &[
-            Action::ScrollPageUp,
-            Action::ScrollPageDown,
-            Action::Copy,
-            Action::Paste,
-            Action::OpenSearch,
-            Action::ScrollPrevPrompt,
-            Action::ScrollNextPrompt,
-            Action::JumpToPreviousFailed,
-            Action::JumpToPreviousCommand,
-            Action::JumpToPreviousSuccessful,
-            Action::OpenNewWindow,
-            Action::NewTab,
-            Action::CloseActiveTab,
-            Action::CloseWindow,
-            Action::NextTab,
-            Action::PrevTab,
-            Action::PasteAsBackground,
-            Action::ClearPastedBackground,
-            Action::ToggleOutputRecording,
-            Action::CycleEmojiCompatibility,
-            Action::ToggleCommandEditor,
-            Action::ClearAllHistory,
-            Action::ClearDirectoryHistory,
-            Action::ClearHistoryEntries,
-        ]
+    pub fn command_palette_actions() -> Vec<Action> {
+        Self::VARIANTS
+            .iter()
+            .copied()
+            .filter(|action| *action != Action::OpenCommandPalette)
+            .collect()
     }
 
     pub fn palette_label(self) -> &'static str {

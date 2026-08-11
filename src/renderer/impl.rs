@@ -295,7 +295,7 @@ impl Renderer {
         background_opacity: f32,
         startup_snapshot_size: (u32, u32),
         size: PhysicalSize<u32>,
-    ) -> PreparedRenderer {
+    ) -> Option<PreparedRenderer> {
         let instance = tracing::debug_span!("create_instance").in_scope(|| {
             let mut desc = wgpu::InstanceDescriptor::new_with_display_handle(Box::new(display));
             #[cfg(not(feature = "vulkan"))]
@@ -323,7 +323,8 @@ impl Renderer {
                     ..Default::default()
                 })
                 .await
-                .expect("request adapter")
+                .inspect_err(|err| error!("gpu: no usable graphics adapter: {err}"))
+                .ok()?
         };
 
         let (device, queue) = {
@@ -342,7 +343,8 @@ impl Renderer {
             adapter
                 .request_device(&descriptor)
                 .await
-                .expect("request device")
+                .inspect_err(|err| error!("gpu: adapter refused a device: {err}"))
+                .ok()?
         };
 
         // Screen size uniform (shared by all pipelines).
@@ -419,7 +421,7 @@ impl Renderer {
             })
         });
 
-        PreparedRenderer {
+        Some(PreparedRenderer {
             instance,
             adapter,
             device,
@@ -432,7 +434,7 @@ impl Renderer {
             image_atlas,
             bg_image_layout,
             background,
-        }
+        })
     }
 
     pub fn from_prepared(
@@ -441,7 +443,7 @@ impl Renderer {
         opacity: f32,
         gutter_enabled: bool,
         vsync: VSync,
-    ) -> Self {
+    ) -> Option<Self> {
         let PreparedRenderer {
             instance,
             adapter,
@@ -458,8 +460,12 @@ impl Renderer {
         } = prepared;
 
         let size = window.inner_size();
-        let surface = tracing::debug_span!("create_surface")
-            .in_scope(|| instance.create_surface(window).expect("create surface"));
+        let surface = tracing::debug_span!("create_surface").in_scope(|| {
+            instance
+                .create_surface(window)
+                .inspect_err(|err| error!("gpu: cannot create a drawing surface: {err}"))
+                .ok()
+        })?;
 
         let surface_caps = surface.get_capabilities(&adapter);
         let preferred_formats = [
@@ -578,7 +584,7 @@ impl Renderer {
             background.resize(&renderer.queue, (size.width, size.height));
         }
 
-        renderer
+        Some(renderer)
     }
 
     pub fn resize(

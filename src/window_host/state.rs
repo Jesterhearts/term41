@@ -83,6 +83,9 @@ pub(crate) enum AppEvent {
         request: KittyFileRequest,
         decision: PermissionDecision,
     },
+    /// The render thread could not initialize a GPU renderer and is staying on
+    /// the software path for the rest of the session.
+    GpuRendererUnavailable,
     DismissRecordingPopup(u64),
     ShowToast(String),
     DismissToast(u64),
@@ -185,6 +188,10 @@ pub(crate) struct StartupState {
     pub(crate) tabs: Vec<Tab>,
     pub(crate) next_redraw: Option<Instant>,
     pub(crate) release_tx: Option<mpsc::SyncSender<Vec<Tab>>>,
+    /// Set once the render thread reports that no GPU renderer is coming, so
+    /// the presenter is the renderer for the rest of the session. UI that the
+    /// presenter cannot draw has to degrade rather than wait to be seen.
+    pub(crate) gpu_unavailable: bool,
 }
 
 pub(crate) struct InputRuntime {

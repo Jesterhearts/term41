@@ -1,3 +1,4 @@
+mod actions;
 mod command_editor;
 mod command_palette;
 mod events;
@@ -7,6 +8,7 @@ mod mouse;
 mod startup;
 mod state;
 
+pub(crate) use actions::*;
 pub(crate) use command_editor::*;
 pub(crate) use command_palette::*;
 pub(crate) use history_deletion::*;

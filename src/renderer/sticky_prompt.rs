@@ -3,6 +3,7 @@ use terminal41::LineAttr;
 use terminal41::RowSnapshot;
 use terminal41::TermSnapshot;
 use terminal41::Terminal;
+use terminal41::view;
 
 pub(super) fn apply_to_snapshot(
     snap: &mut TermSnapshot,
@@ -41,8 +42,8 @@ pub(super) fn row_snapshot(
         return None;
     }
 
-    let top = rendered_document_top(terminal, snap.viewport_rows);
-    let prompt = sticky_prompt_row_at_top(terminal, top)?;
+    let prompt =
+        view::sticky_prompt_above_view(&terminal.active, &terminal.viewport, snap.viewport_rows)?;
     Some(row_snapshot_for_sticky_prompt(
         terminal,
         prompt.row,
@@ -50,133 +51,6 @@ pub(super) fn row_snapshot(
         prompt.active_row,
         sticky_prompt_generation(snap.generation, prompt.rendered_row),
     ))
-}
-
-#[derive(Clone, Copy)]
-struct StickyPromptRow<'a> {
-    rendered_row: u64,
-    active_row: Option<u32>,
-    row: &'a terminal41::Row,
-}
-
-fn sticky_prompt_row_at_top(
-    terminal: &Terminal,
-    top: u32,
-) -> Option<StickyPromptRow<'_>> {
-    let mut idx = top;
-    let mut block_start = terminal.active.rendered_row_base;
-    for block in &terminal.active.scrollback_blocks {
-        let block_rows = block.grid.rows.len() as u32;
-        if idx < block_rows {
-            return sticky_prompt_in_rows(&block.grid.rows, idx, block_start, None);
-        }
-
-        idx -= block_rows;
-        let completed_block_start = block_start;
-        block_start += block_rows as u64;
-        if idx == 0 {
-            return sticky_prompt_in_rows(
-                &block.grid.rows,
-                block_rows,
-                completed_block_start,
-                None,
-            );
-        }
-        idx -= 1;
-        block_start += 1;
-    }
-
-    let active_rows = active_block_rendered_rows_len(terminal) as u32;
-    if idx < active_rows {
-        sticky_prompt_in_rows(
-            &terminal.active.grid.rows,
-            idx,
-            block_start + terminal.active.grid.total_popped as u64,
-            Some(block_start + terminal.active.grid.total_popped as u64),
-        )
-    } else {
-        None
-    }
-}
-
-fn sticky_prompt_in_rows<'a>(
-    rows: &'a std::collections::VecDeque<terminal41::Row>,
-    local_top: u32,
-    block_start: u64,
-    active_block_start: Option<u64>,
-) -> Option<StickyPromptRow<'a>> {
-    let prompt_local = rows
-        .iter()
-        .take(local_top as usize)
-        .rposition(|row| row.prompt_start)?;
-    let rendered_row = block_start + prompt_local as u64;
-    Some(StickyPromptRow {
-        rendered_row,
-        active_row: active_block_start.map(|start| (rendered_row - start) as u32),
-        row: &rows[prompt_local],
-    })
-}
-
-fn rendered_document_top(
-    terminal: &Terminal,
-    viewport_rows: u32,
-) -> u32 {
-    let rendered_len = rendered_rows_len(terminal) as u32;
-    let visible_rows = rendered_len.min(viewport_rows).max(1);
-    let max_top = rendered_len.saturating_sub(visible_rows);
-    max_top.saturating_sub(terminal.active.offset)
-}
-
-fn rendered_rows_len(terminal: &Terminal) -> usize {
-    let completed_rows = terminal
-        .active
-        .scrollback_blocks
-        .iter()
-        .map(|block| block.grid.rows.len() + 1)
-        .sum::<usize>();
-    completed_rows + active_block_rendered_rows_len(terminal)
-}
-
-fn active_block_rendered_rows_len(terminal: &Terminal) -> usize {
-    let cursor_row = active_cursor_row_index(terminal).saturating_add(1);
-    active_grid_content_rows_len(terminal)
-        .max(cursor_row)
-        .max(1)
-        .min(terminal.active.grid.rows.len())
-}
-
-fn active_cursor_row_index(terminal: &Terminal) -> usize {
-    if terminal.active.page_memory.is_some() {
-        return terminal
-            .viewport
-            .top_index(terminal.active.grid.rows.len())
-            .saturating_add(terminal.active.cursor.row as usize);
-    }
-    terminal
-        .active
-        .grid
-        .rows
-        .len()
-        .saturating_sub(terminal.viewport.rows as usize)
-        .saturating_add(terminal.active.cursor.row as usize)
-}
-
-fn active_grid_content_rows_len(terminal: &Terminal) -> usize {
-    terminal
-        .active
-        .grid
-        .rows
-        .iter()
-        .rposition(row_has_visible_content)
-        .map_or(0, |row| row + 1)
-}
-
-fn row_has_visible_content(row: &terminal41::Row) -> bool {
-    row.cells.iter().any(|cell| cell != " ")
-        || row.prompt_start
-        || row.output_start
-        || row.exit_status.is_some()
-        || row.links.iter().any(Option::is_some)
 }
 
 fn row_snapshot_for_sticky_prompt(
@@ -300,8 +174,9 @@ mod tests {
     fn sticky_prompt_is_applied_as_render_snapshot_postprocess() {
         let mut terminal = terminal_with_completed_block();
         let target_top = 4;
-        let max_top = (rendered_rows_len(&terminal) as u32).saturating_sub(terminal.viewport.rows);
-        terminal.active.offset = max_top.saturating_sub(target_top);
+        let max_top = (view::rendered_rows_len(&terminal.active, &terminal.viewport) as u32)
+            .saturating_sub(terminal.viewport.rows);
+        view::set_viewport_offset(&mut terminal.active, max_top.saturating_sub(target_top));
         terminal.invalidate_snapshot_rows();
 
         let mut snap = terminal_snapshot(&mut terminal);
@@ -318,8 +193,9 @@ mod tests {
     #[test]
     fn prompt_row_does_not_stick_when_viewport_starts_on_prompt() {
         let mut terminal = terminal_with_completed_block();
-        let max_top = (rendered_rows_len(&terminal) as u32).saturating_sub(terminal.viewport.rows);
-        terminal.active.offset = max_top;
+        let max_top = (view::rendered_rows_len(&terminal.active, &terminal.viewport) as u32)
+            .saturating_sub(terminal.viewport.rows);
+        view::set_viewport_offset(&mut terminal.active, max_top);
         terminal.invalidate_snapshot_rows();
 
         let snap = terminal_snapshot(&mut terminal);
@@ -330,7 +206,7 @@ mod tests {
     #[test]
     fn sticky_prompt_replaces_separator_at_live_bottom() {
         let mut terminal = terminal_with_completed_block_rows(2);
-        terminal.active.offset = 0;
+        view::set_viewport_offset(&mut terminal.active, 0);
         terminal.invalidate_snapshot_rows();
 
         let mut snap = terminal_snapshot(&mut terminal);
@@ -349,7 +225,7 @@ mod tests {
     #[test]
     fn sticky_prompt_does_not_push_live_cursor_offscreen() {
         let mut terminal = terminal_with_completed_block();
-        terminal.active.offset = 0;
+        view::set_viewport_offset(&mut terminal.active, 0);
         terminal.invalidate_snapshot_rows();
 
         let mut snap = terminal_snapshot(&mut terminal);

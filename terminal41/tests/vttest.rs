@@ -65,10 +65,10 @@ fn pending_wrap_cancelled_by_cursor_movement() {
     for _ in 0..80 {
         t.process(b"X");
     }
-    assert_eq!(t.inner.active.cursor.col, 80);
+    assert_eq!(t.cursor_col(), 80);
     // CUB should cancel pending wrap then move back
     t.process(b"\x1b[D");
-    assert_eq!(t.inner.active.cursor.col, 78);
+    assert_eq!(t.cursor_col(), 78);
 }
 
 #[test]
@@ -93,8 +93,8 @@ fn decstbm_sets_region_and_homes_cursor() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[5;10H"); // move away from home
     t.process(b"\x1b[5;20r"); // scroll region rows 5-20
-    assert_eq!(t.inner.active.scroll_top, 4);
-    assert_eq!(t.inner.active.scroll_bottom, 19);
+    assert_eq!(t.scroll_region().0, 4);
+    assert_eq!(t.scroll_region().1, 19);
     assert_eq!(t.cursor(), (0, 0)); // cursor homed
 }
 
@@ -118,7 +118,7 @@ fn ind_at_scroll_bottom_scrolls_region() {
     t.process(b"\x1b[15;1H"); // back to bottom
     t.process(b"\x1bD"); // IND — should scroll region up
     // cursor stays at row 14 (0-based), region scrolled
-    assert_eq!(t.inner.active.cursor.row, 14);
+    assert_eq!(t.cursor_row(), 14);
 }
 
 #[test]
@@ -127,7 +127,7 @@ fn ri_at_scroll_top_scrolls_region_down() {
     t.process(b"\x1b[10;15r"); // region rows 10-15
     t.process(b"\x1b[10;1H"); // top of region
     t.process(b"\x1bM"); // RI — should scroll region down
-    assert_eq!(t.inner.active.cursor.row, 9);
+    assert_eq!(t.cursor_row(), 9);
 }
 
 // ---------------------------------------------------------------------------
@@ -151,7 +151,7 @@ fn origin_mode_cud_clamps_to_region() {
     t.process(b"\x1b[12;13r"); // tiny 2-line region
     t.process(b"\x1b[?6h"); // origin mode ON
     t.process(b"\x1b[99B"); // CUD 99 — should clamp to scroll_bottom
-    assert_eq!(t.inner.active.cursor.row, 12); // row 13 (1-based) = 12 (0-based)
+    assert_eq!(t.cursor_row(), 12); // row 13 (1-based) = 12 (0-based)
 }
 
 #[test]
@@ -159,7 +159,7 @@ fn origin_mode_decstbm_homes_to_region_top() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[?6h"); // origin mode ON
     t.process(b"\x1b[20;23r"); // region rows 20-23
-    assert_eq!(t.inner.active.cursor.row, 19); // homed to scroll_top
+    assert_eq!(t.cursor_row(), 19); // homed to scroll_top
 }
 
 // ---------------------------------------------------------------------------
@@ -187,8 +187,8 @@ fn decaln_resets_scroll_region() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[5;10r"); // restricted region
     t.process(b"\x1b#8"); // DECALN resets it
-    assert_eq!(t.inner.active.scroll_top, 0);
-    assert_eq!(t.inner.active.scroll_bottom, 23);
+    assert_eq!(t.scroll_region().0, 0);
+    assert_eq!(t.scroll_region().1, 23);
 }
 
 // ---------------------------------------------------------------------------
@@ -329,9 +329,9 @@ fn dl_deletes_lines() {
 fn default_tab_stops_every_8_columns() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[H\t");
-    assert_eq!(t.inner.active.cursor.col, 8);
+    assert_eq!(t.cursor_col(), 8);
     t.process(b"\t");
-    assert_eq!(t.inner.active.cursor.col, 16);
+    assert_eq!(t.cursor_col(), 16);
 }
 
 #[test]
@@ -340,7 +340,7 @@ fn hts_sets_custom_tab_stop() {
     t.process(b"\x1b[1;5H"); // col 4 (0-based)
     t.process(b"\x1bH"); // HTS
     t.process(b"\x1b[1;1H\t"); // tab from col 0
-    assert_eq!(t.inner.active.cursor.col, 4);
+    assert_eq!(t.cursor_col(), 4);
 }
 
 #[test]
@@ -348,7 +348,7 @@ fn tbc_3_clears_all_tab_stops() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[3g"); // clear all
     t.process(b"\x1b[H\t"); // tab with no stops → last col
-    assert_eq!(t.inner.active.cursor.col, 79);
+    assert_eq!(t.cursor_col(), 79);
 }
 
 // ---------------------------------------------------------------------------
@@ -455,11 +455,11 @@ fn osc_1337_capabilities() {
 #[test]
 fn decckm_tracked_by_screen() {
     let mut t = VtTerm::new_80x24();
-    assert!(!t.inner.active.app_cursor_keys);
+    assert!(!t.app_cursor_keys());
     t.process(b"\x1b[?1h");
-    assert!(t.inner.active.app_cursor_keys);
+    assert!(t.app_cursor_keys());
     t.process(b"\x1b[?1l");
-    assert!(!t.inner.active.app_cursor_keys);
+    assert!(!t.app_cursor_keys());
 }
 
 // ---------------------------------------------------------------------------
@@ -486,12 +486,12 @@ fn title_push_pop() {
 fn xtsave_xtrestore_round_trips_mode() {
     let mut t = VtTerm::new_80x24();
     // Default: autowrap on
-    assert!(t.inner.active.autowrap);
+    assert!(t.autowrap());
     t.process(b"\x1b[?7s"); // save mode 7
     t.process(b"\x1b[?7l"); // disable autowrap
-    assert!(!t.inner.active.autowrap);
+    assert!(!t.autowrap());
     t.process(b"\x1b[?7r"); // restore → should be back on
-    assert!(t.inner.active.autowrap);
+    assert!(t.autowrap());
 }
 
 // ---------------------------------------------------------------------------
@@ -522,7 +522,7 @@ fn decawm_off_prevents_wrap() {
     t.process(b"\x1b[?7l"); // disable autowrap
     t.process(b"\x1b[H");
     t.process(b"abcdefghijXY"); // more than 10 cols
-    assert_eq!(t.inner.active.cursor.row, 0); // no wrap
+    assert_eq!(t.cursor_row(), 0); // no wrap
     assert_eq!(t.cell_char(0, 9), 'Y'); // last col overwritten
 }
 
@@ -576,7 +576,7 @@ fn vt_moves_down_like_lf() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[1;1H");
     t.process(b"\x0b"); // VT
-    assert_eq!(t.inner.active.cursor.row, 1);
+    assert_eq!(t.cursor_row(), 1);
 }
 
 #[test]
@@ -584,7 +584,7 @@ fn ff_moves_down_like_lf() {
     let mut t = VtTerm::new_80x24();
     t.process(b"\x1b[1;1H");
     t.process(b"\x0c"); // FF
-    assert_eq!(t.inner.active.cursor.row, 1);
+    assert_eq!(t.cursor_row(), 1);
 }
 
 // ---------------------------------------------------------------------------
@@ -598,7 +598,7 @@ fn bs_inside_csi_executes_and_sequence_completes() {
     // CUF with embedded BS: CSI 2 BS C
     // BS executes (col 9→8), then CUF 2 fires (col 8→10)
     t.process(b"\x1b[2\x08C");
-    assert_eq!(t.inner.active.cursor.col, 10);
+    assert_eq!(t.cursor_col(), 10);
 }
 
 // ---------------------------------------------------------------------------
@@ -693,17 +693,14 @@ fn decaln_clears_row_wrap_and_line_attr_before_border_drawing() {
     let mut t = VtTerm::new_80x24();
 
     t.process(b"\x1b[23;1H\x1b#6");
-    t.inner.active.grid.rows[22].wrapped = true;
-    assert_eq!(
-        t.inner.active.grid.rows[22].line_attr,
-        LineAttr::DoubleWidth
-    );
-    assert!(t.inner.active.grid.rows[22].wrapped);
+    t.grid_row_mut(22).wrapped = true;
+    assert_eq!(t.grid_row(22).line_attr, LineAttr::DoubleWidth);
+    assert!(t.grid_row(22).wrapped);
 
     t.process(b"\x1b#8");
 
-    assert_eq!(t.inner.active.grid.rows[22].line_attr, LineAttr::Normal);
-    assert!(!t.inner.active.grid.rows[22].wrapped);
+    assert_eq!(t.grid_row(22).line_attr, LineAttr::Normal);
+    assert!(!t.grid_row(22).wrapped);
     assert_eq!(t.row_text(22), "E".repeat(80));
 }
 

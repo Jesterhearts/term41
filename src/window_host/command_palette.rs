@@ -65,8 +65,8 @@ pub(crate) fn command_palette_view() -> CommandPaletteView {
 pub(crate) fn command_palette_items(query: &str) -> Vec<CommandPaletteItem> {
     let input = parse_command_palette_input(query);
     let items = Action::command_palette_actions()
-        .iter()
-        .flat_map(|action| command_palette_items_for_action(*action))
+        .into_iter()
+        .flat_map(command_palette_items_for_action)
         .filter(|item| input.argument.is_none() || item.argument.is_some());
     if input.command.is_empty() {
         return sorted_command_palette_items(items);

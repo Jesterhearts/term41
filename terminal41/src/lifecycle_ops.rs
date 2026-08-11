@@ -2,6 +2,7 @@
 
 use std::collections::HashMap;
 use std::collections::HashSet;
+use std::collections::VecDeque;
 use std::time::Instant;
 
 use crate::ColorPalette;
@@ -190,6 +191,92 @@ pub(crate) fn reset_viewport(screen: &mut Screen) {
         return;
     }
     screen.offset = 0;
+}
+
+/// A prompt row governing the row currently at the top of the view.
+///
+/// The renderer pins this row in place so the prompt a command belongs to
+/// stays readable while its output scrolls underneath.
+pub(crate) struct StickyPrompt<'a> {
+    /// The prompt row itself.
+    pub(crate) row: &'a Row,
+    /// Its row number in the rendered document.
+    pub(crate) rendered_row: u64,
+    /// Its row within the active block, when the prompt lives there rather
+    /// than in a completed block.
+    pub(crate) active_row: Option<u32>,
+}
+
+/// Rendered-document row currently shown at the top of the view.
+///
+/// `viewport_rows` is passed separately because the renderer works from a
+/// published snapshot, whose row count can briefly differ from the live
+/// viewport's during a resize.
+pub(crate) fn rendered_view_top(
+    screen: &Screen,
+    viewport: &Viewport,
+    viewport_rows: u32,
+) -> u32 {
+    let rendered_len = screen::rendered_rows_len_for_viewport(screen, viewport) as u32;
+    let visible_rows = rendered_len.min(viewport_rows).max(1);
+    let max_top = rendered_len.saturating_sub(visible_rows);
+    max_top.saturating_sub(screen.offset)
+}
+
+/// Find the closest prompt row at or above the top of the view.
+///
+/// Walks the rendered document in the same order it renders: each completed
+/// command block followed by its separator row, then the active block.
+pub(crate) fn sticky_prompt_above_view<'a>(
+    screen: &'a Screen,
+    viewport: &Viewport,
+    viewport_rows: u32,
+) -> Option<StickyPrompt<'a>> {
+    let mut idx = rendered_view_top(screen, viewport, viewport_rows);
+    let mut block_start = screen.rendered_row_base;
+
+    for block in &screen.scrollback_blocks {
+        let block_rows = screen::command_block_rendered_rows_len(block) as u32;
+        if idx < block_rows {
+            return last_prompt_before(&block.grid.rows, idx, block_start, None);
+        }
+        idx -= block_rows;
+
+        // The separator row after a completed block belongs to no block, so
+        // landing on it means the block's own last row is the top content row.
+        let completed_block_start = block_start;
+        block_start += u64::from(block_rows);
+        if idx == 0 {
+            return last_prompt_before(&block.grid.rows, block_rows, completed_block_start, None);
+        }
+        idx -= 1;
+        block_start += 1;
+    }
+
+    let active_rows = screen::active_block_rendered_rows_len_for_viewport(screen, viewport) as u32;
+    if idx >= active_rows {
+        return None;
+    }
+    let active_start = block_start + screen.grid.total_popped as u64;
+    last_prompt_before(&screen.grid.rows, idx, active_start, Some(active_start))
+}
+
+fn last_prompt_before<'a>(
+    rows: &'a VecDeque<Row>,
+    local_top: u32,
+    block_start: u64,
+    active_block_start: Option<u64>,
+) -> Option<StickyPrompt<'a>> {
+    let prompt_local = rows
+        .iter()
+        .take(local_top as usize)
+        .rposition(|row| row.prompt_start)?;
+    let rendered_row = block_start + prompt_local as u64;
+    Some(StickyPrompt {
+        row: &rows[prompt_local],
+        rendered_row,
+        active_row: active_block_start.map(|start| (rendered_row - start) as u32),
+    })
 }
 
 pub(crate) fn visible_images(

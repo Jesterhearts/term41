@@ -7,6 +7,7 @@ mod output_recording;
 mod perf_ctrl_c;
 mod renderer;
 mod scripting;
+mod session;
 mod window_host;
 
 use std::collections::HashMap;
@@ -23,26 +24,20 @@ use std::time::Duration;
 use std::time::Instant;
 
 use command_catalog::CommandCatalog;
-use commands41::CommandEditor;
-use config41::StatusLineMode;
 use font41::FontSystem;
 use parking_lot::Mutex;
-use pty_pipe41::Pty;
 use renderer::RenderHost;
 use terminal41::PasteMode;
 use terminal41::Terminal;
-use terminal41::TerminalThread;
 use terminal41::prompt::CommandBlockCommand;
 use terminal41::prompt::CommandTextSource;
 use terminal41::prompt::PromptRef;
 use terminal41::prompt::command_block_for_prompt;
-use terminal41::settings;
 use terminal41::view;
 use winit::event_loop::EventLoop;
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::ModifiersState;
 
-use crate::output_recording::RecorderControl;
 use crate::renderer::RenderEvent;
 use crate::renderer::compute_gutter_width;
 use crate::window_host::AppEvent;
@@ -61,7 +56,6 @@ use crate::window_host::RenderRuntime;
 use crate::window_host::SelectionAutoscroll;
 use crate::window_host::SelectionCopySource;
 use crate::window_host::StartupState;
-use crate::window_host::Tab;
 use crate::window_host::TabId;
 use crate::window_host::WindowHost;
 use crate::window_host::WindowMetrics;
@@ -174,9 +168,9 @@ fn install_log_toast_forwarder(proxy: EventLoopProxy<AppEvent>) {
 }
 
 fn reset_viewport_and_invalidate(terminal: &mut Terminal) {
-    let offset = terminal.active.offset;
+    let offset = view::viewport_offset(&terminal.active);
     view::reset_viewport(&mut terminal.active);
-    if terminal.active.offset != offset {
+    if view::viewport_offset(&terminal.active) != offset {
         terminal.invalidate_snapshot_rows();
     }
 }
@@ -462,82 +456,29 @@ fn main() {
         .cloned()
         .and_then(history_runtime::spawn_history_writer);
 
-    // Create the terminal thread handle before spawning the PTY so the PTY
-    // reader can unpark the terminal thread once it starts.
-    let terminal_thread = TerminalThread::new();
-    let term_thread_handle = terminal_thread.thread_handle.clone();
-
-    // Spawn the initial PTY early so the shell starts running immediately.
-    let initial_status_rows = u32::from(config.status_line != StatusLineMode::Off);
-    let initial_main_rows = INITIAL_ROWS.saturating_sub(initial_status_rows);
-    let (pty, pty_writer, pty_reader) = tracing::debug_span!("spawn_pty").in_scope(|| {
-        let term_features = terminal41::iterm_features::term_features(&config.feature_permissions);
-        Pty::spawn(
-            TabId(0),
-            INITIAL_COLS as u16,
-            initial_main_rows as u16,
-            cell_width as u16,
-            cell_height as u16,
-            Some(term_features),
+    // Spawn the initial session early so the shell starts running while the
+    // window and renderer are still being built.
+    let initial_session = session::spawn_session(
+        session::SessionRequest {
+            id: TabId(0),
+            cols: INITIAL_COLS,
+            rows: INITIAL_ROWS,
+            cell_width,
+            cell_height,
+            scrollback_lines: config.scrollback_lines,
+            cwd: None,
             command,
-            config.shell_integration.hooks,
-            None,
-            terminal_thread.thread_handle.clone(),
-            child_exit_tx.clone(),
-        )
-        .expect("failed to spawn PTY")
-    });
-    let initial_recorder = RecorderControl::new();
-
-    let mut terminal = Terminal::new(
-        INITIAL_COLS,
-        INITIAL_ROWS,
-        config.scrollback_lines,
-        config.status_line,
-        config.feature_permissions.clone(),
-        config.limits,
-        cell_height,
-        cell_width,
-        config.palette.clone(),
-    );
-    settings::set_default_cursor_style(
-        &mut terminal.default_cursor_style,
-        &mut terminal.cursor_style,
-        config.cursor_style,
-    );
-    settings::set_emoji_compatibility_mode(
-        &mut terminal.emoji_compatibility_mode,
-        config.compatibility.emoji,
-    );
-    let (snapshot_publisher, snapshot_output) = terminal41::terminal_snapshot_buffer(&mut terminal);
-    let terminal = Arc::new(Mutex::new(terminal));
-
-    terminal_thread.spawn(
-        "terminal-0".into(),
-        terminal.clone(),
-        pty_reader,
+            window_sync_epoch: 0,
+            startup_redraw: Some(Box::new(move || {
+                let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
+            })),
+        },
+        &config,
         render_thread_handle.clone(),
-        snapshot_publisher,
-        Some(Box::new(move || {
-            let _ = startup_redraw_proxy.send_event(AppEvent::RequestStartupRedraw);
-        })),
-        Box::new({
-            let recorder = initial_recorder.clone();
-            move |bytes| {
-                crate::perf_ctrl_c::observe_pty_output(TabId(0), bytes);
-                recorder.write_chunk(bytes);
-            }
-        }),
-        Box::new({
-            let proxy = proxy.clone();
-            move |effects| {
-                let _ = proxy.send_event(AppEvent::ApplyTerminalEffects {
-                    tab_id: TabId(0),
-                    effects,
-                });
-            }
-        }),
-    );
+        proxy.clone(),
+        child_exit_tx.clone(),
+    )
+    .expect("failed to spawn PTY");
 
     let input_state = Arc::new(Mutex::new(InputState {
         keybindings: startup_keybindings,
@@ -563,14 +504,6 @@ fn main() {
         toast: None,
         preedit: None,
     }));
-    let tab = Tab {
-        id: TabId(0),
-        terminal: terminal.clone(),
-        snapshot_output,
-        pty,
-        window_sync_epoch: 0,
-        terminal_thread,
-    };
 
     // Spawn the render thread.
     let config_reload_ = config_reload.clone();
@@ -603,21 +536,13 @@ fn main() {
         window: None,
         startup: StartupState {
             presenter: None,
-            tabs: vec![tab],
+            tabs: vec![initial_session.tab],
             next_redraw: None,
             release_tx: Some(startup_release_tx),
+            gpu_unavailable: false,
         },
         input: InputRuntime {
-            endpoints: HashMap::from([(
-                TabId(0),
-                InputEndpoint {
-                    terminal: terminal.clone(),
-                    terminal_thread: term_thread_handle,
-                    writer: pty_writer,
-                    recorder: initial_recorder,
-                    command_editor: CommandEditor::new(),
-                },
-            )]),
+            endpoints: HashMap::from([(TabId(0), initial_session.endpoint)]),
             active_tab: Some(TabId(0)),
         },
         command: CommandRuntime {

@@ -88,16 +88,6 @@ pub(super) fn status_erase_chars(
     status.row.clear_range(col..end, status.fg, status.bg);
 }
 
-#[cfg(test)]
-pub(crate) fn put_ascii_run(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    run: &[u8],
-    insert_mode: bool,
-) {
-    put_ascii_run_with_scrollback_policy(screen, viewport, run, insert_mode, true);
-}
-
 #[inline(always)]
 pub(crate) fn put_ascii_run_with_scrollback_policy(
     screen: &mut Screen,
@@ -221,35 +211,6 @@ pub(crate) fn translated_codepoint(
     None
 }
 
-#[cfg(test)]
-pub(crate) fn put_printable(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    s: SmolStr,
-    insert_mode: bool,
-) {
-    put_printable_with_scrollback_policy(screen, viewport, s, insert_mode, true);
-}
-
-#[inline(always)]
-#[cfg(test)]
-pub(crate) fn put_printable_with_scrollback_policy(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    s: SmolStr,
-    insert_mode: bool,
-    preserve_top_origin_scrollback: bool,
-) {
-    put_printable_with_scrollback_policy_and_emoji_compat(
-        screen,
-        viewport,
-        s,
-        insert_mode,
-        preserve_top_origin_scrollback,
-        false,
-    );
-}
-
 #[inline(always)]
 pub(crate) fn put_printable_with_scrollback_policy_and_emoji_compat(
     screen: &mut Screen,
@@ -280,16 +241,6 @@ pub(crate) fn put_status_printable(
     put_printable_impl(screen, viewport, WriteTarget::Status, s, insert_mode, false);
 }
 
-#[cfg(test)]
-pub(crate) fn put_8bit_byte(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    byte: u8,
-    insert_mode: bool,
-) {
-    put_8bit_byte_with_scrollback_policy(screen, viewport, byte, insert_mode, true);
-}
-
 #[inline(always)]
 pub(crate) fn put_8bit_byte_with_scrollback_policy(
     screen: &mut Screen,
@@ -316,35 +267,6 @@ pub(crate) fn put_status_8bit_byte(
     insert_mode: bool,
 ) {
     put_8bit_byte_impl(screen, viewport, WriteTarget::Status, byte, insert_mode);
-}
-
-#[cfg(test)]
-pub(crate) fn put_text_run(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    run: &str,
-    insert_mode: bool,
-) {
-    put_text_run_with_scrollback_policy(screen, viewport, run, insert_mode, true);
-}
-
-#[inline(always)]
-#[cfg(test)]
-pub(crate) fn put_text_run_with_scrollback_policy(
-    screen: &mut Screen,
-    viewport: &Viewport,
-    run: &str,
-    insert_mode: bool,
-    preserve_top_origin_scrollback: bool,
-) {
-    put_text_run_with_scrollback_policy_and_emoji_compat(
-        screen,
-        viewport,
-        run,
-        insert_mode,
-        preserve_top_origin_scrollback,
-        false,
-    );
 }
 
 #[inline(always)]

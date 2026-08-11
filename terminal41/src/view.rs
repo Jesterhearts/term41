@@ -168,6 +168,76 @@ pub fn reset_viewport(screen: &mut Screen) {
     lifecycle_ops::reset_viewport(screen)
 }
 
+/// Current scrollback offset. `0` means the live bottom is showing.
+pub fn viewport_offset(screen: &Screen) -> u32 {
+    screen.offset
+}
+
+/// Move the viewport to an absolute scrollback offset.
+///
+/// Used by search navigation, which computes the offset a match needs from the
+/// match list rather than by stepping.
+pub fn set_viewport_offset(
+    screen: &mut Screen,
+    offset: u32,
+) {
+    screen.offset = offset;
+}
+
+/// Total rows in the rendered document: every completed command block plus
+/// its separator row, then the active block.
+pub fn rendered_rows_len(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> usize {
+    screen::rendered_rows_len_for_viewport(screen, viewport)
+}
+
+/// Rows of scrollback this screen retains.
+pub fn scrollback_limit(screen: &Screen) -> u32 {
+    screen.grid.scrollback_limit
+}
+
+/// Whether DECCKM application cursor-key mode is active.
+pub fn app_cursor_keys(screen: &Screen) -> bool {
+    screen.app_cursor_keys
+}
+
+/// Whether DECKPAM application keypad mode is active.
+pub fn app_keypad(screen: &Screen) -> bool {
+    screen.app_keypad
+}
+
+/// A prompt row pinned to the top of the view. See
+/// [`sticky_prompt_above_view`].
+pub struct StickyPrompt<'a> {
+    /// The prompt row itself.
+    pub row: &'a Row,
+    /// Its row number in the rendered document.
+    pub rendered_row: u64,
+    /// Its row within the active block, when the prompt lives there rather
+    /// than in a completed block.
+    pub active_row: Option<u32>,
+}
+
+/// Find the closest prompt row at or above the top of the view, so the
+/// renderer can pin it while its output scrolls underneath.
+///
+/// `viewport_rows` comes from the published snapshot the renderer is drawing,
+/// which can briefly disagree with the live viewport during a resize.
+pub fn sticky_prompt_above_view<'a>(
+    screen: &'a Screen,
+    viewport: &Viewport,
+    viewport_rows: u32,
+) -> Option<StickyPrompt<'a>> {
+    let found = lifecycle_ops::sticky_prompt_above_view(screen, viewport, viewport_rows)?;
+    Some(StickyPrompt {
+        row: found.row,
+        rendered_row: found.rendered_row,
+        active_row: found.active_row,
+    })
+}
+
 /// Iterate the images whose row range overlaps the current viewport.
 pub fn visible_images(
     screen: &Screen,

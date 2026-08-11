@@ -37,34 +37,22 @@ mod text;
 mod write;
 
 pub(crate) use self::csi::csi_apply;
-#[cfg(test)]
-pub(crate) use self::csi::csi_dispatch;
 pub(crate) use self::csi::csi_parse;
 pub(crate) use self::esc::esc_apply;
-#[cfg(test)]
-pub(crate) use self::esc::esc_dispatch;
 pub(crate) use self::esc::esc_parse;
 pub(crate) use self::status::apply_status_line_csi;
 pub(crate) use self::status::execute_status;
 #[cfg(test)]
 pub(crate) use self::text::execute;
 pub(crate) use self::text::execute_with_scrollback_policy;
-#[cfg(test)]
-pub(crate) use self::write::put_8bit_byte;
 pub(crate) use self::write::put_8bit_byte_with_scrollback_policy;
-#[cfg(test)]
-pub(crate) use self::write::put_ascii_run;
 pub(crate) use self::write::put_ascii_run_with_scrollback_policy;
 pub(crate) use self::write::put_char_with_scrollback_policy;
-#[cfg(test)]
-pub(crate) use self::write::put_printable;
 pub(crate) use self::write::put_printable_with_scrollback_policy_and_emoji_compat;
 pub(crate) use self::write::put_status_8bit_byte;
 pub(crate) use self::write::put_status_ascii_run;
 pub(crate) use self::write::put_status_printable;
 pub(crate) use self::write::put_status_text_run;
-#[cfg(test)]
-pub(crate) use self::write::put_text_run;
 pub(crate) use self::write::put_text_run_with_scrollback_policy_and_emoji_compat;
 
 const fn ascii_cell(byte: u8) -> SmolStr {
@@ -756,9 +744,8 @@ pub(super) mod test_support {
     use vtepp::Parser;
 
     use super::*;
-    use crate::FeaturePermissions;
-    use crate::io::keyboard::KittyKeyboardState;
     use crate::screen::Screen;
+    use crate::test_support::TestTerm;
 
     pub(super) const TEST_COLS: u32 = 10;
     pub(super) const TEST_ROWS: u32 = 4;
@@ -842,193 +829,65 @@ pub(super) mod test_support {
         panic!("no ESC dispatch from input {input:?}");
     }
 
-    /// Drive `input` through a VTE parser and dispatch each action through the
-    /// parser module under test. This is the same pipeline the live terminal
-    /// uses, so tests exercise the same paths callers actually take.
+    /// Cell metrics for the parser tests. Only image placement math reads
+    /// them, but they have to be non-zero for row/column conversions to be
+    /// meaningful.
+    const TEST_CELL_HEIGHT: u32 = 16;
+    const TEST_CELL_WIDTH: u32 = 8;
+
+    /// Drive `input` through the production byte pipeline against the caller's
+    /// screen and viewport, returning the bytes the terminal wants written back
+    /// to the PTY.
+    ///
+    /// The caller's screen and viewport are swapped into a real [`Terminal`]
+    /// for the duration of the call, so these tests take the same
+    /// `TerminalProcessor` -> `apply` path the live terminal does. That path
+    /// carries work the dispatch functions do not: snapshot dirty tracking,
+    /// command-history block clearing, VT52 cursor addressing, DCS
+    /// accumulation, and post-scroll image/metadata fixups. Driving the
+    /// dispatch builders directly from here would mean maintaining a second
+    /// copy of that loop and keeping it in sync by hand.
+    fn feed_pipeline(
+        chunks: &[&[u8]],
+        screen: &mut Screen,
+        viewport: &mut Viewport,
+    ) -> Vec<u8> {
+        let mut term = TestTerm::new(
+            viewport.cols,
+            viewport.rows,
+            screen.grid.scrollback_limit,
+            TEST_CELL_HEIGHT,
+            TEST_CELL_WIDTH,
+        );
+        std::mem::swap(&mut term.inner.active, screen);
+        term.inner.viewport = *viewport;
+
+        for chunk in chunks {
+            term.process(chunk);
+        }
+
+        std::mem::swap(&mut term.inner.active, screen);
+        *viewport = term.inner.viewport;
+        term.take_pending_output()
+    }
+
+    /// Drive `input` through the terminal pipeline, discarding host replies.
     pub(super) fn feed(
         input: &[u8],
         screen: &mut Screen,
         viewport: &mut Viewport,
     ) {
-        let base_pal = ColorPalette::default();
-        let mut dec_color = dec_color_state_from_palette(&base_pal);
-        let mut pal = effective_palette(&base_pal, &dec_color);
-        let mut parser = Parser::new();
-        let mut stash = Screen::new(
-            viewport.cols,
-            viewport.rows,
-            0,
-            default_fg(),
-            default_bg(),
-            default_fg(),
-            default_bg(),
-        );
-        let mut on_alt_screen = false;
-        let mut modes = TerminalModes::new();
-        let mut kitty_keyboard = KittyKeyboardState::new();
-        let mut pending_output = Vec::new();
-        let mut pending_resize = None;
-        let default_cursor_style = CursorStyle::default();
-        let mut cursor_style = CursorStyle::default();
-        let mut saved_alt_cursor_style = None;
-        let mut bell_pending = false;
-        let mut current_title = None;
-        let mut title_stack = Vec::new();
-        let mut saved_modes = std::collections::HashMap::new();
-        let mut current_prompt_row = None;
-        let mut shell_integration_phase = ShellIntegrationPhase::None;
-        let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-        let mut default_status_display = StatusDisplayKind::None;
-        let feature_permissions = FeaturePermissions::default();
-        let mut macros = MacroStore::default();
-        let mut drcs = DrcsStore::default();
-        let mut udks = UdkState::default();
+        let _ = feed_pipeline(&[input], screen, viewport);
+    }
 
-        for action in parser.parse(input) {
-            // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
-            if vt52_cursor_addr != crate::Vt52CursorAddr::Idle {
-                let byte_opt: Option<u8> = match &action {
-                    Action::PrintAscii(run) => run.first().copied(),
-                    Action::Execute(b) => Some(*b),
-                    _ => None,
-                };
-                match (vt52_cursor_addr, byte_opt) {
-                    (crate::Vt52CursorAddr::AwaitingRow, Some(b)) => {
-                        vt52_cursor_addr =
-                            crate::Vt52CursorAddr::AwaitingCol(b.saturating_sub(0x20));
-                        if let Action::PrintAscii(run) = &action
-                            && run.len() >= 2
-                        {
-                            let row = b.saturating_sub(0x20) as u32;
-                            let col = run[1].saturating_sub(0x20) as u32;
-                            screen.cursor.row = row.min(viewport.rows.saturating_sub(1));
-                            screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
-                            vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                            if run.len() > 2 {
-                                let view = screen::screen_viewport(screen, viewport);
-                                put_ascii_run(screen, &view, &run[2..], modes.insert_mode);
-                            }
-                            continue;
-                        }
-                        continue;
-                    }
-                    (crate::Vt52CursorAddr::AwaitingCol(row), Some(b)) => {
-                        let col = b.saturating_sub(0x20) as u32;
-                        screen.cursor.row = (row as u32).min(viewport.rows.saturating_sub(1));
-                        screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
-                        vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                        if let Action::PrintAscii(run) = &action
-                            && run.len() > 1
-                        {
-                            let view = screen::screen_viewport(screen, viewport);
-                            put_ascii_run(screen, &view, &run[1..], modes.insert_mode);
-                        }
-                        continue;
-                    }
-                    _ => {
-                        vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                    }
-                }
-            }
-            // In VT52 mode, CSI sequences are invalid and must be dropped.
-            if modes.vt52_mode && matches!(action, Action::CsiDispatch { .. }) {
-                continue;
-            }
-            match action {
-                Action::PrintAscii(run) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    put_ascii_run(screen, &view, run, modes.insert_mode)
-                }
-                Action::PrintText(run) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    put_text_run(screen, &view, run, modes.insert_mode)
-                }
-                Action::Print(s) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    put_printable(screen, &view, s, modes.insert_mode)
-                }
-                Action::Print8Bit(byte) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    put_8bit_byte(screen, &view, byte, modes.insert_mode)
-                }
-                Action::Execute(b) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    execute(screen, &view, b, &mut bell_pending, modes.newline_mode)
-                }
-                Action::CsiDispatch {
-                    params,
-                    intermediates,
-                    action,
-                } => {
-                    csi_dispatch()
-                        .screen(screen)
-                        .stash(&mut stash)
-                        .viewport(viewport)
-                        .on_alt_screen(&mut on_alt_screen)
-                        .modes(&mut modes)
-                        .kitty_keyboard(&mut kitty_keyboard)
-                        .default_cursor_style(default_cursor_style)
-                        .cursor_style(&mut cursor_style)
-                        .saved_alt_cursor_style(&mut saved_alt_cursor_style)
-                        .current_title(&mut current_title)
-                        .title_stack(&mut title_stack)
-                        .saved_modes(&mut saved_modes)
-                        .current_prompt_row(&mut current_prompt_row)
-                        .bell_pending(&mut bell_pending)
-                        .palette(&mut pal)
-                        .base_palette(&base_pal)
-                        .dec_color(&mut dec_color)
-                        .default_status_display(&mut default_status_display)
-                        .pending_output(&mut pending_output)
-                        .vt52_cursor_addr(&mut vt52_cursor_addr)
-                        .macros(&mut macros)
-                        .drcs(&mut drcs)
-                        .params(&params)
-                        .intermediates(intermediates.as_slice())
-                        .action(action)
-                        .pending_resize(&mut pending_resize)
-                        .cell_width(8)
-                        .cell_height(16)
-                        .feature_permissions(&feature_permissions)
-                        .udks(&mut udks)
-                        .call();
-                }
-                Action::EscDispatch {
-                    intermediates,
-                    byte,
-                } => {
-                    esc_dispatch()
-                        .screen(screen)
-                        .stash(&mut stash)
-                        .viewport(viewport)
-                        .on_alt_screen(&mut on_alt_screen)
-                        .modes(&mut modes)
-                        .kitty_keyboard(&mut kitty_keyboard)
-                        .default_cursor_style(default_cursor_style)
-                        .cursor_style(&mut cursor_style)
-                        .saved_alt_cursor_style(&mut saved_alt_cursor_style)
-                        .current_title(&mut current_title)
-                        .title_stack(&mut title_stack)
-                        .saved_modes(&mut saved_modes)
-                        .current_prompt_row(&mut current_prompt_row)
-                        .shell_integration_phase(&mut shell_integration_phase)
-                        .bell_pending(&mut bell_pending)
-                        .palette(&mut pal)
-                        .base_palette(&base_pal)
-                        .dec_color(&mut dec_color)
-                        .default_status_display(&mut default_status_display)
-                        .pending_output(&mut pending_output)
-                        .vt52_cursor_addr(&mut vt52_cursor_addr)
-                        .macros(&mut macros)
-                        .drcs(&mut drcs)
-                        .intermediates(intermediates.as_slice())
-                        .byte(byte)
-                        .udks(&mut udks)
-                        .call();
-                }
-                _ => {}
-            }
-        }
+    /// Like [`feed`] but pushes each chunk through one processor in turn, so
+    /// tests can exercise sequences split across PTY read boundaries.
+    pub(super) fn feed_chunks(
+        chunks: &[&[u8]],
+        screen: &mut Screen,
+        viewport: &mut Viewport,
+    ) {
+        let _ = feed_pipeline(chunks, screen, viewport);
     }
 
     pub(super) fn row_text(
@@ -1045,193 +904,14 @@ pub(super) mod test_support {
         s
     }
 
-    /// Like `feed` but returns the `pending_output` bytes written by query
-    /// responses (DECRQM, DSR, etc.).
+    /// Like [`feed`] but returns the bytes written by query responses
+    /// (DECRQM, DSR, etc.).
     pub(super) fn feed_with_output(
         input: &[u8],
         screen: &mut Screen,
         viewport: &mut Viewport,
     ) -> Vec<u8> {
-        let base_pal = ColorPalette::default();
-        let mut dec_color = dec_color_state_from_palette(&base_pal);
-        let mut pal = effective_palette(&base_pal, &dec_color);
-        let mut parser = Parser::new();
-        let mut stash = Screen::new(
-            viewport.cols,
-            viewport.rows,
-            0,
-            default_fg(),
-            default_bg(),
-            default_fg(),
-            default_bg(),
-        );
-        let mut on_alt_screen = false;
-        let mut modes = TerminalModes::new();
-        let mut kitty_keyboard = KittyKeyboardState::new();
-        let mut pending_output = Vec::new();
-        let mut pending_resize = None;
-        let default_cursor_style = CursorStyle::default();
-        let mut cursor_style = CursorStyle::default();
-        let mut saved_alt_cursor_style = None;
-        let mut bell_pending = false;
-        let mut current_title = None;
-        let mut title_stack = Vec::new();
-        let mut saved_modes = std::collections::HashMap::new();
-        let mut current_prompt_row = None;
-        let mut shell_integration_phase = ShellIntegrationPhase::None;
-        let mut vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-        let mut default_status_display = StatusDisplayKind::None;
-        let feature_permissions = FeaturePermissions::default();
-        let mut macros = MacroStore::default();
-        let mut drcs = DrcsStore::default();
-        let mut udks = UdkState::default();
-
-        for action in parser.parse(input) {
-            // VT52 ESC Y cursor address state machine (mirrors Terminal::apply).
-            if vt52_cursor_addr != crate::Vt52CursorAddr::Idle {
-                let byte_opt: Option<u8> = match &action {
-                    Action::PrintAscii(run) => run.first().copied(),
-                    Action::Execute(b) => Some(*b),
-                    _ => None,
-                };
-                match (vt52_cursor_addr, byte_opt) {
-                    (crate::Vt52CursorAddr::AwaitingRow, Some(b)) => {
-                        vt52_cursor_addr =
-                            crate::Vt52CursorAddr::AwaitingCol(b.saturating_sub(0x20));
-                        if let Action::PrintAscii(run) = &action
-                            && run.len() >= 2
-                        {
-                            let row = b.saturating_sub(0x20) as u32;
-                            let col = run[1].saturating_sub(0x20) as u32;
-                            screen.cursor.row = row.min(viewport.rows.saturating_sub(1));
-                            screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
-                            vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                            if run.len() > 2 {
-                                let view = screen::screen_viewport(screen, viewport);
-                                put_ascii_run(screen, &view, &run[2..], modes.insert_mode);
-                            }
-                            continue;
-                        }
-                        continue;
-                    }
-                    (crate::Vt52CursorAddr::AwaitingCol(row), Some(b)) => {
-                        let col = b.saturating_sub(0x20) as u32;
-                        screen.cursor.row = (row as u32).min(viewport.rows.saturating_sub(1));
-                        screen.cursor.col = col.min(viewport.cols.saturating_sub(1));
-                        vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                        if let Action::PrintAscii(run) = &action
-                            && run.len() > 1
-                        {
-                            let view = screen::screen_viewport(screen, viewport);
-                            put_ascii_run(screen, &view, &run[1..], modes.insert_mode);
-                        }
-                        continue;
-                    }
-                    _ => {
-                        vt52_cursor_addr = crate::Vt52CursorAddr::Idle;
-                    }
-                }
-            }
-            // In VT52 mode, CSI sequences are invalid and must be dropped.
-            if modes.vt52_mode && matches!(action, Action::CsiDispatch { .. }) {
-                continue;
-            }
-            match action {
-                Action::PrintAscii(run) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    put_ascii_run(screen, &view, run, modes.insert_mode)
-                }
-                Action::PrintText(run) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    put_text_run(screen, &view, run, modes.insert_mode)
-                }
-                Action::Print(s) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    put_printable(screen, &view, s, modes.insert_mode)
-                }
-                Action::Print8Bit(byte) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    put_8bit_byte(screen, &view, byte, modes.insert_mode)
-                }
-                Action::Execute(b) => {
-                    let view = screen::screen_viewport(screen, viewport);
-                    execute(screen, &view, b, &mut bell_pending, modes.newline_mode)
-                }
-                Action::CsiDispatch {
-                    params,
-                    intermediates,
-                    action,
-                } => {
-                    csi_dispatch()
-                        .screen(screen)
-                        .stash(&mut stash)
-                        .viewport(viewport)
-                        .on_alt_screen(&mut on_alt_screen)
-                        .modes(&mut modes)
-                        .kitty_keyboard(&mut kitty_keyboard)
-                        .pending_output(&mut pending_output)
-                        .pending_resize(&mut pending_resize)
-                        .default_cursor_style(default_cursor_style)
-                        .cursor_style(&mut cursor_style)
-                        .saved_alt_cursor_style(&mut saved_alt_cursor_style)
-                        .cell_width(8)
-                        .cell_height(16)
-                        .palette(&mut pal)
-                        .base_palette(&base_pal)
-                        .dec_color(&mut dec_color)
-                        .default_status_display(&mut default_status_display)
-                        .title_stack(&mut title_stack)
-                        .current_title(&mut current_title)
-                        .saved_modes(&mut saved_modes)
-                        .current_prompt_row(&mut current_prompt_row)
-                        .bell_pending(&mut bell_pending)
-                        .vt52_cursor_addr(&mut vt52_cursor_addr)
-                        .macros(&mut macros)
-                        .drcs(&mut drcs)
-                        .params(&params)
-                        .intermediates(intermediates.as_slice())
-                        .action(action)
-                        .feature_permissions(&feature_permissions)
-                        .udks(&mut udks)
-                        .call();
-                }
-                Action::EscDispatch {
-                    intermediates,
-                    byte,
-                } => {
-                    esc_dispatch()
-                        .screen(screen)
-                        .stash(&mut stash)
-                        .viewport(viewport)
-                        .on_alt_screen(&mut on_alt_screen)
-                        .modes(&mut modes)
-                        .kitty_keyboard(&mut kitty_keyboard)
-                        .default_cursor_style(default_cursor_style)
-                        .cursor_style(&mut cursor_style)
-                        .saved_alt_cursor_style(&mut saved_alt_cursor_style)
-                        .current_title(&mut current_title)
-                        .title_stack(&mut title_stack)
-                        .saved_modes(&mut saved_modes)
-                        .current_prompt_row(&mut current_prompt_row)
-                        .shell_integration_phase(&mut shell_integration_phase)
-                        .bell_pending(&mut bell_pending)
-                        .palette(&mut pal)
-                        .base_palette(&base_pal)
-                        .dec_color(&mut dec_color)
-                        .default_status_display(&mut default_status_display)
-                        .pending_output(&mut pending_output)
-                        .vt52_cursor_addr(&mut vt52_cursor_addr)
-                        .macros(&mut macros)
-                        .drcs(&mut drcs)
-                        .intermediates(intermediates.as_slice())
-                        .byte(byte)
-                        .udks(&mut udks)
-                        .call();
-                }
-                _ => {}
-            }
-        }
-        pending_output
+        feed_pipeline(&[input], screen, viewport)
     }
 }
 
