@@ -286,9 +286,13 @@ impl TestTerm {
         limit: u32,
     ) {
         let Terminal {
-            active, viewport, ..
+            active,
+            stash,
+            on_alt_screen,
+            viewport,
+            ..
         } = &mut self.inner;
-        settings::set_scrollback_policy(active, viewport, limit)
+        settings::set_scrollback_policy(active, stash, *on_alt_screen, viewport, limit)
     }
 
     pub fn set_default_status_display(

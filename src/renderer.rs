@@ -30,7 +30,6 @@ use std::time::Instant;
 use clip41::Clipboard;
 use config41::BellMode;
 use config41::Config;
-use config41::DEFAULT_SCROLLBACK;
 use config41::config;
 use config41::keybindings::Action;
 use font41::FontSystem;
@@ -38,7 +37,6 @@ use parking_lot::Mutex;
 use terminal41::StatusDisplayKind;
 use terminal41::VisibleImage;
 use terminal41::settings;
-use terminal41::view;
 use tracing::debug_span;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
@@ -896,12 +894,12 @@ impl RenderHost {
             (INITIAL_COLS, INITIAL_ROWS)
         };
 
-        let scrollback = if let Some(tab) = self.active_tab() {
-            view::scrollback_limit(&tab.terminal.lock().active)
-        } else {
-            DEFAULT_SCROLLBACK
-        };
-
+        // The budget comes from the config, never from a neighbouring tab.
+        // Reading it off the active tab's visible screen picked up the alt
+        // screen's zero whenever a full-screen app was in the foreground, and
+        // a tab born with no budget never gets one back -- reload_config is
+        // the only thing that revisits the limit, and it only runs when the
+        // config file changes.
         let session = match session::spawn_session(
             session::SessionRequest {
                 id,
@@ -909,7 +907,7 @@ impl RenderHost {
                 rows,
                 cell_width: self.font_system.cell_width,
                 cell_height: self.font_system.cell_height,
-                scrollback_lines: scrollback,
+                scrollback_lines: self.config.scrollback_lines,
                 cwd,
                 command: None,
                 window_sync_epoch: self.window_resize_epoch,
@@ -1004,6 +1002,7 @@ impl RenderHost {
             let terminal41::Terminal {
                 active,
                 stash,
+                on_alt_screen,
                 viewport,
                 cursor_style,
                 default_cursor_style,
@@ -1035,7 +1034,13 @@ impl RenderHost {
                     config41::StatusLineMode::Indicator => StatusDisplayKind::Indicator,
                 },
             );
-            settings::set_scrollback_policy(active, viewport, cfg.scrollback_lines);
+            settings::set_scrollback_policy(
+                active,
+                stash,
+                *on_alt_screen,
+                viewport,
+                cfg.scrollback_lines,
+            );
             settings::set_feature_permissions(protocol, cfg.feature_permissions.clone());
             settings::set_terminal_limits(protocol, cfg.limits);
             settings::set_palette(

@@ -193,11 +193,6 @@ pub fn rendered_rows_len(
     screen::rendered_rows_len_for_viewport(screen, viewport)
 }
 
-/// Rows of scrollback this screen retains.
-pub fn scrollback_limit(screen: &Screen) -> u32 {
-    screen.grid.scrollback_limit
-}
-
 /// Whether DECCKM application cursor-key mode is active.
 pub fn app_cursor_keys(screen: &Screen) -> bool {
     screen.app_cursor_keys

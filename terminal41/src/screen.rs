@@ -1389,7 +1389,7 @@ mod integration_tests {
         // oldest block] -- what it must not do is keep evicting past the
         // budget and hand back a document shorter than the user asked for.
         let budget = term.viewport.rows as usize + 12;
-        crate::settings::set_scrollback_policy(&mut term.inner.active, &term.inner.viewport, 12);
+        term.set_scrollback_policy(12);
 
         assert!(history > budget, "test needs more history than the budget");
         assert!(
@@ -1469,7 +1469,7 @@ mod integration_tests {
         // Shrinking the budget evicts the oldest blocks. Every block that
         // survives has to keep the rendered row it already had, because
         // selections and search spans are holding those numbers.
-        crate::settings::set_scrollback_policy(&mut term.inner.active, &term.inner.viewport, 6);
+        term.set_scrollback_policy(6);
 
         assert!(term.active.rendered_row_base > 0);
         let after = commands_by_rendered_row(&term);

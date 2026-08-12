@@ -82,13 +82,21 @@ pub fn set_cell_dimensions(
     *cell_height = new_cell_height;
 }
 
-/// Apply a new scrollback row limit to the active screen.
+/// Apply a new scrollback row limit to the primary screen.
+///
+/// The budget belongs to the primary screen specifically. An alternate screen
+/// is a fixed-size page with no history by definition, so it keeps its zero --
+/// and while one is up it is `active`, which is why the caller has to say which
+/// screen is which rather than handing over whichever one is on display.
 pub fn set_scrollback_policy(
     active: &mut Screen,
+    stash: &mut Screen,
+    on_alt_screen: bool,
     viewport: &Viewport,
     limit: u32,
 ) {
-    feature::apply_scrollback_limit(active, viewport, limit);
+    let primary = if on_alt_screen { stash } else { active };
+    feature::apply_scrollback_limit(primary, viewport, limit);
 }
 
 /// Replace the default status-line display mode and resize screens as needed.
@@ -148,6 +156,34 @@ mod tests {
             term.active.grid.rows.len(),
             max_expected,
         );
+    }
+
+    /// The budget belongs to the primary screen. Applying it to whichever
+    /// screen happens to be on display leaves the primary stale for as long as
+    /// a full-screen app is up, and hands the alternate screen a history it is
+    /// not supposed to have.
+    #[test]
+    fn set_scrollback_limit_targets_the_primary_screen_behind_an_alt_screen() {
+        let mut term = TestTerm::new(8, 4, 100, 16, 8);
+        for i in 0..50u32 {
+            term.process(format!("line{i}\n").as_bytes());
+        }
+        term.process(b"\x1b[?1049h");
+        assert!(term.on_alt_screen);
+
+        term.set_scrollback_policy(7);
+
+        assert_eq!(
+            term.active.grid.scrollback_limit, 0,
+            "the alternate screen must keep its zero budget"
+        );
+        assert_eq!(
+            term.stash.grid.scrollback_limit, 7,
+            "the primary screen behind the app should have taken the new budget"
+        );
+
+        term.process(b"\x1b[?1049l");
+        assert_eq!(term.active.grid.scrollback_limit, 7);
     }
 
     #[test]
