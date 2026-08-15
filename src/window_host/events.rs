@@ -281,6 +281,11 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             WindowEvent::Focused(f) => {
                 if !f {
                     self.keyboard.physical_modifiers = PhysicalModifierState::default();
+                    self.mouse.tab_drag = None;
+                    self.mouse.mouse_buttons.left = false;
+                    if let Some(window) = &self.window {
+                        window.set_cursor(winit::window::CursorIcon::Default);
+                    }
                 }
                 handle_focus_event(
                     &mut self.input,

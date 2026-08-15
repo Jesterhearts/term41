@@ -4,6 +4,24 @@ pub(crate) const BUTTON_CELLS: f32 = 3.0;
 /// Total width of the window-control button region in cell-width units.
 pub(crate) const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
 
+pub(crate) fn move_tab<T>(
+    tabs: &mut Vec<T>,
+    from_idx: usize,
+    to_idx: usize,
+) -> bool {
+    let Some(last_idx) = tabs.len().checked_sub(1) else {
+        return false;
+    };
+    let to_idx = to_idx.min(last_idx);
+    if from_idx >= tabs.len() || from_idx == to_idx {
+        return false;
+    }
+
+    let tab = tabs.remove(from_idx);
+    tabs.insert(to_idx, tab);
+    true
+}
+
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TabBarHover {
     NewTab,
@@ -34,4 +52,31 @@ pub(crate) struct TabContextMenu {
     pub x: f32,
     /// Currently hovered menu-item index.
     pub hovered_item: Option<usize>,
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn move_tab_reorders_in_both_directions() {
+        let mut tabs = vec!['a', 'b', 'c', 'd'];
+
+        assert!(move_tab(&mut tabs, 0, 2));
+        assert_eq!(tabs, ['b', 'c', 'a', 'd']);
+
+        assert!(move_tab(&mut tabs, 3, 1));
+        assert_eq!(tabs, ['b', 'd', 'c', 'a']);
+    }
+
+    #[test]
+    fn move_tab_clamps_the_destination_and_rejects_invalid_sources() {
+        let mut tabs = vec!['a', 'b', 'c'];
+
+        assert!(move_tab(&mut tabs, 0, usize::MAX));
+        assert_eq!(tabs, ['b', 'c', 'a']);
+        assert!(!move_tab(&mut tabs, 3, 0));
+        assert!(!move_tab(&mut tabs, 1, 1));
+        assert_eq!(tabs, ['b', 'c', 'a']);
+    }
 }

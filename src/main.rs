@@ -575,6 +575,7 @@ fn main() {
             left_drag_active: false,
             selection_drag_moved: false,
             command_editor_drag_anchor: None,
+            tab_drag: None,
             selection_autoscroll_direction: None,
             selection_autoscroll_next: None,
             scroll_carry: (0.0, 0.0),

@@ -83,6 +83,7 @@ pub(crate) use crate::renderer::tab_ui::TAB_MENU_ITEMS;
 pub(crate) use crate::renderer::tab_ui::TAB_MENU_WIDTH_CELLS;
 pub(crate) use crate::renderer::tab_ui::TabBarHover;
 pub(crate) use crate::renderer::tab_ui::TabContextMenu;
+pub(crate) use crate::renderer::tab_ui::move_tab;
 pub(crate) use crate::renderer::ui_state::HistoryConfirmationModal;
 pub(crate) use crate::renderer::ui_state::PreeditState;
 pub(crate) use crate::renderer::ui_state::RecordingPopup;
@@ -125,6 +126,10 @@ pub enum RenderEvent {
         cwd: Option<PathBuf>,
     },
     SetActiveTab(usize),
+    ReorderTab {
+        tab_id: TabId,
+        to_idx: usize,
+    },
     CloseTab(usize),
     CloseOtherTabs(usize),
     /// The window's DPI scale factor changed (e.g. moved to a different
@@ -549,6 +554,14 @@ impl RenderHost {
             }
             RenderEvent::SpawnNewTab { cwd } => self.spawn_new_tab_in_dir(cwd.clone()),
             RenderEvent::SetActiveTab(tab_idx) => self.set_active_tab(*tab_idx),
+            RenderEvent::ReorderTab { tab_id, to_idx } => {
+                let Some(from_idx) = self.tabs.iter().position(|tab| tab.id == *tab_id) else {
+                    return;
+                };
+                if move_tab(&mut self.tabs, from_idx, *to_idx) {
+                    self.sync_input_state();
+                }
+            }
             RenderEvent::CloseOtherTabs(tab_idx) => self.close_other_tabs(*tab_idx),
             RenderEvent::CloseTab(tab_idx) => self.close_tab(*tab_idx),
             RenderEvent::ScaleFactorChanged { scale_factor } => {

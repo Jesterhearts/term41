@@ -2,6 +2,13 @@
 
 All notable changes to `term41` are documented here.
 
+## Unreleased
+
+### Added
+
+- Added pointer drag reordering for tabs while preserving the active terminal
+  session.
+
 ## [0.2.1] - 2026-05-13
 
 Generated from the changes between tags `0.2.0` and `0.2.1`.

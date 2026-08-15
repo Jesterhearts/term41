@@ -40,6 +40,7 @@ use super::MouseRuntime;
 use super::PermissionDecision;
 use super::PopupRerunPasteTarget;
 use super::RenderRuntime;
+use super::TabDrag;
 use super::TabId;
 use super::TabMenuActionLocal;
 use super::WindowButton;
@@ -139,6 +140,20 @@ pub(crate) fn handle_cursor_moved(
         if let Some(popup) = state.gutter_popup.as_mut() {
             popup.hovered_item = hovered_popup_item;
         }
+    }
+
+    if host.mouse.tab_drag.is_some() {
+        update_tab_drag(host);
+        if let Some(w) = &host.window {
+            w.set_cursor(winit::window::CursorIcon::Grabbing);
+        }
+        notify_interaction_changed(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+        );
+        return;
     }
 
     if let Some(dir) = resize_direction_at(host.window.as_ref(), &host.mouse, &host.metrics) {
@@ -499,6 +514,11 @@ pub(crate) fn handle_mouse_input(
     pressed: bool,
     button: MouseButton,
 ) {
+    if !pressed && button == MouseButton::Left && host.mouse.tab_drag.is_some() {
+        host.mouse.mouse_buttons.set(button, false);
+        finish_tab_drag(host);
+        return;
+    }
     if host.modals.permission_modal.is_some() {
         if pressed
             && button == MouseButton::Left
@@ -601,6 +621,7 @@ pub(crate) fn handle_mouse_input(
             close_gutter_popup(&host.render, &mut host.input);
             update_tab_context_menu(&host.render, None);
             if let Some(idx) = tab_at_mouse(&host.mouse, &host.render, &host.metrics) {
+                host.mouse.tab_drag = tab_drag_at_index(&host.render, idx);
                 send(&mut host.render, RenderEvent::SetActiveTab(idx));
             }
             notify_interaction_changed(
@@ -1524,6 +1545,108 @@ pub(crate) fn tab_at_mouse(
         .position(|tab| mx >= tab.x && mx < tab.x + tab.width)
 }
 
+pub(crate) fn tab_drag_target_at_x(
+    current_idx: usize,
+    mouse_x: f64,
+    tab_count: usize,
+    surface_width: f32,
+    cell_width: f32,
+) -> Option<usize> {
+    let layout = build_tab_bar_layout(tab_count, surface_width, cell_width);
+    let current = layout.tabs.get(current_idx)?;
+    if current.width <= 0.0 {
+        return None;
+    }
+
+    let mouse_x = mouse_x.max(0.0) as f32;
+    if mouse_x >= current.x && mouse_x < current.x + current.width {
+        return Some(current_idx);
+    }
+
+    Some(
+        layout
+            .tabs
+            .iter()
+            .position(|tab| mouse_x < tab.x + tab.width)
+            .unwrap_or(tab_count - 1),
+    )
+}
+
+fn tab_drag_at_index(
+    render: &RenderRuntime,
+    tab_idx: usize,
+) -> Option<TabDrag> {
+    let state = render.input_state.lock();
+    Some(TabDrag {
+        tab_id: *state.tab_order.get(tab_idx)?,
+        current_idx: tab_idx,
+    })
+}
+
+fn update_tab_drag(host: &mut WindowHost) {
+    let Some(drag) = host.mouse.tab_drag else {
+        return;
+    };
+    let (cell_width, _, _, tab_count) = layout_snapshot(&host.render);
+    let Some(to_idx) = tab_drag_target_at_x(
+        drag.current_idx,
+        host.mouse.pos.0,
+        tab_count,
+        host.metrics.window_size.0 as f32,
+        cell_width as f32,
+    ) else {
+        return;
+    };
+    if to_idx == drag.current_idx {
+        return;
+    }
+
+    {
+        let mut state = host.render.input_state.lock();
+        let Some(from_idx) = state
+            .tab_order
+            .iter()
+            .position(|tab_id| *tab_id == drag.tab_id)
+        else {
+            host.mouse.tab_drag = None;
+            return;
+        };
+        renderer::move_tab(&mut state.tab_order, from_idx, to_idx);
+    }
+    if let Some(from_idx) = host
+        .startup
+        .tabs
+        .iter()
+        .position(|tab| tab.id == drag.tab_id)
+    {
+        renderer::move_tab(&mut host.startup.tabs, from_idx, to_idx);
+    }
+    host.mouse.tab_drag = Some(TabDrag {
+        current_idx: to_idx,
+        ..drag
+    });
+    send(
+        &mut host.render,
+        RenderEvent::ReorderTab {
+            tab_id: drag.tab_id,
+            to_idx,
+        },
+    );
+}
+
+fn finish_tab_drag(host: &mut WindowHost) {
+    host.mouse.tab_drag = None;
+    if let Some(w) = &host.window {
+        w.set_cursor(winit::window::CursorIcon::Default);
+    }
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
+
 pub(crate) fn is_on_new_tab_button(
     mouse: &MouseRuntime,
     render: &RenderRuntime,
@@ -1540,7 +1663,9 @@ pub(crate) fn is_in_titlebar_drag_region(
     render: &RenderRuntime,
     metrics: &WindowMetrics,
 ) -> bool {
-    is_in_tab_bar(mouse, render) && tab_bar_hover_at(mouse, render, metrics).is_none()
+    is_in_tab_bar(mouse, render)
+        && tab_at_mouse(mouse, render, metrics).is_none()
+        && tab_bar_hover_at(mouse, render, metrics).is_none()
 }
 
 pub(crate) fn tab_bar_hover_at(

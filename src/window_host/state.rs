@@ -235,6 +235,7 @@ pub(crate) struct MouseRuntime {
     pub(crate) left_drag_active: bool,
     pub(crate) selection_drag_moved: bool,
     pub(crate) command_editor_drag_anchor: Option<usize>,
+    pub(crate) tab_drag: Option<TabDrag>,
     pub(crate) selection_autoscroll_direction: Option<SelectionAutoscroll>,
     pub(crate) selection_autoscroll_next: Option<Instant>,
     /// Sub-line wheel movement carried over between scroll events, as
@@ -244,6 +245,12 @@ pub(crate) struct MouseRuntime {
     /// one line, so each event has to hand its remainder to the next one or
     /// every event rounds away to zero and scrolling never moves.
     pub(crate) scroll_carry: (f64, f64),
+}
+
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub(crate) struct TabDrag {
+    pub(crate) tab_id: TabId,
+    pub(crate) current_idx: usize,
 }
 
 pub(crate) struct WindowMetrics {
