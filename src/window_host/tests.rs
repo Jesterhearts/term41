@@ -222,21 +222,21 @@ mod tab_drag_tests {
 
     #[test]
     fn tab_drag_stays_put_until_the_pointer_crosses_a_tab_boundary() {
-        assert_eq!(tab_drag_target_at_x(1, 100.0, 3, 430.0, 10.0), Some(1));
-        assert_eq!(tab_drag_target_at_x(1, 199.0, 3, 430.0, 10.0), Some(1));
+        assert_eq!(tab_drag_target_at_x(1, 100.0, 3, 460.0, 10.0), Some(1));
+        assert_eq!(tab_drag_target_at_x(1, 199.0, 3, 460.0, 10.0), Some(1));
     }
 
     #[test]
     fn tab_drag_moves_to_crossed_and_outer_tabs() {
-        assert_eq!(tab_drag_target_at_x(1, 99.0, 3, 430.0, 10.0), Some(0));
-        assert_eq!(tab_drag_target_at_x(1, 200.0, 3, 430.0, 10.0), Some(2));
-        assert_eq!(tab_drag_target_at_x(2, -20.0, 3, 430.0, 10.0), Some(0));
-        assert_eq!(tab_drag_target_at_x(0, 500.0, 3, 430.0, 10.0), Some(2));
+        assert_eq!(tab_drag_target_at_x(1, 99.0, 3, 460.0, 10.0), Some(0));
+        assert_eq!(tab_drag_target_at_x(1, 200.0, 3, 460.0, 10.0), Some(2));
+        assert_eq!(tab_drag_target_at_x(2, -20.0, 3, 460.0, 10.0), Some(0));
+        assert_eq!(tab_drag_target_at_x(0, 500.0, 3, 460.0, 10.0), Some(2));
     }
 
     #[test]
     fn tab_drag_ignores_missing_and_zero_width_tab_regions() {
-        assert_eq!(tab_drag_target_at_x(3, 0.0, 3, 430.0, 10.0), None);
+        assert_eq!(tab_drag_target_at_x(3, 0.0, 3, 460.0, 10.0), None);
         assert_eq!(tab_drag_target_at_x(0, 0.0, 3, 10.0, 10.0), None);
     }
 }

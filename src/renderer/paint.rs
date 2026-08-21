@@ -11,6 +11,7 @@ use unicode_segmentation::UnicodeSegmentation;
 
 use crate::renderer::BUTTON_CELLS;
 use crate::renderer::BUTTONS_REGION_CELLS;
+use crate::renderer::MIN_TITLEBAR_DRAG_CELLS;
 use crate::renderer::TabBarHover;
 use crate::renderer::r#impl::MAX_TAB_WIDTH;
 use crate::renderer::r#impl::TabInfo;
@@ -393,7 +394,9 @@ pub(crate) fn build_tab_bar_layout(
 ) -> TabBarLayout {
     let buttons_region_w = cell_w * BUTTONS_REGION_CELLS;
     let new_tab_button_w = cell_w * 4.0;
-    let tabs_available_w = (surface_w - buttons_region_w - new_tab_button_w).max(0.0);
+    let min_drag_region_w = cell_w * MIN_TITLEBAR_DRAG_CELLS;
+    let tabs_available_w =
+        (surface_w - buttons_region_w - min_drag_region_w - new_tab_button_w).max(0.0);
     let max_tab_w = (cell_w * MAX_TAB_WIDTH).min(tabs_available_w);
     let tab_w = if tab_count == 0 {
         0.0
@@ -789,6 +792,19 @@ mod tests {
         assert_eq!(
             hovered.new_tab_button.bg,
             Some(blend(normal.base_bg, palette.fg, 0.3))
+        );
+    }
+
+    #[test]
+    fn full_tab_bar_reserves_a_window_drag_region() {
+        let cell_w = 10.0;
+        let layout = build_tab_bar_layout(3, 460.0, cell_w);
+        let new_tab_end = layout.new_tab_button.x + layout.new_tab_button.width;
+        let window_controls_start = layout.buttons[0].x;
+
+        assert_eq!(
+            window_controls_start - new_tab_end,
+            cell_w * MIN_TITLEBAR_DRAG_CELLS
         );
     }
 }

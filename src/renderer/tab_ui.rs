@@ -4,6 +4,9 @@ pub(crate) const BUTTON_CELLS: f32 = 3.0;
 /// Total width of the window-control button region in cell-width units.
 pub(crate) const BUTTONS_REGION_CELLS: f32 = BUTTON_CELLS * 3.0;
 
+/// Minimum draggable space between the new-tab button and window controls.
+pub(crate) const MIN_TITLEBAR_DRAG_CELLS: f32 = BUTTON_CELLS;
+
 pub(crate) fn move_tab<T>(
     tabs: &mut Vec<T>,
     from_idx: usize,

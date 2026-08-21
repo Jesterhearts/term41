@@ -79,6 +79,7 @@ pub(crate) use crate::renderer::permissions::permission_panel_rect;
 use crate::renderer::script_status::apply_script_status_line;
 pub(crate) use crate::renderer::tab_ui::BUTTON_CELLS;
 pub(crate) use crate::renderer::tab_ui::BUTTONS_REGION_CELLS;
+pub(crate) use crate::renderer::tab_ui::MIN_TITLEBAR_DRAG_CELLS;
 pub(crate) use crate::renderer::tab_ui::TAB_MENU_ITEMS;
 pub(crate) use crate::renderer::tab_ui::TAB_MENU_WIDTH_CELLS;
 pub(crate) use crate::renderer::tab_ui::TabBarHover;
