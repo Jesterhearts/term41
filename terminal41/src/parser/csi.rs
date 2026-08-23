@@ -447,6 +447,7 @@ fn apply_main_csi(
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
+    runtime_colors: &mut crate::RuntimeColorOverrides,
     default_status_display: &mut StatusDisplayKind,
     title_stack: &mut Vec<Option<String>>,
     current_title: &mut Option<String>,
@@ -493,6 +494,7 @@ fn apply_main_csi(
                     .palette(palette)
                     .base_palette(base_palette)
                     .dec_color(dec_color)
+                    .runtime_colors(runtime_colors)
                     .default_status_display(default_status_display)
                     .macros(macros)
                     .udks(udks)
@@ -685,9 +687,12 @@ fn apply_main_csi(
         MainCsiAction::SetGraphicsRendition { params } => {
             apply_sgr_groups(
                 &mut screen.fg,
+                &mut screen.fg_index,
                 &mut screen.bg,
+                &mut screen.bg_index,
                 &mut screen.attrs,
                 &mut screen.underline_color,
+                &mut screen.underline_index,
                 params,
                 palette,
             );
@@ -863,6 +868,7 @@ fn apply_main_csi(
         }
         MainCsiAction::RestoreCursor => {
             screen::restore_cursor_slot(screen, &viewport);
+            sync_screen_erase_defaults(screen, dec_color);
         }
         MainCsiAction::NextPage { count } => {
             let n = count.max(1) as u32;
@@ -944,6 +950,7 @@ pub(crate) fn csi_apply(
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
+    runtime_colors: &mut crate::RuntimeColorOverrides,
     default_status_display: &mut StatusDisplayKind,
     title_stack: &mut Vec<Option<String>>,
     current_title: &mut Option<String>,
@@ -983,6 +990,7 @@ pub(crate) fn csi_apply(
                 .palette(palette)
                 .base_palette(base_palette)
                 .dec_color(dec_color)
+                .runtime_colors(runtime_colors)
                 .default_status_display(default_status_display)
                 .title_stack(title_stack)
                 .current_title(current_title)
@@ -1332,9 +1340,12 @@ pub(crate) fn csi_apply(
                             rect_right,
                             s,
                             screen.fg,
+                            screen.fg_index,
                             screen.bg,
+                            screen.bg_index,
                             screen.attrs,
                             screen.underline_color,
+                            screen.underline_index,
                         );
                     }
                 }
@@ -1520,9 +1531,13 @@ pub(crate) fn csi_apply(
                 return;
             }
             screen.fg = palette.fg;
+            screen.fg_index = crate::color::ColorSource::Default;
             screen.bg = palette.bg;
+            screen.bg_index = crate::color::ColorSource::Default;
             screen.attrs = CellAttrs::default();
             screen.underline_color = None;
+            screen.underline_index = crate::color::ColorSource::Direct;
+            sync_screen_erase_defaults(screen, dec_color);
             screen.scroll_top = 0;
             screen.scroll_bottom = viewport.rows.saturating_sub(1);
             screen.left_margin = 0;
@@ -1575,6 +1590,7 @@ pub(crate) fn csi_apply(
                 .bell_pending(bell_pending)
                 .vt52_cursor_addr(vt52_cursor_addr)
                 .dec_color(dec_color)
+                .runtime_colors(runtime_colors)
                 .default_status_display(default_status_display)
                 .macros(macros)
                 .udks(udks)

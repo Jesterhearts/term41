@@ -16,7 +16,7 @@ use config41::FeaturePermissions;
 use config41::PermissionPolicy;
 
 use self::clipboard::ClipboardAction;
-use self::color_query::ColorQueryAction;
+use self::color_query::ColorControlAction;
 use self::directory::DirectoryAction;
 use self::hyperlink::HyperlinkAction;
 use self::iterm::ItermAction;
@@ -24,9 +24,12 @@ use self::shell_integration::ShellIntegrationAction;
 use self::shell_integration::VscodeShellIntegrationAction;
 use crate::C1Mode;
 use crate::CommandMeta;
+use crate::DecColorState;
 #[cfg(test)]
 use crate::Row;
 use crate::ShellIntegrationPhase;
+use crate::dynamic_color::DynamicColorTarget;
+use crate::dynamic_color::RuntimeColorOverrides;
 use crate::io::clipboard::ClipboardRequest;
 use crate::screen::Screen;
 use crate::screen::grid::Viewport;
@@ -65,14 +68,13 @@ pub enum OscCommand {
     Iterm2 = 1337,
 }
 
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq)]
 enum ParsedOscAction<'a> {
     Unsupported,
-    AcceptedNoop,
     SetTitle(Option<&'a str>),
     SetDirectory(DirectoryAction),
     SetHyperlink(HyperlinkAction<'a>),
-    ColorQuery(ColorQueryAction<'a>),
+    ColorControl(ColorControlAction),
     Clipboard(ClipboardAction),
     ShellIntegration(ShellIntegrationAction),
     VscodeShellIntegration(VscodeShellIntegrationAction),
@@ -131,6 +133,7 @@ pub(super) fn handle_osc(
     current_directory: &mut Option<PathBuf>,
     hyperlinks: &mut HyperlinkRegistry,
     active_screen: &mut Screen,
+    stashed_screen: &mut Screen,
     viewport: &Viewport,
     on_alt_screen: bool,
     current_title: &mut Option<String>,
@@ -145,7 +148,10 @@ pub(super) fn handle_osc(
     /// Per-prompt metadata: command column (from B), output row (from C),
     /// and timestamps for duration calculation.
     command_metas: &mut HashMap<u64, CommandMeta>,
-    palette: &ColorPalette,
+    palette: &mut ColorPalette,
+    base_palette: &ColorPalette,
+    dec_color: &mut DecColorState,
+    runtime_colors: &mut RuntimeColorOverrides,
     cell_width: u32,
     cell_height: u32,
 ) {
@@ -160,6 +166,7 @@ pub(super) fn handle_osc(
         .current_directory(current_directory)
         .hyperlinks(hyperlinks)
         .active_screen(active_screen)
+        .stashed_screen(stashed_screen)
         .viewport(viewport)
         .on_alt_screen(on_alt_screen)
         .current_title(current_title)
@@ -167,6 +174,9 @@ pub(super) fn handle_osc(
         .shell_integration_phase(shell_integration_phase)
         .command_metas(command_metas)
         .palette(palette)
+        .base_palette(base_palette)
+        .dec_color(dec_color)
+        .runtime_colors(runtime_colors)
         .cell_width(cell_width)
         .cell_height(cell_height)
         .call();
@@ -196,18 +206,20 @@ fn parse_osc(payload: &[u8]) -> ParsedOscAction<'_> {
             .unwrap_or(ParsedOscAction::Unsupported),
         OscCommand::Hyperlink => ParsedOscAction::SetHyperlink(hyperlink::parse(rest)),
         OscCommand::PaletteColor => color_query::parse_palette(rest)
-            .map(ParsedOscAction::ColorQuery)
+            .map(ParsedOscAction::ColorControl)
             .unwrap_or(ParsedOscAction::Unsupported),
-        OscCommand::FgColor => parse_color_query(rest, ColorQueryAction::Foreground),
-        OscCommand::BgColor => parse_color_query(rest, ColorQueryAction::Background),
-        OscCommand::CursorColor => parse_color_query(rest, ColorQueryAction::Cursor),
+        OscCommand::FgColor => parse_dynamic_color(rest, DynamicColorTarget::Foreground),
+        OscCommand::BgColor => parse_dynamic_color(rest, DynamicColorTarget::Background),
+        OscCommand::CursorColor => parse_dynamic_color(rest, DynamicColorTarget::Cursor),
         OscCommand::Clipboard => clipboard::parse(rest)
             .map(ParsedOscAction::Clipboard)
             .unwrap_or(ParsedOscAction::Unsupported),
-        OscCommand::ResetPalette
-        | OscCommand::ResetFg
-        | OscCommand::ResetBg
-        | OscCommand::ResetCursorColor => ParsedOscAction::AcceptedNoop,
+        OscCommand::ResetPalette => color_query::parse_palette_reset(rest)
+            .map(ParsedOscAction::ColorControl)
+            .unwrap_or(ParsedOscAction::Unsupported),
+        OscCommand::ResetFg => parse_dynamic_color_reset(rest, DynamicColorTarget::Foreground),
+        OscCommand::ResetBg => parse_dynamic_color_reset(rest, DynamicColorTarget::Background),
+        OscCommand::ResetCursorColor => parse_dynamic_color_reset(rest, DynamicColorTarget::Cursor),
         OscCommand::ShellIntegration => shell_integration::parse_osc_133(rest)
             .map(ParsedOscAction::ShellIntegration)
             .unwrap_or(ParsedOscAction::Unsupported),
@@ -218,12 +230,21 @@ fn parse_osc(payload: &[u8]) -> ParsedOscAction<'_> {
     }
 }
 
-fn parse_color_query<'a>(
-    rest: &[u8],
-    query_action: ColorQueryAction<'a>,
+fn parse_dynamic_color<'a>(
+    rest: &'a [u8],
+    target: DynamicColorTarget,
 ) -> ParsedOscAction<'a> {
-    color_query::parse_current(rest, query_action)
-        .map(ParsedOscAction::ColorQuery)
+    color_query::parse_dynamic(rest, target)
+        .map(ParsedOscAction::ColorControl)
+        .unwrap_or(ParsedOscAction::Unsupported)
+}
+
+fn parse_dynamic_color_reset(
+    rest: &[u8],
+    target: DynamicColorTarget,
+) -> ParsedOscAction<'_> {
+    color_query::parse_dynamic_reset(rest, target)
+        .map(ParsedOscAction::ColorControl)
         .unwrap_or(ParsedOscAction::Unsupported)
 }
 
@@ -243,26 +264,38 @@ fn apply_parsed_osc(
     current_directory: &mut Option<PathBuf>,
     hyperlinks: &mut HyperlinkRegistry,
     active_screen: &mut Screen,
+    stashed_screen: &mut Screen,
     viewport: &Viewport,
     on_alt_screen: bool,
     current_title: &mut Option<String>,
     current_prompt_row: &mut Option<u64>,
     shell_integration_phase: &mut ShellIntegrationPhase,
     command_metas: &mut HashMap<u64, CommandMeta>,
-    palette: &ColorPalette,
+    palette: &mut ColorPalette,
+    base_palette: &ColorPalette,
+    dec_color: &mut DecColorState,
+    runtime_colors: &mut RuntimeColorOverrides,
     cell_width: u32,
     cell_height: u32,
 ) {
     match action {
-        ParsedOscAction::Unsupported | ParsedOscAction::AcceptedNoop => {}
+        ParsedOscAction::Unsupported => {}
         ParsedOscAction::SetTitle(title) => title::apply(title, current_title),
         ParsedOscAction::SetDirectory(action) => directory::apply(action, current_directory),
         ParsedOscAction::SetHyperlink(action) => {
             hyperlink::apply(action, hyperlinks, &mut active_screen.current_hyperlink);
         }
-        ParsedOscAction::ColorQuery(action) => {
-            color_query::apply(action, pending_output, c1_mode, palette);
-        }
+        ParsedOscAction::ColorControl(action) => color_query::apply(
+            action,
+            pending_output,
+            c1_mode,
+            active_screen,
+            stashed_screen,
+            palette,
+            base_palette,
+            dec_color,
+            runtime_colors,
+        ),
         ParsedOscAction::Clipboard(action) => clipboard::apply(
             action,
             clipboard,
@@ -307,6 +340,7 @@ mod tests {
     use config41::default_fg;
 
     use super::*;
+    use crate::test_support::TestTerm;
 
     struct Bag {
         clipboard: Clipboard,
@@ -314,12 +348,16 @@ mod tests {
         cwd: Option<PathBuf>,
         registry: HyperlinkRegistry,
         screen: Screen,
+        stash: Screen,
         viewport: Viewport,
         title: Option<String>,
         prompt_row: Option<u64>,
         shell_integration_phase: ShellIntegrationPhase,
         command_metas: HashMap<u64, CommandMeta>,
         palette: ColorPalette,
+        base_palette: ColorPalette,
+        dec_color: DecColorState,
+        runtime_colors: RuntimeColorOverrides,
         clipboard_requests: Vec<ClipboardRequest>,
         feature_permissions: FeaturePermissions,
     }
@@ -333,6 +371,9 @@ mod tests {
             cols: u32,
             rows: u32,
         ) -> Self {
+            let base_palette = ColorPalette::default();
+            let dec_color = crate::dec_color_state_from_palette(&base_palette);
+            let palette = crate::dec::color::effective_palette(&base_palette, &dec_color);
             Self {
                 clipboard: Clipboard::in_memory(),
                 pending: Vec::new(),
@@ -347,12 +388,24 @@ mod tests {
                     default_fg(),
                     default_bg(),
                 ),
+                stash: Screen::new(
+                    cols,
+                    rows,
+                    0,
+                    default_fg(),
+                    default_bg(),
+                    default_fg(),
+                    default_bg(),
+                ),
                 viewport: Viewport { rows, cols, top: 0 },
                 title: None,
                 prompt_row: None,
                 shell_integration_phase: ShellIntegrationPhase::None,
                 command_metas: HashMap::new(),
-                palette: ColorPalette::default(),
+                palette,
+                base_palette,
+                dec_color,
+                runtime_colors: RuntimeColorOverrides::default(),
                 clipboard_requests: Vec::new(),
                 feature_permissions: FeaturePermissions {
                     clipboard: ClipboardPermissions {
@@ -390,13 +443,17 @@ mod tests {
                 .current_directory(&mut self.cwd)
                 .hyperlinks(&mut self.registry)
                 .active_screen(&mut self.screen)
+                .stashed_screen(&mut self.stash)
                 .viewport(&self.viewport)
                 .on_alt_screen(false)
                 .current_title(&mut self.title)
                 .current_prompt_row(&mut self.prompt_row)
                 .shell_integration_phase(&mut self.shell_integration_phase)
                 .command_metas(&mut self.command_metas)
-                .palette(&self.palette)
+                .palette(&mut self.palette)
+                .base_palette(&self.base_palette)
+                .dec_color(&mut self.dec_color)
+                .runtime_colors(&mut self.runtime_colors)
                 .cell_width(8)
                 .cell_height(16)
                 .call();
@@ -740,7 +797,7 @@ mod tests {
         assert_eq!(bag.title.as_deref(), Some("icon-name-only"));
     }
 
-    // ---- OSC 10 / OSC 11 / OSC 4 — color queries ----
+    // ---- OSC 4 / OSC 10 / OSC 11 color controls ----
 
     #[test]
     fn osc_10_query_returns_default_fg() {
@@ -759,10 +816,14 @@ mod tests {
     }
 
     #[test]
-    fn osc_10_non_query_is_ignored() {
+    fn osc_10_sets_and_queries_foreground() {
         let mut bag = Bag::new();
-        bag.dispatch(b"10;rgb:ffff/ffff/ffff");
-        assert!(bag.pending.is_empty());
+        bag.dispatch(b"10;rgb:1234/5678/9abc");
+        assert_eq!(bag.palette.fg, palette::Srgb::new(0x12, 0x56, 0x9a));
+        assert_eq!(bag.screen.fg, bag.palette.fg);
+
+        bag.dispatch(b"10;?");
+        assert_eq!(bag.pending, b"\x1b]10;rgb:1212/5656/9a9a\x1b\\");
     }
 
     #[test]
@@ -770,6 +831,13 @@ mod tests {
         let mut bag = Bag::new();
         // Palette color 1 = (205, 0, 0) → cd00/0000/0000
         bag.dispatch(b"4;1;?");
+        assert_eq!(bag.pending, b"\x1b]4;1;rgb:cdcd/0000/0000\x1b\\");
+    }
+
+    #[test]
+    fn osc_4_query_canonicalizes_the_index() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"4;001;?");
         assert_eq!(bag.pending, b"\x1b]4;1;rgb:cdcd/0000/0000\x1b\\");
     }
 
@@ -782,20 +850,47 @@ mod tests {
     }
 
     #[test]
-    fn osc_4_non_query_is_ignored() {
+    fn osc_4_sets_multiple_indices_and_queries_in_order() {
         let mut bag = Bag::new();
-        bag.dispatch(b"4;1;rgb:ffff/0000/0000");
-        assert!(bag.pending.is_empty());
+        bag.dispatch(b"4;1;#123456;196;rgb:ffff/8080/0000;1;?;196;?");
+        assert_eq!(
+            bag.palette.indexed_color(1),
+            palette::Srgb::new(0x12, 0x34, 0x56)
+        );
+        assert_eq!(
+            bag.palette.indexed_color(196),
+            palette::Srgb::new(255, 128, 0)
+        );
+        assert_eq!(
+            bag.pending,
+            b"\x1b]4;1;rgb:1212/3434/5656\x1b\\\x1b]4;196;rgb:ffff/8080/0000\x1b\\"
+        );
     }
 
     #[test]
     fn osc_4_invalid_index_is_ignored() {
         let mut bag = Bag::new();
-        bag.dispatch(b"4;999;?");
+        let original = bag.palette.indexed_color(255);
+        bag.dispatch(b"4;999;?;255;#010203;255;?");
+        assert_eq!(bag.palette.indexed_color(255), original);
         assert!(bag.pending.is_empty());
     }
 
-    // ---- OSC 12 — cursor color query ----
+    #[test]
+    fn osc_4_indices_zero_and_seven_do_not_change_dynamic_defaults() {
+        let mut bag = Bag::new();
+        let foreground = bag.palette.fg;
+        let background = bag.palette.bg;
+        let dec_background = bag.dec_color.table[0];
+        let dec_foreground = bag.dec_color.table[7];
+        bag.dispatch(b"4;0;#ff0000;7;#0000ff");
+        assert_eq!(bag.palette.fg, foreground);
+        assert_eq!(bag.palette.bg, background);
+        assert_eq!(bag.dec_color.table[0], dec_background);
+        assert_eq!(bag.dec_color.table[7], dec_foreground);
+    }
+
+    // ---- OSC 12 cursor color controls ----
 
     #[test]
     fn osc_12_query_returns_fg_when_no_cursor_color() {
@@ -808,53 +903,374 @@ mod tests {
     #[test]
     fn osc_12_query_returns_explicit_cursor_color() {
         let mut bag = Bag::new();
-        bag.palette.cursor = Some(palette::Srgb::new(255, 128, 0));
+        bag.dispatch(b"12;rgb:ffff/8080/0000");
         bag.dispatch(b"12;?");
         assert_eq!(bag.pending, b"\x1b]12;rgb:ffff/8080/0000\x1b\\");
     }
 
     #[test]
-    fn osc_12_non_query_is_ignored() {
+    fn osc_10_parameters_continue_through_background_and_cursor() {
         let mut bag = Bag::new();
-        bag.dispatch(b"12;rgb:ffff/0000/0000");
-        assert!(bag.pending.is_empty());
+        bag.dispatch(b"10;#ff0000;#00ff00;#0000ff");
+        assert_eq!(bag.palette.fg, palette::Srgb::new(255, 0, 0));
+        assert_eq!(bag.palette.bg, palette::Srgb::new(0, 255, 0));
+        assert_eq!(bag.palette.cursor, Some(palette::Srgb::new(0, 0, 255)));
     }
 
-    // ---- OSC 104/110/111/112 — color reset no-ops ----
+    #[test]
+    fn dynamic_queries_use_colors_from_before_the_control_sequence() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"10;#ff0000;?;?");
+        assert_eq!(bag.palette.fg, palette::Srgb::new(255, 0, 0));
+        assert_eq!(
+            bag.pending,
+            b"\x1b]11;rgb:0000/0000/0000\x1b\\\x1b]12;rgb:cccc/cccc/cccc\x1b\\"
+        );
+    }
 
     #[test]
-    fn osc_104_accepted_silently() {
+    fn dynamic_colors_skip_invalid_slots_and_continue() {
         let mut bag = Bag::new();
+        let background = bag.palette.bg;
+        bag.dispatch(b"10;#010203;;#070809");
+        assert_eq!(bag.palette.fg, palette::Srgb::new(1, 2, 3));
+        assert_eq!(bag.palette.bg, background);
+        assert_eq!(bag.palette.cursor, Some(palette::Srgb::new(7, 8, 9)));
+    }
+
+    // ---- OSC 104/110/111/112 color resets ----
+
+    #[test]
+    fn osc_104_without_indices_resets_the_full_indexed_palette() {
+        let mut bag = Bag::new();
+        let original_1 = bag.base_palette.indexed_color(1);
+        let original_196 = bag.base_palette.indexed_color(196);
+        bag.dispatch(b"4;1;#ff0000;196;#0000ff");
         bag.dispatch(b"104");
-        assert!(bag.pending.is_empty());
+        assert_eq!(bag.palette.indexed_color(1), original_1);
+        assert_eq!(bag.palette.indexed_color(196), original_196);
     }
 
     #[test]
-    fn osc_104_with_index_accepted_silently() {
+    fn osc_104_resets_only_the_listed_indices() {
         let mut bag = Bag::new();
+        let original_1 = bag.base_palette.indexed_color(1);
+        bag.dispatch(b"4;1;#ff0000;196;#0000ff");
         bag.dispatch(b"104;1");
-        assert!(bag.pending.is_empty());
+        assert_eq!(bag.palette.indexed_color(1), original_1);
+        assert_eq!(
+            bag.palette.indexed_color(196),
+            palette::Srgb::new(0, 0, 255)
+        );
     }
 
     #[test]
-    fn osc_110_accepted_silently() {
+    fn osc_104_stops_at_the_first_invalid_index() {
         let mut bag = Bag::new();
+        let original_1 = bag.base_palette.indexed_color(1);
+        bag.dispatch(b"4;1;#010203;2;#040506");
+        bag.dispatch(b"104;1;bad;2");
+        assert_eq!(bag.palette.indexed_color(1), original_1);
+        assert_eq!(bag.palette.indexed_color(2), palette::Srgb::new(4, 5, 6));
+    }
+
+    #[test]
+    fn osc_110_restores_configured_foreground() {
+        let mut bag = Bag::new();
+        let original = bag.base_palette.fg;
+        bag.dispatch(b"10;#ff0000");
         bag.dispatch(b"110");
-        assert!(bag.pending.is_empty());
+        assert_eq!(bag.palette.fg, original);
     }
 
     #[test]
-    fn osc_111_accepted_silently() {
+    fn osc_111_restores_configured_background() {
         let mut bag = Bag::new();
+        let original = bag.base_palette.bg;
+        bag.dispatch(b"11;#ff0000");
         bag.dispatch(b"111");
-        assert!(bag.pending.is_empty());
+        assert_eq!(bag.palette.bg, original);
     }
 
     #[test]
-    fn osc_112_accepted_silently() {
+    fn osc_112_restores_configured_cursor_fallback() {
         let mut bag = Bag::new();
+        bag.dispatch(b"12;#ff0000");
         bag.dispatch(b"112");
-        assert!(bag.pending.is_empty());
+        assert_eq!(
+            bag.palette.cursor,
+            Some(bag.base_palette.cursor.unwrap_or(bag.base_palette.fg))
+        );
+    }
+
+    #[test]
+    fn osc_112_restores_the_configured_cursor_after_foreground_changes() {
+        let mut bag = Bag::new();
+        bag.dispatch(b"10;#ff0000");
+        bag.dispatch(b"12;#0000ff");
+        bag.dispatch(b"112");
+        bag.dispatch(b"12;?");
+        assert_eq!(bag.pending, b"\x1b]12;rgb:cccc/cccc/cccc\x1b\\");
+    }
+
+    #[test]
+    fn osc_4_updates_existing_and_future_extended_indexed_cells() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[38;5;196mA");
+        term.process(b"\x1b]4;196;#123456\x07B");
+
+        let row = &term.active.grid.rows[0];
+        assert_eq!(row.fg[0], palette::Srgb::new(0x12, 0x34, 0x56));
+        assert_eq!(row.fg[1], palette::Srgb::new(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn osc_4_updates_only_cells_from_the_selected_index() {
+        let mut term = TestTerm::new(6, 2, 10, 16, 8);
+        term.process(b"\x1b[91mA\x1b[38;5;196mB\x1b[38;2;255;0;0mC\x1b]4;196;#123456\x07");
+
+        let row = &term.active.grid.rows[0];
+        assert_eq!(row.fg[0], palette::Srgb::new(255, 0, 0));
+        assert_eq!(row.fg[1], palette::Srgb::new(0x12, 0x34, 0x56));
+        assert_eq!(row.fg[2], palette::Srgb::new(255, 0, 0));
+    }
+
+    #[test]
+    fn osc_104_does_not_reset_equal_truecolor_cells() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b]4;196;#123456\x07\x1b[38;5;196mA\x1b[38;2;18;52;86mB\x1b]104;196\x07");
+
+        let row = &term.active.grid.rows[0];
+        assert_eq!(row.fg[0], term.base_palette.indexed_color(196));
+        assert_eq!(row.fg[1], palette::Srgb::new(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn dynamic_defaults_do_not_recolor_equal_truecolor_cells() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[38;2;204;204;204mA\x1b[39mB\x1b]10;#123456\x07");
+
+        let row = &term.active.grid.rows[0];
+        assert_eq!(row.fg[0], palette::Srgb::new(204, 204, 204));
+        assert_eq!(row.fg[1], palette::Srgb::new(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn erased_cells_retain_indexed_background_identity() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[48;5;196m\x1b[2K\x1b]4;196;#123456\x07");
+
+        assert!(
+            term.active.grid.rows[0]
+                .bg
+                .iter()
+                .all(|color| *color == palette::Srgb::new(0x12, 0x34, 0x56))
+        );
+    }
+
+    #[test]
+    fn writable_status_erases_retain_indexed_background_identity() {
+        let mut term = TestTerm::new(4, 3, 10, 16, 8);
+        term.process(b"\x1b[2$~\x1b[1$}\x1b[48;5;196m\x1b[2K\x1b]4;196;#123456\x07");
+
+        let status = term.active.status_line.as_ref().expect("status line");
+        assert!(
+            status
+                .row
+                .bg
+                .iter()
+                .all(|color| *color == palette::Srgb::new(0x12, 0x34, 0x56))
+        );
+    }
+
+    #[test]
+    fn dececm_erases_follow_default_background_changes() {
+        let mut term = TestTerm::new(4, 3, 10, 16, 8);
+        term.process(b"\x1b[?117h\x1b[2J\x1b]11;#123456\x07");
+
+        assert!(
+            term.active.grid.rows[0]
+                .bg
+                .iter()
+                .all(|color| *color == palette::Srgb::new(0x12, 0x34, 0x56))
+        );
+    }
+
+    #[test]
+    fn restored_background_resynchronizes_erase_provenance() {
+        let mut term = TestTerm::new(4, 3, 10, 16, 8);
+        term.process(b"\x1b[48;5;196m\x1b7\x1b[48;2;1;2;3m\x1b8\x1b[2K\x1b]4;196;#123456\x07");
+
+        assert!(
+            term.active.grid.rows[0]
+                .bg
+                .iter()
+                .all(|color| *color == palette::Srgb::new(0x12, 0x34, 0x56))
+        );
+    }
+
+    #[test]
+    fn soft_reset_resynchronizes_default_erase_provenance() {
+        let mut term = TestTerm::new(4, 3, 10, 16, 8);
+        term.process(b"\x1b[48;5;196m\x1b[!p\x1b[2K\x1b]11;#123456\x07");
+
+        assert!(
+            term.active.grid.rows[0]
+                .bg
+                .iter()
+                .all(|color| *color == palette::Srgb::new(0x12, 0x34, 0x56))
+        );
+    }
+
+    #[test]
+    fn osc_4_updates_completed_blocks_and_saved_cursor_colors() {
+        let mut term = TestTerm::new(8, 3, 10, 16, 8);
+        term.process(b"\x1b[38;5;196mold\x1b7\x1b]133;A\x07new");
+        term.process(b"\x1b]4;196;#123456\x07\x1b8");
+
+        assert_eq!(
+            term.active.scrollback_blocks[0].grid.rows[0].fg[0],
+            palette::Srgb::new(0x12, 0x34, 0x56)
+        );
+        assert_eq!(term.active.fg, palette::Srgb::new(0x12, 0x34, 0x56));
+    }
+
+    #[test]
+    fn palette_changes_preserve_completed_block_erase_provenance() {
+        let mut term = TestTerm::new(8, 3, 10, 16, 8);
+        term.process(b"\x1b[48;5;196mold\x1b]133;A\x07new\x1b]12;#123456\x07");
+
+        let block = &term.active.scrollback_blocks[0];
+        assert_eq!(
+            block.grid.default_bg_source,
+            crate::color::ColorSource::Indexed(196)
+        );
+        assert_eq!(block.grid.default_bg, term.palette.indexed_color(196));
+    }
+
+    #[test]
+    fn indexed_color_identity_survives_reflow() {
+        let mut term = TestTerm::new(4, 3, 10, 16, 8);
+        term.process(b"\x1b[38;5;196;58;5;196mabcdef");
+        term.resize(2, 3);
+        term.resize(6, 3);
+        term.process(b"\x1b]4;196;#123456\x07");
+
+        let colors = term
+            .active
+            .grid
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter().zip(&row.fg))
+            .filter(|(cell, _)| cell.as_str() != " ")
+            .map(|(_, color)| *color)
+            .collect::<Vec<_>>();
+        assert_eq!(colors, vec![palette::Srgb::new(0x12, 0x34, 0x56); 6]);
+        let underline_colors = term
+            .active
+            .grid
+            .rows
+            .iter()
+            .flat_map(|row| row.cells.iter().zip(&row.underline_color))
+            .filter(|(cell, _)| cell.as_str() != " ")
+            .map(|(_, color)| *color)
+            .collect::<Vec<_>>();
+        assert_eq!(
+            underline_colors,
+            vec![Some(palette::Srgb::new(0x12, 0x34, 0x56)); 6]
+        );
+    }
+
+    #[test]
+    fn osc_4_keeps_the_dec_color_table_synchronized() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        let original = term.dec_color.table[196];
+        term.process(b"\x1b]4;196;#123456\x07");
+        assert_eq!(
+            term.dec_color.table[196],
+            palette::Srgb::new(0x12, 0x34, 0x56)
+        );
+
+        term.process(b"\x1b]104;196\x07");
+        assert_eq!(term.dec_color.table[196], original);
+    }
+
+    #[test]
+    fn osc_overrides_survive_theme_reload_and_reset_to_the_new_theme() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        let override_color = palette::Srgb::new(1, 2, 3);
+        term.process(b"\x1b]4;1;#010203\x07");
+
+        let mut new_theme = term.base_palette.clone();
+        let new_theme_color = palette::Srgb::new(9, 8, 7);
+        new_theme.set_indexed_color(1, new_theme_color);
+        term.set_palette(new_theme);
+        assert_eq!(term.palette.indexed_color(1), override_color);
+        assert_eq!(term.dec_color.table[1], override_color);
+
+        term.process(b"\x1b]104;1\x07");
+        assert_eq!(term.palette.indexed_color(1), new_theme_color);
+        assert_eq!(term.dec_color.table[1], new_theme_color);
+    }
+
+    #[test]
+    fn hard_reset_clears_runtime_color_overrides() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        let original = term.base_palette.indexed_color(196);
+        term.process(b"\x1b]4;196;#010203\x07\x1bc");
+
+        assert_eq!(term.palette.indexed_color(196), original);
+    }
+
+    #[test]
+    fn hard_reset_preserves_dynamic_color_overrides() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b]10;#010203;#040506;#070809\x07\x1bc");
+        assert_eq!(term.palette.fg, palette::Srgb::new(1, 2, 3));
+        assert_eq!(term.palette.bg, palette::Srgb::new(4, 5, 6));
+        assert_eq!(term.palette.cursor, Some(palette::Srgb::new(7, 8, 9)));
+    }
+
+    #[test]
+    fn hard_reset_remaps_retained_indexed_scrollback() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        let original = term.base_palette.indexed_color(196);
+        term.process(b"\x1b]4;196;#010203\x07\x1b[38;5;196mold\r\none\r\ntwo\x1bc");
+
+        let indexed_cells = term
+            .active
+            .grid
+            .rows
+            .iter()
+            .flat_map(|row| row.fg.iter().zip(&row.fg_index))
+            .filter(|(_, source)| **source == crate::color::ColorSource::Indexed(196))
+            .collect::<Vec<_>>();
+        assert!(!indexed_cells.is_empty());
+        assert!(indexed_cells.iter().all(|(color, _)| **color == original));
+    }
+
+    #[test]
+    fn dynamic_color_resets_restore_custom_theme_values() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        let mut theme = term.base_palette.clone();
+        theme.fg = palette::Srgb::new(10, 20, 30);
+        theme.bg = palette::Srgb::new(40, 50, 60);
+        theme.cursor = Some(palette::Srgb::new(70, 80, 90));
+        term.set_palette(theme.clone());
+
+        term.process(b"\x1b]10;#ff0000;#00ff00;#0000ff\x07\x1b]110\x07\x1b]111\x07\x1b]112\x07");
+        assert_eq!(term.palette.fg, theme.fg);
+        assert_eq!(term.palette.bg, theme.bg);
+        assert_eq!(term.palette.cursor, theme.cursor);
+    }
+
+    #[test]
+    fn dynamic_color_updates_both_screen_buffers() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"A\x1b[?1049hB\x1b]10;#123456\x07");
+        let color = palette::Srgb::new(0x12, 0x34, 0x56);
+        assert_eq!(term.active.grid.rows[0].fg[0], color);
+        assert_eq!(term.stash.grid.rows[0].fg[0], color);
     }
 
     // ---- OSC 1337 — iTerm2 non-image commands ----

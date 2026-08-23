@@ -6,24 +6,18 @@ use vtepp::Params;
 
 use crate::parser::BorrowedParams;
 
-/// First palette index of the 6×6×6 RGB color cube in the 256-color palette.
-const CUBE_PALETTE_START: u8 = 16;
-/// Last palette index of the 6×6×6 RGB color cube.
-const CUBE_PALETTE_END: u8 = 231;
-/// Side length of the RGB cube — each channel takes 6 discrete levels.
-const CUBE_SIDE: u8 = 6;
-/// Non-zero cube channel value for level `c`: `CUBE_CHANNEL_BASE +
-/// CUBE_CHANNEL_STEP * c`.
-const CUBE_CHANNEL_BASE: u8 = 55;
-const CUBE_CHANNEL_STEP: u8 = 40;
-
-/// First palette index of the grayscale ramp.
-const GRAY_PALETTE_START: u8 = 232;
-/// Last palette index of the grayscale ramp.
-const GRAY_PALETTE_END: u8 = 255;
-/// Grayscale ramp value for step `n`: `GRAY_BASE + GRAY_STEP * n`.
-const GRAY_BASE: u8 = 8;
-const GRAY_STEP: u8 = 10;
+/// Origin of a resolved terminal color.
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum ColorSource {
+    /// The terminal's current default foreground or background.
+    Default,
+    /// An xterm indexed palette entry.
+    Indexed(u8),
+    /// A DEC color-table entry.
+    Dec(u8),
+    /// A direct RGB color that must not follow palette changes.
+    Direct,
+}
 
 /// Offset from a standard ANSI color (0..=7) to its bright variant (8..=15).
 const BRIGHT_OFFSET: u8 = 8;
@@ -136,44 +130,12 @@ impl TryFrom<u16> for SgrAction {
     }
 }
 
-/// Look up a 256-color palette index using the given [`ColorPalette`] for
-/// indices 0–15 and the computed cube/grayscale ramp for 16–255.
+/// Look up a 256-color palette index.
 pub(super) fn palette_color(
     palette: &ColorPalette,
     index: u8,
 ) -> Srgb<u8> {
-    if index < 16 {
-        palette.ansi[index as usize]
-    } else {
-        computed_color(index)
-    }
-}
-
-/// Compute the RGB value for 256-color palette indices 16–255 (the 6×6×6
-/// cube and 24-step grayscale ramp). Indices 0–15 are returned as black;
-/// callers that need theme-aware 0–15 should use [`palette_color`] instead.
-const fn computed_color(index: u8) -> Srgb<u8> {
-    match index {
-        CUBE_PALETTE_START..=CUBE_PALETTE_END => {
-            const fn to_val(c: u8) -> u8 {
-                if c == 0 {
-                    0
-                } else {
-                    CUBE_CHANNEL_BASE + CUBE_CHANNEL_STEP * c
-                }
-            }
-            let idx = index - CUBE_PALETTE_START;
-            let r = idx / (CUBE_SIDE * CUBE_SIDE);
-            let g = (idx % (CUBE_SIDE * CUBE_SIDE)) / CUBE_SIDE;
-            let b = idx % CUBE_SIDE;
-            Srgb::new(to_val(r), to_val(g), to_val(b))
-        }
-        GRAY_PALETTE_START..=GRAY_PALETTE_END => {
-            let v = GRAY_BASE + GRAY_STEP * (index - GRAY_PALETTE_START);
-            Srgb::new(v, v, v)
-        }
-        _ => Srgb::new(0, 0, 0),
-    }
+    palette.indexed_color(index)
 }
 
 /// Apply SGR (Select Graphic Rendition) parameters to the current fg/bg
@@ -193,37 +155,70 @@ pub(super) fn apply_sgr(
     params: &Params,
     palette: &ColorPalette,
 ) {
+    let mut fg_index = ColorSource::Default;
+    let mut bg_index = ColorSource::Default;
+    let mut underline_index = ColorSource::Direct;
     apply_sgr_group_refs(
         fg,
+        &mut fg_index,
         bg,
+        &mut bg_index,
         attrs,
         underline_color,
+        &mut underline_index,
         BorrowedParams::from_vte(params),
         palette,
     );
 }
 
+#[allow(clippy::too_many_arguments)]
 pub(super) fn apply_sgr_groups(
     fg: &mut Srgb<u8>,
+    fg_index: &mut ColorSource,
     bg: &mut Srgb<u8>,
+    bg_index: &mut ColorSource,
     attrs: &mut CellAttrs,
     underline_color: &mut Option<Srgb<u8>>,
+    underline_index: &mut ColorSource,
     groups: BorrowedParams,
     palette: &ColorPalette,
 ) {
-    apply_sgr_group_refs(fg, bg, attrs, underline_color, groups, palette);
+    apply_sgr_group_refs(
+        fg,
+        fg_index,
+        bg,
+        bg_index,
+        attrs,
+        underline_color,
+        underline_index,
+        groups,
+        palette,
+    );
 }
 
+#[allow(clippy::too_many_arguments)]
 fn apply_sgr_group_refs(
     fg: &mut Srgb<u8>,
+    fg_index: &mut ColorSource,
     bg: &mut Srgb<u8>,
+    bg_index: &mut ColorSource,
     attrs: &mut CellAttrs,
     underline_color: &mut Option<Srgb<u8>>,
+    underline_index: &mut ColorSource,
     groups: BorrowedParams,
     palette: &ColorPalette,
 ) {
     if groups.is_empty() {
-        reset_all(fg, bg, attrs, underline_color, palette);
+        reset_all(
+            fg,
+            fg_index,
+            bg,
+            bg_index,
+            attrs,
+            underline_color,
+            underline_index,
+            palette,
+        );
         return;
     }
 
@@ -232,7 +227,16 @@ fn apply_sgr_group_refs(
         let g = &groups[i];
         if let Ok(action) = SgrAction::try_from(g[0]) {
             match action {
-                SgrAction::Reset => reset_all(fg, bg, attrs, underline_color, palette),
+                SgrAction::Reset => reset_all(
+                    fg,
+                    fg_index,
+                    bg,
+                    bg_index,
+                    attrs,
+                    underline_color,
+                    underline_index,
+                    palette,
+                ),
                 SgrAction::Bold => attrs.insert(CellAttrs::BOLD),
                 SgrAction::Dim => attrs.insert(CellAttrs::DIM),
                 SgrAction::Italic => attrs.insert(CellAttrs::ITALIC),
@@ -263,31 +267,55 @@ fn apply_sgr_group_refs(
                 SgrAction::ResetStrikethrough => attrs.remove(CellAttrs::STRIKETHROUGH),
                 SgrAction::Overline => attrs.insert(CellAttrs::OVERLINE),
                 SgrAction::ResetOverline => attrs.remove(CellAttrs::OVERLINE),
-                SgrAction::FgRange(n) => *fg = palette_color(palette, (n - SGR_FG_START) as u8),
+                SgrAction::FgRange(n) => {
+                    let index = (n - SGR_FG_START) as u8;
+                    *fg = palette_color(palette, index);
+                    *fg_index = ColorSource::Indexed(index);
+                }
                 SgrAction::FgExtended => {
                     if let Some(color) = parse_extended_color(groups, g, &mut i, palette) {
-                        *fg = color;
+                        *fg = color.value;
+                        *fg_index = color.index;
                     }
                 }
-                SgrAction::FgDefault => *fg = palette.fg,
-                SgrAction::BgRange(n) => *bg = palette_color(palette, (n - SGR_BG_START) as u8),
+                SgrAction::FgDefault => {
+                    *fg = palette.fg;
+                    *fg_index = ColorSource::Default;
+                }
+                SgrAction::BgRange(n) => {
+                    let index = (n - SGR_BG_START) as u8;
+                    *bg = palette_color(palette, index);
+                    *bg_index = ColorSource::Indexed(index);
+                }
                 SgrAction::BgExtended => {
                     if let Some(color) = parse_extended_color(groups, g, &mut i, palette) {
-                        *bg = color;
+                        *bg = color.value;
+                        *bg_index = color.index;
                     }
                 }
-                SgrAction::BgDefault => *bg = palette.bg,
+                SgrAction::BgDefault => {
+                    *bg = palette.bg;
+                    *bg_index = ColorSource::Default;
+                }
                 SgrAction::UnderlineColor => {
                     if let Some(color) = parse_extended_color(groups, g, &mut i, palette) {
-                        *underline_color = Some(color);
+                        *underline_color = Some(color.value);
+                        *underline_index = color.index;
                     }
                 }
-                SgrAction::ResetUnderlineColor => *underline_color = None,
+                SgrAction::ResetUnderlineColor => {
+                    *underline_color = None;
+                    *underline_index = ColorSource::Direct;
+                }
                 SgrAction::BrightFgRange(n) => {
-                    *fg = palette_color(palette, (n - SGR_BRIGHT_FG_START) as u8 + BRIGHT_OFFSET)
+                    let index = (n - SGR_BRIGHT_FG_START) as u8 + BRIGHT_OFFSET;
+                    *fg = palette_color(palette, index);
+                    *fg_index = ColorSource::Indexed(index);
                 }
                 SgrAction::BrightBgRange(n) => {
-                    *bg = palette_color(palette, (n - SGR_BRIGHT_BG_START) as u8 + BRIGHT_OFFSET)
+                    let index = (n - SGR_BRIGHT_BG_START) as u8 + BRIGHT_OFFSET;
+                    *bg = palette_color(palette, index);
+                    *bg_index = ColorSource::Indexed(index);
                 }
             }
         }
@@ -295,18 +323,31 @@ fn apply_sgr_group_refs(
     }
 }
 
+#[allow(clippy::too_many_arguments)]
 fn reset_all(
     fg: &mut Srgb<u8>,
+    fg_index: &mut ColorSource,
     bg: &mut Srgb<u8>,
+    bg_index: &mut ColorSource,
     attrs: &mut CellAttrs,
     underline_color: &mut Option<Srgb<u8>>,
+    underline_index: &mut ColorSource,
     palette: &ColorPalette,
 ) {
     *fg = palette.fg;
+    *fg_index = ColorSource::Default;
     *bg = palette.bg;
+    *bg_index = ColorSource::Default;
     let protected = *attrs & CellAttrs::PROTECTED;
     *attrs = protected;
     *underline_color = None;
+    *underline_index = ColorSource::Direct;
+}
+
+#[derive(Clone, Copy)]
+struct ParsedColor {
+    value: Srgb<u8>,
+    index: ColorSource,
 }
 
 /// Parse an extended color from either the colon sub-parameter form
@@ -318,7 +359,7 @@ fn parse_extended_color(
     group: &[u16],
     i: &mut usize,
     palette: &ColorPalette,
-) -> Option<Srgb<u8>> {
+) -> Option<ParsedColor> {
     // Colon form: sub-parameters sit in the same group (e.g. [38, 5, 196]).
     if group.len() > 1 {
         return parse_color_subparams(&group[1..], palette);
@@ -337,7 +378,11 @@ fn parse_extended_color(
         SrgExt::Indexed => {
             if *i + 2 < groups.len() {
                 *i += 2;
-                Some(palette_color(palette, groups[*i][0] as u8))
+                let index = u8::try_from(groups[*i][0]).ok()?;
+                Some(ParsedColor {
+                    value: palette_color(palette, index),
+                    index: ColorSource::Indexed(index),
+                })
             } else {
                 None
             }
@@ -345,11 +390,13 @@ fn parse_extended_color(
         SrgExt::Rgb => {
             if *i + 4 < groups.len() {
                 *i += 4;
-                Some(Srgb::new(
-                    groups[*i - 2][0] as u8,
-                    groups[*i - 1][0] as u8,
-                    groups[*i][0] as u8,
-                ))
+                let red = u8::try_from(groups[*i - 2][0]).ok()?;
+                let green = u8::try_from(groups[*i - 1][0]).ok()?;
+                let blue = u8::try_from(groups[*i][0]).ok()?;
+                Some(ParsedColor {
+                    value: Srgb::new(red, green, blue),
+                    index: ColorSource::Direct,
+                })
             } else {
                 None
             }
@@ -362,24 +409,41 @@ fn parse_extended_color(
 fn parse_color_subparams(
     sub: &[u16],
     palette: &ColorPalette,
-) -> Option<Srgb<u8>> {
+) -> Option<ParsedColor> {
     let Ok(ext) = SrgExt::try_from(*sub.first()?) else {
         return None;
     };
 
     match ext {
         SrgExt::Indexed => {
-            let idx = *sub.get(1)?;
-            Some(palette_color(palette, idx as u8))
+            let index = u8::try_from(*sub.get(1)?).ok()?;
+            Some(ParsedColor {
+                value: palette_color(palette, index),
+                index: ColorSource::Indexed(index),
+            })
         }
         SrgExt::Rgb => {
             // The full form is `2:CS:R:G:B` (5 values after the lead param).
             // When CS (color space) is omitted the shorter `2:R:G:B` form
             // has 4 values. We accept both.
             if sub.len() >= 5 {
-                Some(Srgb::new(sub[2] as u8, sub[3] as u8, sub[4] as u8))
+                Some(ParsedColor {
+                    value: Srgb::new(
+                        u8::try_from(sub[2]).ok()?,
+                        u8::try_from(sub[3]).ok()?,
+                        u8::try_from(sub[4]).ok()?,
+                    ),
+                    index: ColorSource::Direct,
+                })
             } else if sub.len() >= 4 {
-                Some(Srgb::new(sub[1] as u8, sub[2] as u8, sub[3] as u8))
+                Some(ParsedColor {
+                    value: Srgb::new(
+                        u8::try_from(sub[1]).ok()?,
+                        u8::try_from(sub[2]).ok()?,
+                        u8::try_from(sub[3]).ok()?,
+                    ),
+                    index: ColorSource::Direct,
+                })
             } else {
                 None
             }
@@ -563,13 +627,13 @@ mod tests {
     #[test]
     fn sgr_38_5_sets_indexed_foreground() {
         let (fg, _) = apply(b"\x1b[38;5;196m");
-        assert_eq!(fg, computed_color(196));
+        assert_eq!(fg, ColorPalette::default().indexed_color(196));
     }
 
     #[test]
     fn sgr_48_5_sets_indexed_background() {
         let (_, bg) = apply(b"\x1b[48;5;21m");
-        assert_eq!(bg, computed_color(21));
+        assert_eq!(bg, ColorPalette::default().indexed_color(21));
     }
 
     #[test]
@@ -675,6 +739,13 @@ mod tests {
     #[test]
     fn sgr_truncated_indexed_is_ignored() {
         let (fg, bg) = apply(b"\x1b[48;5m");
+        assert_eq!(fg, default_fg());
+        assert_eq!(bg, default_bg());
+    }
+
+    #[test]
+    fn sgr_out_of_range_color_components_are_ignored() {
+        let (fg, bg) = apply(b"\x1b[38;5;256;48;2;0;0;256m");
         assert_eq!(fg, default_fg());
         assert_eq!(bg, default_bg());
     }
@@ -865,7 +936,7 @@ mod tests {
     #[test]
     fn sgr_58_5_sets_indexed_underline_color() {
         let (_, ul_color) = apply_full(b"\x1b[58;5;196m");
-        assert_eq!(ul_color, Some(computed_color(196)));
+        assert_eq!(ul_color, Some(ColorPalette::default().indexed_color(196)));
     }
 
     #[test]
@@ -877,7 +948,7 @@ mod tests {
     #[test]
     fn sgr_58_colon_5_sets_indexed_underline_color() {
         let (_, ul_color) = apply_full(b"\x1b[58:5:196m");
-        assert_eq!(ul_color, Some(computed_color(196)));
+        assert_eq!(ul_color, Some(ColorPalette::default().indexed_color(196)));
     }
 
     #[test]
@@ -918,7 +989,7 @@ mod tests {
     #[test]
     fn sgr_38_colon_5_sets_indexed_foreground() {
         let (fg, _) = apply(b"\x1b[38:5:196m");
-        assert_eq!(fg, computed_color(196));
+        assert_eq!(fg, ColorPalette::default().indexed_color(196));
     }
 
     #[test]

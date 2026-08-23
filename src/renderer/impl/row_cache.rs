@@ -172,6 +172,8 @@ pub(super) fn blank_cached_row(
         attrs: vec![CellAttrs::default(); cols],
         fg: vec![palette.fg; cols],
         bg: vec![palette.bg; cols],
+        fg_source: vec![terminal41::ColorSource::Default; cols],
+        bg_source: vec![terminal41::ColorSource::Default; cols],
         underline_color: vec![None; cols],
         has_link: vec![false; cols],
         line_attr: LineAttr::Normal,

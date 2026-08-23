@@ -128,7 +128,7 @@ Legend:
 | Area                                           | Status       | Notes                                                                                             |
 | ---------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------- |
 | OSC 0 / OSC 2 titles                           | ✅ Supported | Common xterm-compatible title updates.                                                            |
-| OSC 4 / OSC 10 / OSC 11 colors                 | ✅ Supported | Palette/default foreground/background queries and updates.                                        |
+| OSC 4 / OSC 10 / OSC 11 / OSC 12 colors        | ✅ Supported | Indexed, default, and cursor color queries, updates, and xterm-compatible resets.                   |
 | OSC 7 current directory                        | ✅ Supported | Stored as untrusted metadata.                                                                     |
 | OSC 8 hyperlinks                               | ✅ Supported | Hyperlinks attach to terminal cells.                                                              |
 | OSC 52 clipboard                               | ✅ Supported | Read/write requests are policy-gated and default to asking.                                       |

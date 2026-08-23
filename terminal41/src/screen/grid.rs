@@ -2,6 +2,7 @@ use std::collections::VecDeque;
 
 use palette::Srgb;
 
+use crate::color::ColorSource;
 use crate::screen::row::Row;
 
 mod edit;
@@ -87,8 +88,10 @@ pub struct Grid {
     pub total_popped: usize,
     /// Default foreground color for new / cleared cells (from palette).
     pub default_fg: Srgb<u8>,
+    pub(crate) default_fg_source: ColorSource,
     /// Default background color for new / cleared cells (from palette).
     pub default_bg: Srgb<u8>,
+    pub(crate) default_bg_source: ColorSource,
 }
 
 impl Grid {
@@ -112,12 +115,23 @@ impl Grid {
         let max_rows = viewport.rows as usize + self.scrollback_limit as usize;
         if self.rows.len() >= max_rows && max_rows > 0 {
             let mut recycled = self.rows.pop_front().expect("max_rows > 0");
-            recycled.reset_for_reuse(viewport.cols, self.default_fg, self.default_bg);
+            recycled.reset_for_reuse(
+                viewport.cols,
+                self.default_fg,
+                self.default_fg_source,
+                self.default_bg,
+                self.default_bg_source,
+            );
             self.rows.push_back(recycled);
             self.total_popped += 1;
         } else {
-            self.rows
-                .push_back(Row::new(viewport.cols, self.default_fg, self.default_bg));
+            self.rows.push_back(Row::new_styled(
+                viewport.cols,
+                self.default_fg,
+                self.default_fg_source,
+                self.default_bg,
+                self.default_bg_source,
+            ));
         }
     }
 
@@ -217,7 +231,9 @@ mod tests {
             scrollback_limit: 1000,
             total_popped: 0,
             default_fg: default_fg(),
+            default_fg_source: ColorSource::Default,
             default_bg: default_bg(),
+            default_bg_source: ColorSource::Default,
         }
     }
 
@@ -612,7 +628,9 @@ mod tests {
             scrollback_limit: 1000,
             total_popped: 0,
             default_fg: default_fg(),
+            default_fg_source: ColorSource::Default,
             default_bg: default_bg(),
+            default_bg_source: ColorSource::Default,
         };
         (grid, vp)
     }
@@ -951,7 +969,9 @@ mod tests {
             scrollback_limit: 1000,
             total_popped: 0,
             default_fg: default_fg(),
+            default_fg_source: ColorSource::Default,
             default_bg: default_bg(),
+            default_bg_source: ColorSource::Default,
         };
         grid.reflow(10); // should not panic
         assert_eq!(grid.rows.len(), 0);
@@ -1017,7 +1037,9 @@ mod tests {
             scrollback_limit: 2,
             total_popped: 0,
             default_fg: default_fg(),
+            default_fg_source: ColorSource::Default,
             default_bg: default_bg(),
+            default_bg_source: ColorSource::Default,
         };
         // Fill 3 visible + 2 scrollback = 5 rows (at the limit).
         for ch in ['S', 'T', 'A', 'B', 'C'] {
@@ -1041,7 +1063,9 @@ mod tests {
             scrollback_limit: 0,
             total_popped: 0,
             default_fg: default_fg(),
+            default_fg_source: ColorSource::Default,
             default_bg: default_bg(),
+            default_bg_source: ColorSource::Default,
         };
         // Start with 2 visible rows.
         for ch in ['A', 'B'] {

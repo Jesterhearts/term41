@@ -77,6 +77,8 @@ mod geometry_tests {
             attrs: vec![CellAttrs::default(); cols],
             fg: vec![Srgb::new(255, 255, 255); cols],
             bg: vec![Srgb::new(0, 0, 0); cols],
+            fg_source: vec![terminal41::ColorSource::Default; cols],
+            bg_source: vec![terminal41::ColorSource::Default; cols],
             underline_color: vec![None; cols],
             has_link: vec![false; cols],
             line_attr: LineAttr::Normal,

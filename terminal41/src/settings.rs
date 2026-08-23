@@ -12,6 +12,8 @@ use crate::TerminalProtocolState;
 use crate::Viewport;
 use crate::dec::color::effective_palette;
 use crate::dec::color::rebase_theme_entries;
+use crate::dynamic_color::RuntimeColorOverrides;
+use crate::dynamic_color::runtime_palette;
 use crate::feature;
 use crate::lifecycle_ops;
 use crate::screen::palette_sync::apply_screen_palette;
@@ -43,14 +45,16 @@ pub fn set_palette(
     palette: &mut ColorPalette,
     base_palette: &mut ColorPalette,
     dec_color: &mut DecColorState,
+    runtime_colors: &RuntimeColorOverrides,
     new_palette: ColorPalette,
 ) {
-    let old_palette = palette.clone();
-    rebase_theme_entries(dec_color, base_palette, &new_palette);
+    let old_runtime_palette = runtime_palette(base_palette, runtime_colors);
+    let new_runtime_palette = runtime_palette(&new_palette, runtime_colors);
+    rebase_theme_entries(dec_color, &old_runtime_palette, &new_runtime_palette);
     *base_palette = new_palette;
-    *palette = effective_palette(base_palette, dec_color);
+    *palette = effective_palette(&new_runtime_palette, dec_color);
     for screen in [active, stash] {
-        apply_screen_palette(screen, &old_palette, palette);
+        apply_screen_palette(screen, palette, dec_color);
         sync_screen_erase_defaults(screen, dec_color);
     }
 }
@@ -256,5 +260,20 @@ mod tests {
         assert_eq!(row.fg[0], explicit);
         assert_eq!(row.bg[0], Srgb::new(4, 5, 6));
         assert_eq!(row.underline_color[0], Some(Srgb::new(7, 8, 9)));
+    }
+
+    #[test]
+    fn set_palette_distinguishes_equal_indexed_and_truecolor_values() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"\x1b[31mA\x1b[38;2;205;0;0mB");
+        let mut new = term.palette.clone();
+        let new_red = Srgb::new(9, 10, 11);
+        new.set_indexed_color(1, new_red);
+
+        term.set_palette(new);
+
+        let row = &term.active.grid.rows[0];
+        assert_eq!(row.fg[0], new_red);
+        assert_eq!(row.fg[1], Srgb::new(205, 0, 0));
     }
 }

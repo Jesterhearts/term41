@@ -74,6 +74,8 @@ fn row_snapshot_for_sticky_prompt(
         attrs: row.attrs.clone(),
         fg: row.fg.clone(),
         bg: row.bg.clone(),
+        fg_source: row.fg_sources().to_vec(),
+        bg_source: row.bg_sources().to_vec(),
         underline_color: row.underline_color.clone(),
         has_link: row.links.iter().map(|link| link.is_some()).collect(),
         line_attr: row.line_attr,
@@ -115,6 +117,8 @@ fn normalize_renderer_snapshot_row(
     row.attrs.resize(cols, CellAttrs::default());
     row.fg.resize(cols, terminal.palette.fg);
     row.bg.resize(cols, terminal.palette.bg);
+    row.fg_source.resize(cols, terminal41::ColorSource::Default);
+    row.bg_source.resize(cols, terminal41::ColorSource::Default);
     row.underline_color.resize(cols, None);
     row.has_link.resize(cols, false);
 }

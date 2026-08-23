@@ -8,9 +8,9 @@ use crate::PlacedImage;
 use crate::ShellIntegrationPhase;
 use crate::Terminal;
 use crate::TerminalEffects;
-use crate::dec::color::effective_palette;
 use crate::dec::color::restore_color_table;
 use crate::dispatch;
+use crate::dynamic_color::effective_runtime_palette;
 use crate::feature;
 use crate::graphics;
 use crate::metadata::shift_terminal_metadata_rows;
@@ -30,14 +30,18 @@ pub(crate) fn restore_dec_color_table(
         return false;
     }
     apply_dec_color_defaults(terminal);
+    terminal.snapshot.mark_all();
     true
 }
 
 fn apply_dec_color_defaults(terminal: &mut Terminal) {
-    let old_palette = terminal.palette.clone();
-    terminal.palette = effective_palette(&terminal.base_palette, &terminal.dec_color);
+    terminal.palette = effective_runtime_palette(
+        &terminal.base_palette,
+        &terminal.runtime_colors,
+        &terminal.dec_color,
+    );
     for screen in [&mut terminal.active, &mut terminal.stash] {
-        apply_screen_palette(screen, &old_palette, &terminal.palette);
+        apply_screen_palette(screen, &terminal.palette, &terminal.dec_color);
         sync_screen_erase_defaults(screen, &terminal.dec_color);
     }
 }
@@ -173,6 +177,7 @@ pub(crate) fn apply(
             &mut terminal.palette,
             &terminal.base_palette,
             &mut terminal.dec_color,
+            &mut terminal.runtime_colors,
         ),
         dispatch::TerminalAction::Esc(action) => {
             dispatch::apply_esc_action(
@@ -195,6 +200,7 @@ pub(crate) fn apply(
                 &mut terminal.palette,
                 &terminal.base_palette,
                 &mut terminal.dec_color,
+                &mut terminal.runtime_colors,
                 &mut terminal.default_status_display,
                 &mut effects.host_bytes,
                 &mut terminal.vt52_cursor_addr,
@@ -215,13 +221,17 @@ pub(crate) fn apply(
                 &mut terminal.metadata.current_directory,
                 &mut terminal.hyperlinks,
                 &mut terminal.active,
+                &mut terminal.stash,
                 &terminal.viewport,
                 terminal.on_alt_screen,
                 &mut terminal.metadata.current_title,
                 &mut terminal.metadata.current_prompt_row,
                 &mut terminal.metadata.shell_integration_phase,
                 &mut terminal.metadata.command_metas,
-                &terminal.palette,
+                &mut terminal.palette,
+                &terminal.base_palette,
+                &mut terminal.dec_color,
+                &mut terminal.runtime_colors,
                 terminal.cell_width,
                 terminal.cell_height,
                 &mut terminal.images.iterm_chunked,

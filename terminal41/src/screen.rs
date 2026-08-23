@@ -12,6 +12,7 @@ use smol_str::SmolStr;
 
 use crate::charset::CharsetState;
 use crate::charset::UserPreferredSupplementalSet;
+use crate::color::ColorSource;
 use crate::image::PlacedImage;
 use crate::image::anchor_images;
 use crate::image::clear_in_range;
@@ -42,9 +43,12 @@ pub struct CommandBlock {
 pub struct SavedCursor {
     pub cursor: Cursor,
     pub fg: Srgb<u8>,
+    pub(crate) fg_index: ColorSource,
     pub bg: Srgb<u8>,
+    pub(crate) bg_index: ColorSource,
     pub attrs: CellAttrs,
     pub underline_color: Option<Srgb<u8>>,
+    pub(crate) underline_index: ColorSource,
     pub origin_mode: bool,
     pub charset: CharsetState,
 }
@@ -96,9 +100,12 @@ pub struct StatusLine {
     pub row: Row,
     pub cursor: Cursor,
     pub fg: Srgb<u8>,
+    pub(crate) fg_index: ColorSource,
     pub bg: Srgb<u8>,
+    pub(crate) bg_index: ColorSource,
     pub attrs: CellAttrs,
     pub underline_color: Option<Srgb<u8>>,
+    pub(crate) underline_index: ColorSource,
     pub current_hyperlink: Option<HyperlinkId>,
     pub last_char: Option<SmolStr>,
 }
@@ -113,9 +120,12 @@ impl StatusLine {
             row: Row::new(cols, fg, bg),
             cursor: Cursor::default(),
             fg,
+            fg_index: ColorSource::Default,
             bg,
+            bg_index: ColorSource::Default,
             attrs: CellAttrs::default(),
             underline_color: None,
+            underline_index: ColorSource::Direct,
             current_hyperlink: None,
             last_char: None,
         }
@@ -146,14 +156,17 @@ pub struct Screen {
     pub(crate) cursor: Cursor,
     /// Current foreground color for new cell writes.
     pub(crate) fg: Srgb<u8>,
+    pub(crate) fg_index: ColorSource,
     /// Current background color for new cell writes.
     pub(crate) bg: Srgb<u8>,
+    pub(crate) bg_index: ColorSource,
     /// Current text attributes (bold/italic/strikethrough) applied to new cell
     /// writes. Managed via SGR — updated by `apply_sgr`, snapshotted into
     /// `SavedCursor` on DECSC.
     pub(crate) attrs: CellAttrs,
     /// Current underline color override. `None` = use foreground color.
     pub(crate) underline_color: Option<Srgb<u8>>,
+    pub(crate) underline_index: ColorSource,
     /// Top row of the scroll region (0-indexed, inclusive).
     pub(crate) scroll_top: u32,
     /// Bottom row of the scroll region (0-indexed, inclusive).
@@ -250,16 +263,21 @@ impl Screen {
                 scrollback_limit,
                 total_popped: 0,
                 default_fg: fg,
+                default_fg_source: ColorSource::Default,
                 default_bg: bg,
+                default_bg_source: ColorSource::Default,
             },
             scrollback_blocks: Vec::new(),
             rendered_row_base: 0,
             active_command_block_started: false,
             cursor: Cursor::default(),
             fg,
+            fg_index: ColorSource::Default,
             bg,
+            bg_index: ColorSource::Default,
             attrs: CellAttrs::default(),
             underline_color: None,
+            underline_index: ColorSource::Direct,
             scroll_top: 0,
             scroll_bottom: rows.saturating_sub(1),
             left_margin: 0,
@@ -317,7 +335,9 @@ pub(super) fn resize_status_line(
     let Some(status) = screen.status_line.as_mut() else {
         return;
     };
-    status.row.resize(cols, status.fg, status.bg);
+    status
+        .row
+        .resize_styled(cols, status.fg, status.fg_index, status.bg, status.bg_index);
     status.cursor.col = status.cursor.col.min(cols.saturating_sub(1));
 }
 
@@ -338,7 +358,9 @@ pub(super) fn set_status_display(
             resize_status_line(screen, cols);
             let status = ensure_status_line(screen, cols, status_fg, status_bg);
             status.fg = status_fg;
+            status.fg_index = ColorSource::Default;
             status.bg = status_bg;
+            status.bg_index = ColorSource::Default;
             if status_display != StatusDisplayKind::HostWritable
                 && screen.active_display == ActiveDisplay::Status
             {
@@ -400,15 +422,19 @@ pub(super) fn start_command_block(
         return;
     }
     let replacement = Grid {
-        rows: VecDeque::from([Row::new(
+        rows: VecDeque::from([Row::new_styled(
             viewport.cols,
             screen.grid.default_fg,
+            screen.grid.default_fg_source,
             screen.grid.default_bg,
+            screen.grid.default_bg_source,
         )]),
         scrollback_limit: screen.grid.scrollback_limit,
         total_popped: 0,
         default_fg: screen.grid.default_fg,
+        default_fg_source: screen.grid.default_fg_source,
         default_bg: screen.grid.default_bg,
+        default_bg_source: screen.grid.default_bg_source,
     };
     let mut completed = std::mem::replace(&mut screen.grid, replacement);
     let completed_rows = grid_content_rows_len(&completed)
@@ -506,10 +532,12 @@ fn reset_active_command_block(
     viewport: &Viewport,
 ) {
     screen.grid.rows.clear();
-    screen.grid.rows.push_back(Row::new(
+    screen.grid.rows.push_back(Row::new_styled(
         viewport.cols,
         screen.grid.default_fg,
+        screen.grid.default_fg_source,
         screen.grid.default_bg,
+        screen.grid.default_bg_source,
     ));
     screen.grid.total_popped = 0;
     screen.images.clear();
@@ -803,10 +831,12 @@ pub(super) fn activate_page_memory(
     if current_tail_rows < required_tail_rows {
         let missing = required_tail_rows - current_tail_rows;
         for _ in 0..missing {
-            screen.grid.rows.push_back(Row::new(
+            screen.grid.rows.push_back(Row::new_styled(
                 viewport.cols,
                 screen.grid.default_fg,
+                screen.grid.default_fg_source,
                 screen.grid.default_bg,
+                screen.grid.default_bg_source,
             ));
         }
     }
@@ -842,10 +872,12 @@ pub(super) fn deactivate_page_memory(
         screen.grid.rows.truncate(keep);
     }
     while screen.grid.rows.len() < viewport.rows as usize {
-        screen.grid.rows.push_back(Row::new(
+        screen.grid.rows.push_back(Row::new_styled(
             viewport.cols,
             screen.grid.default_fg,
+            screen.grid.default_fg_source,
             screen.grid.default_bg,
+            screen.grid.default_bg_source,
         ));
     }
     screen.cursor.row = screen.cursor.row.min(viewport.rows.saturating_sub(1));
@@ -874,10 +906,12 @@ pub(super) fn resize_page_memory(
     if current_tail_rows < required_tail_rows {
         let missing = required_tail_rows - current_tail_rows;
         for _ in 0..missing {
-            screen.grid.rows.push_back(Row::new(
+            screen.grid.rows.push_back(Row::new_styled(
                 viewport.cols,
                 screen.grid.default_fg,
+                screen.grid.default_fg_source,
                 screen.grid.default_bg,
+                screen.grid.default_bg_source,
             ));
         }
     } else if current_tail_rows > required_tail_rows {
@@ -962,9 +996,12 @@ pub(super) fn save_cursor_slot(screen: &mut Screen) {
     screen.saved_cursor = Some(SavedCursor {
         cursor: screen.cursor,
         fg: screen.fg,
+        fg_index: screen.fg_index,
         bg: screen.bg,
+        bg_index: screen.bg_index,
         attrs: screen.attrs,
         underline_color: screen.underline_color,
+        underline_index: screen.underline_index,
         origin_mode: screen.origin_mode,
         charset: screen.charset,
     });
@@ -982,9 +1019,12 @@ pub(super) fn restore_cursor_slot(
             screen.cursor.row = saved.cursor.row.min(viewport.rows.saturating_sub(1));
             screen.cursor.col = saved.cursor.col.min(viewport.cols.saturating_sub(1));
             screen.fg = saved.fg;
+            screen.fg_index = saved.fg_index;
             screen.bg = saved.bg;
+            screen.bg_index = saved.bg_index;
             screen.attrs = saved.attrs;
             screen.underline_color = saved.underline_color;
+            screen.underline_index = saved.underline_index;
             screen.origin_mode = saved.origin_mode;
             screen.charset = saved.charset;
         }
@@ -1009,15 +1049,17 @@ pub(super) fn clear_visible(
         .len()
         .saturating_sub(viewport.rows as usize);
     let fg = screen.grid.default_fg;
+    let fg_source = screen.grid.default_fg_source;
     let bg = screen.grid.default_bg;
+    let bg_source = screen.grid.default_bg_source;
     for r in first_visible..screen.grid.rows.len() {
-        screen.grid.rows[r].clear(fg, bg);
+        screen.grid.rows[r].clear_styled(fg, fg_source, bg, bg_source);
         screen.grid.rows[r].wrapped = false;
         screen.grid.rows[r].line_attr = LineAttr::Normal;
     }
     clear_in_range(&mut screen.images, first_visible, screen.grid.rows.len());
     if let Some(status) = screen.status_line.as_mut() {
-        status.row.clear(fg, bg);
+        status.row.clear_styled(fg, fg_source, bg, bg_source);
         status.row.wrapped = false;
         status.row.line_attr = LineAttr::Normal;
         status.cursor = Cursor::default();
@@ -1027,9 +1069,12 @@ pub(super) fn clear_visible(
 fn reset_alt_entry_state(screen: &mut Screen) {
     screen.cursor = Cursor::default();
     screen.fg = screen.grid.default_fg;
+    screen.fg_index = screen.grid.default_fg_source;
     screen.bg = screen.grid.default_bg;
+    screen.bg_index = screen.grid.default_bg_source;
     screen.attrs = CellAttrs::default();
     screen.underline_color = None;
+    screen.underline_index = ColorSource::Direct;
     screen.current_hyperlink = None;
     screen.cursor_visible = true;
     screen.last_char = None;
@@ -1041,10 +1086,12 @@ pub(super) fn ensure_visible_rows(
 ) {
     let required_rows = screen_viewport(screen, viewport).top + viewport.rows as usize;
     while screen.grid.rows.len() < required_rows {
-        screen.grid.rows.push_back(Row::new(
+        screen.grid.rows.push_back(Row::new_styled(
             viewport.cols,
             screen.grid.default_fg,
+            screen.grid.default_fg_source,
             screen.grid.default_bg,
+            screen.grid.default_bg_source,
         ));
     }
 }
@@ -1067,10 +1114,12 @@ pub(super) fn ensure_cursor_row_exists(
             + viewport.rows.saturating_sub(1) as usize,
     );
     while target >= screen.grid.rows.len() {
-        screen.grid.rows.push_back(Row::new(
+        screen.grid.rows.push_back(Row::new_styled(
             viewport.cols,
             screen.grid.default_fg,
+            screen.grid.default_fg_source,
             screen.grid.default_bg,
+            screen.grid.default_bg_source,
         ));
         inserted += 1;
     }
@@ -1869,7 +1918,9 @@ mod integration_tests {
         assert_eq!(term.active.cursor.row, 0);
         assert_eq!(term.active.cursor.col, 0);
         assert_eq!(term.active.fg, term.active.grid.default_fg);
+        assert_eq!(term.active.fg_index, term.active.grid.default_fg_source);
         assert_eq!(term.active.bg, term.active.grid.default_bg);
+        assert_eq!(term.active.bg_index, term.active.grid.default_bg_source);
         assert_eq!(term.active.attrs, font41::attrs::CellAttrs::default());
         assert_eq!(term.active.underline_color, None);
         assert!(term.active.cursor_visible);

@@ -5,6 +5,9 @@ use utils41::blend_colors;
 
 use crate::palette_crate::Srgb;
 
+const EXTENDED_COLOR_COUNT: usize = 240;
+const EXTENDED_COLOR_START: u8 = 16;
+
 pub const fn default_fg() -> Srgb<u8> {
     Srgb::new(204, 204, 204)
 }
@@ -38,6 +41,33 @@ pub struct ColorPalette {
     pub selection_fg: Option<Srgb<u8>>,
     /// The 16 ANSI colors: indices 0-7 are normal, 8-15 are bright.
     pub ansi: [Srgb<u8>; 16],
+    /// The xterm color cube and grayscale ramp for indices 16-255.
+    pub extended: [Srgb<u8>; EXTENDED_COLOR_COUNT],
+}
+
+impl ColorPalette {
+    pub fn indexed_color(
+        &self,
+        index: u8,
+    ) -> Srgb<u8> {
+        if index < EXTENDED_COLOR_START {
+            self.ansi[index as usize]
+        } else {
+            self.extended[(index - EXTENDED_COLOR_START) as usize]
+        }
+    }
+
+    pub fn set_indexed_color(
+        &mut self,
+        index: u8,
+        color: Srgb<u8>,
+    ) {
+        if index < EXTENDED_COLOR_START {
+            self.ansi[index as usize] = color;
+        } else {
+            self.extended[(index - EXTENDED_COLOR_START) as usize] = color;
+        }
+    }
 }
 
 impl Default for ColorPalette {
@@ -71,7 +101,25 @@ impl Default for ColorPalette {
                 Srgb::new(0, 255, 255),   // 14 bright cyan     rgb(0, 255, 255)
                 Srgb::new(255, 255, 255), // 15 bright white    rgb(255, 255, 255)
             ],
+            extended: std::array::from_fn(|offset| {
+                default_extended_color(offset as u8 + EXTENDED_COLOR_START)
+            }),
         }
+    }
+}
+
+fn default_extended_color(index: u8) -> Srgb<u8> {
+    if index < 232 {
+        let offset = index - EXTENDED_COLOR_START;
+        let channel = |value: u8| if value == 0 { 0 } else { 55 + 40 * value };
+        Srgb::new(
+            channel(offset / 36),
+            channel((offset % 36) / 6),
+            channel(offset % 6),
+        )
+    } else {
+        let value = 8 + 10 * (index - 232);
+        Srgb::new(value, value, value)
     }
 }
 
@@ -263,4 +311,32 @@ pub(crate) fn build_palette(colors: Option<ColorsConfig>) -> ColorPalette {
     }
 
     pal
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn default_extended_palette_matches_xterm_boundaries() {
+        let palette = ColorPalette::default();
+        assert_eq!(palette.indexed_color(16), Srgb::new(0, 0, 0));
+        assert_eq!(palette.indexed_color(21), Srgb::new(0, 0, 255));
+        assert_eq!(palette.indexed_color(196), Srgb::new(255, 0, 0));
+        assert_eq!(palette.indexed_color(231), Srgb::new(255, 255, 255));
+        assert_eq!(palette.indexed_color(232), Srgb::new(8, 8, 8));
+        assert_eq!(palette.indexed_color(255), Srgb::new(238, 238, 238));
+    }
+
+    #[test]
+    fn indexed_palette_mutation_covers_ansi_and_extended_colors() {
+        let mut palette = ColorPalette::default();
+        let color = Srgb::new(1, 2, 3);
+        palette.set_indexed_color(15, color);
+        palette.set_indexed_color(16, color);
+        palette.set_indexed_color(255, color);
+        assert_eq!(palette.indexed_color(15), color);
+        assert_eq!(palette.indexed_color(16), color);
+        assert_eq!(palette.indexed_color(255), color);
+    }
 }

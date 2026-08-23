@@ -4,6 +4,7 @@ use font41::attrs::CellAttrs;
 use palette::Srgb;
 use smol_str::SmolStr;
 
+use crate::color::ColorSource;
 use crate::screen::hyperlink::HyperlinkId;
 
 /// Inline SmolStr for the default blank cell. Cheap to clone.
@@ -40,14 +41,20 @@ pub struct Row {
     pub cells: Vec<SmolStr>,
     /// Per-cell foreground colors.
     pub fg: Vec<Srgb<u8>>,
+    /// Color source for each foreground.
+    pub(crate) fg_index: Vec<ColorSource>,
     /// Per-cell background colors.
     pub bg: Vec<Srgb<u8>>,
+    /// Color source for each background.
+    pub(crate) bg_index: Vec<ColorSource>,
     /// Per-cell text attributes (bold/italic/strikethrough). Set from
     /// `screen.attrs` at write time alongside `fg`/`bg`.
     pub attrs: Vec<CellAttrs>,
     /// Per-cell underline color override. `None` means "use the cell's
     /// foreground color" (the default). Set via SGR 58, cleared by SGR 59.
     pub underline_color: Vec<Option<Srgb<u8>>>,
+    /// Color source for each explicit underline color.
+    pub(crate) underline_index: Vec<ColorSource>,
     /// Hyperlink id per cell, set from the screen's current OSC 8 span at
     /// write time. `None` for plain cells; reused ids share the same target
     /// in the screen's hyperlink registry so adjacent cells of one link
@@ -86,19 +93,44 @@ pub struct Row {
 }
 
 impl Row {
+    /// Return the color source for each foreground cell.
+    pub fn fg_sources(&self) -> &[ColorSource] {
+        &self.fg_index
+    }
+
+    /// Return the color source for each background cell.
+    pub fn bg_sources(&self) -> &[ColorSource] {
+        &self.bg_index
+    }
+}
+
+impl Row {
     /// Create a blank row of `cols` cells using the provided default colors.
     pub fn new(
         cols: u32,
         fg: Srgb<u8>,
         bg: Srgb<u8>,
     ) -> Self {
+        Self::new_styled(cols, fg, ColorSource::Default, bg, ColorSource::Default)
+    }
+
+    pub(crate) fn new_styled(
+        cols: u32,
+        fg: Srgb<u8>,
+        fg_source: ColorSource,
+        bg: Srgb<u8>,
+        bg_source: ColorSource,
+    ) -> Self {
         let n = cols as usize;
         Self {
             cells: vec![blank_cell(); n],
             fg: vec![fg; n],
+            fg_index: vec![fg_source; n],
             bg: vec![bg; n],
+            bg_index: vec![bg_source; n],
             attrs: vec![CellAttrs::default(); n],
             underline_color: vec![None; n],
+            underline_index: vec![ColorSource::Direct; n],
             links: vec![None; n],
             wrapped: false,
             prompt_start: false,
@@ -126,18 +158,33 @@ impl Row {
         }
     }
 
+    #[cfg(test)]
     pub(crate) fn resize(
         &mut self,
         new_len: u32,
         fg: Srgb<u8>,
         bg: Srgb<u8>,
     ) {
+        self.resize_styled(new_len, fg, ColorSource::Default, bg, ColorSource::Default);
+    }
+
+    pub(crate) fn resize_styled(
+        &mut self,
+        new_len: u32,
+        fg: Srgb<u8>,
+        fg_source: ColorSource,
+        bg: Srgb<u8>,
+        bg_source: ColorSource,
+    ) {
         let new_len = new_len as usize;
         self.cells.resize(new_len, blank_cell());
         self.fg.resize(new_len, fg);
+        self.fg_index.resize(new_len, fg_source);
         self.bg.resize(new_len, bg);
+        self.bg_index.resize(new_len, bg_source);
         self.attrs.resize(new_len, CellAttrs::default());
         self.underline_color.resize(new_len, None);
+        self.underline_index.resize(new_len, ColorSource::Direct);
         self.links.resize(new_len, None);
     }
 
@@ -148,9 +195,12 @@ impl Row {
         let new_len = new_len as usize;
         self.cells.truncate(new_len);
         self.fg.truncate(new_len);
+        self.fg_index.truncate(new_len);
         self.bg.truncate(new_len);
+        self.bg_index.truncate(new_len);
         self.attrs.truncate(new_len);
         self.underline_color.truncate(new_len);
+        self.underline_index.truncate(new_len);
         self.links.truncate(new_len);
     }
 
@@ -159,7 +209,17 @@ impl Row {
         fg: Srgb<u8>,
         bg: Srgb<u8>,
     ) {
-        self.clear_expanded_range(0..self.cells.len(), fg, bg);
+        self.clear_styled(fg, ColorSource::Default, bg, ColorSource::Default);
+    }
+
+    pub(crate) fn clear_styled(
+        &mut self,
+        fg: Srgb<u8>,
+        fg_source: ColorSource,
+        bg: Srgb<u8>,
+        bg_source: ColorSource,
+    ) {
+        self.clear_expanded_range(0..self.cells.len(), fg, fg_source, bg, bg_source);
         // A full-row wipe drops the row's semantic (OSC 133) marks. Partial
         // clears via `clear_range` leave them alone, so apps that use SGR to
         // redraw a prompt line in place don't lose the mark mid-update.
@@ -178,61 +238,85 @@ impl Row {
         &mut self,
         cols: u32,
         fg: Srgb<u8>,
+        fg_source: ColorSource,
         bg: Srgb<u8>,
+        bg_source: ColorSource,
     ) {
         let n = cols as usize;
         if self.cells.len() != n {
-            self.resize(cols, fg, bg);
+            self.resize_styled(cols, fg, fg_source, bg, bg_source);
         }
-        self.clear(fg, bg);
+        self.clear_styled(fg, fg_source, bg, bg_source);
         self.wrapped = false;
         self.line_attr = LineAttr::Normal;
         self.has_wide_cells = false;
     }
 
+    #[cfg(test)]
     pub(crate) fn clear_range(
         &mut self,
         range: std::ops::Range<usize>,
         fg: Srgb<u8>,
         bg: Srgb<u8>,
     ) {
+        self.clear_range_styled(range, fg, ColorSource::Default, bg, ColorSource::Default);
+    }
+
+    pub(crate) fn clear_range_styled(
+        &mut self,
+        range: std::ops::Range<usize>,
+        fg: Srgb<u8>,
+        fg_source: ColorSource,
+        bg: Srgb<u8>,
+        bg_source: ColorSource,
+    ) {
         let range = self.expand_grapheme_erase_range(range);
         if range.is_empty() {
             return;
         }
-        self.clear_expanded_range(range, fg, bg);
+        self.clear_expanded_range(range, fg, fg_source, bg, bg_source);
     }
 
     fn clear_expanded_range(
         &mut self,
         range: std::ops::Range<usize>,
         fg: Srgb<u8>,
+        fg_source: ColorSource,
         bg: Srgb<u8>,
+        bg_source: ColorSource,
     ) {
         self.cells[range.clone()].fill(blank_cell());
         self.fg[range.clone()].fill(fg);
+        self.fg_index[range.clone()].fill(fg_source);
         self.bg[range.clone()].fill(bg);
+        self.bg_index[range.clone()].fill(bg_source);
         self.attrs[range.clone()].fill(CellAttrs::default());
         self.underline_color[range.clone()].fill(None);
+        self.underline_index[range.clone()].fill(ColorSource::Direct);
         self.links[range].fill(None);
     }
 
     /// Selective clear: erase only cells whose `PROTECTED` bit is *not* set.
     /// Used by DECSED (`CSI ? J`) and DECSEL (`CSI ? K`).
-    pub(crate) fn clear_range_selective(
+    pub(crate) fn clear_range_selective_styled(
         &mut self,
         range: std::ops::Range<usize>,
         fg: Srgb<u8>,
+        fg_source: ColorSource,
         bg: Srgb<u8>,
+        bg_source: ColorSource,
     ) {
         let range = self.expand_grapheme_erase_range(range);
         for i in range {
             if !self.attrs[i].contains(CellAttrs::PROTECTED) {
                 self.cells[i] = blank_cell();
                 self.fg[i] = fg;
+                self.fg_index[i] = fg_source;
                 self.bg[i] = bg;
+                self.bg_index[i] = bg_source;
                 self.attrs[i] = CellAttrs::default();
                 self.underline_color[i] = None;
+                self.underline_index[i] = ColorSource::Direct;
                 self.links[i] = None;
             }
         }
@@ -240,12 +324,14 @@ impl Row {
 
     /// Selective full-row clear: like [`clear`] but skips protected cells
     /// and preserves semantic marks (since partial content may survive).
-    pub(crate) fn clear_selective(
+    pub(crate) fn clear_selective_styled(
         &mut self,
         fg: Srgb<u8>,
+        fg_source: ColorSource,
         bg: Srgb<u8>,
+        bg_source: ColorSource,
     ) {
-        self.clear_range_selective(0..self.cells.len(), fg, bg);
+        self.clear_range_selective_styled(0..self.cells.len(), fg, fg_source, bg, bg_source);
     }
 
     fn expand_grapheme_erase_range(
@@ -329,9 +415,12 @@ impl Row {
             }
         }
         self.fg.copy_within(src.clone(), dest);
+        self.fg_index.copy_within(src.clone(), dest);
         self.bg.copy_within(src.clone(), dest);
+        self.bg_index.copy_within(src.clone(), dest);
         self.attrs.copy_within(src.clone(), dest);
         self.underline_color.copy_within(src.clone(), dest);
+        self.underline_index.copy_within(src.clone(), dest);
         self.links.copy_within(src, dest);
     }
 
@@ -348,12 +437,18 @@ impl Row {
             .clone_from_slice(&other.cells[src.start..src.start + copy_len]);
         self.fg[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.fg[src.start..src.start + copy_len]);
+        self.fg_index[dest_offset..dest_offset + copy_len]
+            .copy_from_slice(&other.fg_index[src.start..src.start + copy_len]);
         self.bg[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.bg[src.start..src.start + copy_len]);
+        self.bg_index[dest_offset..dest_offset + copy_len]
+            .copy_from_slice(&other.bg_index[src.start..src.start + copy_len]);
         self.attrs[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.attrs[src.start..src.start + copy_len]);
         self.underline_color[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.underline_color[src.start..src.start + copy_len]);
+        self.underline_index[dest_offset..dest_offset + copy_len]
+            .copy_from_slice(&other.underline_index[src.start..src.start + copy_len]);
         self.links[dest_offset..dest_offset + copy_len]
             .copy_from_slice(&other.links[src.start..src.start + copy_len]);
 
@@ -372,9 +467,12 @@ impl Row {
         Self {
             cells: self.cells[left..right_excl].to_vec(),
             fg: self.fg[left..right_excl].to_vec(),
+            fg_index: self.fg_index[left..right_excl].to_vec(),
             bg: self.bg[left..right_excl].to_vec(),
+            bg_index: self.bg_index[left..right_excl].to_vec(),
             attrs: self.attrs[left..right_excl].to_vec(),
             underline_color: self.underline_color[left..right_excl].to_vec(),
+            underline_index: self.underline_index[left..right_excl].to_vec(),
             links: self.links[left..right_excl].to_vec(),
             wrapped: false,
             prompt_start: false,
@@ -402,10 +500,14 @@ impl Row {
         }
         self.cells[dst_start..dst_start + copy_len].clone_from_slice(&snap.cells[..copy_len]);
         self.fg[dst_start..dst_start + copy_len].copy_from_slice(&snap.fg[..copy_len]);
+        self.fg_index[dst_start..dst_start + copy_len].copy_from_slice(&snap.fg_index[..copy_len]);
         self.bg[dst_start..dst_start + copy_len].copy_from_slice(&snap.bg[..copy_len]);
+        self.bg_index[dst_start..dst_start + copy_len].copy_from_slice(&snap.bg_index[..copy_len]);
         self.attrs[dst_start..dst_start + copy_len].copy_from_slice(&snap.attrs[..copy_len]);
         self.underline_color[dst_start..dst_start + copy_len]
             .copy_from_slice(&snap.underline_color[..copy_len]);
+        self.underline_index[dst_start..dst_start + copy_len]
+            .copy_from_slice(&snap.underline_index[..copy_len]);
         self.links[dst_start..dst_start + copy_len].copy_from_slice(&snap.links[..copy_len]);
         self.has_wide_cells |= snap.has_wide_cells;
     }

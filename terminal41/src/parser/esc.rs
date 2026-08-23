@@ -416,6 +416,7 @@ pub(crate) fn esc_apply(
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
+    runtime_colors: &mut crate::RuntimeColorOverrides,
     default_status_display: &mut StatusDisplayKind,
     pending_output: &mut Vec<u8>,
     vt52_cursor_addr: &mut crate::Vt52CursorAddr,
@@ -488,6 +489,7 @@ pub(crate) fn esc_apply(
                 .palette(palette)
                 .base_palette(base_palette)
                 .dec_color(dec_color)
+                .runtime_colors(runtime_colors)
                 .default_status_display(default_status_display)
                 .macros(macros)
                 .udks(udks)
@@ -506,6 +508,7 @@ pub(crate) fn esc_apply(
             clamp_cursor_to_row_width(screen, viewport);
             let screen_view = screen::screen_viewport(screen, viewport);
             screen::restore_cursor_slot(screen, &screen_view);
+            crate::parser::sync_screen_erase_defaults(screen, dec_color);
         }
         ParsedEscAction::Index => {
             clamp_cursor_to_row_width(screen, viewport);

@@ -12,6 +12,20 @@ use crate::image::shift_anchored_cells_up;
 use crate::image::shift_in_region;
 use crate::screen::grid::Grid;
 
+fn clear_range(
+    grid: &mut Grid,
+    row: usize,
+    range: std::ops::Range<usize>,
+) {
+    grid.rows[row].clear_range_styled(
+        range,
+        grid.default_fg,
+        grid.default_fg_source,
+        grid.default_bg,
+        grid.default_bg_source,
+    );
+}
+
 pub(crate) fn scroll_up_in_region(
     grid: &mut Grid,
     viewport: &Viewport,
@@ -28,7 +42,13 @@ pub(crate) fn scroll_up_in_region(
         grid.rows.remove(abs_top);
         grid.rows.insert(
             abs_bottom,
-            Row::new(viewport.cols, grid.default_fg, grid.default_bg),
+            Row::new_styled(
+                viewport.cols,
+                grid.default_fg,
+                grid.default_fg_source,
+                grid.default_bg,
+                grid.default_bg_source,
+            ),
         );
     }
     shift_in_region(images, abs_top, abs_bottom, -(n as i64));
@@ -55,7 +75,13 @@ pub(crate) fn scroll_up_in_region_with_scrollback_policy(
     for _ in 0..n {
         grid.rows.insert(
             insert_at,
-            Row::new(viewport.cols, grid.default_fg, grid.default_bg),
+            Row::new_styled(
+                viewport.cols,
+                grid.default_fg,
+                grid.default_fg_source,
+                grid.default_bg,
+                grid.default_bg_source,
+            ),
         );
     }
     shift_images_after_insert(images, insert_at, n);
@@ -78,7 +104,13 @@ pub(crate) fn scroll_down_in_region(
         grid.rows.remove(abs_bottom);
         grid.rows.insert(
             abs_top,
-            Row::new(viewport.cols, grid.default_fg, grid.default_bg),
+            Row::new_styled(
+                viewport.cols,
+                grid.default_fg,
+                grid.default_fg_source,
+                grid.default_bg,
+                grid.default_bg_source,
+            ),
         );
     }
     shift_in_region(images, abs_top, abs_bottom, n as i64);
@@ -128,21 +160,27 @@ pub(crate) fn scroll_up_in_rect(
         let src = row + n;
         let cells = grid.rows[src].cells[l..r].to_vec();
         let fg = grid.rows[src].fg[l..r].to_vec();
+        let fg_index = grid.rows[src].fg_index[l..r].to_vec();
         let bg = grid.rows[src].bg[l..r].to_vec();
+        let bg_index = grid.rows[src].bg_index[l..r].to_vec();
         let attrs = grid.rows[src].attrs[l..r].to_vec();
         let ul_color = grid.rows[src].underline_color[l..r].to_vec();
+        let underline_index = grid.rows[src].underline_index[l..r].to_vec();
         let links = grid.rows[src].links[l..r].to_vec();
 
         grid.rows[row].cells[l..r].clone_from_slice(&cells);
         grid.rows[row].fg[l..r].copy_from_slice(&fg);
+        grid.rows[row].fg_index[l..r].copy_from_slice(&fg_index);
         grid.rows[row].bg[l..r].copy_from_slice(&bg);
+        grid.rows[row].bg_index[l..r].copy_from_slice(&bg_index);
         grid.rows[row].attrs[l..r].copy_from_slice(&attrs);
         grid.rows[row].underline_color[l..r].copy_from_slice(&ul_color);
+        grid.rows[row].underline_index[l..r].copy_from_slice(&underline_index);
         grid.rows[row].links[l..r].clone_from_slice(&links);
     }
 
     for row in (abs_bottom - n + 1)..=abs_bottom {
-        grid.rows[row].clear_range(l..r, grid.default_fg, grid.default_bg);
+        clear_range(grid, row, l..r);
     }
     shift_anchored_cells_up(images, abs_top, abs_bottom + 1, l, r, n);
 }
@@ -168,21 +206,27 @@ pub(crate) fn scroll_down_in_rect(
         let src = row - n;
         let cells = grid.rows[src].cells[l..r].to_vec();
         let fg = grid.rows[src].fg[l..r].to_vec();
+        let fg_index = grid.rows[src].fg_index[l..r].to_vec();
         let bg = grid.rows[src].bg[l..r].to_vec();
+        let bg_index = grid.rows[src].bg_index[l..r].to_vec();
         let attrs = grid.rows[src].attrs[l..r].to_vec();
         let ul_color = grid.rows[src].underline_color[l..r].to_vec();
+        let underline_index = grid.rows[src].underline_index[l..r].to_vec();
         let links = grid.rows[src].links[l..r].to_vec();
 
         grid.rows[row].cells[l..r].clone_from_slice(&cells);
         grid.rows[row].fg[l..r].copy_from_slice(&fg);
+        grid.rows[row].fg_index[l..r].copy_from_slice(&fg_index);
         grid.rows[row].bg[l..r].copy_from_slice(&bg);
+        grid.rows[row].bg_index[l..r].copy_from_slice(&bg_index);
         grid.rows[row].attrs[l..r].copy_from_slice(&attrs);
         grid.rows[row].underline_color[l..r].copy_from_slice(&ul_color);
+        grid.rows[row].underline_index[l..r].copy_from_slice(&underline_index);
         grid.rows[row].links[l..r].clone_from_slice(&links);
     }
 
     for row in abs_top..(abs_top + n) {
-        grid.rows[row].clear_range(l..r, grid.default_fg, grid.default_bg);
+        clear_range(grid, row, l..r);
     }
     shift_anchored_cells_down(images, abs_top, abs_bottom + 1, l, r, n);
 }
@@ -204,7 +248,7 @@ pub(crate) fn scroll_left(
     for r in top..=bottom {
         let abs = first_visible + r as usize;
         grid.rows[abs].copy_within(n..cols, 0);
-        grid.rows[abs].clear_range(cols - n..cols, grid.default_fg, grid.default_bg);
+        clear_range(grid, abs, cols - n..cols);
     }
     shift_anchored_cells_left(
         images,
@@ -233,7 +277,7 @@ pub(crate) fn scroll_right(
     for r in top..=bottom {
         let abs = first_visible + r as usize;
         grid.rows[abs].copy_within(0..cols - n, n);
-        grid.rows[abs].clear_range(0..n, grid.default_fg, grid.default_bg);
+        clear_range(grid, abs, 0..n);
     }
     shift_anchored_cells_right(
         images,
@@ -264,7 +308,7 @@ pub(crate) fn insert_cols(
     for r in top..=bottom {
         let abs = first_visible + r as usize;
         grid.rows[abs].copy_within(col..cols - n, col + n);
-        grid.rows[abs].clear_range(col..col + n, grid.default_fg, grid.default_bg);
+        clear_range(grid, abs, col..col + n);
     }
     shift_anchored_cells_right(
         images,
@@ -295,7 +339,7 @@ pub(crate) fn delete_cols(
     for r in top..=bottom {
         let abs = first_visible + r as usize;
         grid.rows[abs].copy_within(col + n..cols, col);
-        grid.rows[abs].clear_range(cols - n..cols, grid.default_fg, grid.default_bg);
+        clear_range(grid, abs, cols - n..cols);
     }
     shift_anchored_cells_left(
         images,

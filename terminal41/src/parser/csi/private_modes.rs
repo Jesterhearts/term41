@@ -85,6 +85,9 @@ pub(super) fn apply_private_mode(
             saved_alt_cursor_style,
             cursor_style,
         );
+        for screen in [&mut *screen, &mut *stash] {
+            sync_screen_erase_defaults(screen, dec_color);
+        }
     }
 }
 

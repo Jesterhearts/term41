@@ -18,7 +18,7 @@ pub const DEC_ALT_TEXT_COMBINATIONS: usize = 16;
 const DEC_COLOR_SPACE_HLS: u16 = 1;
 const DEC_COLOR_SPACE_RGB: u16 = 2;
 const DEFAULT_TEXT_FG_INDEX: u8 = 7;
-const DEFAULT_TEXT_BG_INDEX: u8 = 0;
+pub(crate) const DEFAULT_TEXT_BG_INDEX: u8 = 0;
 
 /// DEC color lookup table selected by DECATC-style controls.
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
@@ -106,19 +106,60 @@ pub fn rebase_theme_entries(
     old_palette: &ColorPalette,
     new_palette: &ColorPalette,
 ) {
-    for idx in 0..16 {
-        let old_color = match idx as u8 {
+    for idx in 0..DEC_COLOR_TABLE_SIZE {
+        let index = idx as u8;
+        let old_color = match index {
             DEFAULT_TEXT_BG_INDEX => old_palette.bg,
             DEFAULT_TEXT_FG_INDEX => old_palette.fg,
-            idx => color::palette_color(old_palette, idx),
+            index => color::palette_color(old_palette, index),
         };
-        let new_color = match idx as u8 {
+        let new_color = match index {
             DEFAULT_TEXT_BG_INDEX => new_palette.bg,
             DEFAULT_TEXT_FG_INDEX => new_palette.fg,
-            idx => color::palette_color(new_palette, idx),
+            index => color::palette_color(new_palette, index),
         };
         if state.table[idx] == old_color {
             state.table[idx] = new_color;
+        }
+    }
+}
+
+pub(crate) fn rebase_indexed_entry(
+    state: &mut DecColorState,
+    old_palette: &ColorPalette,
+    new_palette: &ColorPalette,
+    index: u8,
+) {
+    if matches!(index, DEFAULT_TEXT_BG_INDEX | DEFAULT_TEXT_FG_INDEX) {
+        return;
+    }
+    let slot = &mut state.table[index as usize];
+    if *slot == old_palette.indexed_color(index) {
+        *slot = new_palette.indexed_color(index);
+    }
+}
+
+pub(crate) fn rebase_all_indexed_entries(
+    state: &mut DecColorState,
+    old_palette: &ColorPalette,
+    new_palette: &ColorPalette,
+) {
+    for index in u8::MIN..=u8::MAX {
+        rebase_indexed_entry(state, old_palette, new_palette, index);
+    }
+}
+
+pub(crate) fn rebase_default_entries(
+    state: &mut DecColorState,
+    old_palette: &ColorPalette,
+    new_palette: &ColorPalette,
+) {
+    for (index, old_color, new_color) in [
+        (DEFAULT_TEXT_BG_INDEX, old_palette.bg, new_palette.bg),
+        (DEFAULT_TEXT_FG_INDEX, old_palette.fg, new_palette.fg),
+    ] {
+        if state.table[index as usize] == old_color {
+            state.table[index as usize] = new_color;
         }
     }
 }

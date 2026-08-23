@@ -269,6 +269,7 @@ impl TestTerm {
             palette: current_palette,
             base_palette,
             dec_color,
+            runtime_colors,
             ..
         } = &mut self.inner;
         settings::set_palette(
@@ -277,6 +278,7 @@ impl TestTerm {
             current_palette,
             base_palette,
             dec_color,
+            runtime_colors,
             palette,
         )
     }

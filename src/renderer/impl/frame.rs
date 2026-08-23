@@ -866,9 +866,13 @@ pub(super) fn append_row_geometry(
 
     append_gutter_marker(snap_row, layout.gutter_px, layout.cell_h, y, geometry);
 
-    if let Some(overlay) =
-        cursor_state.bar_overlay_at(row, &snap_row.fg, layout.cell_w, layout.cell_h)
-    {
+    if let Some(overlay) = cursor_state.bar_overlay_at(
+        row,
+        &snap_row.fg,
+        snap.palette.cursor,
+        layout.cell_w,
+        layout.cell_h,
+    ) {
         let ox = overlay.x + layout.gutter_px;
         let oy = overlay.y + layout.tab_bar_h + layout.terminal_y_offset + layout.block_y_offset;
         let bi = geometry.bg.vertices.len() as u32;

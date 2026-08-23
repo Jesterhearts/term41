@@ -908,6 +908,20 @@ mod integration_tests {
     }
 
     #[test]
+    fn decctr_restore_invalidates_published_rows() {
+        let mut term = TestTerm::new(4, 2, 10, 16, 8);
+        term.process(b"ab");
+        let (mut publisher, mut output) = crate::terminal_snapshot_buffer(&mut term.inner);
+        let original_generation = output.read().rows[0].generation;
+
+        term.process(b"\x1bP2$p0;2;1;2;3/7;2;10;20;30\x1b\\");
+        crate::publish_terminal_snapshot(&mut term.inner, &mut publisher);
+        output.update();
+
+        assert_ne!(output.read().rows[0].generation, original_generation);
+    }
+
+    #[test]
     fn decctr_restore_preserves_explicit_sgr_colors() {
         let mut term = TestTerm::new(4, 2, 10, 16, 8);
         term.process(b"\x1b[31mx");

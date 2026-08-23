@@ -1025,6 +1025,7 @@ impl RenderHost {
                 palette,
                 base_palette,
                 dec_color,
+                runtime_colors,
                 default_status_display,
                 emoji_compatibility_mode,
                 protocol,
@@ -1065,6 +1066,7 @@ impl RenderHost {
                 palette,
                 base_palette,
                 dec_color,
+                runtime_colors,
                 cfg.palette.clone(),
             );
             terminal.invalidate_snapshot_rows();

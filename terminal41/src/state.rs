@@ -16,6 +16,7 @@ use crate::LocalFunctionKeyControl;
 use crate::ModifierKeyControl;
 use crate::dec::color::effective_palette;
 use crate::dec::color::state_from_palette as dec_color_state_from_palette;
+use crate::dynamic_color::RuntimeColorOverrides;
 use crate::feature;
 use crate::io::keyboard::KittyKeyboardState;
 use crate::lifecycle_ops;
@@ -113,6 +114,9 @@ pub struct Terminal {
     pub base_palette: ColorPalette,
     /// DEC color-table and lookup-mode state.
     pub dec_color: DecColorState,
+    /// Per-session OSC indexed and dynamic-color overrides.
+    #[doc(hidden)]
+    pub runtime_colors: RuntimeColorOverrides,
 
     /// State machine for the VT52 `ESC Y Pr Pc` direct cursor address. After
     /// `ESC Y` is dispatched, the next 1-2 byte actions carry the row and
@@ -191,6 +195,7 @@ impl Terminal {
             palette,
             base_palette,
             dec_color,
+            runtime_colors: RuntimeColorOverrides::default(),
             vt52_cursor_addr: Vt52CursorAddr::Idle,
             default_status_display,
             emoji_compatibility_mode: EmojiCompatibilityMode::Auto,

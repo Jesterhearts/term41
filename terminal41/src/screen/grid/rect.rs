@@ -7,6 +7,7 @@ use palette::Srgb;
 use smol_str::SmolStr;
 
 use crate::Viewport;
+use crate::color::ColorSource;
 use crate::image::PlacedImage;
 use crate::image::clear_anchored_cells;
 use crate::screen::grid::AttrChangeExtent;
@@ -22,9 +23,12 @@ pub(crate) fn fill_rect(
     right: u32,
     ch: SmolStr,
     fg: Srgb<u8>,
+    fg_index: ColorSource,
     bg: Srgb<u8>,
+    bg_index: ColorSource,
     attrs: CellAttrs,
     underline_color: Option<Srgb<u8>>,
+    underline_index: ColorSource,
 ) {
     let first_visible = viewport.top_index(grid.rows.len());
     let left = left as usize;
@@ -35,9 +39,12 @@ pub(crate) fn fill_rect(
         for c in left..right_excl {
             row.cells[c] = ch.clone();
             row.fg[c] = fg;
+            row.fg_index[c] = fg_index;
             row.bg[c] = bg;
+            row.bg_index[c] = bg_index;
             row.attrs[c] = attrs;
             row.underline_color[c] = underline_color;
+            row.underline_index[c] = underline_index;
             row.links[c] = None;
         }
     }
@@ -57,7 +64,13 @@ pub(crate) fn erase_rect(
     let right_excl = (right as usize + 1).min(viewport.cols as usize);
     for r in top..=bottom {
         let abs = first_visible + r as usize;
-        grid.rows[abs].clear_range(left..right_excl, grid.default_fg, grid.default_bg);
+        grid.rows[abs].clear_range_styled(
+            left..right_excl,
+            grid.default_fg,
+            grid.default_fg_source,
+            grid.default_bg,
+            grid.default_bg_source,
+        );
     }
     clear_anchored_cells(
         images,
@@ -82,7 +95,13 @@ pub(crate) fn erase_rect_selective(
     let right_excl = (right as usize + 1).min(viewport.cols as usize);
     for r in top..=bottom {
         let abs = first_visible + r as usize;
-        grid.rows[abs].clear_range_selective(left..right_excl, grid.default_fg, grid.default_bg);
+        grid.rows[abs].clear_range_selective_styled(
+            left..right_excl,
+            grid.default_fg,
+            grid.default_fg_source,
+            grid.default_bg,
+            grid.default_bg_source,
+        );
     }
     clear_anchored_cells(
         images,

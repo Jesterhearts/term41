@@ -42,7 +42,8 @@ Status:
 Implemented:
 
 - OSC 0 / OSC 2 titles
-- OSC 4 / OSC 10 / OSC 11 / OSC 12 color queries
+- OSC 4 / OSC 10 / OSC 11 / OSC 12 color queries and setters
+- OSC 104 / OSC 110 / OSC 111 / OSC 112 color resets
 - OSC 7 current-working-directory tracking
 - OSC 8 hyperlinks
 - OSC 52 clipboard read/write
@@ -64,9 +65,8 @@ Maintenance direction:
 - Revisit OSC 52 policy. Clipboard writes are common and useful; clipboard reads
   are more sensitive and should move toward local configuration with clear
   defaults.
-- Complete OSC 4 / OSC 10 / OSC 11 / OSC 12 setters and OSC 104 / OSC 110 /
-  OSC 111 / OSC 112 resets before advertising mutable xterm palette support or
-  adding Kitty's broader color-control protocol.
+- Keep mutable xterm colors integrated with all 256 indexed colors, configured
+  theme resets, DEC defaults, and live theme reloads.
 - Keep XTGETTCAP reporting coarse and policy-filtered. It should report
   implemented special-key sequences and useful terminal facts, not detailed host
   configuration.
@@ -323,9 +323,9 @@ Why:
 
 - kitty documents additional color-control extensions, and Ghostty documents
   support for OSC 21 as the kitty color protocol.
-- `term41` already has OSC 4 / OSC 10 / OSC 11 / OSC 12 queries plus a
-  substantial VT525 color-control implementation. Mutable xterm colors and
-  resets must be completed before adding Kitty OSC 21 or the Kitty color stack.
+- `term41` already has mutable OSC 4 / OSC 10 / OSC 11 / OSC 12 colors,
+  xterm resets, and a substantial VT525 color-control implementation. Kitty
+  OSC 21 and the Kitty color stack would add another color namespace.
 
 Decision:
 

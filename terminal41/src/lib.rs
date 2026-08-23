@@ -18,6 +18,7 @@ mod dcs;
 mod dec;
 mod dispatch;
 mod drcs;
+mod dynamic_color;
 mod effects;
 mod feature;
 mod graphics;
@@ -58,6 +59,7 @@ use config41::FeaturePermissions;
 use config41::TerminalLimits;
 pub use vte_mode41::TextMode;
 
+pub use crate::color::ColorSource;
 pub use crate::conformance::C1Mode;
 pub use crate::conformance::ConformanceLevel;
 pub use crate::dec::color::ColorSpace as DecColorSpace;
@@ -74,6 +76,8 @@ pub use crate::dec::udk::LocalFunctionKeyControl;
 pub use crate::dec::udk::ModifierKeyControl;
 pub(crate) use crate::dispatch::CsiAction;
 pub(crate) use crate::drcs::DrcsStore;
+#[doc(hidden)]
+pub use crate::dynamic_color::RuntimeColorOverrides;
 pub use crate::effects::TerminalEffects;
 pub(crate) use crate::feature::apply_status_display_mode;
 pub use crate::graphics::KittyFileRequest;

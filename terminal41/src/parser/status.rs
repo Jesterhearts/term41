@@ -75,9 +75,12 @@ pub(crate) fn apply_status_line_csi(
             palette.bg = palette.status_line_bg;
             apply_sgr_groups(
                 &mut status.fg,
+                &mut status.fg_index,
                 &mut status.bg,
+                &mut status.bg_index,
                 &mut status.attrs,
                 &mut status.underline_color,
+                &mut status.underline_index,
                 params,
                 &palette,
             );
@@ -102,15 +105,33 @@ pub(crate) fn apply_status_line_csi(
             cursor.col = (col.max(1) as u32 - 1).min(cols - 1);
         }
         StatusLineCsiAction::EraseDisplay => {
-            status.row.clear(status.fg, status.bg);
+            status
+                .row
+                .clear_styled(status.fg, status.fg_index, status.bg, status.bg_index);
         }
         StatusLineCsiAction::EraseInLine { mode } => {
             let col = cursor.col as usize;
             let len = cols as usize;
             match mode {
-                0 => status.row.clear_range(col..len, status.fg, status.bg),
-                1 => status.row.clear_range(0..(col + 1), status.fg, status.bg),
-                2 => status.row.clear(status.fg, status.bg),
+                0 => status.row.clear_range_styled(
+                    col..len,
+                    status.fg,
+                    status.fg_index,
+                    status.bg,
+                    status.bg_index,
+                ),
+                1 => status.row.clear_range_styled(
+                    0..(col + 1),
+                    status.fg,
+                    status.fg_index,
+                    status.bg,
+                    status.bg_index,
+                ),
+                2 => {
+                    status
+                        .row
+                        .clear_styled(status.fg, status.fg_index, status.bg, status.bg_index)
+                }
                 _ => {}
             }
         }

@@ -15,6 +15,7 @@ use crate::Row;
 use crate::Screen;
 use crate::Viewport;
 use crate::charset;
+use crate::color::ColorSource;
 use crate::parser::ascii_cell;
 use crate::parser::current_row_display_cols;
 use crate::screen;
@@ -34,9 +35,12 @@ enum WriteTarget {
 #[derive(Clone, Copy)]
 struct CellStyle {
     fg: palette::Srgb<u8>,
+    fg_index: ColorSource,
     bg: palette::Srgb<u8>,
+    bg_index: ColorSource,
     attrs: CellAttrs,
     underline_color: Option<palette::Srgb<u8>>,
+    underline_index: ColorSource,
     link: Option<screen::hyperlink::HyperlinkId>,
 }
 
@@ -57,9 +61,13 @@ pub(super) fn status_shift_chars(
         return;
     }
     status.row.copy_within(col..cols - count, col + count);
-    status
-        .row
-        .clear_range(col..col + count, status.fg, status.bg);
+    status.row.clear_range_styled(
+        col..col + count,
+        status.fg,
+        status.fg_index,
+        status.bg,
+        status.bg_index,
+    );
 }
 
 pub(super) fn status_delete_chars(
@@ -73,9 +81,13 @@ pub(super) fn status_delete_chars(
         return;
     }
     status.row.copy_within(col + count..cols, col);
-    status
-        .row
-        .clear_range(cols - count..cols, status.fg, status.bg);
+    status.row.clear_range_styled(
+        cols - count..cols,
+        status.fg,
+        status.fg_index,
+        status.bg,
+        status.bg_index,
+    );
 }
 
 pub(super) fn status_erase_chars(
@@ -85,7 +97,13 @@ pub(super) fn status_erase_chars(
     let cols = status.row.cells.len();
     let col = status.cursor.col as usize;
     let end = (col + count).min(cols);
-    status.row.clear_range(col..end, status.fg, status.bg);
+    status.row.clear_range_styled(
+        col..end,
+        status.fg,
+        status.fg_index,
+        status.bg,
+        status.bg_index,
+    );
 }
 
 #[inline(always)]
@@ -721,9 +739,12 @@ fn fill_row_style(
     style: CellStyle,
 ) {
     row.fg[col..col + width].fill(style.fg);
+    row.fg_index[col..col + width].fill(style.fg_index);
     row.bg[col..col + width].fill(style.bg);
+    row.bg_index[col..col + width].fill(style.bg_index);
     row.attrs[col..col + width].fill(style.attrs);
     row.underline_color[col..col + width].fill(style.underline_color);
+    row.underline_index[col..col + width].fill(style.underline_index);
     row.links[col..col + width].fill(style.link);
 }
 
@@ -731,9 +752,12 @@ fn fill_row_style(
 fn screen_style(screen: &Screen) -> CellStyle {
     CellStyle {
         fg: screen.fg,
+        fg_index: screen.fg_index,
         bg: screen.bg,
+        bg_index: screen.bg_index,
         attrs: screen.attrs,
         underline_color: screen.underline_color,
+        underline_index: screen.underline_index,
         link: screen.current_hyperlink,
     }
 }
@@ -742,9 +766,12 @@ fn screen_style(screen: &Screen) -> CellStyle {
 fn status_style(status: &StatusLine) -> CellStyle {
     CellStyle {
         fg: status.fg,
+        fg_index: status.fg_index,
         bg: status.bg,
+        bg_index: status.bg_index,
         attrs: status.attrs,
         underline_color: status.underline_color,
+        underline_index: status.underline_index,
         link: status.current_hyperlink,
     }
 }

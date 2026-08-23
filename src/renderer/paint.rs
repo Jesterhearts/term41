@@ -3,6 +3,7 @@ use font41::attrs::CellAttrs;
 use palette::Srgb;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
+use terminal41::ColorSource;
 use terminal41::DecColorLookupTable;
 use terminal41::LineAttr;
 use terminal41::RowSnapshot;
@@ -124,6 +125,8 @@ pub(crate) fn status_line_label_row(
         line_attr: LineAttr::Normal,
         fg: vec![palette.status_line_fg; len],
         bg: vec![palette.status_line_bg; len],
+        fg_source: vec![ColorSource::Direct; len],
+        bg_source: vec![ColorSource::Direct; len],
         attrs: vec![CellAttrs::default(); len],
         selected: vec![false; len],
         matched: vec![false; len],
@@ -159,6 +162,8 @@ pub(crate) fn local_status_line_row(
         line_attr: LineAttr::Normal,
         fg: vec![palette.status_line_fg; cols],
         bg: vec![palette.status_line_bg; cols],
+        fg_source: vec![ColorSource::Direct; cols],
+        bg_source: vec![ColorSource::Direct; cols],
         attrs: vec![CellAttrs::default(); cols],
         selected: vec![false; cols],
         matched: vec![false; cols],
@@ -239,6 +244,8 @@ fn blank_status_line_row(
         line_attr: LineAttr::Normal,
         fg: vec![palette.status_line_fg; cols],
         bg: vec![palette.status_line_bg; cols],
+        fg_source: vec![ColorSource::Direct; cols],
+        bg_source: vec![ColorSource::Direct; cols],
         attrs: vec![CellAttrs::default(); cols],
         selected: vec![false; cols],
         matched: vec![false; cols],
@@ -267,6 +274,7 @@ fn set_status_cell(
     builder.push_str(grapheme);
     row.cells[idx] = builder.finish();
     row.fg[idx] = fg;
+    row.fg_source[idx] = ColorSource::Direct;
 }
 
 #[cfg(test)]
@@ -450,6 +458,8 @@ pub(crate) fn row_paintable_cols(row: &RowSnapshot) -> usize {
         row.attrs.len(),
         row.fg.len(),
         row.bg.len(),
+        row.fg_source.len(),
+        row.bg_source.len(),
         row.underline_color.len(),
         row.has_link.len(),
     ]
@@ -491,10 +501,12 @@ pub(crate) fn resolve_painted_cell(
         .unwrap_or(false);
     let cell_attrs = snap_row.attrs[col as usize];
     let block_cursor_here = block_cursor == Some((row, col));
-    let (base_fg, base_bg) = resolve_dec_color_cell(
+    let (base_fg, base_bg, background_source) = resolve_dec_color_cell(
         snap,
         &snap_row.fg[col as usize],
         &snap_row.bg[col as usize],
+        snap_row.fg_source[col as usize],
+        snap_row.bg_source[col as usize],
         cell_attrs,
     );
     let fg = if active_match {
@@ -516,7 +528,10 @@ pub(crate) fn resolve_painted_cell(
         Some(snap.palette.cursor.unwrap_or(base_fg))
     } else if matched {
         Some(base_fg)
-    } else if has_background_image && base_bg == snap.palette.bg {
+    } else if has_background_image
+        && background_source == ColorSource::Default
+        && base_bg == snap.palette.bg
+    {
         None
     } else {
         Some(base_bg)
@@ -533,12 +548,18 @@ fn resolve_dec_color_cell(
     snap: &TermSnapshot,
     raw_fg: &Srgb<u8>,
     raw_bg: &Srgb<u8>,
+    raw_fg_source: ColorSource,
+    raw_bg_source: ColorSource,
     attrs: CellAttrs,
-) -> (Srgb<u8>, Srgb<u8>) {
+) -> (Srgb<u8>, Srgb<u8>, ColorSource) {
     let mut color_attrs = attrs;
     let mut fg = *raw_fg;
     let mut bg = *raw_bg;
-    let default_colored = *raw_fg == snap.palette.fg && *raw_bg == snap.palette.bg;
+    let (mut fg_source, mut bg_source) = (raw_fg_source, raw_bg_source);
+    let default_colored = raw_fg_source == ColorSource::Default
+        && raw_bg_source == ColorSource::Default
+        && *raw_fg == snap.palette.fg
+        && *raw_bg == snap.palette.bg;
     let mut recolored_by_alternate_lookup = false;
 
     match snap.dec_color.lookup_table {
@@ -548,31 +569,48 @@ fn resolve_dec_color_cell(
             let assignment = terminal41::dec_alternate_assignment_for_style(&snap.dec_color, attrs);
             fg = terminal41::dec_table_color(&snap.dec_color, assignment.fg);
             bg = terminal41::dec_table_color(&snap.dec_color, assignment.bg);
+            fg_source = ColorSource::Dec(assignment.fg);
+            bg_source = ColorSource::Dec(assignment.bg);
             color_attrs.remove(CellAttrs::REVERSE);
             recolored_by_alternate_lookup = true;
         }
         _ => {}
     }
 
+    if color_attrs.contains(CellAttrs::REVERSE) != snap.screen_reverse {
+        std::mem::swap(&mut fg_source, &mut bg_source);
+    }
+    if color_attrs.contains(CellAttrs::HIDDEN) {
+        fg_source = bg_source;
+    }
     let (mut fg, mut bg) = resolve_cell_colors(&fg, &bg, color_attrs, snap.screen_reverse);
 
     if snap.dec_color.lookup_table == DecColorLookupTable::Mono {
         fg = grayscale(fg);
         bg = grayscale(bg);
     } else if attrs.contains(CellAttrs::BOLD) && !recolored_by_alternate_lookup {
-        fg = brighten_basic_color(fg, &snap.dec_color).unwrap_or(fg);
+        fg = brighten_basic_color(fg, fg_source, &snap.dec_color).unwrap_or(fg);
         if snap.dec_color.bold_blink_affects_background {
-            bg = brighten_basic_color(bg, &snap.dec_color).unwrap_or(bg);
+            bg = brighten_basic_color(bg, bg_source, &snap.dec_color).unwrap_or(bg);
         }
     }
 
-    (fg, bg)
+    (fg, bg, bg_source)
 }
 
 fn brighten_basic_color(
     color: Srgb<u8>,
+    source: ColorSource,
     state: &terminal41::DecColorState,
 ) -> Option<Srgb<u8>> {
+    match source {
+        ColorSource::Indexed(index @ 0..=7) | ColorSource::Dec(index @ 0..=7) => {
+            return (terminal41::dec_table_color(state, index) == color)
+                .then(|| terminal41::dec_table_color(state, index + 8));
+        }
+        ColorSource::Indexed(_) | ColorSource::Dec(_) | ColorSource::Direct => return None,
+        ColorSource::Default => {}
+    }
     for idx in 0..8u8 {
         if terminal41::dec_table_color(state, idx) == color {
             return Some(terminal41::dec_table_color(state, idx + 8));
@@ -651,6 +689,8 @@ mod tests {
             attrs: vec![CellAttrs::BOLD],
             fg: vec![palette.fg],
             bg: vec![palette.bg],
+            fg_source: vec![ColorSource::Default],
+            bg_source: vec![ColorSource::Default],
             underline_color: vec![None],
             has_link: vec![false],
             line_attr: LineAttr::Normal,
@@ -722,6 +762,50 @@ mod tests {
             painted.fill_bg,
             Some(terminal41::dec_table_color(&snap.dec_color, 3))
         );
+    }
+
+    #[test]
+    fn alternate_lookup_preserves_equal_direct_colors() {
+        let mut dec = terminal41::dec_color_state_from_palette(&ColorPalette::default());
+        terminal41::dec_assign_alternate_text_color(&mut dec, 1, 2, 3);
+        terminal41::dec_select_lookup_table(&mut dec, 1);
+        let snap = test_snapshot(dec);
+        let row = RowSnapshot {
+            fg_source: vec![ColorSource::Direct],
+            bg_source: vec![ColorSource::Direct],
+            ..test_row(&snap.palette)
+        };
+
+        let painted = resolve_painted_cell(&snap, &row, 0, 0, None, true);
+        assert_eq!(painted.base_fg, snap.palette.fg);
+        assert_eq!(painted.fill_bg, Some(snap.palette.bg));
+    }
+
+    #[test]
+    fn bold_high_index_collision_does_not_brighten() {
+        let dec = terminal41::dec_color_state_from_palette(&ColorPalette::default());
+        let snap = test_snapshot(dec);
+        let basic = terminal41::dec_table_color(&snap.dec_color, 1);
+        let row = RowSnapshot {
+            fg: vec![basic],
+            fg_source: vec![ColorSource::Indexed(196)],
+            ..test_row(&snap.palette)
+        };
+
+        let painted = resolve_painted_cell(&snap, &row, 0, 0, None, false);
+        assert_eq!(painted.base_fg, basic);
+    }
+
+    #[test]
+    fn alternate_background_is_not_treated_as_transparent_default() {
+        let mut dec = terminal41::dec_color_state_from_palette(&ColorPalette::default());
+        terminal41::dec_assign_alternate_text_color(&mut dec, 1, 2, 0);
+        terminal41::dec_select_lookup_table(&mut dec, 1);
+        let snap = test_snapshot(dec);
+        let row = test_row(&snap.palette);
+
+        let painted = resolve_painted_cell(&snap, &row, 0, 0, None, true);
+        assert_eq!(painted.fill_bg, Some(snap.palette.bg));
     }
 
     #[test]

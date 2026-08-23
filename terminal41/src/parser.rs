@@ -593,6 +593,11 @@ fn sync_screen_erase_defaults(
     dec_color: &DecColorState,
 ) {
     screen.grid.default_bg = erase_background_color(dec_color, screen.bg);
+    screen.grid.default_bg_source = if dec_color.erase_to_screen {
+        crate::color::ColorSource::Dec(crate::dec::color::DEFAULT_TEXT_BG_INDEX)
+    } else {
+        screen.bg_index
+    };
 }
 
 #[bon::builder]
@@ -616,6 +621,7 @@ fn apply_hard_reset_state(
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
+    runtime_colors: &mut crate::RuntimeColorOverrides,
     default_status_display: &StatusDisplayKind,
     macros: &mut MacroStore,
     udks: &mut UdkState,
@@ -623,16 +629,21 @@ fn apply_hard_reset_state(
     conformance_level: ConformanceLevel,
     c1_mode: C1Mode,
 ) {
-    *dec_color = dec_color_state_from_palette(base_palette);
-    *palette = effective_palette(base_palette, dec_color);
+    crate::dynamic_color::clear_indexed(runtime_colors);
+    let reset_palette = crate::dynamic_color::runtime_palette(base_palette, runtime_colors);
+    *dec_color = dec_color_state_from_palette(&reset_palette);
+    *palette = effective_palette(&reset_palette, dec_color);
     if *on_alt_screen {
         std::mem::swap(screen, stash);
         *on_alt_screen = false;
     }
     let total_rows = viewport.rows + screen::status_line_rows(screen);
     for s in [&mut *screen, &mut *stash] {
+        crate::screen::palette_sync::apply_screen_palette(s, palette, dec_color);
         s.grid.default_fg = palette.fg;
+        s.grid.default_fg_source = crate::color::ColorSource::Default;
         s.grid.default_bg = palette.bg;
+        s.grid.default_bg_source = crate::color::ColorSource::Default;
         // Nothing else ever leaves page memory, and while it is active the
         // viewport cannot scroll at all, so a hard reset is the user's only
         // way back to a scrollable terminal after a stray DECSLPP/DECSNLS.
@@ -641,9 +652,12 @@ fn apply_hard_reset_state(
         s.active_command_block_started = false;
         s.cursor = grid::Cursor::default();
         s.fg = palette.fg;
+        s.fg_index = crate::color::ColorSource::Default;
         s.bg = palette.bg;
+        s.bg_index = crate::color::ColorSource::Default;
         s.attrs = CellAttrs::default();
         s.underline_color = None;
+        s.underline_index = crate::color::ColorSource::Direct;
         s.scroll_top = 0;
         s.scroll_bottom = viewport.rows.saturating_sub(1);
         s.left_margin = 0;

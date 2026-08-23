@@ -25,11 +25,12 @@ use crate::Vt52CursorAddr;
 use crate::conformance;
 use crate::dec::color::TEXT_COLOR_ASSIGNMENT_CLASS;
 use crate::dec::color::assign_color;
-use crate::dec::color::effective_palette;
 use crate::dec::r#macro::MacroStore;
 use crate::dec::udk::UdkState;
 use crate::dec_assign_alternate_text_color;
 use crate::dec_select_lookup_table;
+use crate::dynamic_color::RuntimeColorOverrides;
+use crate::dynamic_color::effective_runtime_palette;
 use crate::graphics;
 use crate::osc::handle_osc;
 use crate::parser::ParsedCsiAction;
@@ -285,6 +286,7 @@ pub(super) fn apply_csi_action(
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
+    runtime_colors: &mut RuntimeColorOverrides,
 ) -> PendingApplication {
     match action {
         CsiAction::Ignore => PendingApplication::None,
@@ -295,6 +297,7 @@ pub(super) fn apply_csi_action(
             .palette(palette)
             .base_palette(base_palette)
             .dec_color(dec_color)
+            .runtime_colors(runtime_colors)
             .pending_output(pending_output)
             .c1_mode(modes.c1_mode)
             .feature_permissions(feature_permissions)
@@ -333,6 +336,7 @@ pub(super) fn apply_csi_action(
                 .palette(palette)
                 .base_palette(base_palette)
                 .dec_color(dec_color)
+                .runtime_colors(runtime_colors)
                 .call();
             PendingApplication::None
         }
@@ -359,6 +363,7 @@ pub(super) fn apply_esc_action(
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
+    runtime_colors: &mut RuntimeColorOverrides,
     default_status_display: &mut StatusDisplayKind,
     pending_output: &mut Vec<u8>,
     vt52_cursor_addr: &mut Vt52CursorAddr,
@@ -388,6 +393,7 @@ pub(super) fn apply_esc_action(
                 .palette(palette)
                 .base_palette(base_palette)
                 .dec_color(dec_color)
+                .runtime_colors(runtime_colors)
                 .default_status_display(default_status_display)
                 .pending_output(pending_output)
                 .vt52_cursor_addr(vt52_cursor_addr)
@@ -410,13 +416,17 @@ pub(super) fn apply_osc_action(
     current_directory: &mut Option<PathBuf>,
     hyperlinks: &mut HyperlinkRegistry,
     active: &mut Screen,
+    stash: &mut Screen,
     viewport: &Viewport,
     on_alt_screen: bool,
     current_title: &mut Option<String>,
     current_prompt_row: &mut Option<u64>,
     shell_integration_phase: &mut ShellIntegrationPhase,
     command_metas: &mut HashMap<u64, CommandMeta>,
-    palette: &ColorPalette,
+    palette: &mut ColorPalette,
+    base_palette: &ColorPalette,
+    dec_color: &mut DecColorState,
+    runtime_colors: &mut RuntimeColorOverrides,
     cell_width: u32,
     cell_height: u32,
     iterm_chunked: &mut image41::iterm::ChunkedTransmission,
@@ -434,6 +444,7 @@ pub(super) fn apply_osc_action(
                 .current_directory(current_directory)
                 .hyperlinks(hyperlinks)
                 .active_screen(active)
+                .stashed_screen(stash)
                 .viewport(viewport)
                 .on_alt_screen(on_alt_screen)
                 .current_title(current_title)
@@ -441,6 +452,9 @@ pub(super) fn apply_osc_action(
                 .shell_integration_phase(shell_integration_phase)
                 .command_metas(command_metas)
                 .palette(palette)
+                .base_palette(base_palette)
+                .dec_color(dec_color)
+                .runtime_colors(runtime_colors)
                 .cell_width(cell_width)
                 .cell_height(cell_height)
                 .call();
@@ -647,6 +661,7 @@ pub(super) fn apply_special_csi(
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
+    runtime_colors: &RuntimeColorOverrides,
     pending_output: &mut Vec<u8>,
     c1_mode: C1Mode,
     feature_permissions: &FeaturePermissions,
@@ -669,6 +684,7 @@ pub(super) fn apply_special_csi(
                 palette,
                 base_palette,
                 dec_color,
+                runtime_colors,
                 item,
                 fg,
                 bg,
@@ -883,6 +899,7 @@ fn assign_dec_color(
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
     dec_color: &mut DecColorState,
+    runtime_colors: &RuntimeColorOverrides,
     item: u16,
     fg: u16,
     bg: u16,
@@ -891,7 +908,14 @@ fn assign_dec_color(
         return;
     }
     if item == TEXT_COLOR_ASSIGNMENT_CLASS {
-        apply_dec_color_defaults(active, stash, palette, base_palette, dec_color);
+        apply_dec_color_defaults(
+            active,
+            stash,
+            palette,
+            base_palette,
+            dec_color,
+            runtime_colors,
+        );
     }
 }
 
@@ -901,11 +925,11 @@ fn apply_dec_color_defaults(
     palette: &mut ColorPalette,
     base_palette: &ColorPalette,
     dec_color: &DecColorState,
+    runtime_colors: &RuntimeColorOverrides,
 ) {
-    let old_palette = palette.clone();
-    *palette = effective_palette(base_palette, dec_color);
+    *palette = effective_runtime_palette(base_palette, runtime_colors, dec_color);
     for screen in [active, stash] {
-        apply_screen_palette(screen, &old_palette, palette);
+        apply_screen_palette(screen, palette, dec_color);
         sync_screen_erase_defaults(screen, dec_color);
     }
 }

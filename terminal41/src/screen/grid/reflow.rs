@@ -27,14 +27,16 @@ fn grow(
     new_width: usize,
 ) {
     let fg = grid.default_fg;
+    let fg_source = grid.default_fg_source;
     let bg = grid.default_bg;
+    let bg_source = grid.default_bg_source;
     let mut dst = 0;
     let mut dst_col = grid.rows[0].content_len() as usize;
     let mut src = 1;
     let mut src_col: usize = 0;
 
     while dst < grid.rows.len() && src < grid.rows.len() {
-        grid.rows[dst].resize(new_width as u32, fg, bg);
+        grid.rows[dst].resize_styled(new_width as u32, fg, fg_source, bg, bg_source);
 
         if !grid.rows[dst].wrapped {
             dst += 1;
@@ -65,7 +67,7 @@ fn grow(
 
         if src_col >= s_content {
             d.wrapped = s.wrapped;
-            s.clear(fg, bg);
+            s.clear_styled(fg, fg_source, bg, bg_source);
             s.wrapped = true;
             src += 1;
             src_col = 0;
@@ -81,7 +83,7 @@ fn grow(
                 grid.rows[dst].copy_within(src_col.., 0);
                 shift_markers_left(&mut grid.rows[dst], src_col);
                 let len = grid.rows[dst].len() as usize;
-                grid.rows[dst].clear_range(len - src_col..len, fg, bg);
+                grid.rows[dst].clear_range_styled(len - src_col..len, fg, fg_source, bg, bg_source);
                 dst_col = len - src_col;
                 src += 1;
                 src_col = 0;
@@ -89,7 +91,7 @@ fn grow(
         }
     }
 
-    grid.rows[dst].resize(new_width as u32, fg, bg);
+    grid.rows[dst].resize_styled(new_width as u32, fg, fg_source, bg, bg_source);
     grid.rows
         .truncate(dst + if grid.rows[dst].wrapped { 0 } else { 1 });
 }
@@ -107,9 +109,12 @@ fn shrink(
                 let mut overflow = Row {
                     cells,
                     fg: grid.rows[row].fg.split_off(new_width as usize),
+                    fg_index: grid.rows[row].fg_index.split_off(new_width as usize),
                     bg: grid.rows[row].bg.split_off(new_width as usize),
+                    bg_index: grid.rows[row].bg_index.split_off(new_width as usize),
                     attrs: grid.rows[row].attrs.split_off(new_width as usize),
                     underline_color: grid.rows[row].underline_color.split_off(new_width as usize),
+                    underline_index: grid.rows[row].underline_index.split_off(new_width as usize),
                     links: grid.rows[row].links.split_off(new_width as usize),
                     wrapped: grid.rows[row].wrapped,
                     prompt_start: false,
@@ -130,7 +135,13 @@ fn shrink(
             }
         } else {
             let mut content = grid.rows[row].len() as usize;
-            grid.rows[row].resize(new_width, grid.default_fg, grid.default_bg);
+            grid.rows[row].resize_styled(
+                new_width,
+                grid.default_fg,
+                grid.default_fg_source,
+                grid.default_bg,
+                grid.default_bg_source,
+            );
 
             while grid.rows[row].wrapped && row + 1 < grid.rows.len() {
                 let room = new_width as usize - content;
@@ -148,7 +159,17 @@ fn shrink(
                         dst.cells[content + i] = src.cells[i].clone();
                     }
                     dst.fg[content..content + to_copy].copy_from_slice(&src.fg[..to_copy]);
+                    dst.fg_index[content..content + to_copy]
+                        .copy_from_slice(&src.fg_index[..to_copy]);
                     dst.bg[content..content + to_copy].copy_from_slice(&src.bg[..to_copy]);
+                    dst.bg_index[content..content + to_copy]
+                        .copy_from_slice(&src.bg_index[..to_copy]);
+                    dst.attrs[content..content + to_copy].copy_from_slice(&src.attrs[..to_copy]);
+                    dst.underline_color[content..content + to_copy]
+                        .copy_from_slice(&src.underline_color[..to_copy]);
+                    dst.underline_index[content..content + to_copy]
+                        .copy_from_slice(&src.underline_index[..to_copy]);
+                    dst.links[content..content + to_copy].copy_from_slice(&src.links[..to_copy]);
                     move_markers_in_copied_range(
                         dst,
                         src,

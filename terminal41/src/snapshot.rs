@@ -32,6 +32,10 @@ pub struct RowSnapshot {
     pub attrs: Vec<CellAttrs>,
     pub fg: Vec<Srgb<u8>>,
     pub bg: Vec<Srgb<u8>>,
+    /// Source identity corresponding to each foreground color.
+    pub fg_source: Vec<crate::ColorSource>,
+    /// Source identity corresponding to each background color.
+    pub bg_source: Vec<crate::ColorSource>,
     pub underline_color: Vec<Option<Srgb<u8>>>,
     pub has_link: Vec<bool>,
     pub line_attr: LineAttr,
@@ -381,6 +385,8 @@ fn snapshot_grid_row(
         attrs: grid_row.attrs.clone(),
         fg: grid_row.fg.clone(),
         bg: grid_row.bg.clone(),
+        fg_source: grid_row.fg_index.clone(),
+        bg_source: grid_row.bg_index.clone(),
         underline_color: grid_row.underline_color.clone(),
         has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
         line_attr: grid_row.line_attr,
@@ -551,6 +557,8 @@ fn snapshot_status_line_row(
         attrs: grid_row.attrs.clone(),
         fg: grid_row.fg.clone(),
         bg: grid_row.bg.clone(),
+        fg_source: grid_row.fg_index.clone(),
+        bg_source: grid_row.bg_index.clone(),
         underline_color: grid_row.underline_color.clone(),
         has_link: grid_row.links.iter().map(|l| l.is_some()).collect(),
         line_attr: grid_row.line_attr,
@@ -584,6 +592,8 @@ fn normalize_snapshot_row(
     row.attrs.resize(cols, CellAttrs::default());
     row.fg.resize(cols, palette.fg);
     row.bg.resize(cols, palette.bg);
+    row.fg_source.resize(cols, crate::ColorSource::Default);
+    row.bg_source.resize(cols, crate::ColorSource::Default);
     row.underline_color.resize(cols, None);
     row.has_link.resize(cols, false);
 }
@@ -677,6 +687,8 @@ fn blank_status_line_row(
         line_attr: LineAttr::Normal,
         fg: vec![palette.status_line_fg; cols],
         bg: vec![palette.status_line_bg; cols],
+        fg_source: vec![crate::ColorSource::Default; cols],
+        bg_source: vec![crate::ColorSource::Default; cols],
         attrs: vec![CellAttrs::default(); cols],
         selected: vec![false; cols],
         matched: vec![false; cols],

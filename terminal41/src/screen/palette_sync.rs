@@ -3,118 +3,118 @@ use palette::Srgb;
 use crate::ColorPalette;
 use crate::DecColorState;
 use crate::Screen;
+use crate::color::ColorSource;
+use crate::dec::color::DEFAULT_TEXT_BG_INDEX;
 use crate::dec::color::erase_background_color;
+use crate::dec::color::table_color;
 
-struct PaletteColorRemap {
-    old_text_fg: Srgb<u8>,
+struct PaletteColorRemap<'a> {
     new_text_fg: Srgb<u8>,
-    old_text_bg: Srgb<u8>,
     new_text_bg: Srgb<u8>,
-    old_status_fg: Srgb<u8>,
     new_status_fg: Srgb<u8>,
-    old_status_bg: Srgb<u8>,
     new_status_bg: Srgb<u8>,
-    ansi: [(Srgb<u8>, Srgb<u8>); 16],
+    palette: &'a ColorPalette,
+    dec_color: &'a DecColorState,
 }
 
-impl PaletteColorRemap {
+impl<'a> PaletteColorRemap<'a> {
     fn new(
-        old_palette: &ColorPalette,
-        new_palette: &ColorPalette,
+        new_palette: &'a ColorPalette,
+        dec_color: &'a DecColorState,
     ) -> Self {
         Self {
-            old_text_fg: old_palette.fg,
             new_text_fg: new_palette.fg,
-            old_text_bg: old_palette.bg,
             new_text_bg: new_palette.bg,
-            old_status_fg: old_palette.status_line_fg,
             new_status_fg: new_palette.status_line_fg,
-            old_status_bg: old_palette.status_line_bg,
             new_status_bg: new_palette.status_line_bg,
-            ansi: std::array::from_fn(|idx| (old_palette.ansi[idx], new_palette.ansi[idx])),
+            palette: new_palette,
+            dec_color,
         }
     }
 
     fn text_fg(
         &self,
         color: Srgb<u8>,
+        source: ColorSource,
     ) -> Srgb<u8> {
-        if color == self.old_text_fg {
-            self.new_text_fg
-        } else {
-            self.ansi(color)
+        match source {
+            ColorSource::Default => self.new_text_fg,
+            ColorSource::Indexed(index) => self.palette.indexed_color(index),
+            ColorSource::Dec(index) => table_color(self.dec_color, index),
+            ColorSource::Direct => color,
         }
     }
 
     fn text_bg(
         &self,
         color: Srgb<u8>,
+        source: ColorSource,
     ) -> Srgb<u8> {
-        if color == self.old_text_bg {
-            self.new_text_bg
-        } else {
-            self.ansi(color)
+        match source {
+            ColorSource::Default => self.new_text_bg,
+            ColorSource::Indexed(index) => self.palette.indexed_color(index),
+            ColorSource::Dec(index) => table_color(self.dec_color, index),
+            ColorSource::Direct => color,
         }
     }
 
     fn status_fg(
         &self,
         color: Srgb<u8>,
+        source: ColorSource,
     ) -> Srgb<u8> {
-        if color == self.old_status_fg {
-            self.new_status_fg
-        } else {
-            self.ansi(color)
+        match source {
+            ColorSource::Default => self.new_status_fg,
+            ColorSource::Indexed(index) => self.palette.indexed_color(index),
+            ColorSource::Dec(index) => table_color(self.dec_color, index),
+            ColorSource::Direct => color,
         }
     }
 
     fn status_bg(
         &self,
         color: Srgb<u8>,
+        source: ColorSource,
     ) -> Srgb<u8> {
-        if color == self.old_status_bg {
-            self.new_status_bg
-        } else {
-            self.ansi(color)
+        match source {
+            ColorSource::Default => self.new_status_bg,
+            ColorSource::Indexed(index) => self.palette.indexed_color(index),
+            ColorSource::Dec(index) => table_color(self.dec_color, index),
+            ColorSource::Direct => color,
         }
-    }
-
-    fn ansi(
-        &self,
-        color: Srgb<u8>,
-    ) -> Srgb<u8> {
-        self.ansi
-            .iter()
-            .find_map(|(old, new)| (color == *old).then_some(*new))
-            .unwrap_or(color)
     }
 }
 
 pub(crate) fn apply_screen_palette(
     screen: &mut Screen,
-    old_palette: &ColorPalette,
     new_palette: &ColorPalette,
+    dec_color: &DecColorState,
 ) {
-    let remap = PaletteColorRemap::new(old_palette, new_palette);
+    let remap = PaletteColorRemap::new(new_palette, dec_color);
     remap_screen_palette_colors(screen, &remap);
     screen.grid.default_fg = new_palette.fg;
+    screen.grid.default_fg_source = ColorSource::Default;
     screen.grid.default_bg = new_palette.bg;
-    screen.fg = remap.text_fg(screen.fg);
-    screen.bg = remap.text_bg(screen.bg);
-    screen.underline_color = screen.underline_color.map(|color| remap.text_fg(color));
+    screen.grid.default_bg_source = ColorSource::Default;
+    screen.fg = remap.text_fg(screen.fg, screen.fg_index);
+    screen.bg = remap.text_bg(screen.bg, screen.bg_index);
+    screen.underline_color = screen
+        .underline_color
+        .map(|color| remap.text_fg(color, screen.underline_index));
+    if let Some(saved) = screen.saved_cursor.as_mut() {
+        saved.fg = remap.text_fg(saved.fg, saved.fg_index);
+        saved.bg = remap.text_bg(saved.bg, saved.bg_index);
+        saved.underline_color = saved
+            .underline_color
+            .map(|color| remap.text_fg(color, saved.underline_index));
+    }
     if let Some(status) = screen.status_line.as_mut() {
-        status.fg = remap.status_fg(status.fg);
-        status.bg = remap.status_bg(status.bg);
-        status.underline_color = status.underline_color.map(|color| remap.status_fg(color));
-        for fg in &mut status.row.fg {
-            *fg = remap.status_fg(*fg);
-        }
-        for bg in &mut status.row.bg {
-            *bg = remap.status_bg(*bg);
-        }
-        for underline_color in &mut status.row.underline_color {
-            *underline_color = underline_color.map(|color| remap.status_fg(color));
-        }
+        status.fg = remap.status_fg(status.fg, status.fg_index);
+        status.bg = remap.status_bg(status.bg, status.bg_index);
+        status.underline_color = status
+            .underline_color
+            .map(|color| remap.status_fg(color, status.underline_index));
+        remap_row_palette_colors(&mut status.row, &remap, true);
     }
 }
 
@@ -123,6 +123,11 @@ pub(crate) fn sync_screen_erase_defaults(
     dec_color: &DecColorState,
 ) {
     screen.grid.default_bg = erase_background_color(dec_color, screen.bg);
+    screen.grid.default_bg_source = if dec_color.erase_to_screen {
+        ColorSource::Dec(DEFAULT_TEXT_BG_INDEX)
+    } else {
+        screen.bg_index
+    };
 }
 
 fn remap_screen_palette_colors(
@@ -130,14 +135,43 @@ fn remap_screen_palette_colors(
     remap: &PaletteColorRemap,
 ) {
     for row in &mut screen.grid.rows {
-        for fg in &mut row.fg {
-            *fg = remap.text_fg(*fg);
+        remap_row_palette_colors(row, remap, false);
+    }
+    for block in &mut screen.scrollback_blocks {
+        block.grid.default_fg = remap.text_fg(block.grid.default_fg, block.grid.default_fg_source);
+        block.grid.default_bg = remap.text_bg(block.grid.default_bg, block.grid.default_bg_source);
+        for row in &mut block.grid.rows {
+            remap_row_palette_colors(row, remap, false);
         }
-        for bg in &mut row.bg {
-            *bg = remap.text_bg(*bg);
-        }
-        for underline_color in &mut row.underline_color {
-            *underline_color = underline_color.map(|color| remap.text_fg(color));
-        }
+    }
+}
+
+fn remap_row_palette_colors(
+    row: &mut crate::Row,
+    remap: &PaletteColorRemap,
+    status_line: bool,
+) {
+    for (color, index) in row.fg.iter_mut().zip(&row.fg_index) {
+        *color = if status_line {
+            remap.status_fg(*color, *index)
+        } else {
+            remap.text_fg(*color, *index)
+        };
+    }
+    for (color, index) in row.bg.iter_mut().zip(&row.bg_index) {
+        *color = if status_line {
+            remap.status_bg(*color, *index)
+        } else {
+            remap.text_bg(*color, *index)
+        };
+    }
+    for (color, index) in row.underline_color.iter_mut().zip(&row.underline_index) {
+        *color = color.map(|color| {
+            if status_line {
+                remap.status_fg(color, *index)
+            } else {
+                remap.text_fg(color, *index)
+            }
+        });
     }
 }

@@ -11,6 +11,8 @@ All notable changes to `term41` are documented here.
 - Completed Kitty keyboard progressive enhancements with alternate key values,
   press/repeat/release events, associated-text filtering, and independent mode
   stacks for the main and alternate screens.
+- Added runtime OSC 4/10/11/12 color setters and OSC 104/110/111/112 resets,
+  including all 256 indexed colors and theme-aware reset values.
 
 ## [0.2.1] - 2026-05-13
 

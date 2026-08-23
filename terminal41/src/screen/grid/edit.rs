@@ -16,6 +16,58 @@ fn reset_row_after_full_clear(row: &mut Row) {
     row.line_attr = LineAttr::Normal;
 }
 
+fn clear_row(
+    grid: &mut Grid,
+    row: usize,
+) {
+    grid.rows[row].clear_styled(
+        grid.default_fg,
+        grid.default_fg_source,
+        grid.default_bg,
+        grid.default_bg_source,
+    );
+}
+
+fn clear_row_range(
+    grid: &mut Grid,
+    row: usize,
+    range: std::ops::Range<usize>,
+) {
+    grid.rows[row].clear_range_styled(
+        range,
+        grid.default_fg,
+        grid.default_fg_source,
+        grid.default_bg,
+        grid.default_bg_source,
+    );
+}
+
+fn clear_row_selective(
+    grid: &mut Grid,
+    row: usize,
+) {
+    grid.rows[row].clear_selective_styled(
+        grid.default_fg,
+        grid.default_fg_source,
+        grid.default_bg,
+        grid.default_bg_source,
+    );
+}
+
+fn clear_row_range_selective(
+    grid: &mut Grid,
+    row: usize,
+    range: std::ops::Range<usize>,
+) {
+    grid.rows[row].clear_range_selective_styled(
+        range,
+        grid.default_fg,
+        grid.default_fg_source,
+        grid.default_bg,
+        grid.default_bg_source,
+    );
+}
+
 fn clear_wrapped_continuation_rows(
     grid: &mut Grid,
     images: &mut BTreeMap<u64, PlacedImage>,
@@ -25,7 +77,7 @@ fn clear_wrapped_continuation_rows(
     let mut row = first;
     while row < grid.rows.len() {
         let continued = grid.rows[row].wrapped;
-        grid.rows[row].clear(grid.default_fg, grid.default_bg);
+        clear_row(grid, row);
         reset_row_after_full_clear(&mut grid.rows[row]);
         clear_anchored_cells(images, row, row + 1, 0, cols);
         row += 1;
@@ -50,10 +102,10 @@ pub(crate) fn erase_in_display(
     match mode {
         0 => {
             let cols = grid.rows[active].cells.len();
-            grid.rows[active].clear_range(col..cols, grid.default_fg, grid.default_bg);
+            clear_row_range(grid, active, col..cols);
             grid.rows[active].wrapped = false;
             for r in (active + 1)..grid.rows.len() {
-                grid.rows[r].clear(grid.default_fg, grid.default_bg);
+                clear_row(grid, r);
                 reset_row_after_full_clear(&mut grid.rows[r]);
             }
             clear_anchored_cells(images, active, active + 1, col, cols);
@@ -61,15 +113,15 @@ pub(crate) fn erase_in_display(
         }
         1 => {
             for r in first_visible..active {
-                grid.rows[r].clear(grid.default_fg, grid.default_bg);
+                clear_row(grid, r);
             }
-            grid.rows[active].clear_range(0..col + 1, grid.default_fg, grid.default_bg);
+            clear_row_range(grid, active, 0..col + 1);
             clear_anchored_cells(images, first_visible, active, 0, cols);
             clear_anchored_cells(images, active, active + 1, 0, col + 1);
         }
         2 => {
             for r in first_visible..grid.rows.len() {
-                grid.rows[r].clear(grid.default_fg, grid.default_bg);
+                clear_row(grid, r);
                 reset_row_after_full_clear(&mut grid.rows[r]);
             }
             clear_in_range(images, first_visible, grid.rows.len());
@@ -98,24 +150,24 @@ pub(crate) fn erase_in_display_selective(
     match mode {
         0 => {
             let cols = grid.rows[active].cells.len();
-            grid.rows[active].clear_range_selective(col..cols, grid.default_fg, grid.default_bg);
+            clear_row_range_selective(grid, active, col..cols);
             for r in (active + 1)..grid.rows.len() {
-                grid.rows[r].clear_selective(grid.default_fg, grid.default_bg);
+                clear_row_selective(grid, r);
             }
             clear_anchored_cells(images, active, active + 1, col, cols);
             clear_anchored_cells(images, active + 1, grid.rows.len(), 0, cols);
         }
         1 => {
             for r in first_visible..active {
-                grid.rows[r].clear_selective(grid.default_fg, grid.default_bg);
+                clear_row_selective(grid, r);
             }
-            grid.rows[active].clear_range_selective(0..col + 1, grid.default_fg, grid.default_bg);
+            clear_row_range_selective(grid, active, 0..col + 1);
             clear_anchored_cells(images, first_visible, active, 0, cols);
             clear_anchored_cells(images, active, active + 1, 0, col + 1);
         }
         2 => {
             for r in first_visible..grid.rows.len() {
-                grid.rows[r].clear_selective(grid.default_fg, grid.default_bg);
+                clear_row_selective(grid, r);
             }
             clear_in_range(images, first_visible, grid.rows.len());
             clear_anchored_cells(images, first_visible, grid.rows.len(), 0, cols);
@@ -137,15 +189,15 @@ pub(crate) fn erase_in_line_selective(
 
     match mode {
         0 => {
-            grid.rows[active].clear_range_selective(col..cols, grid.default_fg, grid.default_bg);
+            clear_row_range_selective(grid, active, col..cols);
             clear_anchored_cells(images, active, active + 1, col, cols);
         }
         1 => {
-            grid.rows[active].clear_range_selective(0..col + 1, grid.default_fg, grid.default_bg);
+            clear_row_range_selective(grid, active, 0..col + 1);
             clear_anchored_cells(images, active, active + 1, 0, col + 1);
         }
         2 => {
-            grid.rows[active].clear_selective(grid.default_fg, grid.default_bg);
+            clear_row_selective(grid, active);
             clear_anchored_cells(images, active, active + 1, 0, cols);
         }
         _ => {}
@@ -165,7 +217,7 @@ pub(crate) fn erase_in_line(
 
     match mode {
         0 => {
-            grid.rows[active].clear_range(col..cols, grid.default_fg, grid.default_bg);
+            clear_row_range(grid, active, col..cols);
             clear_anchored_cells(images, active, active + 1, col, cols);
             if grid.rows[active].wrapped {
                 grid.rows[active].wrapped = false;
@@ -174,7 +226,7 @@ pub(crate) fn erase_in_line(
         }
         1 => {
             let end = col.saturating_add(1).min(cols);
-            grid.rows[active].clear_range(0..end, grid.default_fg, grid.default_bg);
+            clear_row_range(grid, active, 0..end);
             clear_anchored_cells(images, active, active + 1, 0, end);
             if end == cols && grid.rows[active].wrapped {
                 grid.rows[active].wrapped = false;
@@ -183,7 +235,7 @@ pub(crate) fn erase_in_line(
         }
         2 => {
             let had_wrapped_continuation = grid.rows[active].wrapped;
-            grid.rows[active].clear(grid.default_fg, grid.default_bg);
+            clear_row(grid, active);
             grid.rows[active].wrapped = false;
             clear_anchored_cells(images, active, active + 1, 0, cols);
             if had_wrapped_continuation {
@@ -207,7 +259,7 @@ pub(crate) fn delete_chars(
     let count = (n as usize).min(cols - col);
 
     grid.rows[active].copy_within(col + count..cols, col);
-    grid.rows[active].clear_range(cols - count..cols, grid.default_fg, grid.default_bg);
+    clear_row_range(grid, active, cols - count..cols);
     shift_anchored_cells_left(images, active, active + 1, col, cols, count);
 }
 
@@ -225,7 +277,7 @@ pub(crate) fn shift_chars(
     let count = (n as usize).min(cols - col);
 
     grid.rows[active].copy_within(col..cols - count, col + count);
-    grid.rows[active].clear_range(col..col + count, grid.default_fg, grid.default_bg);
+    clear_row_range(grid, active, col..col + count);
     shift_anchored_cells_right(images, active, active + 1, col, cols, count);
 }
 
@@ -242,6 +294,6 @@ pub(crate) fn erase_chars(
     cursor.col = col as u32;
     let end = (col + n as usize).min(cols);
 
-    grid.rows[active].clear_range(col..end, grid.default_fg, grid.default_bg);
+    clear_row_range(grid, active, col..end);
     clear_anchored_cells(images, active, active + 1, col, end);
 }
