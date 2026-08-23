@@ -28,8 +28,10 @@ use winit::event::MouseButton;
 use winit::event_loop::EventLoopProxy;
 use winit::event_loop::OwnedDisplayHandle;
 use winit::keyboard::Key;
+use winit::keyboard::KeyLocation;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
+use winit::keyboard::PhysicalKey;
 use winit::window::Window;
 
 use crate::command_catalog::CommandCatalog;
@@ -222,7 +224,28 @@ pub(crate) struct RenderRuntime {
 pub(crate) struct KeyboardRuntime {
     pub(crate) modifiers: ModifiersState,
     pub(crate) physical_modifiers: PhysicalModifierState,
+    /// Press ownership and normalized encoding data for keys sent to a PTY.
+    /// Repeats and releases reuse these records so they stay paired with the
+    /// original tab and key even when focus or the keyboard layout changes.
+    pub(crate) forwarded_keys: HashMap<PhysicalKey, ForwardedKey>,
     pub(crate) ime_preedit_active: bool,
+}
+
+#[derive(Clone)]
+pub(crate) struct ForwardedKey {
+    pub(crate) tab_id: TabId,
+    pub(crate) encoding: ForwardedKeyEncoding,
+}
+
+#[derive(Clone)]
+pub(crate) enum ForwardedKeyEncoding {
+    Sequence(Vec<u8>),
+    Terminal {
+        key: Key,
+        key_without_modifiers: Key,
+        location: KeyLocation,
+        release_reported: bool,
+    },
 }
 
 pub(crate) struct MouseRuntime {

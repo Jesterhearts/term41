@@ -563,6 +563,7 @@ fn main() {
         keyboard: KeyboardRuntime {
             modifiers: ModifiersState::default(),
             physical_modifiers: PhysicalModifierState::default(),
+            forwarded_keys: std::collections::HashMap::new(),
             ime_preedit_active: false,
         },
         mouse: MouseRuntime {

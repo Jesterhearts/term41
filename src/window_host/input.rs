@@ -23,9 +23,9 @@ use terminal41::selection::search_step_next;
 use terminal41::selection::search_step_prev;
 use terminal41::view;
 use winit::event::ElementState;
+use winit::event::KeyEvent;
 use winit::keyboard::Key;
 use winit::keyboard::KeyCode;
-use winit::keyboard::KeyLocation;
 use winit::keyboard::ModifiersState;
 use winit::keyboard::NamedKey;
 use winit::keyboard::PhysicalKey;
@@ -35,6 +35,8 @@ use super::ActionOwner;
 use super::AppEvent;
 use super::CommandPaletteArgument;
 use super::CommandPaletteInvocation;
+use super::ForwardedKey;
+use super::ForwardedKeyEncoding;
 use super::InputEndpoint;
 use super::InputRuntime;
 use super::KeyboardRuntime;
@@ -96,6 +98,8 @@ use super::toggle_command_editor;
 use super::update_command_palette_query;
 use super::update_history_deletion_query;
 use crate::output_recording::next_recording_path;
+use crate::renderer::KittyInput;
+use crate::renderer::KittyKeyEventType;
 use crate::renderer::RenderEvent;
 use crate::renderer::ctrl_byte;
 use crate::renderer::kitty_encode_ime_commit;
@@ -989,10 +993,27 @@ fn host_command_palette_working_directory(
 
 pub(crate) fn handle_key_event(
     host: &mut WindowHost,
-    key: Key,
-    location: KeyLocation,
-    physical: PhysicalKey,
+    event: KeyEvent,
+    key_without_modifiers: Key,
+    text_with_all_modifiers: Option<smol_str::SmolStr>,
 ) {
+    let KeyEvent {
+        logical_key: key,
+        location,
+        physical_key: physical,
+        repeat,
+        ..
+    } = event;
+    if repeat && let Some(forwarded) = host.keyboard.forwarded_keys.get(&physical).cloned() {
+        forward_recorded_repeat(
+            host,
+            physical,
+            &key,
+            text_with_all_modifiers.as_deref(),
+            forwarded,
+        );
+        return;
+    }
     if host.modals.permission_modal.is_some() {
         handle_permission_modal_key(host, &key);
         return;
@@ -1009,7 +1030,6 @@ pub(crate) fn handle_key_event(
     let Some(active_tab_id) = host.input.active_tab else {
         return;
     };
-
     if handle_command_palette_key(host, active_tab_id, &key) {
         return;
     }
@@ -1057,6 +1077,12 @@ pub(crate) fn handle_key_event(
         return;
     }
 
+    // Let local handlers process their repeats, but do not send an orphan
+    // terminal repeat when no forwarded press owns the physical key.
+    if repeat {
+        return;
+    }
+
     let Some(target) = host.input.endpoints.get_mut(&active_tab_id) else {
         return;
     };
@@ -1066,6 +1092,12 @@ pub(crate) fn handle_key_event(
         if let Some(bytes) = bytes {
             reset_viewport_and_invalidate(&mut target.terminal.lock());
             let _ = target.writer.write(&bytes);
+            record_forwarded_key(
+                &mut host.keyboard,
+                physical,
+                active_tab_id,
+                ForwardedKeyEncoding::Sequence(bytes),
+            );
             notify_interaction_changed(
                 &host.input,
                 &mut host.render,
@@ -1097,9 +1129,33 @@ pub(crate) fn handle_key_event(
         let terminal = target.terminal.lock();
         (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
     };
-    if let Some(bytes) = kitty_encode_input(&key, host.keyboard.modifiers, kitty_flags, c1_mode) {
+    let kitty_modifiers = kitty_event_modifiers(&key, &host.keyboard);
+    if let Some(bytes) = kitty_encode_input(
+        KittyInput {
+            key: &key,
+            key_without_modifiers: &key_without_modifiers,
+            text: text_with_all_modifiers.as_deref(),
+            location,
+            physical,
+            modifiers: kitty_modifiers,
+            event_type: KittyKeyEventType::Press,
+        },
+        kitty_flags,
+        c1_mode,
+    ) {
         reset_viewport_and_invalidate(&mut target.terminal.lock());
         let _ = target.writer.write(&bytes);
+        record_forwarded_key(
+            &mut host.keyboard,
+            physical,
+            active_tab_id,
+            ForwardedKeyEncoding::Terminal {
+                key: key.clone(),
+                key_without_modifiers: key_without_modifiers.clone(),
+                location,
+                release_reported: kitty_flags.contains(terminal41::KittyFlags::REPORT_EVENT_TYPES),
+            },
+        );
         notify_interaction_changed(
             &host.input,
             &mut host.render,
@@ -1109,31 +1165,14 @@ pub(crate) fn handle_key_event(
         return;
     }
 
-    if host.keyboard.modifiers.control_key() {
-        let byte = match &key {
+    if host.keyboard.modifiers.control_key()
+        && match &key {
             Key::Character(c) => ctrl_byte(c),
             Key::Named(NamedKey::Space) => Some(0x00),
             _ => None,
-        };
-
-        if let Some(byte) = byte {
-            if byte == 0x03 {
-                crate::perf_ctrl_c::record_ctrl_c_hit(active_tab_id);
-            }
-            reset_viewport_and_invalidate(&mut target.terminal.lock());
-            if host.keyboard.modifiers.alt_key() {
-                let _ = target.writer.write(&[0x1b, byte]);
-            } else {
-                let _ = target.writer.write(&[byte]);
-            }
-            notify_interaction_changed(
-                &host.input,
-                &mut host.render,
-                &host.startup,
-                host.window.as_ref(),
-            );
-            return;
-        }
+        } == Some(0x03)
+    {
+        crate::perf_ctrl_c::record_ctrl_c_hit(active_tab_id);
     }
 
     let (app_cursor_keys, app_keypad, c1_mode) = {
@@ -1145,39 +1184,30 @@ pub(crate) fn handle_key_event(
         )
     };
 
-    let bytes = match &key {
-        Key::Character(c) => {
-            if let Some(bytes) = legacy_encode_numpad_character(
-                c,
-                location,
-                physical,
-                host.keyboard.modifiers,
-                app_keypad,
-                c1_mode,
-            ) {
-                Some(bytes)
-            } else if host.keyboard.modifiers.alt_key() {
-                let mut v = vec![0x1b];
-                v.extend_from_slice(c.as_bytes());
-                Some(v)
-            } else {
-                Some(c.as_bytes().to_vec())
-            }
-        }
-        Key::Named(named) => legacy_encode_named(
-            *named,
-            location,
-            host.keyboard.modifiers,
-            app_cursor_keys,
-            app_keypad,
-            c1_mode,
-        ),
-        _ => None,
-    };
+    let bytes = legacy_encode_key(
+        &key,
+        location,
+        physical,
+        host.keyboard.modifiers,
+        app_cursor_keys,
+        app_keypad,
+        c1_mode,
+    );
 
     if let Some(bytes) = bytes {
         reset_viewport_and_invalidate(&mut target.terminal.lock());
         let _ = target.writer.write(&bytes);
+        record_forwarded_key(
+            &mut host.keyboard,
+            physical,
+            active_tab_id,
+            ForwardedKeyEncoding::Terminal {
+                key: key.clone(),
+                key_without_modifiers: key_without_modifiers.clone(),
+                location,
+                release_reported: false,
+            },
+        );
         notify_interaction_changed(
             &host.input,
             &mut host.render,
@@ -1185,6 +1215,224 @@ pub(crate) fn handle_key_event(
             host.window.as_ref(),
         );
     }
+}
+
+pub(crate) fn handle_key_release(
+    host: &mut WindowHost,
+    event: KeyEvent,
+) {
+    let Some(forwarded) = host.keyboard.forwarded_keys.remove(&event.physical_key) else {
+        return;
+    };
+    let ForwardedKeyEncoding::Terminal {
+        key: press_key,
+        key_without_modifiers,
+        location,
+        release_reported,
+    } = forwarded.encoding
+    else {
+        return;
+    };
+    if !release_reported {
+        return;
+    }
+    let tab_id = forwarded.tab_id;
+    let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
+        return;
+    };
+    let (flags, c1_mode) = {
+        let terminal = target.terminal.lock();
+        (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
+    };
+    if !flags.contains(terminal41::KittyFlags::REPORT_EVENT_TYPES) {
+        return;
+    }
+    let key = forwarded_logical_key(&press_key, &event.logical_key);
+    let modifiers = kitty_event_modifiers(key, &host.keyboard);
+    let Some(bytes) = kitty_encode_input(
+        KittyInput {
+            key,
+            key_without_modifiers: &key_without_modifiers,
+            text: None,
+            location,
+            physical: event.physical_key,
+            modifiers,
+            event_type: KittyKeyEventType::Release,
+        },
+        flags,
+        c1_mode,
+    ) else {
+        return;
+    };
+    reset_viewport_and_invalidate(&mut target.terminal.lock());
+    let _ = target.writer.write(&bytes);
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
+
+fn record_forwarded_key(
+    keyboard: &mut KeyboardRuntime,
+    physical: PhysicalKey,
+    tab_id: TabId,
+    encoding: ForwardedKeyEncoding,
+) {
+    keyboard
+        .forwarded_keys
+        .insert(physical, ForwardedKey { tab_id, encoding });
+}
+
+fn forward_recorded_repeat(
+    host: &mut WindowHost,
+    physical: PhysicalKey,
+    current_key: &Key,
+    current_text: Option<&str>,
+    forwarded: ForwardedKey,
+) {
+    let Some(target) = host.input.endpoints.get_mut(&forwarded.tab_id) else {
+        return;
+    };
+    let bytes = match &forwarded.encoding {
+        ForwardedKeyEncoding::Sequence(bytes) => Some(bytes.clone()),
+        ForwardedKeyEncoding::Terminal {
+            key: press_key,
+            key_without_modifiers,
+            location,
+            ..
+        } => {
+            let (flags, app_cursor_keys, app_keypad, c1_mode) = {
+                let terminal = target.terminal.lock();
+                (
+                    terminal.kitty_keyboard.current(),
+                    view::app_cursor_keys(&terminal.active),
+                    view::app_keypad(&terminal.active),
+                    terminal.modes.c1_mode,
+                )
+            };
+            let key = forwarded_logical_key(press_key, current_key);
+            let modifiers = kitty_event_modifiers(key, &host.keyboard);
+            kitty_encode_input(
+                KittyInput {
+                    key,
+                    key_without_modifiers,
+                    text: current_text,
+                    location: *location,
+                    physical,
+                    modifiers,
+                    event_type: KittyKeyEventType::Repeat,
+                },
+                flags,
+                c1_mode,
+            )
+            .or_else(|| {
+                legacy_encode_key(
+                    key,
+                    *location,
+                    physical,
+                    modifiers,
+                    app_cursor_keys,
+                    app_keypad,
+                    c1_mode,
+                )
+            })
+        }
+    };
+    let Some(bytes) = bytes else {
+        return;
+    };
+    reset_viewport_and_invalidate(&mut target.terminal.lock());
+    let _ = target.writer.write(&bytes);
+    notify_interaction_changed(
+        &host.input,
+        &mut host.render,
+        &host.startup,
+        host.window.as_ref(),
+    );
+}
+
+fn forwarded_logical_key<'a>(
+    press_key: &'a Key,
+    current_key: &'a Key,
+) -> &'a Key {
+    if matches!(press_key, Key::Character(_)) && matches!(current_key, Key::Character(_)) {
+        current_key
+    } else {
+        press_key
+    }
+}
+
+fn legacy_encode_key(
+    key: &Key,
+    location: winit::keyboard::KeyLocation,
+    physical: PhysicalKey,
+    modifiers: ModifiersState,
+    app_cursor_keys: bool,
+    app_keypad: bool,
+    c1_mode: terminal41::C1Mode,
+) -> Option<Vec<u8>> {
+    if modifiers.control_key() {
+        let byte = match key {
+            Key::Character(c) => ctrl_byte(c),
+            Key::Named(NamedKey::Space) => Some(0x00),
+            _ => None,
+        };
+        if let Some(byte) = byte {
+            return Some(if modifiers.alt_key() {
+                vec![0x1b, byte]
+            } else {
+                vec![byte]
+            });
+        }
+    }
+
+    match key {
+        Key::Character(c) => {
+            legacy_encode_numpad_character(c, location, physical, modifiers, app_keypad, c1_mode)
+                .or_else(|| {
+                    if modifiers.alt_key() {
+                        let mut bytes = vec![0x1b];
+                        bytes.extend_from_slice(c.as_bytes());
+                        Some(bytes)
+                    } else {
+                        Some(c.as_bytes().to_vec())
+                    }
+                })
+        }
+        Key::Named(named) => legacy_encode_named(
+            *named,
+            location,
+            modifiers,
+            app_cursor_keys,
+            app_keypad,
+            c1_mode,
+        ),
+        _ => None,
+    }
+}
+
+fn kitty_event_modifiers(
+    key: &Key,
+    keyboard: &KeyboardRuntime,
+) -> ModifiersState {
+    let physical = keyboard.physical_modifiers.modifiers();
+    let mut modifiers = keyboard.modifiers | physical;
+    let Key::Named(named) = key else {
+        return modifiers;
+    };
+    let family = match named {
+        NamedKey::Shift => Some(ModifiersState::SHIFT),
+        NamedKey::Control => Some(ModifiersState::CONTROL),
+        NamedKey::Alt => Some(ModifiersState::ALT),
+        NamedKey::Super => Some(ModifiersState::SUPER),
+        _ => None,
+    };
+    if let Some(family) = family {
+        modifiers.set(family, physical.contains(family));
+    }
+    modifiers
 }
 
 pub(crate) fn handle_modifiers_changed(
@@ -1275,7 +1523,11 @@ pub(crate) fn handle_ime_commit(
         let terminal = target.terminal.lock();
         (terminal.kitty_keyboard.current(), terminal.modes.c1_mode)
     };
-    let bytes = if flags.contains(terminal41::KittyFlags::REPORT_ASSOCIATED_TEXT) {
+    let reports_ime_text = flags.contains(
+        terminal41::KittyFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES
+            | terminal41::KittyFlags::REPORT_ASSOCIATED_TEXT,
+    );
+    let bytes = if reports_ime_text {
         kitty_encode_ime_commit(text, c1_mode)
     } else {
         text.as_bytes().to_vec()

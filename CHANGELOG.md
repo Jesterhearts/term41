@@ -8,6 +8,9 @@ All notable changes to `term41` are documented here.
 
 - Added pointer drag reordering for tabs while preserving the active terminal
   session.
+- Completed Kitty keyboard progressive enhancements with alternate key values,
+  press/repeat/release events, associated-text filtering, and independent mode
+  stacks for the main and alternate screens.
 
 ## [0.2.1] - 2026-05-13
 

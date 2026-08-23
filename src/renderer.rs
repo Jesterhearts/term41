@@ -58,6 +58,8 @@ use crate::renderer::r#impl::Renderer;
 pub(crate) use crate::renderer::r#impl::TabInfo;
 use crate::renderer::r#impl::WindowControls;
 pub use crate::renderer::r#impl::compute_gutter_width;
+pub(crate) use crate::renderer::input_encoding::KittyInput;
+pub(crate) use crate::renderer::input_encoding::KittyKeyEventType;
 pub(crate) use crate::renderer::input_encoding::ctrl_byte;
 pub(crate) use crate::renderer::input_encoding::kitty_encode_ime_commit;
 pub(crate) use crate::renderer::input_encoding::kitty_encode_input;

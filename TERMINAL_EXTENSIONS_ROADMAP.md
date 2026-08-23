@@ -120,11 +120,12 @@ Security:
 
 Status:
 
-- `Partial`
+- `Implemented`
 
-Implemented foundation:
+Implemented:
 
-- kitty keyboard protocol mode stack and key encoding
+- kitty keyboard protocol main/alternate mode stacks, key encoding,
+  repeat/release events, alternate keys, associated text, and IME commits
 - legacy xterm keyboard encodings
 - xterm mouse protocols
 - bracketed paste
@@ -132,10 +133,6 @@ Implemented foundation:
 
 Maintenance direction:
 
-- Complete repeat/release event reporting and alternate-key reporting before
-  describing the Kitty keyboard implementation as complete. The terminal must
-  not accept and report enhancement flags whose output behavior is absent.
-- Keep separate keyboard mode stacks for the main and alternate screens.
 - Track kitty keyboard behavior as implemented by kitty, Ghostty, Alacritty,
   foot, iTerm2, WezTerm, and Rio.
 - Prefer compatibility tests that compare emitted byte sequences for ambiguous

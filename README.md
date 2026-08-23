@@ -99,7 +99,7 @@ Legend:
 
 | Area                                   | Status                        | Notes                                                                                                               |
 | -------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------- |
-| Kitty keyboard protocol                | ✅ Supported                  | Mode stack, key encoding, associated text, IME commits, and 7-bit/8-bit reply handling.                             |
+| Kitty keyboard protocol                | ✅ Supported                  | Per-screen mode stacks, alternate keys, press/repeat/release events, associated text, IME commits, and 7-bit/8-bit controls. |
 | Kitty graphics direct payloads         | ✅ Supported                  | RGB, RGBA, PNG, zlib compression, chunking, transmit, transmit-and-display, and placement.                          |
 | Kitty graphics file/temp-file payloads | ✅ Supported                  | File and temp-file media with byte range support and safe temp-file deletion rules.                                 |
 | Kitty graphics placement model         | ✅ Supported                  | Image IDs, image numbers, placement IDs, relative placements, cell offsets, z-index, and expanded delete selectors. |

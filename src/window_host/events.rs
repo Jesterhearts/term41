@@ -10,6 +10,7 @@ use winit::event::WindowEvent;
 use winit::event_loop::ActiveEventLoop;
 use winit::event_loop::ControlFlow;
 use winit::keyboard::Key;
+use winit::platform::modifier_supplement::KeyEventExtModifierSupplement;
 use winit::platform::wayland::WindowAttributesExtWayland;
 use winit::window::Window;
 use winit::window::WindowId;
@@ -25,6 +26,7 @@ use super::handle_cursor_moved;
 use super::handle_focus_event;
 use super::handle_ime_commit;
 use super::handle_key_event;
+use super::handle_key_release;
 use super::handle_modifiers_changed;
 use super::handle_mouse_input;
 use super::handle_mouse_wheel;
@@ -281,6 +283,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             WindowEvent::Focused(f) => {
                 if !f {
                     self.keyboard.physical_modifiers = PhysicalModifierState::default();
+                    self.keyboard.forwarded_keys.clear();
                     self.mouse.tab_drag = None;
                     self.mouse.mouse_buttons.left = false;
                     if let Some(window) = &self.window {
@@ -298,20 +301,24 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::KeyboardInput { event, .. } => {
+                let key_without_modifiers = event.key_without_modifiers();
+                let text_with_all_modifiers =
+                    event.text_with_all_modifiers().map(smol_str::SmolStr::new);
                 sync_modifier_key_from_keyboard_event(
                     &mut self.keyboard,
                     event.physical_key,
                     event.state,
                 );
-                if event.state != ElementState::Pressed {
+                if event.state == ElementState::Released {
+                    handle_key_release(self, event);
                     return;
                 }
                 match &event.logical_key {
                     Key::Character(_) | Key::Named(_) => handle_key_event(
                         self,
-                        event.logical_key,
-                        event.location,
-                        event.physical_key,
+                        event,
+                        key_without_modifiers,
+                        text_with_all_modifiers,
                     ),
                     _ => return,
                 }

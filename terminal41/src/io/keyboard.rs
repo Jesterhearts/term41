@@ -57,12 +57,13 @@ bitflags::bitflags! {
     }
 }
 
-/// Push/pop stack of currently-active flag sets. The top of stack is the
-/// effective mode; pushing/popping is how apps temporarily change behaviour
-/// without trampling another layer's preference.
+/// Main- and alternate-screen push/pop stacks of active flag sets. Each screen
+/// has its own stack so a full-screen application cannot overwrite the shell's
+/// keyboard mode while using the alternate screen.
 #[derive(Debug, Default)]
 pub struct KittyKeyboardState {
-    stack: Vec<KittyFlags>,
+    stacks: [Vec<KittyFlags>; 2],
+    alternate_screen: bool,
 }
 
 impl KittyKeyboardState {
@@ -73,7 +74,18 @@ impl KittyKeyboardState {
 
     /// Effective flags = top of stack, or none when the stack is empty.
     pub fn current(&self) -> KittyFlags {
-        self.stack.last().copied().unwrap_or(KittyFlags::empty())
+        self.active_stack()
+            .last()
+            .copied()
+            .unwrap_or(KittyFlags::empty())
+    }
+
+    /// Select the keyboard mode stack associated with the visible screen.
+    pub fn set_alternate_screen(
+        &mut self,
+        alternate_screen: bool,
+    ) {
+        self.alternate_screen = alternate_screen;
     }
 
     /// `CSI > flags u`. Pushes a new entry. Trims the bottom of the stack
@@ -83,9 +95,10 @@ impl KittyKeyboardState {
         &mut self,
         flags: KittyFlags,
     ) {
-        self.stack.push(flags);
-        if self.stack.len() > MAX_STACK {
-            self.stack.remove(0);
+        let stack = self.active_stack_mut();
+        stack.push(flags);
+        if stack.len() > MAX_STACK {
+            stack.remove(0);
         }
     }
 
@@ -95,8 +108,9 @@ impl KittyKeyboardState {
         &mut self,
         n: u32,
     ) {
+        let stack = self.active_stack_mut();
         for _ in 0..n {
-            if self.stack.pop().is_none() {
+            if stack.pop().is_none() {
                 break;
             }
         }
@@ -110,17 +124,32 @@ impl KittyKeyboardState {
         flags: KittyFlags,
         mode: u32,
     ) {
-        if self.stack.is_empty() {
-            self.push(flags);
+        if self.active_stack().is_empty() {
+            self.push(match mode {
+                1 | 2 => flags,
+                3 => KittyFlags::empty(),
+                _ => KittyFlags::empty(),
+            });
             return;
         }
-        let cur = self.stack.last_mut().expect("non-empty by guard");
+        let cur = self
+            .active_stack_mut()
+            .last_mut()
+            .expect("non-empty by guard");
         *cur = match mode {
             1 => flags,
             2 => *cur | flags,
             3 => *cur & !flags,
             _ => *cur,
         };
+    }
+
+    fn active_stack(&self) -> &[KittyFlags] {
+        &self.stacks[usize::from(self.alternate_screen)]
+    }
+
+    fn active_stack_mut(&mut self) -> &mut Vec<KittyFlags> {
+        &mut self.stacks[usize::from(self.alternate_screen)]
     }
 }
 
@@ -203,6 +232,25 @@ mod integration_tests {
         term.process(b"\x1b[>3u\x1b[?u");
         assert_eq!(term.take_pending_output(), b"\x1b[?3u");
     }
+
+    #[test]
+    fn main_and_alternate_screen_stacks_survive_screen_switches() {
+        let mut term = TestTerm::new(20, 3, 100, 16, 8);
+        term.process(b"\x1b[>1u\x1b[?1049h");
+        assert!(term.kitty_keyboard.current().is_empty());
+
+        term.process(b"\x1b[>2u\x1b[?1049l");
+        assert_eq!(
+            term.kitty_keyboard.current(),
+            KittyFlags::DISAMBIGUATE_ESCAPE_CODES
+        );
+
+        term.process(b"\x1b[?1049h");
+        assert_eq!(
+            term.kitty_keyboard.current(),
+            KittyFlags::REPORT_EVENT_TYPES
+        );
+    }
 }
 
 #[cfg(test)]
@@ -270,6 +318,13 @@ mod tests {
     }
 
     #[test]
+    fn clear_mode_on_empty_stack_keeps_flags_clear() {
+        let mut s = KittyKeyboardState::new();
+        s.set(KittyFlags::DISAMBIGUATE_ESCAPE_CODES, 3);
+        assert!(s.current().is_empty());
+    }
+
+    #[test]
     fn stack_is_capped() {
         let mut s = KittyKeyboardState::new();
         for _ in 0..(MAX_STACK + 5) {
@@ -278,6 +333,21 @@ mod tests {
         // Bottom entries trimmed away — depth never exceeds the cap.
         s.pop(MAX_STACK as u32);
         assert!(s.current().is_empty());
+    }
+
+    #[test]
+    fn main_and_alternate_screens_have_independent_stacks() {
+        let mut s = KittyKeyboardState::new();
+        s.push(KittyFlags::DISAMBIGUATE_ESCAPE_CODES);
+
+        s.set_alternate_screen(true);
+        assert!(s.current().is_empty());
+        s.push(KittyFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES);
+
+        s.set_alternate_screen(false);
+        assert_eq!(s.current(), KittyFlags::DISAMBIGUATE_ESCAPE_CODES);
+        s.set_alternate_screen(true);
+        assert_eq!(s.current(), KittyFlags::REPORT_ALL_KEYS_AS_ESCAPE_CODES);
     }
 }
 

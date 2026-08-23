@@ -252,6 +252,9 @@ pub(crate) fn apply(
     if terminal.on_alt_screen != was_on_alt_screen {
         terminal.selection = None;
     }
+    terminal
+        .kitty_keyboard
+        .set_alternate_screen(terminal.on_alt_screen);
     if snapshot_dirty::input_context_state(terminal) != input_context_before {
         effects.input_context_changed = true;
     }

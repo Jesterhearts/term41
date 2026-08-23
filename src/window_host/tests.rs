@@ -153,6 +153,7 @@ mod selection_autoscroll_tests {
         let mut keyboard = KeyboardRuntime {
             modifiers: ModifiersState::empty(),
             physical_modifiers: PhysicalModifierState::default(),
+            forwarded_keys: std::collections::HashMap::new(),
             ime_preedit_active: false,
         };
 
@@ -171,6 +172,7 @@ mod selection_autoscroll_tests {
         let mut keyboard = KeyboardRuntime {
             modifiers: ModifiersState::empty(),
             physical_modifiers: PhysicalModifierState::default(),
+            forwarded_keys: std::collections::HashMap::new(),
             ime_preedit_active: false,
         };
 
