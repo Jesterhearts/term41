@@ -24,6 +24,8 @@ extension families that improve real terminal applications while preserving
 ## Status Legend
 
 - `Implemented`: present and worth maintaining.
+- `Partial`: useful support exists, but advertised protocol behavior is not yet
+  complete.
 - `Planned`: useful enough to design and implement.
 - `Watch`: promising, but either new, unstable, or not yet clearly adopted.
 - `Explicitly not planned`: the compatibility value does not justify the
@@ -40,7 +42,7 @@ Status:
 Implemented:
 
 - OSC 0 / OSC 2 titles
-- OSC 4 / OSC 10 / OSC 11 style color queries and palette updates
+- OSC 4 / OSC 10 / OSC 11 / OSC 12 color queries
 - OSC 7 current-working-directory tracking
 - OSC 8 hyperlinks
 - OSC 52 clipboard read/write
@@ -62,6 +64,9 @@ Maintenance direction:
 - Revisit OSC 52 policy. Clipboard writes are common and useful; clipboard reads
   are more sensitive and should move toward local configuration with clear
   defaults.
+- Complete OSC 4 / OSC 10 / OSC 11 / OSC 12 setters and OSC 104 / OSC 110 /
+  OSC 111 / OSC 112 resets before advertising mutable xterm palette support or
+  adding Kitty's broader color-control protocol.
 - Keep XTGETTCAP reporting coarse and policy-filtered. It should report
   implemented special-key sequences and useful terminal facts, not detailed host
   configuration.
@@ -101,8 +106,7 @@ Maintenance direction:
   `wezterm imgcat`, `chafa`, `yazi`, `onefetch`, `notcurses`, and
   `libsixel`-based tools.
 - Keep kitty graphics parity focused on real tools. The remaining deliberately
-  scoped follow-ups are Unicode placeholder virtual placements and kitty
-  animation frame actions.
+  scoped follow-up is kitty animation frame support.
 
 Security:
 
@@ -116,9 +120,9 @@ Security:
 
 Status:
 
-- `Implemented`
+- `Partial`
 
-Implemented:
+Implemented foundation:
 
 - kitty keyboard protocol mode stack and key encoding
 - legacy xterm keyboard encodings
@@ -128,6 +132,10 @@ Implemented:
 
 Maintenance direction:
 
+- Complete repeat/release event reporting and alternate-key reporting before
+  describing the Kitty keyboard implementation as complete. The terminal must
+  not accept and report enhancement flags whose output behavior is absent.
+- Keep separate keyboard mode stacks for the main and alternate screens.
 - Track kitty keyboard behavior as implemented by kitty, Ghostty, Alacritty,
   foot, iTerm2, WezTerm, and Rio.
 - Prefer compatibility tests that compare emitted byte sequences for ambiguous
@@ -171,7 +179,7 @@ Security:
 
 ## Planned
 
-### Kitty Graphics Placeholder And Animation Follow-Ups
+### Kitty Graphics Animation
 
 Status:
 
@@ -181,15 +189,12 @@ Why:
 
 - `term41` now covers the practical kitty graphics transmit/place/delete
   surface, including placement IDs, z-index, image numbers, relative placement,
-  and expanded delete selectors.
-- The remaining upstream protocol areas are larger semantic features rather than
-  missing parser keys.
+  expanded delete selectors, and Unicode placeholder virtual placements.
+- The remaining upstream graphics area is a larger semantic feature rather than
+  a collection of missing parser keys.
 
 Scope:
 
-- Implement Unicode placeholder virtual placements only if real tools need them.
-  This requires interpreting `U+10EEEE`, foreground-color image IDs, and
-  row/column combining marks inside the text grid.
 - Implement kitty animation frame actions only as a separate project. These
   mutate stored frame data and affect renderer lifecycle, quotas, and scrollback
   semantics.
@@ -199,7 +204,6 @@ Scope:
 Security:
 
 - `MEDIUM`
-- Placeholder rendering must not make text extraction dishonest.
 - Animation support needs explicit quotas for frame storage and mutation.
 - Shared-memory transport is a local cross-process attack surface and remains
   out of scope.
@@ -253,8 +257,8 @@ Status:
 
 Why:
 
-- Ghostty and kitty-family protocols expose system-theme information to
-  applications so TUIs can adapt colors.
+- The Contour palette-preference protocol, also implemented by Kitty and
+  Ghostty, exposes a coarse light/dark preference so TUIs can adapt colors.
 - This is useful, but it is also environment fingerprinting.
 
 Potential scope:
@@ -322,9 +326,9 @@ Why:
 
 - kitty documents additional color-control extensions, and Ghostty documents
   support for OSC 21 as the kitty color protocol.
-- `term41` already has OSC 4 / OSC 10 / OSC 11 color support plus a substantial
-  VT525 color-control implementation, so the remaining question is application
-  demand rather than basic capability.
+- `term41` already has OSC 4 / OSC 10 / OSC 11 / OSC 12 queries plus a
+  substantial VT525 color-control implementation. Mutable xterm colors and
+  resets must be completed before adding Kitty OSC 21 or the Kitty color stack.
 
 Decision:
 
@@ -335,6 +339,32 @@ Decision:
 Security:
 
 - `LOW` to `MEDIUM`
+
+### Kitty Drag And Drop
+
+Status:
+
+- `Watch`
+
+Why:
+
+- Kitty 0.47 introduced OSC 72 for negotiating inbound and outbound drag and
+  drop operations, including MIME data and remote files.
+- The complete protocol needs native MIME negotiation, drag-source support,
+  cancellation, and remote-data transfer. Basic path-oriented window drop
+  events are not enough for conformance.
+
+Decision:
+
+- Do not advertise partial OSC 72 support as the full protocol.
+- Revisit only if the windowing layer gains suitable cross-platform MIME and
+  drag-source APIs and real terminal applications adopt the protocol.
+
+Security:
+
+- `HIGH`
+- Drag and drop can disclose local files or broker remote content, so it needs
+  explicit local policy, strict quotas, and clear directionality.
 
 ## Explicitly Not Planned
 
@@ -477,7 +507,7 @@ Security:
 
 - `MEDIUM`
 
-### Multiple Terminal Cursors
+### Kitty Multiple Terminal Cursors
 
 Status:
 
@@ -485,6 +515,8 @@ Status:
 
 Why:
 
+- Kitty 0.43 introduced a protocol for screen-fixed extra cursor locations,
+  cursor shapes, colors, and queries.
 - Multiple cursors are an editor/application concept, not a terminal transport
   concept.
 - The terminal should keep one protocol cursor and let applications render any
