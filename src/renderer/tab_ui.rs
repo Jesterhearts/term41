@@ -27,6 +27,7 @@ pub(crate) fn move_tab<T>(
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum TabBarHover {
+    Tab(usize),
     NewTab,
     Minimize,
     Maximize,

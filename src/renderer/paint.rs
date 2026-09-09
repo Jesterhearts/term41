@@ -24,6 +24,13 @@ pub(crate) struct TabBarPlan {
     pub tabs: Vec<TabVisual>,
     pub new_tab_button: TabBarButtonVisual,
     pub buttons: [WindowButtonVisual; 3],
+    pub tooltip: Option<TabTooltip>,
+}
+
+pub(crate) struct TabTooltip {
+    pub x: f32,
+    pub width: f32,
+    pub lines: Vec<String>,
 }
 
 #[derive(Clone, Copy)]
@@ -37,6 +44,19 @@ pub(crate) struct TabBarLayout {
     pub tabs: Vec<TabBarRegion>,
     pub new_tab_button: TabBarRegion,
     pub buttons: [TabBarRegion; 3],
+}
+
+impl TabBarLayout {
+    pub(crate) fn hover_at(
+        &self,
+        x: f32,
+    ) -> Option<TabBarHover> {
+        std::iter::once(&self.new_tab_button)
+            .chain(&self.buttons)
+            .chain(&self.tabs)
+            .find(|region| x >= region.x && x < region.x + region.width)
+            .and_then(|region| region.button)
+    }
 }
 
 pub(crate) struct TabVisual {
@@ -333,13 +353,21 @@ pub(crate) fn build_tab_bar_plan(
     let inactive_bg = blend(palette.bg, palette.fg, 0.5);
     let layout = build_tab_bar_layout(tabs.len(), surface_w, cell_w);
     let margin = cell_w;
+    let mut tooltip = None;
 
     let tabs = tabs
         .iter()
         .zip(layout.tabs.iter().copied())
-        .map(|(tab, region)| {
-            let max_label_chars = ((region.width - margin * 2.0) / cell_w).max(1.0) as usize;
+        .enumerate()
+        .map(|(idx, (tab, region))| {
+            let max_label_chars = ((region.width - margin * 2.0) / cell_w).max(0.0) as usize;
             let label = truncate_label(tab.label, max_label_chars);
+            if hovered_button == Some(TabBarHover::Tab(idx))
+                && region.width > 0.0
+                && tab.label.graphemes(true).count() > max_label_chars
+            {
+                tooltip = Some(build_tab_tooltip(tab.label, region.x, surface_w, cell_w));
+            }
             TabVisual {
                 x: region.x,
                 width: region.width,
@@ -371,7 +399,7 @@ pub(crate) fn build_tab_bar_plan(
         width: layout.buttons[i].width,
         bg: hovered_button
             .and_then(|hover| match hover {
-                TabBarHover::NewTab => None,
+                TabBarHover::Tab(_) | TabBarHover::NewTab => None,
                 TabBarHover::Minimize => Some(0),
                 TabBarHover::Maximize => Some(1),
                 TabBarHover::Close => Some(2),
@@ -392,6 +420,27 @@ pub(crate) fn build_tab_bar_plan(
         tabs,
         new_tab_button,
         buttons,
+        tooltip,
+    }
+}
+
+fn build_tab_tooltip(
+    label: &str,
+    tab_x: f32,
+    surface_w: f32,
+    cell_w: f32,
+) -> TabTooltip {
+    let max_chars = ((surface_w - cell_w) / cell_w).max(1.0) as usize;
+    let graphemes: Vec<_> = label.graphemes(true).collect();
+    let lines: Vec<String> = graphemes
+        .chunks(max_chars)
+        .map(|line| line.concat())
+        .collect();
+    let width = ((graphemes.len().min(max_chars) + 1) as f32 * cell_w).min(surface_w);
+    TabTooltip {
+        x: tab_x.min(surface_w - width).max(0.0),
+        width,
+        lines,
     }
 }
 
@@ -415,7 +464,7 @@ pub(crate) fn build_tab_bar_layout(
         .map(|i| TabBarRegion {
             x: i as f32 * tab_w,
             width: tab_w,
-            button: None,
+            button: Some(TabBarHover::Tab(i)),
         })
         .collect();
     let new_tab_button = TabBarRegion {
@@ -633,6 +682,9 @@ fn truncate_label(
     let label_chars = label.graphemes(true).count();
     if label_chars <= max_chars {
         return label.to_string();
+    }
+    if max_chars <= 1 {
+        return "\u{2026}".repeat(max_chars);
     }
     let ellipsis = "… ";
     let truncated_len = max_chars.saturating_sub(2);
@@ -890,5 +942,177 @@ mod tests {
             window_controls_start - new_tab_end,
             cell_w * MIN_TITLEBAR_DRAG_CELLS
         );
+    }
+
+    #[test]
+    fn tab_hover_hit_testing_preserves_buttons_and_drag_region() {
+        let layout = build_tab_bar_layout(3, 460.0, 10.0);
+        for (x, expected) in [
+            (-1.0, None),
+            (0.0, Some(TabBarHover::Tab(0))),
+            (99.9, Some(TabBarHover::Tab(0))),
+            (100.0, Some(TabBarHover::Tab(1))),
+            (299.9, Some(TabBarHover::Tab(2))),
+            (300.0, Some(TabBarHover::NewTab)),
+            (340.0, None),
+            (370.0, Some(TabBarHover::Minimize)),
+            (400.0, Some(TabBarHover::Maximize)),
+            (430.0, Some(TabBarHover::Close)),
+            (460.0, None),
+        ] {
+            assert_eq!(layout.hover_at(x), expected, "x={x}");
+        }
+    }
+
+    #[test]
+    fn tab_tooltip_only_shows_for_the_hovered_truncated_title() {
+        let palette = ColorPalette::default();
+        let title = "a".repeat(29);
+        let tabs = [
+            TabInfo {
+                label: "Shell",
+                active: true,
+            },
+            TabInfo {
+                label: &title,
+                active: false,
+            },
+        ];
+        for hover in [
+            None,
+            Some(TabBarHover::Tab(0)),
+            Some(TabBarHover::Tab(1)),
+            Some(TabBarHover::Tab(2)),
+            Some(TabBarHover::NewTab),
+            Some(TabBarHover::Close),
+        ] {
+            let plan = build_tab_bar_plan(&tabs, &palette, "+".into(), hover, false, 1000.0, 10.0);
+            assert_eq!(plan.tabs[0].label, "Shell");
+            assert_ne!(plan.tabs[1].label, title);
+            assert_eq!(plan.tooltip.is_some(), hover == Some(TabBarHover::Tab(1)));
+            if let Some(tooltip) = plan.tooltip {
+                assert_eq!(tooltip.lines, [title.as_str()]);
+                assert_eq!(tooltip.x, plan.tabs[1].x);
+            }
+        }
+    }
+
+    #[test]
+    fn tab_tooltip_tracks_available_title_width() {
+        let palette = ColorPalette::default();
+        for (title, width, clipped) in [
+            ("a".repeat(28), 1000.0, false),
+            ("a".repeat(29), 1000.0, true),
+            ("a".repeat(28), 400.0, true),
+            ("e\u{301}".repeat(28), 1000.0, false),
+            ("e\u{301}".repeat(29), 1000.0, true),
+            (String::new(), 1000.0, false),
+        ] {
+            let tabs = [TabInfo {
+                label: &title,
+                active: true,
+            }];
+            let plan = build_tab_bar_plan(
+                &tabs,
+                &palette,
+                "+".into(),
+                Some(TabBarHover::Tab(0)),
+                false,
+                width,
+                10.0,
+            );
+            assert_eq!(
+                plan.tooltip.is_some(),
+                clipped,
+                "title={title:?}, width={width}"
+            );
+        }
+    }
+
+    #[test]
+    fn tab_tooltip_wraps_full_title_without_splitting_graphemes() {
+        let title = "e\u{301}\u{1f469}\u{200d}\u{1f4bb}".repeat(50);
+        let tabs = [TabInfo {
+            label: &title,
+            active: true,
+        }];
+        let plan = build_tab_bar_plan(
+            &tabs,
+            &ColorPalette::default(),
+            "+".into(),
+            Some(TabBarHover::Tab(0)),
+            false,
+            400.0,
+            10.0,
+        );
+        let tooltip = plan.tooltip.unwrap();
+        assert_eq!(tooltip.lines.concat(), title);
+        assert_eq!(tooltip.lines.len(), 3);
+        assert_eq!(tooltip.width, 400.0);
+        let original: Vec<_> = title.graphemes(true).collect();
+        let wrapped: Vec<_> = tooltip
+            .lines
+            .iter()
+            .flat_map(|line| line.graphemes(true))
+            .collect();
+        assert_eq!(wrapped, original);
+        assert!(
+            tooltip
+                .lines
+                .iter()
+                .all(|line| line.graphemes(true).count() <= 39)
+        );
+    }
+
+    #[test]
+    fn tab_tooltip_stays_inside_the_right_window_edge() {
+        let title = "a".repeat(35);
+        let tabs = [
+            TabInfo {
+                label: "Shell",
+                active: true,
+            },
+            TabInfo {
+                label: &title,
+                active: false,
+            },
+        ];
+        let plan = build_tab_bar_plan(
+            &tabs,
+            &ColorPalette::default(),
+            "+".into(),
+            Some(TabBarHover::Tab(1)),
+            false,
+            500.0,
+            10.0,
+        );
+        let tooltip = plan.tooltip.unwrap();
+        assert_eq!(tooltip.lines, [title]);
+        assert_eq!(tooltip.x + tooltip.width, 500.0);
+        assert!(tooltip.x < plan.tabs[1].x);
+    }
+
+    #[test]
+    fn narrow_tabs_keep_labels_within_their_text_budget() {
+        for max_chars in 0..=3 {
+            assert!(truncate_label("title", max_chars).graphemes(true).count() <= max_chars);
+        }
+        let tabs = [TabInfo {
+            label: "title",
+            active: true,
+        }];
+        for (width, visible) in [(160.0, false), (170.0, true)] {
+            let plan = build_tab_bar_plan(
+                &tabs,
+                &ColorPalette::default(),
+                "+".into(),
+                Some(TabBarHover::Tab(0)),
+                false,
+                width,
+                10.0,
+            );
+            assert!(plan.tabs[0].label.is_empty());
+            assert_eq!(plan.tooltip.is_some(), visible);
+        }
     }
 }

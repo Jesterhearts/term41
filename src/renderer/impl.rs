@@ -148,7 +148,7 @@ pub struct TabInfo<'s> {
 
 /// CSD window control state passed to the renderer each frame.
 pub struct WindowControls {
-    /// Which button the mouse is hovering, if any.
+    /// Which tab or button the mouse is hovering, if any.
     pub hovered: Option<crate::renderer::TabBarHover>,
     /// Whether the window is currently maximized (affects the maximize icon).
     pub maximized: bool,

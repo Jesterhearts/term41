@@ -135,7 +135,7 @@ pub(crate) fn startup_interaction_snapshot(
 ) {
     let state = render.input_state.lock();
     (
-        state.hovered_tab_bar_button,
+        state.tab_bar_hover(),
         state.tab_context_menu.clone(),
         state.gutter_popup.clone(),
     )
@@ -856,8 +856,11 @@ pub(crate) fn update_preedit(
 pub(crate) fn update_hovered_tab_bar_button(
     render: &RenderRuntime,
     hovered_button: Option<renderer::TabBarHover>,
-) {
-    render.input_state.lock().hovered_tab_bar_button = hovered_button;
+) -> bool {
+    let mut state = render.input_state.lock();
+    let changed = state.hovered_tab_bar_button != hovered_button;
+    state.hovered_tab_bar_button = hovered_button;
+    changed
 }
 
 pub(crate) fn update_tab_context_menu(

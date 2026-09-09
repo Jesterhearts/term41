@@ -30,6 +30,7 @@ use super::handle_key_release;
 use super::handle_modifiers_changed;
 use super::handle_mouse_input;
 use super::handle_mouse_wheel;
+use super::notify_interaction_changed;
 use super::present_startup_frame;
 use super::refresh_command_editor_view;
 use super::request_due_startup_redraw;
@@ -40,6 +41,7 @@ use super::run_selection_autoscroll;
 use super::send;
 use super::show_toast;
 use super::sync_modifier_key_from_keyboard_event;
+use super::update_hovered_tab_bar_button;
 use super::update_preedit;
 use super::update_toast_view;
 use crate::APP_START_TIME;
@@ -263,6 +265,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::Resized(size) => {
+                update_hovered_tab_bar_button(&self.render, None);
                 self.metrics.window_size = (size.width, size.height);
                 refresh_command_editor_view(self);
                 RenderEvent::Resized {
@@ -282,6 +285,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
             WindowEvent::Focused(f) => {
                 if !f {
+                    update_hovered_tab_bar_button(&self.render, None);
                     self.keyboard.physical_modifiers = PhysicalModifierState::default();
                     self.keyboard.forwarded_keys.clear();
                     self.mouse.tab_drag = None;
@@ -326,6 +330,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
 
             WindowEvent::ScaleFactorChanged { scale_factor, .. } => {
+                update_hovered_tab_bar_button(&self.render, None);
                 RenderEvent::ScaleFactorChanged { scale_factor }
             }
 
@@ -336,6 +341,17 @@ impl ApplicationHandler<AppEvent> for WindowHost {
 
             WindowEvent::CursorMoved { position, .. } => {
                 handle_cursor_moved(self, position.x, position.y);
+                return;
+            }
+
+            WindowEvent::CursorLeft { .. } => {
+                update_hovered_tab_bar_button(&self.render, None);
+                notify_interaction_changed(
+                    &self.input,
+                    &mut self.render,
+                    &self.startup,
+                    self.window.as_ref(),
+                );
                 return;
             }
 

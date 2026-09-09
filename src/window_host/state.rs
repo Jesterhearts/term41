@@ -173,6 +173,21 @@ pub(crate) struct InputState {
     pub(crate) preedit: Option<PreeditState>,
 }
 
+impl InputState {
+    pub(crate) fn tab_bar_hover(&self) -> Option<renderer::TabBarHover> {
+        self.hovered_tab_bar_button.filter(|hover| {
+            !matches!(hover, renderer::TabBarHover::Tab(_))
+                || (self.tab_context_menu.is_none()
+                    && self.gutter_popup.is_none()
+                    && self.recording_popup.is_none()
+                    && self.permission_modal.is_none()
+                    && self.command_palette.is_none()
+                    && self.history_confirmation.is_none()
+                    && self.history_deletion.is_none())
+        })
+    }
+}
+
 pub(crate) struct WindowHost {
     pub(crate) window: Option<Arc<Window>>,
     pub(crate) startup: StartupState,
@@ -406,5 +421,49 @@ impl PhysicalModifierState {
         mods.set(ModifiersState::ALT, self.alt_left || self.alt_right);
         mods.set(ModifiersState::SUPER, self.super_left || self.super_right);
         mods
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn modal_suppresses_tab_tooltips_but_not_window_button_hover() {
+        let mut state = InputState {
+            keybindings: Keybindings::default(),
+            command_editor_config: CommandEditorConfig::default(),
+            command_editor_views: HashMap::new(),
+            tab_count: 1,
+            tab_order: vec![TabId(0)],
+            cell_width: 10,
+            cell_height: 20,
+            gutter_width: 0,
+            hovered_tab_bar_button: Some(renderer::TabBarHover::Tab(0)),
+            tab_context_menu: None,
+            gutter_popup: None,
+            recording_popup: None,
+            permission_modal: None,
+            command_palette: None,
+            history_confirmation: None,
+            history_deletion: None,
+            toast: None,
+            preedit: None,
+        };
+        assert_eq!(state.tab_bar_hover(), Some(renderer::TabBarHover::Tab(0)));
+
+        state.recording_popup = Some(RecordingPopupView { lines: vec![] });
+        assert_eq!(state.tab_bar_hover(), None);
+        state.hovered_tab_bar_button = Some(renderer::TabBarHover::Close);
+        assert_eq!(state.tab_bar_hover(), Some(renderer::TabBarHover::Close));
+
+        state.recording_popup = None;
+        state.hovered_tab_bar_button = Some(renderer::TabBarHover::Tab(0));
+        assert_eq!(state.tab_bar_hover(), Some(renderer::TabBarHover::Tab(0)));
+        state.permission_modal = Some(PermissionModal {
+            feature: "test".into(),
+            hovered: None,
+        });
+        assert_eq!(state.tab_bar_hover(), None);
     }
 }

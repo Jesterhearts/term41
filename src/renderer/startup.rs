@@ -1,3 +1,5 @@
+mod tab_bar;
+
 use std::collections::HashMap;
 use std::num::NonZeroU32;
 use std::path::PathBuf;
@@ -14,9 +16,10 @@ use image41::decode_image;
 use palette::Srgb;
 use smol_str::SmolStr;
 use smol_str::SmolStrBuilder;
-use smol_str::ToSmolStr;
 use softbuffer::Context;
 use softbuffer::Surface;
+use tab_bar::paint_tab_bar;
+use tab_bar::paint_tab_tooltip;
 use terminal41::LineAttr;
 use terminal41::RowSnapshot;
 use terminal41::TermSnapshot;
@@ -49,7 +52,6 @@ use crate::renderer::r#impl::row_hidden_by_sticky_prompt;
 use crate::renderer::r#impl::snapshot_row_y;
 use crate::renderer::r#impl::visible_command_editor;
 use crate::renderer::paint::blink_animation_enabled;
-use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::centered_ink_origin_x;
 use crate::renderer::paint::command_highlight_rgb;
 use crate::renderer::paint::resolve_painted_cell;
@@ -183,7 +185,7 @@ impl StartupPresenter {
         if let Some(background) = self.background.as_ref() {
             paint_cached_background(buffer.as_mut(), width, height, background);
         }
-        paint_tab_bar(
+        let tab_tooltip = paint_tab_bar(
             &mut self.font_system,
             &frame.snap,
             buffer.as_mut(),
@@ -315,6 +317,19 @@ impl StartupPresenter {
                 buffer.as_mut(),
                 width,
                 height,
+            );
+        }
+        if tab_context_menu.is_none()
+            && gutter_popup.is_none()
+            && let Some(tooltip) = tab_tooltip.as_ref()
+        {
+            paint_tab_tooltip(
+                &mut self.font_system,
+                &frame.snap,
+                buffer.as_mut(),
+                width,
+                height,
+                tooltip,
             );
         }
         if gutter_w > 0
@@ -554,136 +569,6 @@ fn duration_until_next_phase_from_elapsed(
         half_period
     } else {
         Duration::from_nanos((period_nanos - remainder) as u64)
-    }
-}
-
-fn paint_tab_bar(
-    font_system: &mut FontSystem,
-    snap: &TermSnapshot,
-    buffer: &mut [u32],
-    tabs: &[TabInfo<'_>],
-    new_tab_text: SmolStr,
-    cell_w: i32,
-    width: usize,
-    height: usize,
-    tab_bar_h: i32,
-    bg: Srgb<u8>,
-    fg: Srgb<u8>,
-    hovered_button: Option<crate::renderer::TabBarHover>,
-    maximized: bool,
-) {
-    let tab_infos: Vec<TabInfo<'_>> = tabs
-        .iter()
-        .map(|tab| TabInfo {
-            label: tab.label,
-            active: tab.active,
-        })
-        .collect();
-    let plan = build_tab_bar_plan(
-        &tab_infos,
-        &snap.palette,
-        new_tab_text,
-        hovered_button,
-        maximized,
-        width as f32,
-        cell_w as f32,
-    );
-
-    fill_rect(
-        buffer,
-        width,
-        height,
-        0,
-        0,
-        width as i32,
-        tab_bar_h,
-        pack_rgb(plan.base_bg),
-    );
-
-    for tab in &plan.tabs {
-        if let Some(tab_bg) = tab.bg {
-            fill_rect(
-                buffer,
-                width,
-                height,
-                tab.x.round() as i32,
-                0,
-                tab.width.round() as i32,
-                tab_bar_h,
-                pack_rgb(tab_bg),
-            );
-        }
-        let row = label_row(&tab.label, fg, bg, true);
-        paint_shaped_label(
-            font_system,
-            snap,
-            buffer,
-            width,
-            height,
-            &row,
-            tab.label_x,
-            0.0,
-        );
-    }
-
-    if let Some(button_bg) = plan.new_tab_button.bg {
-        fill_rect(
-            buffer,
-            width,
-            height,
-            plan.new_tab_button.x.round() as i32,
-            0,
-            plan.new_tab_button.width.round() as i32,
-            tab_bar_h,
-            pack_rgb(button_bg),
-        );
-    }
-    let row = label_row(
-        &plan.new_tab_button.label.to_smolstr(),
-        fg,
-        plan.base_bg,
-        false,
-    );
-    let x = centered_label_x(
-        font_system,
-        snap,
-        &row,
-        plan.new_tab_button.x,
-        plan.new_tab_button.width,
-    );
-    paint_shaped_label(font_system, snap, buffer, width, height, &row, x, 0.0);
-
-    for button in &plan.buttons {
-        if let Some(button_bg) = button.bg {
-            fill_rect(
-                buffer,
-                width,
-                height,
-                button.x.round() as i32,
-                0,
-                button.width.round() as i32,
-                tab_bar_h,
-                pack_rgb(button_bg),
-            );
-        }
-        let row = label_row(button.label, fg, plan.base_bg, false);
-        let x = centered_label_x(font_system, snap, &row, button.x, button.width);
-        paint_shaped_label(font_system, snap, buffer, width, height, &row, x, 0.0);
-    }
-
-    for tab in &plan.tabs {
-        if let Some(separator) = tab.separator {
-            fill_rect(
-                buffer,
-                width,
-                height,
-                tab.x.round() as i32 + tab.width.round() as i32,
-                0,
-                3,
-                tab_bar_h,
-                pack_rgb(separator),
-            );
-        }
     }
 }
 
@@ -2036,7 +1921,7 @@ mod tests {
         assert_eq!(startup_cached_row_count(&snap), 25);
     }
 
-    fn test_snapshot(
+    pub(super) fn test_snapshot(
         cols: u32,
         rows: u32,
         row_indices: &[u32],

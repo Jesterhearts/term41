@@ -47,6 +47,7 @@ use super::chrome::render_recording_popup;
 use super::chrome::render_search_bar;
 use super::chrome::render_status_line_chrome;
 use super::chrome::render_tab_bar;
+use super::chrome::render_tab_tooltip;
 use super::chrome::render_toast;
 use super::clip_image_quad;
 use super::collect_row_glyphs;
@@ -487,7 +488,7 @@ pub(super) fn build_render_geometry_once(
         &mut geometry.fg,
     );
 
-    render_tab_bar(
+    let tab_tooltip = render_tab_bar(
         renderer,
         font_system,
         tabs,
@@ -520,6 +521,17 @@ pub(super) fn build_render_geometry_once(
             &mut geometry.overlay_bg_vertices,
             &mut geometry.overlay_bg_indices,
             &mut geometry.overlay_fg,
+        );
+    }
+
+    if let Some(tooltip) = &tab_tooltip {
+        render_tab_tooltip(
+            renderer,
+            font_system,
+            tooltip,
+            &mut geometry.top_overlay_bg_vertices,
+            &mut geometry.top_overlay_bg_indices,
+            &mut geometry.top_overlay_fg,
         );
     }
 

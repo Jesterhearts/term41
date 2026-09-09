@@ -1,4 +1,5 @@
 use super::super::*;
+use crate::renderer::paint::TabTooltip;
 
 /// close) are rendered at the right edge.
 pub(in crate::renderer::r#impl) fn render_tab_bar(
@@ -14,7 +15,7 @@ pub(in crate::renderer::r#impl) fn render_tab_bar(
     overlay_bg_vertices: &mut Vec<BgVertex>,
     overlay_bg_indices: &mut Vec<u32>,
     overlay_fg: &mut FgGeometry,
-) {
+) -> Option<TabTooltip> {
     let cell_w = font_system.cell_width as f32;
     let cell_h = font_system.cell_height as f32;
     let baseline = font_system.baseline_offset();
@@ -247,5 +248,59 @@ pub(in crate::renderer::r#impl) fn render_tab_bar(
             ]);
             bg_indices.extend_from_slice(&[bi, bi + 1, bi + 2, bi + 2, bi + 1, bi + 3]);
         }
+    }
+
+    plan.tooltip.filter(|_| controls.tab_menu.is_none())
+}
+
+pub(in crate::renderer::r#impl) fn render_tab_tooltip(
+    renderer: &mut Renderer,
+    font_system: &mut FontSystem,
+    tooltip: &TabTooltip,
+    bg_vertices: &mut Vec<BgVertex>,
+    bg_indices: &mut Vec<u32>,
+    fg: &mut FgGeometry,
+) {
+    let cell_w = font_system.cell_width as f32;
+    let cell_h = font_system.cell_height as f32;
+    let baseline = font_system.baseline_offset();
+    let y = cell_h;
+    let height = (tooltip.lines.len() as f32 + 0.5) * cell_h;
+    let panel_bg = pack_color(&Srgb::new(30, 30, 38), 255);
+    let border = pack_color(&Srgb::new(80, 80, 100), 255);
+    push_rect(
+        tooltip.x,
+        y,
+        tooltip.width,
+        height,
+        panel_bg,
+        bg_vertices,
+        bg_indices,
+    );
+    for border_y in [y, y + height - 1.0] {
+        push_rect(
+            tooltip.x,
+            border_y,
+            tooltip.width,
+            1.0,
+            border,
+            bg_vertices,
+            bg_indices,
+        );
+    }
+    for (idx, line) in tooltip.lines.iter().enumerate() {
+        super::shape_and_render_label(
+            renderer,
+            font_system,
+            line,
+            tooltip.x + cell_w * 0.5,
+            y + (idx as f32 + 0.25) * cell_h,
+            baseline,
+            cell_w,
+            None,
+            Some(cell_h),
+            pack_color(&Srgb::new(220, 220, 220), 255),
+            fg,
+        );
     }
 }

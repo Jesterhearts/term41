@@ -29,4 +29,5 @@ pub(in crate::renderer::r#impl) use recording_popup::render_recording_popup;
 pub(in crate::renderer::r#impl) use search::render_search_bar;
 pub(in crate::renderer::r#impl) use status_line::render_status_line_chrome;
 pub(in crate::renderer::r#impl) use tab_bar::render_tab_bar;
+pub(in crate::renderer::r#impl) use tab_bar::render_tab_tooltip;
 pub(in crate::renderer::r#impl) use toast::render_toast;

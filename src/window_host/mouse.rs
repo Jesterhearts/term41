@@ -103,6 +103,20 @@ pub(crate) fn handle_cursor_moved(
     y: f64,
 ) {
     host.mouse.pos = (x, y);
+    let hovered_button = if host.mouse.tab_drag.is_none() {
+        tab_bar_hover_at(&host.mouse, &host.render, &host.metrics)
+    } else {
+        None
+    };
+    if update_hovered_tab_bar_button(&host.render, hovered_button) {
+        notify_interaction_changed(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+        );
+    }
+
     if host.modals.permission_modal.is_some() {
         update_permission_hover(
             host,
@@ -116,9 +130,6 @@ pub(crate) fn handle_cursor_moved(
     if host.modals.recording_popup.is_some() {
         return;
     }
-
-    let hovered_button = tab_bar_hover_at(&host.mouse, &host.render, &host.metrics);
-    update_hovered_tab_bar_button(&host.render, hovered_button);
 
     let hovered_menu_item =
         tab_menu_item_at(&host.render, &host.metrics, x, y).map(|(_, _, idx)| idx);
@@ -514,6 +525,14 @@ pub(crate) fn handle_mouse_input(
     pressed: bool,
     button: MouseButton,
 ) {
+    if pressed && update_hovered_tab_bar_button(&host.render, None) {
+        notify_interaction_changed(
+            &host.input,
+            &mut host.render,
+            &host.startup,
+            host.window.as_ref(),
+        );
+    }
     if !pressed && button == MouseButton::Left && host.mouse.tab_drag.is_some() {
         host.mouse.mouse_buttons.set(button, false);
         finish_tab_drag(host);
@@ -1673,20 +1692,13 @@ pub(crate) fn tab_bar_hover_at(
     render: &RenderRuntime,
     metrics: &WindowMetrics,
 ) -> Option<renderer::TabBarHover> {
-    if !is_in_tab_bar(mouse, render) {
+    if mouse.pos.1 < 0.0 || !is_in_tab_bar(mouse, render) {
         return None;
     }
     let (cell_w, _, _, tab_count) = layout_snapshot(render);
-    let mx = mouse.pos.0.max(0.0) as f32;
+    let mx = mouse.pos.0 as f32;
     let layout = build_tab_bar_layout(tab_count, metrics.window_size.0 as f32, cell_w as f32);
-    if mx >= layout.new_tab_button.x && mx < layout.new_tab_button.x + layout.new_tab_button.width {
-        return Some(renderer::TabBarHover::NewTab);
-    }
-    layout
-        .buttons
-        .iter()
-        .find(|button| mx >= button.x && mx < button.x + button.width)
-        .and_then(|button| button.button)
+    layout.hover_at(mx)
 }
 
 pub(crate) fn resize_direction_at(

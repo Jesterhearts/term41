@@ -1257,7 +1257,7 @@ impl RenderHost {
         ) = {
             let input_state = self.input_state.lock();
             (
-                input_state.hovered_tab_bar_button,
+                input_state.tab_bar_hover(),
                 input_state.tab_context_menu.clone(),
                 input_state.gutter_popup.clone(),
                 input_state.recording_popup.clone(),
@@ -1462,6 +1462,16 @@ impl RenderHost {
         );
         if !input_state.command_editor_config.enabled {
             input_state.command_editor_views.clear();
+        }
+        if !input_state
+            .tab_order
+            .iter()
+            .copied()
+            .eq(self.tabs.iter().map(|tab| tab.id))
+            || input_state.cell_width != self.font_system.cell_width
+            || input_state.cell_height != self.font_system.cell_height
+        {
+            input_state.hovered_tab_bar_button = None;
         }
         if !self.tabs.is_empty() {
             input_state.tab_count = self.tabs.len();
