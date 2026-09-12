@@ -44,7 +44,6 @@ use super::ToastView;
 use super::WindowHost;
 use super::cell_at;
 use super::close_gutter_popup;
-use super::command_editor_terminal_row_offset;
 use super::command_editor_view;
 use super::command_editor_view_context;
 use super::command_editor_view_for_input_tab;
@@ -451,8 +450,17 @@ pub(crate) fn copy_active_selection_to_clipboard(
 pub(crate) fn set_command_editor_view(
     host: &mut WindowHost,
     tab_id: TabId,
-    view: Option<CommandLineView>,
+    mut view: Option<CommandLineView>,
 ) {
+    let mut sync_error = None;
+    if let Some(view) = &view
+        && let Some(target) = host.input.endpoints.get_mut(&tab_id)
+    {
+        sync_error = super::sync_shell_input(target, view).err();
+    }
+    if sync_error.is_some() {
+        view = command_editor_view_for_tab(host, tab_id);
+    }
     {
         let mut state = host.render.input_state.lock();
         if let Some(view) = view {
@@ -467,6 +475,9 @@ pub(crate) fn set_command_editor_view(
         &host.startup,
         host.window.as_ref(),
     );
+    if let Some(error) = sync_error {
+        show_toast(host, error);
+    }
 }
 
 pub(crate) fn refresh_command_editor_view(host: &mut WindowHost) {
@@ -497,6 +508,11 @@ pub(crate) fn command_editor_view_for_tab(
 ) -> Option<CommandLineView> {
     let config = command_editor_config(&host.render);
     if !config.enabled {
+        return None;
+    }
+    let target = host.input.endpoints.get_mut(&tab_id)?;
+    super::adopt_shell_input(target);
+    if !super::shell_editing_active(target) {
         return None;
     }
     host.command.catalog.refresh_for_config(&config);
@@ -804,6 +820,11 @@ pub(crate) fn toggle_command_editor(host: &mut WindowHost) {
         }
         state.command_editor_config.enabled
     };
+    for target in host.input.endpoints.values_mut() {
+        if !enabled {
+            super::suspend_shell_editing(target);
+        }
+    }
     refresh_command_editor_view(host);
     show_toast(
         host,
@@ -883,6 +904,16 @@ pub(crate) fn notify_interaction_changed(
     startup: &StartupState,
     window: Option<&Arc<Window>>,
 ) {
+    render
+        .input_state
+        .lock()
+        .command_editor_views
+        .retain(|tab_id, _| {
+            input
+                .endpoints
+                .get(tab_id)
+                .is_some_and(super::shell_editing_active)
+        });
     publish_active_input_snapshot(input);
     // Deliberately silent, unlike `send`: this pushes nothing but a wakeup
     // nudge, and a full ring already means the render thread has work queued
@@ -933,7 +964,6 @@ pub(crate) fn current_selection_autoscroll_direction(
 ) -> Option<SelectionAutoscroll> {
     if !host.mouse.left_drag_active
         || !host.mouse.selection_drag_moved
-        || host.mouse.command_editor_drag_anchor.is_some()
         || host.modals.permission_modal.is_some()
         || host.modals.recording_popup.is_some()
     {
@@ -941,20 +971,10 @@ pub(crate) fn current_selection_autoscroll_direction(
     }
     let mouse_y = host.mouse.pos.1;
     let (_, cell_height, _, _) = layout_snapshot(&host.render);
-    let command_editor_view_present = {
-        let state = host.render.input_state.lock();
-        command_editor_view_open_for_input_tab(&state, host.input.active_tab)
-    };
     let target = active_input_target(&mut host.input)?;
     let terminal = target.terminal.lock();
     terminal.selection.as_ref()?;
-    let viewport_rows = terminal
-        .viewport
-        .rows
-        .saturating_sub(command_editor_terminal_row_offset(
-            &terminal,
-            command_editor_view_present,
-        ));
+    let viewport_rows = terminal.viewport.rows;
     selection_autoscroll_direction(mouse_y, cell_height, viewport_rows)
 }
 
@@ -977,7 +997,6 @@ pub(crate) fn clear_selection_autoscroll(mouse: &mut MouseRuntime) {
 pub(crate) fn stop_selection_drag(mouse: &mut MouseRuntime) {
     mouse.left_drag_active = false;
     mouse.selection_drag_moved = false;
-    mouse.command_editor_drag_anchor = None;
     clear_selection_autoscroll(mouse);
 }
 

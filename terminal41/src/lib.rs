@@ -285,6 +285,44 @@ mod command_block_tests {
     }
 
     #[test]
+    fn prompt_only_redraw_preserves_echoed_command_cells() {
+        let mut term = TestTerm::new(40, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07cd Documents/Projects");
+        // Readline reprints PS1, then skips command cells it already painted.
+        term.process(b"\r\x1b]133;A\x07$ \x1b]133;B\x07\x1b[21C");
+        assert!(row_text(&term.active.grid.rows[0]).starts_with("$ cd Documents/Projects"));
+        assert!(term.active.scrollback_blocks.is_empty());
+
+        term.process(b"\r\n\x1b]133;C\x07\x1b]133;D;0\x07\x1b]133;A\x07$ \x1b]133;B\x07");
+        assert!(
+            row_text(&term.active.scrollback_blocks[0].grid.rows[0])
+                .starts_with("$ cd Documents/Projects")
+        );
+    }
+
+    #[test]
+    fn prompt_only_redraw_preserves_wrapped_command_cells() {
+        let mut term = TestTerm::new(8, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07abcdefghijk");
+        term.process(b"\r\x1b[A\x1b]133;A\x07$ \x1b]133;B\x07\x1b[B\r\x1b[5C");
+        assert!(row_text(&term.active.grid.rows[0]).starts_with("$ abcdef"));
+        assert!(row_text(&term.active.grid.rows[1]).starts_with("ghijk"));
+        assert_eq!(term.cursor(), (1, 5));
+        assert!(term.active.scrollback_blocks.is_empty());
+    }
+
+    #[test]
+    fn multiline_prompt_redraw_preserves_command_cells() {
+        let mut term = TestTerm::new(40, 6, 100, 16, 8);
+        term.process(b"\x1b]133;A\x07header\r\n$ \x1b]133;B\x07cd /tmp");
+        term.process(b"\r\x1b[A\x1b]133;A\x07header\r\n$ \x1b]133;B\x07\x1b[7C");
+        assert!(row_text(&term.active.grid.rows[0]).starts_with("header"));
+        assert!(row_text(&term.active.grid.rows[1]).starts_with("$ cd /tmp"));
+        assert_eq!(term.cursor(), (1, 9));
+        assert!(term.active.scrollback_blocks.is_empty());
+    }
+
+    #[test]
     fn prompt_restart_preserves_finished_empty_command_block() {
         let mut term = TestTerm::new(10, 3, 100, 16, 8);
 

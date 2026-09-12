@@ -118,6 +118,7 @@ impl ApplicationHandler<AppEvent> for WindowHost {
                         recorder,
                         terminal_thread,
                         command_editor: CommandEditor::new(),
+                        shell_editing: Default::default(),
                     },
                 );
                 if self.input.active_tab == Some(tab_id) {

@@ -5,9 +5,6 @@ use clip41::ClipboardKind;
 use commands41::EditorInput;
 use commands41::EditorSettings;
 use commands41::apply_input;
-use commands41::select_range;
-use commands41::selected_text;
-use commands41::set_cursor;
 use config41::keybindings::Action;
 use terminal41::HostInput;
 use terminal41::HostInputEffects;
@@ -49,19 +46,13 @@ use super::WindowMetrics;
 use super::active_input_target;
 use super::clear_command_editor_selection_for_tab;
 use super::clear_terminal_selection_for_tab;
-use super::command_editor_byte_index_at_cell;
 use super::command_editor_config;
 use super::command_editor_history_entries;
 use super::command_editor_mouse_paste_kind;
-use super::command_editor_placement_for_cursor;
 use super::command_editor_settings;
-use super::command_editor_terminal_row_offset;
 use super::command_editor_view;
 use super::command_editor_view_context;
-use super::command_editor_view_for_input_tab;
 use super::command_editor_view_open_for_input_tab;
-use super::command_editor_visible_for_terminal;
-use super::command_editor_visual_cursor_row;
 use super::copy_active_selection_to_clipboard;
 use super::emit_host_input;
 use super::extend_selection_to_mouse;
@@ -175,19 +166,6 @@ pub(crate) fn handle_cursor_moved(
         w.set_cursor(winit::window::CursorIcon::Default);
     }
 
-    if host.mouse.command_editor_drag_anchor.is_some() {
-        if extend_command_editor_selection_to_mouse(host) {
-            host.mouse.selection_drag_moved = true;
-            notify_interaction_changed(
-                &host.input,
-                &mut host.render,
-                &host.startup,
-                host.window.as_ref(),
-            );
-        }
-        return;
-    }
-
     if host.mouse.left_drag_active && extend_selection_to_mouse(host) {
         host.mouse.selection_drag_moved = true;
         refresh_selection_autoscroll_direction(host);
@@ -243,69 +221,6 @@ pub(crate) fn handle_cursor_moved(
     );
 }
 
-pub(crate) fn command_editor_offset_at_mouse(
-    host: &mut WindowHost,
-    x: f64,
-    y: f64,
-) -> Option<usize> {
-    let (cell_w, cell_h, gutter_w, _) = layout_snapshot(&host.render);
-    let cell_w = cell_w.max(1);
-    let cell_h = cell_h.max(1);
-    let raw_x = x.max(0.0) as u32;
-    let raw_y = y.max(0.0) as u32;
-    if raw_x < gutter_w || raw_y < cell_h {
-        return None;
-    }
-
-    let tab_id = host.input.active_tab?;
-    let target = host.input.endpoints.get(&tab_id)?;
-    let command_editor_open = {
-        let state = host.render.input_state.lock();
-        command_editor_view_open_for_input_tab(&state, Some(tab_id))
-    };
-    if !command_editor_open {
-        return None;
-    }
-    let (visual_cursor_row, viewport_rows, viewport_cols) = {
-        let terminal = target.terminal.lock();
-        if !command_editor_visible_for_terminal(&terminal, command_editor_open) {
-            return None;
-        }
-        (
-            command_editor_visual_cursor_row(&terminal),
-            terminal.viewport.rows.max(1),
-            terminal.viewport.cols.max(1),
-        )
-    };
-    let view = {
-        let state = host.render.input_state.lock();
-        command_editor_view_for_input_tab(&state, tab_id).cloned()
-    }?;
-
-    let placement = command_editor_placement_for_cursor(visual_cursor_row, viewport_rows);
-    let visible_rows = placement.rows;
-    let box_top = placement.top_row as i32;
-    let terminal_row = raw_y.saturating_sub(cell_h) / cell_h;
-    let visible_row = terminal_row as i32 - box_top;
-    if !(0..visible_rows as i32).contains(&visible_row) {
-        return None;
-    }
-
-    let terminal_x = raw_x.saturating_sub(gutter_w);
-    let terminal_width = viewport_cols.saturating_mul(cell_w);
-    if terminal_x >= terminal_width {
-        return None;
-    }
-    let col = (terminal_x / cell_w).min(viewport_cols.saturating_sub(1));
-    Some(command_editor_byte_index_at_cell(
-        &view,
-        viewport_cols,
-        visible_rows,
-        visible_row as u32,
-        col,
-    ))
-}
-
 pub(crate) fn command_editor_settings_for_mouse(
     host: &mut WindowHost,
     tab_id: TabId,
@@ -317,7 +232,11 @@ pub(crate) fn command_editor_settings_for_mouse(
     let vim_mode = config.vim_mode;
     host.command.catalog.refresh_for_config(&config);
     let command_words = host.command.catalog.names().to_vec();
-    let target = host.input.endpoints.get(&tab_id)?;
+    let target = host.input.endpoints.get_mut(&tab_id)?;
+    super::adopt_shell_input(target);
+    if !super::shell_editing_active(target) {
+        return None;
+    }
     let context = {
         let terminal = target.terminal.lock();
         command_editor_view_context(&terminal)
@@ -328,78 +247,6 @@ pub(crate) fn command_editor_settings_for_mouse(
         command_editor_settings(&config, context.current_dir, command_words, history_entries),
         vim_mode,
     ))
-}
-
-pub(crate) fn start_command_editor_selection(
-    host: &mut WindowHost,
-    offset: usize,
-) -> bool {
-    let Some(tab_id) = host.input.active_tab else {
-        return false;
-    };
-    let Some((settings, vim_mode)) = command_editor_settings_for_mouse(host, tab_id) else {
-        return false;
-    };
-    clear_terminal_selection_for_tab(host, tab_id);
-    let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
-        return false;
-    };
-    set_cursor(&mut target.command_editor, offset);
-    let view = command_editor_view(&target.command_editor, &settings, vim_mode);
-    reset_viewport_and_invalidate(&mut target.terminal.lock());
-    host.mouse.command_editor_drag_anchor = Some(offset);
-    host.mouse.left_drag_active = true;
-    host.mouse.selection_drag_moved = false;
-    set_command_editor_view(host, tab_id, view);
-    true
-}
-
-pub(crate) fn extend_command_editor_selection_to_mouse(host: &mut WindowHost) -> bool {
-    let Some(anchor) = host.mouse.command_editor_drag_anchor else {
-        return false;
-    };
-    let Some(offset) = command_editor_offset_at_mouse(host, host.mouse.pos.0, host.mouse.pos.1)
-    else {
-        return false;
-    };
-    let Some(tab_id) = host.input.active_tab else {
-        return false;
-    };
-    let Some((settings, vim_mode)) = command_editor_settings_for_mouse(host, tab_id) else {
-        return false;
-    };
-    clear_terminal_selection_for_tab(host, tab_id);
-    let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
-        return false;
-    };
-    select_range(&mut target.command_editor, anchor, offset);
-    let view = command_editor_view(&target.command_editor, &settings, vim_mode);
-    reset_viewport_and_invalidate(&mut target.terminal.lock());
-    set_command_editor_view(host, tab_id, view);
-    true
-}
-
-pub(crate) fn finish_command_editor_selection(host: &mut WindowHost) -> bool {
-    let Some(tab_id) = host.input.active_tab else {
-        return false;
-    };
-    let Some((settings, vim_mode)) = command_editor_settings_for_mouse(host, tab_id) else {
-        return false;
-    };
-    let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
-        return false;
-    };
-    if let Some(text) = selected_text(&target.command_editor) {
-        let mut terminal = target.terminal.lock();
-        terminal.clipboard.set(ClipboardKind::Primary, &text);
-    }
-    let view = command_editor_view(&target.command_editor, &settings, vim_mode);
-    reset_viewport_and_invalidate(&mut target.terminal.lock());
-    host.mouse.command_editor_drag_anchor = None;
-    host.mouse.left_drag_active = false;
-    host.mouse.selection_drag_moved = false;
-    set_command_editor_view(host, tab_id, view);
-    true
 }
 
 pub(crate) fn right_click_command_editor(host: &mut WindowHost) -> bool {
@@ -748,32 +595,6 @@ pub(crate) fn handle_mouse_input(
     if pressed && button == MouseButton::Left && is_in_gutter(&host.mouse, &host.render) {
         let (_, screen_row) = cell_at(host, host.mouse.pos.0, host.mouse.pos.1);
         open_gutter_popup(host, screen_row);
-        return;
-    }
-
-    if !pressed && button == MouseButton::Left && host.mouse.command_editor_drag_anchor.is_some() {
-        finish_command_editor_selection(host);
-        notify_interaction_changed(
-            &host.input,
-            &mut host.render,
-            &host.startup,
-            host.window.as_ref(),
-        );
-        return;
-    }
-
-    if pressed
-        && button == MouseButton::Left
-        && let Some(offset) =
-            command_editor_offset_at_mouse(host, host.mouse.pos.0, host.mouse.pos.1)
-    {
-        start_command_editor_selection(host, offset);
-        notify_interaction_changed(
-            &host.input,
-            &mut host.render,
-            &host.startup,
-            host.window.as_ref(),
-        );
         return;
     }
 
@@ -1449,10 +1270,6 @@ pub(crate) fn mouse_report_position_at(
     let (cell_w, cell_h, gutter_w, _) = layout_snapshot(&host.render);
     let raw_x = x.max(0.0) as u32;
     let raw_y = y.max(0.0) as u32;
-    let command_editor_view_present = {
-        let state = host.render.input_state.lock();
-        command_editor_view_open_for_input_tab(&state, host.input.active_tab)
-    };
     let Some(target) = active_input_target(&mut host.input) else {
         return MouseReportPosition {
             col: 0,
@@ -1464,10 +1281,7 @@ pub(crate) fn mouse_report_position_at(
     let terminal = target.terminal.lock();
     let cols = terminal.viewport.cols.max(1);
     let rows = terminal.viewport.rows.max(1);
-    let row_offset = command_editor_terminal_row_offset(&terminal, command_editor_view_present);
-    mouse_report_position_from_pixels(
-        raw_x, raw_y, cell_w, cell_h, gutter_w, cols, rows, row_offset,
-    )
+    mouse_report_position_from_pixels(raw_x, raw_y, cell_w, cell_h, gutter_w, cols, rows, 0)
 }
 
 pub(crate) fn app_mouse_report_position_at(

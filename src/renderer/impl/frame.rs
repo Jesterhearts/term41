@@ -357,11 +357,7 @@ pub(super) fn build_render_geometry_once(
     suspend_terminal_area: bool,
 ) -> RenderGeometry {
     let mut geometry = RenderGeometry::default();
-    let cursor_state = if command_editor.is_some() {
-        CursorRenderState::Hidden
-    } else {
-        cursor_state_from_snapshot(snap)
-    };
+    let cursor_state = cursor_state_from_snapshot(snap, command_editor);
     let popup_clip = popup_clip(renderer, gutter_popup, layout);
     let blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 500) & 1 == 1;
     let rapid_blink_off = (APP_START_TIME.get().unwrap().elapsed().as_millis() / 250) & 1 == 1;
@@ -600,7 +596,6 @@ pub(super) fn build_render_geometry_once(
 
     if let Some(preedit) = preedit
         && !snap.search_active
-        && command_editor.is_none()
     {
         render_preedit(
             renderer,

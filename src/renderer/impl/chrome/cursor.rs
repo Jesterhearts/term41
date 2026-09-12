@@ -6,7 +6,8 @@ use super::super::*;
 /// per-cell loops don't have to know the rules.
 /// Compute the cursor render state from the snapshot.
 pub(in crate::renderer::r#impl) fn cursor_state_from_snapshot(
-    snap: &TermSnapshot
+    snap: &TermSnapshot,
+    editor: Option<&commands41::CommandLineView>,
 ) -> CursorRenderState {
     let Some((row, col)) = snap.cursor else {
         return CursorRenderState::Hidden;
@@ -23,6 +24,6 @@ pub(in crate::renderer::r#impl) fn cursor_state_from_snapshot(
     CursorRenderState::Visible {
         row,
         col,
-        shape: style.shape,
+        shape: command_cursor_shape(style.shape, editor),
     }
 }

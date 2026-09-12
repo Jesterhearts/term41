@@ -9,43 +9,37 @@
   </video>
 </p>
 
-A GPU-accelerated terminal emulator written in Rust. It features fast startup
-times (target <100ms TTFP on my machine) and responsive handling (target <1
-frame of delay even under heavy load).
+A GPU-accelerated terminal emulator written in Rust. It features fast startup times (target \<100ms
+TTFP on my machine) and responsive handling (target \<1 frame of delay even under heavy load).
 
-> **Note:** This project uses a decent amount of LLM-assisted coding. VTEs have
-> a huge feature surface, and implementing it in a reasonable time frame is only
-> possible thanks to LLM assistance.
+> **Note:** This project uses a decent amount of LLM-assisted coding. VTEs have a huge feature
+> surface, and implementing it in a reasonable time frame is only possible thanks to LLM assistance.
 
 ## Why?
 
-I've been enjoying coding apps I never had the time for in the past with the
-assistance of LLMs, and term41 is the product of one such experiment. I know
-there are many other terminal emulators and this one is nothing special, but
-I've always wanted to write my own, with the features I prefer.
+I've been enjoying coding apps I never had the time for in the past with the assistance of LLMs, and
+term41 is the product of one such experiment. I know there are many other terminal emulators and
+this one is nothing special, but I've always wanted to write my own, with the features I prefer.
 
 ## Do **You** Use This?
-Yes, it is my primary shell. I use it for quite a large portion of the day
-every day.
+
+Yes, it is my primary shell. I use it for quite a large portion of the day every day.
 
 ## Possible Objections
 
 1. You use AI.
    - Fair enough.
-2. It's ugly.
-   - I don't think it's that bad, but only using the same graphics primitives
-     for menus/modals as the rest of the terminal does give it a certain
-     character. Maybe someday it won't be.
-3. It doesn't support `$feature` from the VT feature set.
-   - I probably haven't implemented it yet, or it has security concerns and I'm
-     leery of implementing it.
-4. It lies about being iTerm, and breaks my app because you don't support
-   `$extension`.
+1. It's ugly.
+   - I don't think it's that bad, but only using the same graphics primitives for menus/modals as
+     the rest of the terminal does give it a certain character. Maybe someday it won't be.
+1. It doesn't support `$feature` from the VT feature set.
+   - I probably haven't implemented it yet, or it has security concerns and I'm leery of
+     implementing it.
+1. It lies about being iTerm, and breaks my app because you don't support `$extension`.
    - I'd like to add `$extension` so your app isn't broken. Please file a bug :)
-   - I lie about being iTerm because testing for e.g. iTerm's image support
-     feature in terminals is hardcoded by terminal host name sometimes, and it
-     seemed like the most reasonable choice to lie about so they use the iTerm
-     image API.
+   - I lie about being iTerm because testing for e.g. iTerm's image support feature in terminals is
+     hardcoded by terminal host name sometimes, and it seemed like the most reasonable choice to lie
+     about so they use the iTerm image API.
 
 ## Overview
 
@@ -56,8 +50,8 @@ What I wanted out of this terminal was pretty straightforward:
 - Low latency
 - Unicode shaping and fallback fonts
 - modern image protocols (`sixel`, Kitty, OSC 1337)
-- DEC/VT-style terminal emulation, including page geometry, rectangular ops,
-  status lines, macros, and user-defined keys
+- DEC/VT-style terminal emulation, including page geometry, rectangular ops, status lines, macros,
+  and user-defined keys
 - shell integration, tabs, scrollback search, hyperlinks, and background images
 
 Release notes live in [CHANGELOG.md](CHANGELOG.md).
@@ -97,19 +91,19 @@ Legend:
 
 ### Kitty Protocols
 
-| Area                                   | Status                        | Notes                                                                                                               |
-| -------------------------------------- | ----------------------------- | ------------------------------------------------------------------------------------------------------------------- |
+| Area                                   | Status                        | Notes                                                                                                                        |
+| -------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
 | Kitty keyboard protocol                | ✅ Supported                  | Per-screen mode stacks, alternate keys, press/repeat/release events, associated text, IME commits, and 7-bit/8-bit controls. |
-| Kitty graphics direct payloads         | ✅ Supported                  | RGB, RGBA, PNG, zlib compression, chunking, transmit, transmit-and-display, and placement.                          |
-| Kitty graphics file/temp-file payloads | ✅ Supported                  | File and temp-file media with byte range support and safe temp-file deletion rules.                                 |
-| Kitty graphics placement model         | ✅ Supported                  | Image IDs, image numbers, placement IDs, relative placements, cell offsets, z-index, and expanded delete selectors. |
-| Kitty graphics shared memory (`t=s`)   | ❌ Unplanned                  | Rejected as a local cross-process attack surface.                                                                   |
-| Kitty graphics Unicode placeholders    | ✅ Supported                  | `U=1` virtual placements render from `U+10EEEE` placeholder cells with row/column/image-id combining marks.         |
-| Kitty graphics animation actions       | 🟨 Planned, not supported yet | Needs separate frame mutation, lifecycle, and quota design.                                                         |
-| Kitty text sizing protocol             | 🟦 Watching                   | Could be useful, but affects shaping, selection, hit testing, scrollback, and reflow.                               |
-| Kitty mouse pointer shapes             | 🟦 Watching                   | Reasonable if real applications use it; should stay scoped to terminal content.                                     |
-| Kitty color protocol additions         | 🟦 Watching                   | Watch for real app demand beyond existing OSC 4/10/11 and DEC color support.                                        |
-| Kitty file transfer                    | ❌ Unplanned                  | Local file brokerage from untrusted PTY output is outside scope.                                                    |
+| Kitty graphics direct payloads         | ✅ Supported                  | RGB, RGBA, PNG, zlib compression, chunking, transmit, transmit-and-display, and placement.                                   |
+| Kitty graphics file/temp-file payloads | ✅ Supported                  | File and temp-file media with byte range support and safe temp-file deletion rules.                                          |
+| Kitty graphics placement model         | ✅ Supported                  | Image IDs, image numbers, placement IDs, relative placements, cell offsets, z-index, and expanded delete selectors.          |
+| Kitty graphics shared memory (`t=s`)   | ❌ Unplanned                  | Rejected as a local cross-process attack surface.                                                                            |
+| Kitty graphics Unicode placeholders    | ✅ Supported                  | `U=1` virtual placements render from `U+10EEEE` placeholder cells with row/column/image-id combining marks.                  |
+| Kitty graphics animation actions       | 🟨 Planned, not supported yet | Needs separate frame mutation, lifecycle, and quota design.                                                                  |
+| Kitty text sizing protocol             | 🟦 Watching                   | Could be useful, but affects shaping, selection, hit testing, scrollback, and reflow.                                        |
+| Kitty mouse pointer shapes             | 🟦 Watching                   | Reasonable if real applications use it; should stay scoped to terminal content.                                              |
+| Kitty color protocol additions         | 🟦 Watching                   | Watch for real app demand beyond existing OSC 4/10/11 and DEC color support.                                                 |
+| Kitty file transfer                    | ❌ Unplanned                  | Local file brokerage from untrusted PTY output is outside scope.                                                             |
 
 ### iTerm2 / OSC 1337
 
@@ -128,7 +122,7 @@ Legend:
 | Area                                           | Status       | Notes                                                                                             |
 | ---------------------------------------------- | ------------ | ------------------------------------------------------------------------------------------------- |
 | OSC 0 / OSC 2 titles                           | ✅ Supported | Common xterm-compatible title updates.                                                            |
-| OSC 4 / OSC 10 / OSC 11 / OSC 12 colors        | ✅ Supported | Indexed, default, and cursor color queries, updates, and xterm-compatible resets.                   |
+| OSC 4 / OSC 10 / OSC 11 / OSC 12 colors        | ✅ Supported | Indexed, default, and cursor color queries, updates, and xterm-compatible resets.                 |
 | OSC 7 current directory                        | ✅ Supported | Stored as untrusted metadata.                                                                     |
 | OSC 8 hyperlinks                               | ✅ Supported | Hyperlinks attach to terminal cells.                                                              |
 | OSC 52 clipboard                               | ✅ Supported | Read/write requests are policy-gated and default to asking.                                       |
@@ -161,16 +155,15 @@ cargo run --release
 
 ### Installing
 
-Releases are source-only. To build and install from the GitHub tag into your
-cargo bin dir:
+Releases are source-only. To build and install from the GitHub tag into your cargo bin dir:
 
 ```sh
 cargo install --git https://gitlab.com/Jesterhearts/term41.git --tag 0.2.1 --locked term41
 ```
 
-The default install enables FFmpeg-backed GIF/video decoding, Vulkan rendering,
-and Wayland data-control clipboard support. If you want the smallest dependency
-surface, or the fastest build times:
+The default install enables FFmpeg-backed GIF/video decoding, Vulkan rendering, and Wayland
+data-control clipboard support. If you want the smallest dependency surface, or the fastest build
+times:
 
 ```sh
 cargo install --git https://gitlab.com/Jesterhearts/term41.git --tag 0.2.1 --locked --no-default-features term41
@@ -188,8 +181,8 @@ To install the desktop launcher and icon assets for the current user:
 scripts/install_desktop_assets.sh
 ```
 
-The launcher uses an installed `term41` binary when one is found. To point the
-desktop entry at a specific build or wrapper command:
+The launcher uses an installed `term41` binary when one is found. To point the desktop entry at a
+specific build or wrapper command:
 
 ```sh
 scripts/install_desktop_assets.sh --exec "$HOME/.cargo/bin/term41"
@@ -219,29 +212,26 @@ RUST_LOG=info cargo run --release
 
 ## Security Model
 
-While there is a broad feature set implemented, certain features carry security
-considerations because they go beyond ordinary terminal text output and could
-potentially be used for spoofing, injection, system fingerprinting, or data
-exfiltration.
+While there is a broad feature set implemented, certain features carry security considerations
+because they go beyond ordinary terminal text output and could potentially be used for spoofing,
+injection, system fingerprinting, or data exfiltration.
 
 In practice, extensions that allow either of these should be default-deny:
 
 1. Target-controlled content outside standard text output
-2. Target-controlled emulator behavior
+1. Target-controlled emulator behavior
 
-So the default is: do nothing unless the user explicitly opted in, or the
-feature has a real authorization path.
+So the default is: do nothing unless the user explicitly opted in, or the feature has a real
+authorization path.
 
-VT420 macros and DEC user-defined keys stay denied unless you explicitly allow
-them. This is currently a binary toggle between None/All processes. As far as I
-know, there's no reliable way to say "these bytes in the pty came from this
-process", so there's no safe way to authenticate that some set of bytes in the
-input is from `good` vs `evil`. If such a way becomes available, I'm open to
-adding a per-process allowlist.
+VT420 macros and DEC user-defined keys stay denied unless you explicitly allow them. This is
+currently a binary toggle between None/All processes. As far as I know, there's no reliable way to
+say "these bytes in the pty came from this process", so there's no safe way to authenticate that
+some set of bytes in the input is from `good` vs `evil`. If such a way becomes available, I'm open
+to adding a per-process allowlist.
 
-OSC 52 clipboard reads and writes default to asking for each request. Allowing
-from the confirmation modal applies only to the single clipboard request that
-triggered the prompt.
+OSC 52 clipboard reads and writes default to asking for each request. Allowing from the confirmation
+modal applies only to the single clipboard request that triggered the prompt.
 
 <details>
 <summary><strong>Feature Set</strong></summary>
@@ -267,8 +257,7 @@ triggered the prompt.
 - scroll regions, hardware tab stops, DECSCUSR cursor styles
 - DA1/DA2, DSR, DECRQSS, window-size queries
 - OSC 0/2 titles, OSC 7 cwd tracking, OSC 8 hyperlinks, OSC 52 clipboard
-- DEC character-set engine including NRC sets, GL/GR invocation, UTF-8 and 8-bit
-  text modes
+- DEC character-set engine including NRC sets, GL/GR invocation, UTF-8 and 8-bit text modes
 - VT420 page/geometry controls, rectangular-area controls, and DEC status lines
 - VT420 macros and DEC user-defined keys with allowlist-based gating
 
@@ -285,8 +274,7 @@ triggered the prompt.
 - Kitty keyboard protocol
 - xterm mouse tracking modes and encodings
 - scrollback search
-- OSC 133 / OSC 633 shell integration with prompt navigation and gutter status
-  markers
+- OSC 133 / OSC 633 shell integration with prompt navigation and gutter status markers
 - copy/paste, primary selection, hyperlink opening, and image paste as wallpaper
 
 </details>
@@ -302,10 +290,10 @@ $XDG_CONFIG_HOME/term41/config.toml
 
 On Linux this is usually `~/.config/term41/config.toml`.
 
-Everything is optional. If the file is missing or broken, term41 falls back to
-built-in defaults. It tries hard to parse the config, so a failure in one
-setting shouldn't break all the others. If something isn't working correctly,
-try running with `warning` level logging, as parsing issues should be logged.
+Everything is optional. If the file is missing or broken, term41 falls back to built-in defaults. It
+tries hard to parse the config, so a failure in one setting shouldn't break all the others. If
+something isn't working correctly, try running with `warning` level logging, as parsing issues
+should be logged.
 
 Most settings live-reload on save.
 
@@ -377,13 +365,12 @@ vsync = "auto"
 # hooks = false
 
 [command_editor]
-# Off by default. When enabled, it is active while OSC 133 / OSC 633 shell
-# integration reports command-line editing on the primary screen. If the editor
-# remains visible during command output, input keeps targeting the editor until
-# foreground-app heuristics hide it.
-# You probably want to enable [shell_integration] hooks as well unless your
-# shell already emits OSC 133 markers, or you're going to have a bad time.
+# Edit directly at the shell prompt using term41's editing keys and completions.
+# Off by default. Enabling this also installs the basic lifecycle hooks in new
+# default-shell sessions. Existing sessions need OSC 133 / OSC 633 prompt marks.
+# The shell must use its normal insertion/Emacs bindings for arrows and Delete.
 # enabled = true
+# Vim bindings are handled by term41; keep the shell's own Vi mode disabled.
 # vim_mode = false
 # completions = ["cargo", "git", "rg"]
 # JSON files with command-specific subcommand and argument completions.
@@ -427,116 +414,108 @@ keybindings = [
 Notes:
 
 - `keybindings` replaces the default binding set rather than merging with it.
-- Unbound actions can still be listed in `keybindings` and appear in the
-  command palette. Shell-integration jump actions include
-  `JumpToPreviousFailed`, `JumpToPreviousCommand`, and
+
+- Unbound actions can still be listed in `keybindings` and appear in the command palette.
+  Shell-integration jump actions include `JumpToPreviousFailed`, `JumpToPreviousCommand`, and
   `JumpToPreviousSuccessful`.
-- `strict_altscreen_scrollback = true` restores a zero-scrollback alternate
-  screen.
-- `status_line = "indicator"` enables the emulator-owned DEC indicator line by
-  default; when UDKs are enabled, it also shows UDK status and programmed key
-  badges such as `[F6]`.
-- `security.features.macros` and `security.features.udks` can be `"all"` or
-  omitted/default-denied.
+
+- `strict_altscreen_scrollback = true` restores a zero-scrollback alternate screen.
+
+- `status_line = "indicator"` enables the emulator-owned DEC indicator line by default; when UDKs
+  are enabled, it also shows UDK status and programmed key badges such as `[F6]`.
+
+- `security.features.macros` and `security.features.udks` can be `"all"` or omitted/default-denied.
+
 - `security.clipboard.read` and `security.clipboard.write` default to `"ask"`;
-  `"allow"`/`"all"`/`"*"` skips the prompt, while `"deny"`/`"no"`/`"none"`
-  blocks OSC 52 access.
-- `security.kitty_graphics.files` defaults to `"ask"` for Kitty graphics
-  `t=f`/`t=t` local-file payload reads. Ask mode shows the requested path in the
-  trusted permission modal; deny mode rejects the image request.
-- `[security.limits]` settings live-reload for new protocol actions. They
-  control how much macro/UDK/DRCS/kitty graphics state term41 accepts or
-  retains.
-- Lua scripts are discovered from `$XDG_CONFIG_HOME/term41/scripts/*.lua`. Each
-  script runs in its own Lua state on its own thread and can
-  `require("terminal")` to read the active tab title/cwd and set the current tab
-  title or indicator status text.
-- `[security.scripts.<script_name>]` controls which optional libraries a script
-  receives. The default sandbox has only basic string/table/math/utf8 support
-  plus `require("terminal")`.
-- `[shell_integration] hooks = true` opts in to runtime shell hooks for the
-  default spawned shell. The hooks emit OSC 133 `A`, `B`, `C`, and `D` markers
-  for prompt start, command start, output start, and output end, plus OSC 7
-  current-directory updates before each prompt. The install is per-child-process
-  and temporary; term41 logs a warning when it cannot identify the shell or has
-  no hook implementation for it.
-- `[command_editor]` enables the terminal-local command editor layer.
-  `Ctrl+Shift+D` toggles the editor for the current runtime session without
-  rewriting the config file.
+  `"allow"`/`"all"`/`"*"` skips the prompt, while `"deny"`/`"no"`/`"none"` blocks OSC 52 access.
 
-  It keeps keyboard handling unchanged while disabled, uses Up/Down for its own
-  command history while active, and completes prefixes from recent history,
-  configured words, executable commands discovered from `PATH` plus
-  `[command_editor]` `binary_dirs`, JSON command completion files, and paths
-  relative to the shell's OSC-reported current directory. JSON completion files
-  are configured with `completion_files = ["~/.config/term41/completions/cargo.json"]`
-  and may contain one command object, a list of command objects, or
-  `{ "commands": [...] }`. Each command object uses `command` and
-  `subcommands`; subcommands may be an array like
-  `{ "name": "build", "arguments": ["--release"] }` or a map like
-  `{ "build": ["--release"] }`. The default binary-dir list is platform-based
-  and includes common user tool directories such as `~/.cargo/bin` and the
-  `dirs` crate's per-user executable directory, usually `~/.local/bin` on
+- `security.kitty_graphics.files` defaults to `"ask"` for Kitty graphics `t=f`/`t=t` local-file
+  payload reads. Ask mode shows the requested path in the trusted permission modal; deny mode
+  rejects the image request.
+
+- `[security.limits]` settings live-reload for new protocol actions. They control how much
+  macro/UDK/DRCS/kitty graphics state term41 accepts or retains.
+
+- Lua scripts are discovered from `$XDG_CONFIG_HOME/term41/scripts/*.lua`. Each script runs in its
+  own Lua state on its own thread and can `require("terminal")` to read the active tab title/cwd and
+  set the current tab title or indicator status text.
+
+- `[security.scripts.<script_name>]` controls which optional libraries a script receives. The
+  default sandbox has only basic string/table/math/utf8 support plus `require("terminal")`.
+
+- `[shell_integration] hooks = true` opts in to runtime shell hooks for the default spawned shell.
+  The hooks emit OSC 133 `A`, `B`, `C`, and `D` markers for prompt start, command start, output
+  start, and output end, plus OSC 7 current-directory updates before each prompt. The install is
+  per-child-process and temporary; term41 logs a warning when it cannot identify the shell or has no
+  hook implementation for it.
+
+- `[command_editor]` enables inline shell editing. Each edit is translated into ordinary Left/Right
+  and Delete keys, text input, and bracketed paste. The shell holds and draws the live command line.
+  There is no editor box or reserved editor area. `Ctrl+Shift+D` toggles term41's editing for the
+  runtime session without rewriting the config file.
+
+  Editing starts at an empty prompt identified by OSC 133 / OSC 633 markers. Enabling
+  `command_editor` in the config also enables the existing basic lifecycle hooks for newly spawned
+  default shells. No shell-specific buffer replacement or query hooks are installed. If a prompt
+  already contains input when you enable editing, term41 waits for the next empty prompt. Disabling
+  it leaves the current command in the shell.
+
+  Use the shell's normal insertion/Emacs keymap with standard arrows and Delete. Set
+  `vim_mode = true` for term41's Vim bindings rather than enabling the shell's own Vi mode. Custom
+  bindings for the generated keys can change how the shell interprets edits. An unhandled key that
+  reaches the shell hands editing back to it until the next empty prompt; `Ctrl+L` can redraw
+  without ending term41 editing. Running commands and alternate-screen applications receive normal
+  terminal input.
+
+  It keeps keyboard handling unchanged while disabled, uses Up/Down for its own command history
+  while active, and completes prefixes from recent history, configured words, executable commands
+  discovered from `PATH` plus `[command_editor]` `binary_dirs`, JSON command completion files, and
+  paths relative to the shell's OSC-reported current directory. JSON completion files are configured
+  with `completion_files = ["~/.config/term41/completions/cargo.json"]` and may contain one command
+  object, a list of command objects, or `{ "commands": [...] }`. Each command object uses `command`
+  and `subcommands`; subcommands may be an array like
+  `{ "name": "build", "arguments": ["--release"] }` or a map like `{ "build": ["--release"] }`. The
+  default binary-dir list is platform-based and includes common user tool directories such as
+  `~/.cargo/bin` and the `dirs` crate's per-user executable directory, usually `~/.local/bin` on
   Linux. User-supplied `binary_dirs` are merged into that list by default; set
-  `merge_extra_dirs = false` to make `binary_dirs` replace the default list.
-  Set `deep_history_integration = true` to let `shellhist41` attempt read-only
-  discovery of the active shell history and merge those entries into editor
-  history navigation and completion. It currently supports bash, zsh, fish,
-  PowerShell/PowerShell Core, and Atuin-backed history when Atuin is active.
-  Discovered commands are offered only where a shell command can start, so they
-  do not pollute normal argument completion. For history completions, Tab
-  accepts the next whitespace-delimited token or path element, while Right
-  accepts the full visible history item. When a filesystem path has multiple
-  matches, Tab cycles the ghost candidate and Right accepts the active one;
-  ambiguous completions show up to five ranked matches near the editor area,
-  and Up/Down rotates the active match while the list is visible. Command-name
-  and whole-command history candidates also include fuzzy matches after prefix
-  matches; fuzzy matches never create ghost text and require explicit Up/Down
-  selection before Tab or Right accepts them. While
-  enabled, the editor is rendered in a three-row area with an edge-to-edge top
-  border under the current prompt on the primary screen, with terminal history
-  shifted upward by those three rows. It stays visible through ordinary command
-  output but hides when a foreground command advertises stronger interactive
-  terminal modes such as mouse tracking, app cursor, or app keypad. Multi-line
-  input scrolls inside that three-row area with a small scrollbar, and Up/Down
-  move between input lines when possible.
+  `merge_extra_dirs = false` to make `binary_dirs` replace the default list. Set
+  `deep_history_integration = true` to let `shellhist41` attempt read-only discovery of the active
+  shell history and merge those entries into editor history navigation and completion. It currently
+  supports bash, zsh, fish, PowerShell/PowerShell Core, and Atuin-backed history when Atuin is
+  active. Discovered commands are offered only where a shell command can start, so they do not
+  pollute normal argument completion. For history completions, Tab accepts the next
+  whitespace-delimited token or path element, while Right accepts the full visible history item.
+  When a filesystem path has multiple matches, Tab cycles the ghost candidate and Right accepts the
+  active one; ambiguous completions show up to five ranked matches near the shell cursor, and
+  Up/Down rotates the active match while the list is visible. Command-name and whole-command history
+  candidates also include fuzzy matches after prefix matches; fuzzy matches never create ghost text
+  and require explicit Up/Down selection before Tab or Right accepts them. Suggestions appear at the
+  live shell cursor. The shell handles wrapping, multi-line layout, and any shell syntax
+  highlighting. Up/Down move between input lines when possible.
 
-  Mouse drag selects editor text, release copies it to the primary selection,
-  right-click copies a selected editor range to the clipboard or pastes when no
-  editor selection is active, middle-click pastes the primary selection, and
-  the configured Copy/Paste actions operate on the editor while it is active.
-  While the editor is open, right- and middle-click paste gestures target the
-  editor even when the pointer is over the terminal area. Terminal and editor
-  selections clear each other, and Copy/right-click copy prefer an active
-  terminal selection before an active editor selection.
-  Path completion understands single- and double-quoted arguments and escapes
-  spaces for unquoted paths.
+  Mouse drag uses normal terminal selection, including command text. Copy and right-click copy the
+  selected terminal text. Paste, middle-click primary selection paste, and right-click paste apply
+  through term41 while inline editing is active. Path completion understands single- and
+  double-quoted arguments and escapes spaces for unquoted paths.
 
-  The command palette supports argument-bearing commands whose labels end in
-  `:`. Text after the colon is treated as the argument; for example,
-  `Open new window in dir: Documents` launches a new window with `Documents`
-  resolved relative to the active session's current directory, and
-  `Open new tab in dir: Documents` does the same for a new tab in the current
-  window. Tab fills the currently highlighted palette row into the palette
-  input, and Enter on an argument-bearing row without an argument fills the
-  `: ` prompt instead of running an empty argument.
+  The command palette supports argument-bearing commands whose labels end in `:`. Text after the
+  colon is treated as the argument; for example, `Open new window in dir: Documents` launches a new
+  window with `Documents` resolved relative to the active session's current directory, and
+  `Open new tab in dir: Documents` does the same for a new tab in the current window. Tab fills the
+  currently highlighted palette row into the palette input, and Enter on an argument-bearing row
+  without an argument fills the `: ` prompt instead of running an empty argument.
 
-  Alternate-screen applications always receive normal terminal input. While the
-  editor is visible on the primary screen, keyboard input targets the editor;
-  foreground-app heuristics hide the editor so interactive terminal programs
-  keep receiving normal terminal input.
+  It supports common readline-style editing keys: `Ctrl+A/E`, `Ctrl+D`, `Alt+B/F`, `Ctrl+W`,
+  `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`; `Ctrl+Left/Right` and `Ctrl+Backspace/Delete`
+  are also accepted. `Shift+Enter` inserts a newline for multi-line input. Newlines and literal tabs
+  require the shell to enable bracketed paste; otherwise the edit is rejected with a message. Plain
+  Enter accepts the command already in the shell, without sending a second copy. `Ctrl+C` cancels
+  the shell input, and `Ctrl+D` at an empty non-Vim prompt sends EOF. Set `vim_mode = true` to start
+  in normal mode with mostly-vim emulation. I've probably missed just enough commands you use to
+  annoy you, but it's everything I use so I don't know it. File a bug if you want more emulation!
 
-  It supports common readline-style editing keys: `Ctrl+A/E`, `Ctrl+D`,
-  `Alt+B/F`, `Ctrl+W`, `Alt+Backspace`, `Alt+D`, `Ctrl+K/U`, and `Ctrl+Y`;
-  `Ctrl+Left/Right` and `Ctrl+Backspace/Delete` are also accepted.
-  `Shift+Enter` inserts a newline for multi-line input; plain Enter submits the
-  buffer. Set `vim_mode = true` to start the editor in normal mode with
-  mostly-vim emulation. I've probably missed just enough commands you use to
-  annoy you, but it's everything I use so I don't know it. File a bug if you
-  want more emulation!
-
-- Example scripts are available under `examples/`, including
-  `examples/sys_info.lua` for Linux CPU and memory status text.
+- Example scripts are available under `examples/`, including `examples/sys_info.lua` for Linux CPU
+  and memory status text.
 
 </details>
 

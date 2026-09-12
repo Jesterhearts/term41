@@ -109,6 +109,7 @@ pub(crate) struct InputEndpoint {
     pub(crate) writer: PtyWriter,
     pub(crate) recorder: RecorderControl,
     pub(crate) command_editor: CommandEditor,
+    pub(crate) shell_editing: super::shell_editing::ShellEditing,
 }
 
 #[derive(Clone)]
@@ -272,7 +273,6 @@ pub(crate) struct MouseRuntime {
     pub(crate) click_count: u32,
     pub(crate) left_drag_active: bool,
     pub(crate) selection_drag_moved: bool,
-    pub(crate) command_editor_drag_anchor: Option<usize>,
     pub(crate) tab_drag: Option<TabDrag>,
     pub(crate) selection_autoscroll_direction: Option<SelectionAutoscroll>,
     pub(crate) selection_autoscroll_next: Option<Instant>,

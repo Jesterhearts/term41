@@ -253,3 +253,35 @@ pub fn visible_images(
         now,
     )
 }
+
+/// A conservative acquisition point for terminal-owned shell editing. A
+/// displayed command is not a reliable copy of the shell's actual buffer.
+pub fn shell_prompt_is_empty(terminal: &crate::Terminal) -> bool {
+    let Some(prompt) = terminal.metadata.current_prompt_row else {
+        return false;
+    };
+    let Some(meta) = terminal.metadata.command_metas.get(&prompt) else {
+        return false;
+    };
+    let Some(col) = meta.command_col else {
+        return false;
+    };
+    let local = crate::screen::active_row_index(&terminal.active, &terminal.viewport);
+    let absolute = (terminal.active.grid.total_popped + local) as u64;
+    meta.command_row == Some(absolute)
+        && terminal.active.cursor.col == col
+        && terminal
+            .active
+            .grid
+            .rows
+            .get(local)
+            .is_some_and(|row| row.content_len() <= col)
+}
+
+/// Identify the prompt across archived command blocks, whose active grids
+/// can reuse the same local row numbers.
+pub fn shell_prompt_document_row(terminal: &crate::Terminal) -> Option<u64> {
+    let prompt = terminal.metadata.current_prompt_row?;
+    let local = prompt.checked_sub(terminal.active.grid.total_popped as u64)?;
+    Some(crate::screen::active_block_document_base(&terminal.active) + local)
+}

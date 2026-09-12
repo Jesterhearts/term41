@@ -106,7 +106,7 @@ pub(crate) fn spawn_session(
             cell_height as u16,
             Some(term_features),
             command,
-            config.shell_integration.hooks,
+            config.shell_integration.hooks || config.command_editor.enabled,
             cwd,
             terminal_thread.thread_handle.clone(),
             child_exit_tx,
@@ -172,6 +172,7 @@ pub(crate) fn spawn_session(
             writer,
             recorder,
             command_editor: CommandEditor::new(),
+            shell_editing: Default::default(),
         },
         tab: Tab {
             id,

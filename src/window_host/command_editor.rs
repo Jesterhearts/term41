@@ -9,10 +9,6 @@ use commands41::EditorInput;
 use commands41::EditorSettings;
 use commands41::VimKey;
 use terminal41::Terminal;
-use terminal41::host;
-use terminal41::selection::search_active;
-use terminal41::view;
-use unicode_segmentation::UnicodeSegmentation;
 use winit::event::MouseButton;
 use winit::keyboard::Key;
 use winit::keyboard::ModifiersState;
@@ -20,7 +16,6 @@ use winit::keyboard::NamedKey;
 
 use super::InputState;
 use super::TabId;
-use crate::COMMAND_EDITOR_BOX_ROWS;
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub(crate) struct CommandEditorContext {
@@ -28,7 +23,12 @@ pub(crate) struct CommandEditorContext {
 }
 
 pub(crate) fn command_editor_view_context(terminal: &Terminal) -> Option<CommandEditorContext> {
-    if terminal.on_alt_screen || command_editor_hidden_by_running_command(terminal) {
+    if terminal.on_alt_screen
+        || !matches!(
+            terminal.metadata.shell_integration_phase,
+            terminal41::ShellIntegrationPhase::Command | terminal41::ShellIntegrationPhase::Prompt
+        )
+    {
         return None;
     }
     Some(CommandEditorContext {
@@ -62,85 +62,14 @@ pub(crate) fn command_editor_view_open_for_input_tab(
         .is_some()
 }
 
-fn command_editor_hidden_by_running_command(terminal: &Terminal) -> bool {
-    if terminal.metadata.shell_integration_phase == terminal41::ShellIntegrationPhase::Output {
-        return true;
-    }
-    terminal.metadata.shell_integration_phase != terminal41::ShellIntegrationPhase::Command
-        && (host::mouse_tracking_enabled(terminal.modes.mouse_tracking)
-            || view::app_cursor_keys(&terminal.active)
-            || view::app_keypad(&terminal.active))
-}
-
-pub(crate) fn command_editor_input_context(
-    terminal: &Terminal,
-    command_editor_open: bool,
-) -> Option<CommandEditorContext> {
-    let context = command_editor_view_context(terminal)?;
-    if command_editor_open
-        || terminal.metadata.shell_integration_phase == terminal41::ShellIntegrationPhase::Command
-    {
-        Some(context)
-    } else {
-        None
-    }
-}
-
-pub(crate) fn command_editor_visible_for_terminal(
-    terminal: &Terminal,
-    command_editor_open: bool,
-) -> bool {
-    command_editor_open
-        && view::viewport_offset(&terminal.active) == 0
-        && !search_active(&terminal.search)
-        && command_editor_view_context(terminal).is_some()
-}
-
-pub(crate) fn command_editor_terminal_row_offset(
-    terminal: &Terminal,
-    command_editor_view_present: bool,
-) -> u32 {
-    if command_editor_visible_for_terminal(terminal, command_editor_view_present) {
-        let cursor_row = command_editor_visual_cursor_row(terminal);
-        command_editor_terminal_row_offset_for_cursor(cursor_row, terminal.viewport.rows)
-    } else {
-        0
-    }
-}
-
-pub(crate) fn command_editor_visual_cursor_row(terminal: &Terminal) -> u32 {
-    view::cursor_viewport_row(&terminal.active, &terminal.viewport, terminal.on_alt_screen)
+pub(crate) fn command_editor_input_context(terminal: &Terminal) -> Option<CommandEditorContext> {
+    command_editor_view_context(terminal)
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub(crate) enum CommandEditorPopupSide {
     Above,
     Below,
-}
-
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub(crate) struct CommandEditorPlacement {
-    pub(crate) top_row: u32,
-    pub(crate) rows: u32,
-    pub(crate) terminal_row_offset: u32,
-}
-
-pub(crate) fn command_editor_placement_for_cursor(
-    cursor_row: u32,
-    viewport_rows: u32,
-) -> CommandEditorPlacement {
-    let viewport_rows = viewport_rows.max(1);
-    let cursor_row = cursor_row.min(viewport_rows - 1);
-    let editor_rows = command_editor_reserved_rows(viewport_rows).max(1);
-    let terminal_row_offset =
-        command_editor_terminal_row_offset_for_cursor(cursor_row, viewport_rows);
-    let screen_cursor_row = cursor_row.saturating_sub(terminal_row_offset);
-    let top_row = screen_cursor_row.saturating_add(1).min(viewport_rows - 1);
-    CommandEditorPlacement {
-        top_row,
-        rows: editor_rows,
-        terminal_row_offset,
-    }
 }
 
 pub(crate) fn command_editor_popup_side_for_row(
@@ -152,24 +81,6 @@ pub(crate) fn command_editor_popup_side_for_row(
     } else {
         CommandEditorPopupSide::Above
     }
-}
-
-fn command_editor_terminal_row_offset_for_cursor(
-    cursor_row: u32,
-    viewport_rows: u32,
-) -> u32 {
-    let viewport_rows = viewport_rows.max(1);
-    let cursor_row = cursor_row.min(viewport_rows - 1);
-    let desired_rows = command_editor_reserved_rows(viewport_rows);
-    cursor_row
-        .saturating_add(1)
-        .saturating_add(desired_rows)
-        .saturating_sub(viewport_rows)
-        .min(desired_rows)
-}
-
-fn command_editor_reserved_rows(viewport_rows: u32) -> u32 {
-    COMMAND_EDITOR_BOX_ROWS.min(viewport_rows.saturating_sub(1))
 }
 
 pub(crate) fn command_editor_mouse_paste_kind(
@@ -373,72 +284,6 @@ pub(crate) fn command_editor_view(
         view.cursor_style = CommandEditorCursorStyle::Beam;
     }
     Some(view)
-}
-
-fn command_editor_line_ranges(text: &str) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    for (idx, ch) in text.char_indices() {
-        if ch == '\n' {
-            ranges.push((start, idx));
-            start = idx + ch.len_utf8();
-        }
-    }
-    ranges.push((start, text.len()));
-    ranges
-}
-
-fn command_editor_cursor_line(
-    lines: &[(usize, usize)],
-    cursor: usize,
-) -> usize {
-    for (idx, &(_, end)) in lines.iter().enumerate() {
-        if cursor <= end {
-            return idx;
-        }
-    }
-    lines.len().saturating_sub(1)
-}
-
-fn command_editor_visible_line_start(
-    line_count: usize,
-    cursor_line: usize,
-    visible_rows: usize,
-) -> usize {
-    let visible = visible_rows.max(1);
-    if line_count <= visible {
-        return 0;
-    }
-    cursor_line.saturating_add(1).saturating_sub(visible)
-}
-
-pub(crate) fn command_editor_byte_index_at_cell(
-    view: &CommandLineView,
-    viewport_cols: u32,
-    visible_rows: u32,
-    visible_row: u32,
-    col: u32,
-) -> usize {
-    let lines = command_editor_line_ranges(&view.text);
-    let cursor = view.cursor.min(view.text.len());
-    if !view.text.is_char_boundary(cursor) {
-        return view.text.len();
-    }
-    let cursor_line = command_editor_cursor_line(&lines, cursor);
-    let visible_rows = visible_rows.max(1) as usize;
-    let visible_start = command_editor_visible_line_start(lines.len(), cursor_line, visible_rows);
-    let line_idx = (visible_start
-        + visible_row.min(visible_rows.saturating_sub(1) as u32) as usize)
-        .min(lines.len().saturating_sub(1));
-    let has_overflow = lines.len() > visible_rows;
-    let scrollbar_cols = u32::from(has_overflow);
-    let content_cols = viewport_cols.saturating_sub(1 + scrollbar_cols).max(1);
-    let text_col = col.min(content_cols);
-    let (line_start, line_end) = lines[line_idx];
-    view.text[line_start..line_end]
-        .grapheme_indices(true)
-        .nth(text_col as usize)
-        .map_or(line_end, |(idx, _)| line_start + idx)
 }
 
 pub(crate) fn dec_local_function_key_selector(

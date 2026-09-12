@@ -420,16 +420,6 @@ pub(crate) fn write_host_bytes(
     }
 }
 
-pub(super) fn command_submission_bytes(command: &str) -> Vec<u8> {
-    let mut bytes = Vec::with_capacity(command.len() + 1);
-    bytes.extend(command.bytes().map(|byte| match byte {
-        b'\n' => b'\r',
-        byte => byte,
-    }));
-    bytes.push(b'\r');
-    bytes
-}
-
 pub(crate) fn emit_host_input(
     target: &mut InputEndpoint,
     input: HostInput<'_>,
@@ -439,6 +429,9 @@ pub(crate) fn emit_host_input(
         let mut terminal = target.terminal.lock();
         apply_host_input(&mut terminal, input)
     };
+    if !effects.host_bytes.is_empty() && !matches!(input, HostInput::FocusChanged { .. }) {
+        super::suspend_shell_editing(target);
+    }
     unpark_thread_if_started(&target.terminal_thread);
     write_host_bytes(target, effects.host_bytes, reset_viewport);
 }
@@ -635,19 +628,25 @@ pub(crate) fn handle_command_editor_key(
     if !config.enabled {
         return false;
     }
+    let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
+        return false;
+    };
+    super::adopt_shell_input(target);
+    if !super::shell_editing_active(target) {
+        return false;
+    }
     host.command.catalog.refresh_for_config(&config);
     let command_words = host.command.catalog.names().to_vec();
     let Some(input) = command_editor_input(key, host.keyboard.modifiers, config.vim_mode) else {
         return false;
     };
-    let command_editor_open = command_editor_is_open_for_tab(&host.render, tab_id);
     let (editor_context, terminal_has_selection) = {
         let Some(target) = host.input.endpoints.get(&tab_id) else {
             return false;
         };
         let terminal = target.terminal.lock();
         (
-            command_editor_input_context(&terminal, command_editor_open),
+            command_editor_input_context(&terminal),
             terminal.has_selection(),
         )
     };
@@ -670,18 +669,24 @@ pub(crate) fn handle_command_editor_key(
         match outcome {
             EditOutcome::Submitted(command) => {
                 let history_command = command.clone();
-                let bytes = command_submission_bytes(&command);
-                write_host_bytes(target, bytes, true);
-                let view = command_editor_view(&target.command_editor, &settings, config.vim_mode);
-                (true, view, Some(history_command))
+                super::suspend_shell_editing(target);
+                write_host_bytes(target, vec![b'\r'], true);
+                (true, None, Some(history_command))
             }
             EditOutcome::Updated => {
                 let view = command_editor_view(&target.command_editor, &settings, config.vim_mode);
                 (true, view, None)
             }
             EditOutcome::Canceled => {
-                let view = command_editor_view(&target.command_editor, &settings, config.vim_mode);
-                (true, view, None)
+                if plain_control_character_key(key, host.keyboard.modifiers, "c") {
+                    super::suspend_shell_editing(target);
+                    write_host_bytes(target, vec![3], true);
+                    (true, None, None)
+                } else {
+                    let view =
+                        command_editor_view(&target.command_editor, &settings, config.vim_mode);
+                    (true, view, None)
+                }
             }
             EditOutcome::Ignored => {
                 if ignored_command_editor_input_falls_through(
@@ -719,15 +724,21 @@ pub(crate) fn handle_command_editor_clipboard_action(
     if !config.enabled || action != Action::Paste {
         return false;
     }
+    let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
+        return false;
+    };
+    super::adopt_shell_input(target);
+    if !super::shell_editing_active(target) {
+        return false;
+    }
     host.command.catalog.refresh_for_config(&config);
     let command_words = host.command.catalog.names().to_vec();
-    let command_editor_open = command_editor_is_open_for_tab(&host.render, tab_id);
     let context = {
         let Some(target) = host.input.endpoints.get(&tab_id) else {
             return false;
         };
         let terminal = target.terminal.lock();
-        command_editor_input_context(&terminal, command_editor_open)
+        command_editor_input_context(&terminal)
     };
     let Some(context) = context else {
         return false;
@@ -1090,6 +1101,7 @@ pub(crate) fn handle_key_event(
     if let Some(selector) = dec_udk_selector(&key, host.keyboard.modifiers) {
         let bytes = { target.terminal.lock().user_defined_key(selector) };
         if let Some(bytes) = bytes {
+            super::handoff_shell_input(target, &bytes);
             reset_viewport_and_invalidate(&mut target.terminal.lock());
             let _ = target.writer.write(&bytes);
             record_forwarded_key(
@@ -1143,6 +1155,7 @@ pub(crate) fn handle_key_event(
         kitty_flags,
         c1_mode,
     ) {
+        super::handoff_shell_input(target, &bytes);
         reset_viewport_and_invalidate(&mut target.terminal.lock());
         let _ = target.writer.write(&bytes);
         record_forwarded_key(
@@ -1195,6 +1208,7 @@ pub(crate) fn handle_key_event(
     );
 
     if let Some(bytes) = bytes {
+        super::handoff_shell_input(target, &bytes);
         reset_viewport_and_invalidate(&mut target.terminal.lock());
         let _ = target.writer.write(&bytes);
         record_forwarded_key(
@@ -1343,6 +1357,7 @@ fn forward_recorded_repeat(
     let Some(bytes) = bytes else {
         return;
     };
+    super::handoff_shell_input(target, &bytes);
     reset_viewport_and_invalidate(&mut target.terminal.lock());
     let _ = target.writer.write(&bytes);
     notify_interaction_changed(

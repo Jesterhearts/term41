@@ -413,7 +413,11 @@ pub(super) fn start_command_block(
         return;
     }
     if active_block_is_unfinished_prompt_or_command(screen) {
-        reset_active_command_block(screen, viewport);
+        // Readline can repaint only the prompt and skip over command cells
+        // already on screen. A prompt marker must not erase those cells.
+        if !cursor_is_on_prompt_row(screen, viewport) {
+            reset_active_command_block(screen, viewport);
+        }
         return;
     }
     if !active_block_has_pty_backed_content(screen) {
@@ -452,6 +456,17 @@ pub(super) fn start_command_block(
     screen.cursor.row = 0;
     screen.cursor.col = 0;
     screen.offset = 0;
+}
+
+fn cursor_is_on_prompt_row(
+    screen: &Screen,
+    viewport: &Viewport,
+) -> bool {
+    screen
+        .grid
+        .rows
+        .get(active_row_index(screen, viewport))
+        .is_some_and(|row| row.prompt_start)
 }
 
 /// Evict whole command blocks from the front of the document once the budget

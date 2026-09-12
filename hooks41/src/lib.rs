@@ -69,8 +69,17 @@ if [ -z "${__TERM41_SHELL_INTEGRATION_INSTALLED:-}" ]; then
     return "$__term41_status"
   }
 
+  __term41_wrap_prompt() {
+    case "$PS1" in
+      *"]133;B"*) ;;
+      *) PS1='\[\033]133;A\007\]'"${PS1}"'\[\033]133;B\007\]' ;;
+    esac
+  }
+
   __term41_prompt_command_end() {
     local __term41_status=$?
+    # Prompt frameworks rebuild PS1 in PROMPT_COMMAND, so attach markers last.
+    __term41_wrap_prompt
     __term41_in_prompt=0
     return "$__term41_status"
   }
@@ -89,11 +98,6 @@ if [ -z "${__TERM41_SHELL_INTEGRATION_INSTALLED:-}" ]; then
       fi
     fi
   }
-
-  case "$PS1" in
-    *"]133;B"*) ;;
-    *) PS1='\[\033]133;A\007\]'"${PS1}"'\[\033]133;B\007\]' ;;
-  esac
 
   if __term41_bash_supports_ps0; then
     __term41_use_ps0=1

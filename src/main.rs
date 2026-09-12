@@ -74,7 +74,6 @@ static LOG_TOAST_TX: OnceLock<mpsc::Sender<String>> = OnceLock::new();
 
 const INITIAL_COLS: u32 = 80;
 const INITIAL_ROWS: u32 = 24;
-const COMMAND_EDITOR_BOX_ROWS: u32 = 3;
 
 /// Size of the cueue ring buffer for window→renderer events (in elements).
 const EVENT_QUEUE_SIZE: usize = 4096;
@@ -571,7 +570,6 @@ fn main() {
             click_count: 0,
             left_drag_active: false,
             selection_drag_moved: false,
-            command_editor_drag_anchor: None,
             tab_drag: None,
             selection_autoscroll_direction: None,
             selection_autoscroll_next: None,

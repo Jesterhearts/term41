@@ -34,14 +34,11 @@ use crate::renderer::gutter_popup_origin;
 use crate::renderer::image_atlas::ImageAtlas;
 use crate::renderer::paint::build_tab_bar_plan;
 use crate::renderer::paint::centered_ink_origin_x;
-use crate::renderer::paint::command_highlight_rgb;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
 use crate::renderer::paint::underline_style_for_render;
 use crate::renderer::paint::visible_row_cols;
-use crate::window_host::CommandEditorPopupSide;
 use crate::window_host::TabId;
-use crate::window_host::command_editor_popup_side_for_row;
 
 mod chrome;
 mod cursor;
@@ -85,16 +82,18 @@ use layers::IMAGE_DEPTH_FORMAT;
 use layers::ImageDepthLayer;
 use layers::TerminalLayer;
 pub(in crate::renderer) use layout::ClipRect;
-pub(in crate::renderer) use layout::CommandEditorBoxLayout;
 pub(in crate::renderer) use layout::FrameLayout;
 pub(in crate::renderer) use layout::apply_terminal_layout_offsets;
-pub(in crate::renderer) use layout::command_editor_box_layout;
+pub(in crate::renderer) use layout::command_completion_layout;
+pub(in crate::renderer) use layout::command_completion_list_y;
+pub(in crate::renderer) use layout::command_cursor_shape;
 pub(in crate::renderer) use layout::row_hidden_by_sticky_prompt;
 pub(in crate::renderer) use layout::row_suspended_by_terminal_area;
 pub(in crate::renderer) use layout::snapshot_row_y;
 #[cfg(test)]
 pub(in crate::renderer) use layout::terminal_block_y_offset_rows;
 pub(in crate::renderer) use layout::terminal_row_y;
+pub(in crate::renderer) use layout::truncate_command_label;
 pub(in crate::renderer) use layout::visible_command_editor;
 use pipelines::BgImagePipeline;
 use pipelines::BgPipeline;
@@ -756,7 +755,7 @@ impl Renderer {
     ) {
         let mut layout = frame::frame_layout(self, font_system, tabs);
         let command_editor = visible_command_editor(command_editor, snap);
-        let block_y_offset_rows = apply_terminal_layout_offsets(&mut layout, snap, command_editor);
+        let block_y_offset_rows = apply_terminal_layout_offsets(&mut layout, snap);
         if suspend_terminal_area {
             frame::apply_terminal_snapshot_status_row(self, snap);
         } else {
@@ -813,11 +812,6 @@ impl Renderer {
     pub fn notify_bell(&mut self) {
         self.bell_started = Some(Instant::now());
     }
-}
-
-fn command_highlight_color(kind: commands41::HighlightKind) -> u32 {
-    let rgb = command_highlight_rgb(kind);
-    pack_color(&rgb, 255)
 }
 
 /// Convert a byte-indexed `(start, end)` range on `text` to a character-index

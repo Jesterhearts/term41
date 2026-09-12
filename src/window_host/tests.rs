@@ -15,7 +15,6 @@ use terminal41::prompt::CommandBlockCommand;
 use terminal41::prompt::CommandTextSource;
 use terminal41::prompt::PromptRef;
 use terminal41::prompt::command_block_document;
-use terminal41::selection::open_search;
 use terminal41::view;
 use winit::event::ElementState;
 use winit::event::MouseButton;
@@ -26,7 +25,6 @@ use winit::keyboard::NamedKey;
 use winit::keyboard::PhysicalKey;
 
 use super::*;
-use crate::COMMAND_EDITOR_BOX_ROWS;
 use crate::mouse_report_position_from_pixels;
 use crate::popup_command_text;
 use crate::popup_rerun_command_text;
@@ -402,14 +400,11 @@ mod command_editor_context_tests {
     use super::*;
 
     #[test]
-    fn command_editor_view_context_requires_primary_screen_only() {
+    fn command_editor_context_requires_command_phase() {
         let mut term = TestTerm::new_80x24();
 
-        assert_eq!(
-            command_editor_view_context(&term),
-            Some(CommandEditorContext { current_dir: None })
-        );
-        assert_eq!(command_editor_input_context(&term, false), None);
+        assert_eq!(command_editor_view_context(&term), None);
+        assert_eq!(command_editor_input_context(&term), None);
 
         term.process(b"\x1b]133;B\x07");
 
@@ -418,7 +413,7 @@ mod command_editor_context_tests {
             Some(CommandEditorContext { current_dir: None })
         );
         assert_eq!(
-            command_editor_input_context(&term, false),
+            command_editor_input_context(&term),
             Some(CommandEditorContext { current_dir: None })
         );
     }
@@ -434,8 +429,7 @@ mod command_editor_context_tests {
             ShellIntegrationPhase::Output
         );
         assert_eq!(command_editor_view_context(&term), None);
-        assert_eq!(command_editor_input_context(&term, false), None);
-        assert_eq!(command_editor_input_context(&term, true), None);
+        assert_eq!(command_editor_input_context(&term), None);
     }
 
     #[test]
@@ -445,7 +439,7 @@ mod command_editor_context_tests {
 
         assert!(host::mouse_tracking_enabled(term.modes.mouse_tracking));
         assert_eq!(command_editor_view_context(&term), None);
-        assert_eq!(command_editor_input_context(&term, true), None);
+        assert_eq!(command_editor_input_context(&term), None);
 
         term.process(b"\x1b[?1000l\x1b]133;C\x07");
 
@@ -490,7 +484,7 @@ mod command_editor_context_tests {
             Some(CommandEditorContext { current_dir: None })
         );
         assert_eq!(
-            command_editor_input_context(&term, true),
+            command_editor_input_context(&term),
             Some(CommandEditorContext { current_dir: None })
         );
     }
@@ -507,99 +501,7 @@ mod command_editor_context_tests {
         );
         assert!(term.on_alt_screen);
         assert_eq!(command_editor_view_context(&term), None);
-        assert_eq!(command_editor_input_context(&term, true), None);
-    }
-
-    #[test]
-    fn command_editor_terminal_row_offset_requires_visible_editor() {
-        let mut term = TestTerm::new_80x24();
-
-        assert_eq!(command_editor_terminal_row_offset(&term, false), 0);
-        assert_eq!(
-            command_editor_terminal_row_offset(&term, true),
-            COMMAND_EDITOR_BOX_ROWS
-        );
-
-        term.process(b"\x1b[24;1H");
-        assert_eq!(
-            command_editor_terminal_row_offset(&term, true),
-            COMMAND_EDITOR_BOX_ROWS
-        );
-
-        term.process(b"\x1b[22;1H");
-        assert_eq!(
-            command_editor_terminal_row_offset(&term, true),
-            COMMAND_EDITOR_BOX_ROWS
-        );
-
-        term.process(b"\x1b[21;1H");
-        assert_eq!(
-            command_editor_terminal_row_offset(&term, true),
-            COMMAND_EDITOR_BOX_ROWS
-        );
-
-        let mut term = TestTerm::new(10, 5, 100, 16, 8);
-        term.process(b"one");
-        term.process(b"\x1b]133;A\x07two");
-        term.process(b"\x1b]133;A\x07three");
-        assert_eq!(
-            command_editor_visual_cursor_row(&term),
-            term.viewport.rows - 1
-        );
-        assert_eq!(
-            command_editor_terminal_row_offset(&term, true),
-            COMMAND_EDITOR_BOX_ROWS
-        );
-
-        view::set_viewport_offset(&mut term.active, 1);
-        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
-        view::set_viewport_offset(&mut term.active, 0);
-
-        open_search(&mut term.search);
-        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
-
-        let mut term = TestTerm::new_80x24();
-        term.process(b"\x1b[?1049h");
-        assert_eq!(command_editor_terminal_row_offset(&term, true), 0);
-    }
-
-    #[test]
-    fn command_editor_placement_stays_below_prompt_and_uses_reserved_rows() {
-        assert_eq!(
-            command_editor_placement_for_cursor(0, 24),
-            CommandEditorPlacement {
-                top_row: 1,
-                rows: COMMAND_EDITOR_BOX_ROWS,
-                terminal_row_offset: 0,
-            }
-        );
-
-        assert_eq!(
-            command_editor_placement_for_cursor(20, 24),
-            CommandEditorPlacement {
-                top_row: 21,
-                rows: COMMAND_EDITOR_BOX_ROWS,
-                terminal_row_offset: 0,
-            }
-        );
-
-        assert_eq!(
-            command_editor_placement_for_cursor(23, 24),
-            CommandEditorPlacement {
-                top_row: 21,
-                rows: COMMAND_EDITOR_BOX_ROWS,
-                terminal_row_offset: 3,
-            }
-        );
-
-        assert_eq!(
-            command_editor_placement_for_cursor(0, 2),
-            CommandEditorPlacement {
-                top_row: 1,
-                rows: 1,
-                terminal_row_offset: 0,
-            }
-        );
+        assert_eq!(command_editor_input_context(&term), None);
     }
 
     #[test]
@@ -717,14 +619,6 @@ mod command_editor_input_tests {
     }
 
     #[test]
-    fn submitted_editor_newlines_are_sent_as_enters() {
-        assert_eq!(
-            command_submission_bytes("cargo\ntest\n--workspace"),
-            b"cargo\rtest\r--workspace\r"
-        );
-    }
-
-    #[test]
     fn vim_mode_maps_plain_keys_to_vim_inputs() {
         assert_eq!(
             command_editor_input(&Key::Character("i".into()), ModifiersState::empty(), true),
@@ -829,29 +723,6 @@ mod command_editor_input_tests {
                 .expect("view")
                 .cursor_style,
             CommandEditorCursorStyle::Block
-        );
-    }
-
-    #[test]
-    fn mouse_cell_maps_to_visible_multiline_editor_text() {
-        let view = CommandLineView {
-            text: "one\ntwo\nthree\nfour".to_owned(),
-            cursor: "one\ntwo\nthree\nfour".len(),
-            cursor_style: CommandEditorCursorStyle::Beam,
-            spans: Vec::new(),
-            selection: None,
-            completion: None,
-            candidates: Vec::new(),
-            candidate_index: 0,
-        };
-
-        assert_eq!(
-            command_editor_byte_index_at_cell(&view, 80, 3, 0, 0),
-            "one\n".len()
-        );
-        assert_eq!(
-            command_editor_byte_index_at_cell(&view, 80, 3, 2, 2),
-            "one\ntwo\nthree\nfo".len()
         );
     }
 }

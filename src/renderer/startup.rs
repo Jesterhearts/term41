@@ -38,7 +38,6 @@ use crate::renderer::TabContextMenu;
 use crate::renderer::compute_gutter_width;
 use crate::renderer::gutter_popup_origin;
 use crate::renderer::r#impl::CURSOR_BLINK_HALF_PERIOD;
-use crate::renderer::r#impl::CommandEditorBoxLayout;
 use crate::renderer::r#impl::FAILURE;
 use crate::renderer::r#impl::FrameLayout;
 use crate::renderer::r#impl::RUNNING;
@@ -46,19 +45,19 @@ use crate::renderer::r#impl::SUCCESS;
 use crate::renderer::r#impl::TabInfo;
 use crate::renderer::r#impl::apply_terminal_layout_offsets;
 use crate::renderer::r#impl::collect_row_glyphs;
-use crate::renderer::r#impl::command_editor_box_layout;
+use crate::renderer::r#impl::command_completion_layout;
+use crate::renderer::r#impl::command_completion_list_y;
+use crate::renderer::r#impl::command_cursor_shape;
 use crate::renderer::r#impl::gutter_fill_bg_for_col0;
 use crate::renderer::r#impl::row_hidden_by_sticky_prompt;
 use crate::renderer::r#impl::snapshot_row_y;
+use crate::renderer::r#impl::truncate_command_label;
 use crate::renderer::r#impl::visible_command_editor;
 use crate::renderer::paint::blink_animation_enabled;
 use crate::renderer::paint::centered_ink_origin_x;
-use crate::renderer::paint::command_highlight_rgb;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
 use crate::renderer::paint::visible_row_cols;
-use crate::window_host::CommandEditorPopupSide;
-use crate::window_host::command_editor_popup_side_for_row;
 
 type StartupGlyphKey = (usize, u16, u8, bool, Option<font41::DrcsGeometryClass>);
 
@@ -162,7 +161,7 @@ impl StartupPresenter {
         };
         let command_editor = visible_command_editor(command_editor, &snap);
         let mut layout = startup_frame_layout(&self.font_system, gutter_w, !tabs.is_empty());
-        apply_terminal_layout_offsets(&mut layout, &snap, command_editor);
+        apply_terminal_layout_offsets(&mut layout, &snap);
 
         self.apply_terminal_snapshot_rows(&snap);
         snap.rows = self.terminal_rows.clone();
@@ -200,8 +199,9 @@ impl StartupPresenter {
             hovered_button,
             maximized,
         );
-        let terminal_cursor_visible = command_editor.is_none() && frame.cursor_visible;
-        let block_cursor = match frame.snap.cursor_style.shape {
+        let terminal_cursor_visible = frame.cursor_visible;
+        let cursor_shape = command_cursor_shape(frame.snap.cursor_style.shape, command_editor);
+        let block_cursor = match cursor_shape {
             CursorShape::Block if terminal_cursor_visible => frame.snap.cursor,
             _ => None,
         };
@@ -305,6 +305,7 @@ impl StartupPresenter {
             height,
             &frame.snap,
             terminal_cursor_visible,
+            cursor_shape,
             &layout,
             gutter_w,
         );
@@ -973,158 +974,14 @@ fn paint_command_editor(
     width: usize,
     height: usize,
 ) {
-    let Some(box_layout) = command_editor_box_layout(snap, layout) else {
+    let Some(completion) = command_completion_layout(snap, layout) else {
         return;
     };
-    let border = 2.0;
-    let lines = command_editor_line_ranges(&editor.text);
-    let cursor = editor.cursor.min(editor.text.len());
-    if !editor.text.is_char_boundary(cursor) {
-        return;
-    }
-    let (cursor_line, cursor_line_start) = command_editor_cursor_line(&lines, cursor);
-    let visible_start =
-        command_editor_visible_line_start(lines.len(), cursor_line, box_layout.editor_rows);
-    let visible_end = (visible_start + box_layout.editor_rows).min(lines.len());
-    let has_overflow = lines.len() > box_layout.editor_rows;
-    let scrollbar_cols = u32::from(has_overflow);
-    let content_cols = snap.viewport_cols.saturating_sub(1 + scrollbar_cols).max(1) as usize;
     let cell_w = layout.cell_w;
     let cell_h = layout.cell_h;
-
-    fill_rect_rgba(
-        buffer,
-        width,
-        height,
-        rect_i32(
-            box_layout.editor_x,
-            box_layout.box_y,
-            box_layout.editor_w,
-            box_layout.box_h,
-        ),
-        Srgb::new(18, 21, 29),
-        248,
-    );
-    fill_rect_rgba(
-        buffer,
-        width,
-        height,
-        rect_i32(
-            box_layout.editor_x,
-            box_layout.box_y,
-            box_layout.editor_w,
-            border,
-        ),
-        Srgb::new(88, 150, 255),
-        255,
-    );
-
-    if has_overflow {
-        paint_command_editor_scrollbar(
-            buffer,
-            width,
-            height,
-            &box_layout,
-            border,
-            layout,
-            visible_start,
-            lines.len(),
-        );
-    }
-
-    if let Some(selection) = editor.selection {
-        let (selection_start, selection_end) = selection.ordered();
-        for (visible_idx, &(line_start, line_end)) in
-            lines[visible_start..visible_end].iter().enumerate()
-        {
-            let start = selection_start.max(line_start);
-            let end = selection_end.min(line_end);
-            if start >= end {
-                continue;
-            }
-            let start_col = editor.text[line_start..start].graphemes(true).count();
-            let end_col = editor.text[line_start..end]
-                .graphemes(true)
-                .count()
-                .min(content_cols);
-            if start_col >= end_col || start_col >= content_cols {
-                continue;
-            }
-            fill_rect_rgba(
-                buffer,
-                width,
-                height,
-                rect_i32(
-                    box_layout.content_x + start_col as f32 * cell_w,
-                    box_layout.box_y + visible_idx as f32 * cell_h,
-                    (end_col - start_col) as f32 * cell_w,
-                    cell_h,
-                ),
-                Srgb::new(55, 84, 132),
-                210,
-            );
-        }
-    }
-
-    for (visible_idx, &(line_start, line_end)) in
-        lines[visible_start..visible_end].iter().enumerate()
-    {
-        let line_y = box_layout.box_y + visible_idx as f32 * cell_h;
-        for span in &editor.spans {
-            if span.start >= span.end || span.end > editor.text.len() {
-                continue;
-            }
-            let start = span.start.max(line_start);
-            let end = span.end.min(line_end);
-            if start >= end {
-                continue;
-            }
-            let segment = &editor.text[start..end];
-            if segment.trim().is_empty() {
-                continue;
-            }
-            let col = editor.text[line_start..start].graphemes(true).count();
-            if col >= content_cols {
-                continue;
-            }
-            let label = truncate_graphemes(segment, content_cols - col);
-            let row = label_row(
-                &label,
-                command_highlight_rgb(span.kind),
-                Srgb::new(18, 21, 29),
-                false,
-            );
-            paint_shaped_label(
-                font_system,
-                snap,
-                buffer,
-                width,
-                height,
-                &row,
-                box_layout.content_x + col as f32 * cell_w,
-                line_y,
-            );
-        }
-    }
-
-    let cursor_line_visible = cursor_line >= visible_start && cursor_line < visible_end;
-    let visible_cursor_line = cursor_line.saturating_sub(visible_start);
-    let cursor_cell = editor.text[cursor_line_start..cursor]
-        .graphemes(true)
-        .count()
-        .min(content_cols - 1);
-
-    if let Some(completion) = editor.completion.as_deref()
-        && cursor_line_visible
-        && cursor_cell < content_cols
-    {
-        let label = truncate_graphemes(completion, content_cols - cursor_cell);
-        let row = label_row(
-            &label,
-            Srgb::new(125, 136, 155),
-            Srgb::new(18, 21, 29),
-            false,
-        );
+    if let Some(text) = editor.completion.as_deref() {
+        let label = truncate_command_label(text, completion.cols);
+        let row = label_row(&label, Srgb::new(125, 136, 155), snap.palette.bg, false);
         paint_shaped_label(
             font_system,
             snap,
@@ -1132,40 +989,9 @@ fn paint_command_editor(
             width,
             height,
             &row,
-            box_layout.content_x + cursor_cell as f32 * cell_w,
-            box_layout.box_y + visible_cursor_line as f32 * cell_h,
+            completion.x,
+            completion.y,
         );
-    }
-
-    if cursor_line_visible {
-        match editor.cursor_style {
-            commands41::CommandEditorCursorStyle::Beam => fill_rect_rgba(
-                buffer,
-                width,
-                height,
-                rect_i32(
-                    box_layout.content_x + cursor_cell as f32 * cell_w,
-                    box_layout.box_y + visible_cursor_line as f32 * cell_h + 2.0,
-                    2.0,
-                    cell_h - 4.0,
-                ),
-                Srgb::new(230, 235, 255),
-                255,
-            ),
-            commands41::CommandEditorCursorStyle::Block => fill_rect_rgba(
-                buffer,
-                width,
-                height,
-                rect_i32(
-                    box_layout.content_x + cursor_cell as f32 * cell_w,
-                    box_layout.box_y + visible_cursor_line as f32 * cell_h + 1.0,
-                    cell_w,
-                    cell_h - 2.0,
-                ),
-                Srgb::new(230, 235, 255),
-                175,
-            ),
-        }
     }
 
     if editor.candidates.is_empty() {
@@ -1175,35 +1001,32 @@ fn paint_command_editor(
     let list_cells = editor
         .candidates
         .iter()
-        .map(|candidate| candidate.graphemes(true).count() + 2)
+        .map(|candidate| unicode_width::UnicodeWidthStr::width(candidate.as_str()) + 2)
         .max()
         .unwrap_or(1)
-        .min(content_cols)
+        .min(snap.viewport_cols as usize)
         .max(1);
     let list_w = list_cells as f32 * cell_w;
-    let list_h = editor.candidates.len() as f32 * cell_h;
-    let cursor_y = box_layout.box_y + visible_cursor_line as f32 * cell_h;
-    let editor_cursor_screen_row = box_layout.placement.top_row + visible_cursor_line as u32;
-    let list_y =
-        match command_editor_popup_side_for_row(editor_cursor_screen_row, snap.viewport_rows) {
-            CommandEditorPopupSide::Below => {
-                let preferred = cursor_y + cell_h;
-                preferred
-                    .min(layout.tab_bar_h + snap.viewport_rows as f32 * cell_h - list_h)
-                    .max(layout.tab_bar_h)
-            }
-            CommandEditorPopupSide::Above => (cursor_y - list_h).max(layout.tab_bar_h),
-        };
+    let list_h = editor.candidates.len().min(snap.viewport_rows as usize) as f32 * cell_h;
+    let list_x = completion
+        .x
+        .min(layout.gutter_px + snap.viewport_cols as f32 * cell_w - list_w);
+    let list_y = command_completion_list_y(&completion, list_h, snap, layout);
 
     fill_rect_rgba(
         buffer,
         width,
         height,
-        rect_i32(box_layout.content_x, list_y, list_w, list_h),
+        rect_i32(list_x, list_y, list_w, list_h),
         Srgb::new(22, 25, 34),
         245,
     );
-    for (idx, candidate) in editor.candidates.iter().enumerate() {
+    for (idx, candidate) in editor
+        .candidates
+        .iter()
+        .take(snap.viewport_rows as usize)
+        .enumerate()
+    {
         let row_y = list_y + idx as f32 * cell_h;
         let active = idx == editor.candidate_index;
         if active {
@@ -1211,12 +1034,12 @@ fn paint_command_editor(
                 buffer,
                 width,
                 height,
-                rect_i32(box_layout.content_x, row_y, list_w, cell_h),
+                rect_i32(list_x, row_y, list_w, cell_h),
                 Srgb::new(42, 55, 78),
                 245,
             );
         }
-        let label = truncate_graphemes(candidate, list_cells.saturating_sub(1));
+        let label = truncate_command_label(candidate, list_cells.saturating_sub(1));
         let fg = if active {
             Srgb::new(225, 232, 255)
         } else {
@@ -1230,115 +1053,10 @@ fn paint_command_editor(
             width,
             height,
             &row,
-            box_layout.content_x + cell_w,
+            list_x + cell_w,
             row_y,
         );
     }
-}
-
-#[allow(clippy::too_many_arguments)]
-fn paint_command_editor_scrollbar(
-    buffer: &mut [u32],
-    width: usize,
-    height: usize,
-    box_layout: &CommandEditorBoxLayout,
-    border: f32,
-    layout: &FrameLayout,
-    visible_start: usize,
-    total_lines: usize,
-) {
-    let visible = box_layout.editor_rows.max(1);
-    if total_lines <= visible {
-        return;
-    }
-    let track_h = (box_layout.box_h - border).max(1.0);
-    let track_w = (layout.cell_w * 0.18).max(2.0);
-    let track_x = box_layout.box_x + box_layout.box_w - layout.cell_w * 0.5 - track_w * 0.5;
-    let track_y = box_layout.box_y + border;
-    fill_rect_rgba(
-        buffer,
-        width,
-        height,
-        rect_i32(track_x, track_y, track_w, track_h),
-        Srgb::new(54, 62, 78),
-        220,
-    );
-
-    let thumb_h = (track_h * visible as f32 / total_lines as f32).max(layout.cell_h * 0.45);
-    let max_start = total_lines.saturating_sub(visible).max(1);
-    let scroll_ratio = visible_start as f32 / max_start as f32;
-    let thumb_y = track_y + (track_h - thumb_h).max(0.0) * scroll_ratio;
-    fill_rect_rgba(
-        buffer,
-        width,
-        height,
-        rect_i32(track_x, thumb_y, track_w, thumb_h),
-        Srgb::new(145, 160, 190),
-        255,
-    );
-}
-
-fn command_editor_line_ranges(text: &str) -> Vec<(usize, usize)> {
-    let mut ranges = Vec::new();
-    let mut start = 0;
-    for (idx, ch) in text.char_indices() {
-        if ch == '\n' {
-            ranges.push((start, idx));
-            start = idx + ch.len_utf8();
-        }
-    }
-    ranges.push((start, text.len()));
-    ranges
-}
-
-fn command_editor_cursor_line(
-    lines: &[(usize, usize)],
-    cursor: usize,
-) -> (usize, usize) {
-    for (idx, &(start, end)) in lines.iter().enumerate() {
-        if cursor <= end {
-            return (idx, start);
-        }
-    }
-    lines
-        .last()
-        .map(|&(start, _)| (lines.len().saturating_sub(1), start))
-        .unwrap_or((0, 0))
-}
-
-fn command_editor_visible_line_start(
-    line_count: usize,
-    cursor_line: usize,
-    visible_rows: usize,
-) -> usize {
-    let visible = visible_rows.max(1);
-    if line_count <= visible {
-        return 0;
-    }
-    cursor_line.saturating_add(1).saturating_sub(visible)
-}
-
-fn truncate_graphemes(
-    text: &str,
-    max_cells: usize,
-) -> String {
-    let mut graphemes = text.graphemes(true);
-    let mut out = String::new();
-    for _ in 0..max_cells {
-        let Some(grapheme) = graphemes.next() else {
-            return out;
-        };
-        out.push_str(grapheme);
-    }
-    if graphemes.next().is_some() && max_cells >= 3 {
-        out.truncate(
-            out.grapheme_indices(true)
-                .nth(max_cells - 3)
-                .map_or(0, |(idx, _)| idx),
-        );
-        out.push_str("...");
-    }
-    out
 }
 
 fn paint_status_line_chrome(
@@ -1578,6 +1296,7 @@ fn paint_cursor_overlay(
     height: usize,
     snap: &TermSnapshot,
     cursor_visible: bool,
+    cursor_shape: CursorShape,
     layout: &FrameLayout,
     gutter_w: i32,
 ) {
@@ -1597,7 +1316,7 @@ fn paint_cursor_overlay(
         + layout.block_y_offset)
         .round() as i32;
 
-    match snap.cursor_style.shape {
+    match cursor_shape {
         CursorShape::Block => {}
         CursorShape::Underline => {
             let h = ((cell_h as f32 * 0.12).max(2.0)).round() as i32;

@@ -1,7 +1,6 @@
 use terminal41::RowSnapshot;
 use terminal41::TermSnapshot;
-
-use crate::window_host::command_editor_placement_for_cursor;
+use unicode_segmentation::UnicodeSegmentation;
 
 pub(in crate::renderer) struct FrameLayout {
     pub(in crate::renderer) cell_w: f32,
@@ -22,16 +21,11 @@ pub(in crate::renderer) struct ClipRect {
 }
 
 #[derive(Clone, Copy)]
-pub(in crate::renderer) struct CommandEditorBoxLayout {
-    pub(in crate::renderer) placement: crate::window_host::CommandEditorPlacement,
-    pub(in crate::renderer) editor_x: f32,
-    pub(in crate::renderer) box_x: f32,
-    pub(in crate::renderer) box_y: f32,
-    pub(in crate::renderer) box_w: f32,
-    pub(in crate::renderer) editor_w: f32,
-    pub(in crate::renderer) editor_rows: usize,
-    pub(in crate::renderer) box_h: f32,
-    pub(in crate::renderer) content_x: f32,
+pub(in crate::renderer) struct CommandCompletionLayout {
+    pub(in crate::renderer) x: f32,
+    pub(in crate::renderer) y: f32,
+    pub(in crate::renderer) cursor_row: u32,
+    pub(in crate::renderer) cols: usize,
 }
 
 pub(in crate::renderer) fn terminal_row_y(
@@ -151,46 +145,66 @@ pub(in crate::renderer) fn visible_command_editor<'a>(
 pub(in crate::renderer) fn apply_terminal_layout_offsets(
     layout: &mut FrameLayout,
     snap: &TermSnapshot,
-    command_editor: Option<&commands41::CommandLineView>,
 ) -> u32 {
     let block_y_offset_rows = terminal_block_y_offset_rows(&snap.rows, snap);
     layout.block_y_offset = block_y_offset_rows as f32 * layout.cell_h;
     layout.terminal_y_offset = 0.0;
-    if command_editor.is_some() {
-        let cursor_row = snap
-            .cursor
-            .map_or(0, |(row, _)| row.saturating_add(block_y_offset_rows));
-        let placement = command_editor_placement_for_cursor(cursor_row, snap.viewport_rows);
-        layout.terminal_y_offset = -(placement.terminal_row_offset as f32) * layout.cell_h;
-    }
     block_y_offset_rows
 }
 
-pub(in crate::renderer) fn command_editor_box_layout(
+pub(in crate::renderer) fn command_completion_layout(
     snap: &TermSnapshot,
     layout: &FrameLayout,
-) -> Option<CommandEditorBoxLayout> {
-    let (cursor_row, _cursor_col) = snap.cursor?;
+) -> Option<CommandCompletionLayout> {
+    let (cursor_row, cursor_col) = snap.cursor?;
     let block_offset_rows = (layout.block_y_offset / layout.cell_h).round().max(0.0) as u32;
-    let visual_cursor_row = cursor_row.saturating_add(block_offset_rows);
-    let placement = command_editor_placement_for_cursor(visual_cursor_row, snap.viewport_rows);
-    let editor_x = 0.0;
-    let box_x = layout.gutter_px;
-    let box_y = terminal_row_y(cursor_row, layout) + layout.cell_h;
-    let box_w = snap.viewport_cols.max(1) as f32 * layout.cell_w;
-    let editor_w = layout.gutter_px + box_w;
-    let editor_rows = placement.rows.max(1) as usize;
-    let box_h = editor_rows as f32 * layout.cell_h;
-    let content_x = box_x;
-    Some(CommandEditorBoxLayout {
-        placement,
-        editor_x,
-        box_x,
-        box_y,
-        box_w,
-        editor_w,
-        editor_rows,
-        box_h,
-        content_x,
+    Some(CommandCompletionLayout {
+        x: layout.gutter_px + cursor_col as f32 * layout.cell_w,
+        y: terminal_row_y(cursor_row, layout),
+        cursor_row: cursor_row.saturating_add(block_offset_rows),
+        cols: snap.viewport_cols.saturating_sub(cursor_col) as usize,
+    })
+}
+
+pub(in crate::renderer) fn command_completion_list_y(
+    completion: &CommandCompletionLayout,
+    list_h: f32,
+    snap: &TermSnapshot,
+    layout: &FrameLayout,
+) -> f32 {
+    use crate::window_host::CommandEditorPopupSide;
+    use crate::window_host::command_editor_popup_side_for_row;
+    match command_editor_popup_side_for_row(completion.cursor_row, snap.viewport_rows) {
+        CommandEditorPopupSide::Below => (completion.y + layout.cell_h)
+            .min(layout.tab_bar_h + snap.viewport_rows as f32 * layout.cell_h - list_h)
+            .max(layout.tab_bar_h),
+        CommandEditorPopupSide::Above => (completion.y - list_h).max(layout.tab_bar_h),
+    }
+}
+
+pub(in crate::renderer) fn truncate_command_label(
+    text: &str,
+    max_cells: usize,
+) -> String {
+    let mut output = String::new();
+    let mut cells = 0;
+    for grapheme in text.graphemes(true) {
+        let width = unicode_width::UnicodeWidthStr::width(grapheme);
+        if grapheme.contains(['\n', '\r']) || cells + width > max_cells {
+            break;
+        }
+        output.push_str(grapheme);
+        cells += width;
+    }
+    output
+}
+
+pub(in crate::renderer) fn command_cursor_shape(
+    default: config41::CursorShape,
+    editor: Option<&commands41::CommandLineView>,
+) -> config41::CursorShape {
+    editor.map_or(default, |editor| match editor.cursor_style {
+        commands41::CommandEditorCursorStyle::Block => config41::CursorShape::Block,
+        commands41::CommandEditorCursorStyle::Beam => config41::CursorShape::Beam,
     })
 }

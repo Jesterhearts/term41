@@ -55,7 +55,7 @@ pub struct SubcommandCompletionConfig {
 
 #[derive(Deserialize, Default)]
 pub(crate) struct CommandEditorSettings {
-    /// Enable the terminal-local command editor. Disabled by default so the
+    /// Enable inline shell editing. Disabled by default so the
     /// normal keyboard path remains unchanged unless the user opts in.
     #[serde(default)]
     enabled: Option<bool>,
