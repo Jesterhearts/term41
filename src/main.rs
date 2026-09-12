@@ -358,12 +358,8 @@ fn main() {
     let _ = APP_START_TIME.set(Instant::now());
 
     let directive = cfg_select! {
-        debug_assertions => {
-            "term41=debug"
-        }
-        not(debug_assertions) => {
-            "term41=warn"
-        }
+        debug_assertions => "term41=debug",
+        not(debug_assertions) => "term41=warn",
     };
 
     tracing_subscriber::registry()

@@ -40,6 +40,7 @@ use crate::renderer::paint::status_line_label_row;
 use crate::renderer::paint::underline_style_for_render;
 use crate::renderer::paint::visible_row_cols;
 use crate::window_host::CommandEditorPopupSide;
+use crate::window_host::TabId;
 use crate::window_host::command_editor_popup_side_for_row;
 
 mod chrome;
@@ -331,13 +332,11 @@ impl Renderer {
             let _s = tracing::debug_span!("request_device").entered();
 
             let descriptor = cfg_select! {
-                feature = "vulkan" => {
-                    wgpu::DeviceDescriptor {
+                feature = "vulkan" => wgpu::DeviceDescriptor {
                     required_features: wgpu::Features::PIPELINE_CACHE,
-                        ..Default::default()
-                    }
+                    ..Default::default()
                 },
-                _ => wgpu::DeviceDescriptor::default()
+                _ => wgpu::DeviceDescriptor::default(),
             };
 
             adapter
@@ -386,12 +385,12 @@ impl Renderer {
 
         let mut pipelines = HashMap::new();
         for format in [TextureFormat::Bgra8Unorm, TextureFormat::Rgba8Unorm] {
-            let pipeline_cache: Option<wgpu::PipelineCache> = cfg_select! {
-                feature = "vulkan" => {
-                    tracing::debug_span!("load_pipeline_cache").in_scope(||Some(load_pipeline_cache(&device, format)))
-                }
-                _ => None,
-            };
+            let pipeline_cache: Option<wgpu::PipelineCache> =
+                cfg_select! {
+                    feature = "vulkan" => tracing::debug_span!("load_pipeline_cache")
+                        .in_scope(|| Some(load_pipeline_cache(&device, format))),
+                    _ => None,
+                };
 
             pipelines.insert(
                 format,
@@ -524,12 +523,12 @@ impl Renderer {
                 "surface format {:?} wasn't in the prepared pipelines; this should be rare.",
                 surface_format
             );
-            let pipeline_cache: Option<wgpu::PipelineCache> = cfg_select! {
-                feature = "vulkan" => {
-                    tracing::debug_span!("load_pipeline_cache").in_scope(||Some(load_pipeline_cache(&device, surface_format)))
-                }
-                _ => None,
-            };
+            let pipeline_cache: Option<wgpu::PipelineCache> =
+                cfg_select! {
+                    feature = "vulkan" => tracing::debug_span!("load_pipeline_cache")
+                        .in_scope(|| Some(load_pipeline_cache(&device, surface_format))),
+                    _ => None,
+                };
 
             build_pipeline_for_format(
                 surface_format,
@@ -738,6 +737,7 @@ impl Renderer {
         &mut self,
         acquired: (wgpu::SurfaceTexture, wgpu::TextureView),
         font_system: &mut FontSystem,
+        tab_id: TabId,
         visible_images: &[VisibleImage],
         snap: &TermSnapshot,
         tabs: &[TabInfo],
@@ -765,9 +765,9 @@ impl Renderer {
         let terminal_rows = std::mem::take(&mut self.terminal_rows);
         self.image_atlas.begin_frame();
         let under_text_image_geometry =
-            frame::build_image_geometry(self, visible_images, &layout, true);
+            frame::build_image_geometry(self, tab_id, visible_images, &layout, true);
         let over_text_image_geometry =
-            frame::build_image_geometry(self, visible_images, &layout, false);
+            frame::build_image_geometry(self, tab_id, visible_images, &layout, false);
         let geometry = frame::build_render_geometry(
             self,
             font_system,

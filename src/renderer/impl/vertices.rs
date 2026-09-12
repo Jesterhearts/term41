@@ -145,8 +145,8 @@ pub(super) fn push_underline_quads(
             }
             CellAttrs::CURLY_UNDERLINE => {
                 // Approximate a sine wave with short line-segment quads. Four
-                // segments per cell gives a recognisable wave without bloating the
-                // vertex count.
+                // segments per cell gives a recognisable wave without bloating
+                // the vertex count.
                 let segments = 4u32;
                 let seg_w = cell_w / segments as f32;
                 let amplitude = (cell_h * 0.08).max(1.5);

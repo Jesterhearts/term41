@@ -82,6 +82,7 @@ use crate::renderer::POPUP_WIDTH_CELLS;
 use crate::renderer::glyph_atlas::GlyphAtlas;
 use crate::renderer::gutter_popup_origin;
 use crate::renderer::image_atlas::IMAGE_ATLAS_SIZE;
+use crate::window_host::TabId;
 
 pub(super) fn apply_terminal_snapshot_rows(
     renderer: &mut Renderer,
@@ -197,6 +198,7 @@ pub(super) fn frame_layout(
 
 pub(super) fn build_image_geometry(
     renderer: &mut Renderer,
+    tab_id: TabId,
     visible_images: &[VisibleImage],
     layout: &FrameLayout,
     under_text: bool,
@@ -220,6 +222,7 @@ pub(super) fn build_image_geometry(
         let entry = match renderer.image_atlas.ensure_cached(
             &renderer.device,
             &renderer.queue,
+            tab_id,
             vis.id,
             vis.frame_index,
             &vis.image,

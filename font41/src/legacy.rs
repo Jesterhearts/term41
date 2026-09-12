@@ -1374,7 +1374,8 @@ mod tests {
         let w = 16u32;
         let h = 24u32;
         let g = rasterize(0xFBAE, w, h, 20.0, 1); // all 4 segments
-        // Should produce roughly a diamond shape; check 4 quadrants have coverage.
+        // Should produce roughly a diamond shape; check 4 quadrants have
+        // coverage.
         let qw = w / 2;
         let qh = h / 2;
         let count_in = |x0: u32, y0: u32, x1: u32, y1: u32| -> usize {

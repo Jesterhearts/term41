@@ -147,7 +147,8 @@ fn row_text_and_col_map(cells: &[SmolStr]) -> (String, Vec<u16>) {
             && is_orphaned_emoji_component(ch)
             && chars.next().is_none()
         {
-            // Orphaned emoji components need their own cell broken from the previous one.
+            // Orphaned emoji components need their own cell broken from the
+            // previous one.
             row_text.push('\u{200C}');
         }
         row_text.push_str(cell);

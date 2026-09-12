@@ -778,7 +778,8 @@ impl Parser {
         if self.utf8_len == self.utf8_needed {
             self.state = State::Ground;
             let s = std::str::from_utf8(&self.utf8_buf[..self.utf8_len as usize]);
-            // Up to 4 UTF-8 bytes → always fits inline in SmolStr (23-byte cap).
+            // Up to 4 UTF-8 bytes → always fits inline in SmolStr (23-byte
+            // cap).
             match s.ok() {
                 Some(s) => {
                     let mut builder = SmolStrBuilder::new();

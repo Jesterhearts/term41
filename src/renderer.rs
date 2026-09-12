@@ -1325,6 +1325,7 @@ impl RenderHost {
         renderer.render(
             acquired,
             &mut self.font_system,
+            active_tab_id,
             &visible_images,
             &snap,
             &tab_infos,

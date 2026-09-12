@@ -241,8 +241,9 @@ fn apply_sgr_group_refs(
                 SgrAction::Dim => attrs.insert(CellAttrs::DIM),
                 SgrAction::Italic => attrs.insert(CellAttrs::ITALIC),
                 SgrAction::Underline => {
-                    // Sub-parameter determines style: bare `4` or `4:1` = single,
-                    // `4:0` = none, `4:2` = double, `4:3` = curly, etc.
+                    // Sub-parameter determines style: bare `4` or `4:1` =
+                    // single, `4:0` = none, `4:2` = double,
+                    // `4:3` = curly, etc.
                     let sub = g.get(1).copied().unwrap_or(1);
                     *attrs &= !CellAttrs::UNDERLINE_MASK;
                     attrs.insert(CellAttrs::underline_from_sgr(sub));

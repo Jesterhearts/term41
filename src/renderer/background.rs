@@ -213,8 +213,8 @@ impl Background {
         //   3. Main thread blocks on `meta.recv` (fast — ffmpeg init
         //      + 1-frame decode is ~5-20 ms), then builds GPU state
         //      with the first frame uploaded synchronously.
-        //   4. Thread continues in its steady-state loop, shipping subsequent frames
-        //      through `frame_tx`.
+        //   4. Thread continues in its steady-state loop, shipping subsequent
+        //      frames through `frame_tx`.
 
         let (frame_tx, frame_rx) = mpsc::sync_channel::<Frame>(FRAME_BUFFER_CAPACITY);
         let shutdown = Arc::new(AtomicBool::new(false));

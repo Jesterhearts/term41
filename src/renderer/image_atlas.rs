@@ -21,10 +21,20 @@ use image41::DecodedImage;
 
 use crate::renderer::shelf::Allocation;
 use crate::renderer::shelf::ShelfPacker;
+use crate::window_host::TabId;
 
 pub const IMAGE_ATLAS_SIZE: u32 = 2048;
 const MAX_ATLAS_PAGES: usize = 12;
 const CACHE_CAPACITY: usize = 256;
+
+/// Image ids are terminal-local, but the atlas is shared by all tabs.
+/// Keep each component intact: kitty virtual placements use full-width ids.
+#[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+struct ImageKey {
+    tab_id: TabId,
+    image_id: u64,
+    frame_index: usize,
+}
 
 /// A single rectangular tile of an image in the atlas.
 ///
@@ -53,8 +63,8 @@ pub struct ImageAtlas {
     bind_group_layout: wgpu::BindGroupLayout,
     sampler: wgpu::Sampler,
     pages: Vec<ImageAtlasPage>,
-    cache: Lru<u64, ImageEntry>,
-    frame_pins: HashSet<u64>,
+    cache: Lru<ImageKey, ImageEntry>,
+    frame_pins: HashSet<ImageKey>,
 }
 
 impl ImageAtlas {
@@ -125,19 +135,20 @@ impl ImageAtlas {
     ///
     /// Static images pass `frame_index = 0`; animated images pass the
     /// current frame index, and each frame is packed independently under
-    /// a composite `(image_id, frame_index)` cache key. This means a
+    /// a composite `(tab_id, image_id, frame_index)` cache key. This means a
     /// 20-frame animation occupies up to 20 atlas entries, and LRU
     /// eviction can rotate them like any other cached image.
     pub fn ensure_cached(
         &mut self,
         device: &wgpu::Device,
         queue: &wgpu::Queue,
+        tab_id: TabId,
         image_id: u64,
         frame_index: usize,
         image: &DecodedImage,
     ) -> Option<&ImageEntry> {
         let frame = image.frames.get(frame_index)?;
-        let key = atlas_key(image_id, frame_index);
+        let key = atlas_key(tab_id, image_id, frame_index);
         if self.cache.contains_key(&key) {
             self.frame_pins.insert(key);
             return self.cache.get(&key);
@@ -295,16 +306,16 @@ fn create_page(
     }
 }
 
-/// Pack `(image_id, frame_index)` into the atlas's `u64` cache key. The
-/// low 16 bits hold the frame index (max 65k frames — far beyond any
-/// realistic animation); the rest holds the image id. The layout keeps
-/// static images (frame 0) from colliding with animated images since the
-/// shift puts every image at a different base offset.
 fn atlas_key(
+    tab_id: TabId,
     image_id: u64,
     frame_index: usize,
-) -> u64 {
-    (image_id << 16) | (frame_index as u64 & 0xFFFF)
+) -> ImageKey {
+    ImageKey {
+        tab_id,
+        image_id,
+        frame_index,
+    }
 }
 
 /// A sub-rectangle of a source image that fits within one atlas tile.
@@ -344,9 +355,9 @@ fn tile_regions(
 }
 
 fn evict_one_unpinned(
-    cache: &mut Lru<u64, ImageEntry>,
+    cache: &mut Lru<ImageKey, ImageEntry>,
     pages: &mut [ImageAtlasPage],
-    pinned: &HashSet<u64>,
+    pinned: &HashSet<ImageKey>,
 ) -> bool {
     match least_recent_unpinned_key(cache, pinned) {
         Some(key) => {
@@ -361,9 +372,9 @@ fn evict_one_unpinned(
 }
 
 fn least_recent_unpinned_key(
-    cache: &Lru<u64, ImageEntry>,
-    pinned: &HashSet<u64>,
-) -> Option<u64> {
+    cache: &Lru<ImageKey, ImageEntry>,
+    pinned: &HashSet<ImageKey>,
+) -> Option<ImageKey> {
     cache.keys().find(|key| !pinned.contains(key)).copied()
 }
 
@@ -423,6 +434,152 @@ mod tests {
 
     use super::*;
 
+    const RED_SIXEL: &[u8] = b"\x1bPq#1;2;100;0;0~\x1b\\";
+    const BLUE_SIXEL: &[u8] = b"\x1bPq#1;2;0;0;100~\x1b\\";
+
+    #[test]
+    #[ignore = "requires a graphics adapter"]
+    fn sixel_images_with_matching_ids_stay_cached_per_tab() {
+        let (device, queue) = graphics_device();
+        let mut atlas = ImageAtlas::new(&device);
+        let mut first_terminal = terminal41::test_support::TestTerm::new_80x24();
+        let mut second_terminal = terminal41::test_support::TestTerm::new_80x24();
+        let red = sixel_output(&mut first_terminal, RED_SIXEL);
+        let blue = sixel_output(&mut second_terminal, BLUE_SIXEL);
+        assert_eq!(red.id, blue.id);
+        assert_eq!(
+            (red.image.width, red.image.height),
+            (blue.image.width, blue.image.height)
+        );
+        assert_ne!(red.image.frames[0].pixels, blue.image.frames[0].pixels);
+
+        let tiles: Vec<_> = [
+            (TabId(1), &red),
+            (TabId(2), &blue),
+            (TabId(1), &red),
+            (TabId(2), &blue),
+        ]
+        .into_iter()
+        .map(|(tab_id, image)| cached_tile(&mut atlas, &device, &queue, tab_id, image))
+        .collect();
+
+        assert_ne!(
+            tiles[0], tiles[1],
+            "different tabs need different image tiles"
+        );
+        assert_eq!(
+            tiles[0], tiles[2],
+            "returning to a tab should hit its cache"
+        );
+        assert_eq!(
+            tiles[1], tiles[3],
+            "returning to a tab should hit its cache"
+        );
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter"]
+    fn successive_sixel_outputs_in_one_tab_use_the_requested_image() {
+        let (device, queue) = graphics_device();
+        for previous_outputs in [0, 4] {
+            let mut atlas = ImageAtlas::new(&device);
+            let mut previous_terminal = terminal41::test_support::TestTerm::new_80x24();
+            let mut red_tiles = Vec::new();
+            for _ in 0..previous_outputs {
+                let red = sixel_output(&mut previous_terminal, RED_SIXEL);
+                red_tiles.push(cached_tile(&mut atlas, &device, &queue, TabId(1), &red));
+            }
+
+            let mut terminal = terminal41::test_support::TestTerm::new_80x24();
+            let red = sixel_output(&mut terminal, RED_SIXEL);
+            red_tiles.push(cached_tile(&mut atlas, &device, &queue, TabId(2), &red));
+            let reused_red_tiles: Vec<_> = (1..=4)
+                .map(|id| {
+                    let blue = sixel_output(&mut terminal, BLUE_SIXEL);
+                    assert_eq!(blue.id, id);
+                    assert_eq!(blue.image.frames[0].pixels, [0, 0, 255, 255].repeat(6));
+                    let tile = cached_tile(&mut atlas, &device, &queue, TabId(2), &blue);
+                    red_tiles.contains(&tile)
+                })
+                .collect();
+
+            assert_eq!(
+                reused_red_tiles, [false; 4],
+                "previous outputs: {previous_outputs}"
+            );
+        }
+    }
+
+    fn graphics_device() -> (wgpu::Device, wgpu::Queue) {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::default();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .expect("graphics adapter");
+            adapter
+                .request_device(&wgpu::DeviceDescriptor::default())
+                .await
+                .expect("graphics device")
+        })
+    }
+
+    fn cached_tile(
+        atlas: &mut ImageAtlas,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        tab_id: TabId,
+        image: &terminal41::VisibleImage,
+    ) -> (usize, u32, u32) {
+        atlas.begin_frame();
+        let entry = atlas
+            .ensure_cached(
+                device,
+                queue,
+                tab_id,
+                image.id,
+                image.frame_index,
+                &image.image,
+            )
+            .expect("cached sixel image");
+        assert_eq!(entry.tiles.len(), 1);
+        let tile = entry.tiles[0];
+        atlas.end_frame();
+        (tile.page_index, tile.alloc.x, tile.alloc.y)
+    }
+
+    fn sixel_output(
+        terminal: &mut terminal41::test_support::TestTerm,
+        bytes: &[u8],
+    ) -> terminal41::VisibleImage {
+        terminal.process(bytes);
+        terminal41::view::visible_images(
+            &terminal.active,
+            &terminal.viewport,
+            terminal.cell_height(),
+            terminal.cell_width(),
+            terminal.kitty_images(),
+            &terminal.palette,
+            std::time::Instant::now(),
+        )
+        .max_by_key(|image| image.id)
+        .expect("visible sixel image")
+    }
+
+    #[test]
+    fn cache_keys_keep_tabs_images_and_frames_distinct() {
+        let keys = [
+            atlas_key(TabId(1), 0, 0),
+            atlas_key(TabId(2), 0, 0),
+            atlas_key(TabId(1), 1, 0),
+            atlas_key(TabId(1), 1 << 48, 0),
+            atlas_key(TabId(1), 1 << 63, 0),
+            atlas_key(TabId(1), 0, 1),
+            atlas_key(TabId(1), 0, 1 << 16),
+        ];
+        assert_eq!(HashSet::from(keys).len(), keys.len());
+    }
+
     #[test]
     fn small_image_produces_single_tile() {
         let tiles = tile_regions(100, 50, 2048);
@@ -435,14 +592,19 @@ mod tests {
     #[test]
     fn unpinned_eviction_skips_entries_used_by_current_frame() {
         let mut cache = Lru::new(NonZeroUsize::new(4).unwrap());
-        cache.insert(1, ImageEntry { tiles: Vec::new() });
-        cache.insert(2, ImageEntry { tiles: Vec::new() });
-        cache.insert(3, ImageEntry { tiles: Vec::new() });
-        cache.insert(4, ImageEntry { tiles: Vec::new() });
+        let keys = [
+            atlas_key(TabId(1), 0, 0),
+            atlas_key(TabId(1), 1, 0),
+            atlas_key(TabId(2), 0, 0),
+            atlas_key(TabId(2), 1, 0),
+        ];
+        for key in keys {
+            cache.insert(key, ImageEntry { tiles: Vec::new() });
+        }
 
-        let pinned = HashSet::from([1, 2]);
+        let pinned = HashSet::from([keys[0], keys[1]]);
 
-        assert_eq!(least_recent_unpinned_key(&cache, &pinned), Some(3));
+        assert_eq!(least_recent_unpinned_key(&cache, &pinned), Some(keys[2]));
     }
 
     #[test]

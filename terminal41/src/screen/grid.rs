@@ -586,7 +586,8 @@ mod tests {
 
     #[test]
     fn reflow_shrink_grow_roundtrip_with_trailing_spaces() {
-        // Shrink then grow should recover original content, modulo trailing spaces.
+        // Shrink then grow should recover original content, modulo trailing
+        // spaces.
         let mut grid = make_grid(10, &[("hello     ", true), ("world     ", false)]);
         grid.reflow(5);
         grid.reflow(10);
@@ -643,7 +644,8 @@ mod tests {
 
     #[test]
     fn scroll_up_region_full_viewport() {
-        // Scroll up the full viewport: top row removed, blank inserted at bottom.
+        // Scroll up the full viewport: top row removed, blank inserted at
+        // bottom.
         let (mut grid, vp) = make_grid_with_scrollback(3, 3, &['A', 'B', 'C']);
         grid.scroll_up_in_region(&vp, &mut BTreeMap::new(), 0, 2, 1);
         assert_eq!(all_chars(&grid), vec!["BBB", "CCC", "   "]);
@@ -830,7 +832,8 @@ mod tests {
             ],
         );
 
-        // Shrink to width 4: "Hi" fits, "ABCD"/"EFGH"/"IJKL"/"MNOP", "Bye" fits.
+        // Shrink to width 4: "Hi" fits, "ABCD"/"EFGH"/"IJKL"/"MNOP", "Bye"
+        // fits.
         grid.reflow(4);
         assert_eq!(row_chars(&grid.rows[0]), "Hi  ");
         assert!(!grid.rows[0].wrapped);

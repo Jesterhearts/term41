@@ -759,7 +759,8 @@ mod tests {
         for (i, ch) in "abcd".chars().enumerate() {
             set_cell(&mut src, i, ch);
         }
-        // Copy from src offset 2 to dst offset 0 → copies "cd" (length min(2,5)=2)
+        // Copy from src offset 2 to dst offset 0 → copies "cd" (length
+        // min(2,5)=2)
         dst.copy_from(&src, 2..4, 0);
         assert_eq!(row_text(&dst), "cd   ");
     }
