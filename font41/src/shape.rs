@@ -2,6 +2,7 @@ use std::sync::Arc;
 
 use harfrust::Direction;
 use harfrust::Script;
+use harfrust::ShapeOptions;
 use harfrust::UnicodeBuffer;
 use icu_properties::props::BinaryProperty;
 use icu_properties::props::EmojiComponent;
@@ -282,7 +283,7 @@ fn shape_with_font_fallback(
             let plan = &font_system.plan_cache[&key];
 
             let shaper = loaded.shaper_data.shaper(&font_ref).build();
-            let output = shaper.shape_with_plan(plan, buffer, &[]);
+            let output = shaper.shape(buffer, ShapeOptions::new().plan(Some(plan)));
 
             apply_shaped_output(
                 font_system,

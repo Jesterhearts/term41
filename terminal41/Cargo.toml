@@ -6,7 +6,7 @@ edition = "2024"
 [dependencies]
 base64.workspace         = true
 bitflags.workspace       = true
-bon                      = { version = "3.9.1", default-features = false, features = [
+bon                      = { version = "3.10.1", default-features = false, features = [
   "std"
 ] }
 clip41.workspace         = true
@@ -23,7 +23,7 @@ serde.workspace          = true
 smol_str.workspace       = true
 tracing.workspace        = true
 triple_buffer.workspace  = true
-unicode-segmentation     = "1.13.2"
+unicode-segmentation     = "1.13.3"
 unicode-width.workspace  = true
 utils41.workspace        = true
 vte-mode41.workspace     = true

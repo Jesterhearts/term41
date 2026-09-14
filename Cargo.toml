@@ -24,23 +24,23 @@ members = [
 ]
 
 [workspace.dependencies]
-base64               = "0.22.1"
-bitflags             = "2.11.1"
+base64               = "0.23.1"
+bitflags             = "2.13.2"
 clip41               = { path = "clip41" }
 commands41           = { path = "commands41" }
 config41             = { path = "config41" }
 cueue                = "0.6.0"
-dirs                 = "6.0.0"
-flate2               = "1.1.9"
+dirs                 = "7.0.0"
+flate2               = "1.1.10"
 font41               = { path = "font41" }
 history41            = { path = "history41" }
 hooks41              = { path = "hooks41" }
-icu_properties       = "2.2.0"
+icu_properties       = "2.3.0"
 image41              = { path = "image41" }
-infer                = { version = "0.19.0", default-features = false }
-log                  = "0.4.29"
+infer                = { version = "0.22.0", default-features = false }
+log                  = "0.4.34"
 nucleo-matcher       = "0.3.1"
-palette              = { version = "0.7.6", default-features = false, features = [
+palette              = { version = "0.7.7", default-features = false, features = [
   "named",
   "named_from_str",
   "std",
@@ -48,14 +48,14 @@ palette              = { version = "0.7.6", default-features = false, features =
 parking_lot          = { version = "0.12.5" }
 png                  = "0.18.1"
 pty-pipe41           = { path = "pty-pipe41" }
-rusqlite             = { version = "0.39.0", features = ["bundled"] }
-serde                = { version = "1.0.228", features = ["derive"] }
+rusqlite             = { version = "0.40.2", features = ["bundled"] }
+serde                = { version = "1.0.229", features = ["derive"] }
 shellhist41          = { path = "shellhist41" }
 smol_str             = { version = "0.3.6", features = ["serde"] }
 tether-map           = "0.2.1"
 tracing              = "0.1.44"
 triple_buffer        = "9.0.0"
-unicode-segmentation = "1.13.2"
+unicode-segmentation = "1.13.3"
 unicode-width        = "0.2.2"
 utils41              = { path = "utils41" }
 vte-mode41           = { path = "vte-mode41" }
@@ -67,10 +67,10 @@ harness = false
 name    = "vte_parse"
 
 [dependencies]
-arc-swap                       = "1.9.1"
-atomic-write-file              = "0.3.0"
+arc-swap                       = "1.9.2"
+atomic-write-file              = "0.3.1"
 bitflags.workspace             = true
-bytemuck                       = { version = "1.25.0", features = [
+bytemuck                       = { version = "1.25.2", features = [
   "derive",
   "extern_crate_alloc"
 ] }
@@ -82,30 +82,30 @@ dirs.workspace                 = true
 evictor                        = "0.7.2"
 flate2.workspace               = true
 font41.workspace               = true
-fontdb                         = "0.23.0"
-harfrust                       = "0.6.0"
+fontdb                         = "0.24.0"
+harfrust                       = "0.13.3"
 history41.workspace            = true
 hooks41.workspace              = true
 image41.workspace              = true
 infer.workspace                = true
 log.workspace                  = true
-mlua                           = { version = "0.11.6", default-features = false, features = [
+mlua                           = { version = "0.12.1", default-features = false, features = [
   "lua54",
   "vendored"
 ] }
 nucleo-matcher.workspace       = true
-open                           = "5.3.4"
+open                           = "5.4.4"
 palette.workspace              = true
 parking_lot.workspace          = true
 png.workspace                  = true
-pollster                       = "0.4.0"
+pollster                       = "1.0.1"
 pty-pipe41.workspace           = true
 serde.workspace                = true
 shellhist41.workspace          = true
 smol_str.workspace             = true
 softbuffer                     = "0.4.8"
 terminal41                     = { path = "terminal41" }
-time                           = { version = "0.3.47", features = [
+time                           = { version = "0.3.55", features = [
   "formatting",
   "local-offset",
   "macros"
@@ -116,7 +116,7 @@ unicode-segmentation.workspace = true
 unicode-width.workspace        = true
 utils41.workspace              = true
 vtepp.workspace                = true
-wgpu                           = { version = "29.0.1", default-features = false, features = [
+wgpu                           = { version = "30.0.1", default-features = false, features = [
   "gles",
   "serde",
   "wgsl"
@@ -129,7 +129,7 @@ criterion = { version = "0.8.2", default-features = false, features = [
 ] }
 
 [build-dependencies]
-embed-resource = "3.0.8"
+embed-resource = "3.0.11"
 ico            = "0.5.0"
 
 [features]

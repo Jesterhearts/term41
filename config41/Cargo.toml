@@ -11,10 +11,10 @@ palette.workspace     = true
 parking_lot.workspace = true
 serde.workspace       = true
 serde_ignored         = "0.1.14"
-serde_json            = "1.0.149"
+serde_json            = "1.0.151"
 shellexpand           = "3.1.2"
 smol_str.workspace    = true
 strum                 = { version = "0.28.0", features = ["derive"] }
-toml                  = "1.1.2"
+toml                  = "1.1.6"
 utils41.workspace     = true
 winit.workspace       = true

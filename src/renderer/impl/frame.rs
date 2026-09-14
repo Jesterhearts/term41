@@ -1332,7 +1332,7 @@ pub(super) fn submit_render_passes(
     }
 
     renderer.queue.submit(Some(encoder.finish()));
-    frame.present();
+    renderer.queue.present(frame);
 }
 
 pub(super) fn update_terminal_layer(

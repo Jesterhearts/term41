@@ -4,12 +4,12 @@ version = "0.2.1"
 edition = "2024"
 
 [dependencies]
-atoi              = "2.0.0"
+atoi              = "3.1.0"
 base64.workspace  = true
-ffmpeg-next       = { version = "8.1.0", features = ["build"], optional = true }
+ffmpeg-next       = { version = "9.0.0", features = ["build"], optional = true }
 flate2.workspace  = true
 infer.workspace   = true
-libc              = "0.2.184"
+libc              = "0.2.189"
 log.workspace     = true
 palette.workspace = true
 png.workspace     = true

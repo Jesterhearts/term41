@@ -841,9 +841,16 @@ mod tests {
         ftyp[8..12].copy_from_slice(b"isom");
         assert!(is_animated_format(&ftyp));
 
-        // WebM/MKV: EBML header magic 0x1A45DFA3.
-        let ebml = [0x1A, 0x45, 0xDF, 0xA3, 0, 0, 0, 0];
-        assert!(is_animated_format(&ebml));
+        // infer needs the EBML document type and enough bytes to sniff the
+        // header.
+        for header in [
+            b"\x1A\x45\xDF\xA3\x87\x42\x82\x84webm".as_slice(),
+            b"\x1A\x45\xDF\xA3\x8B\x42\x82\x88matroska".as_slice(),
+        ] {
+            let mut ebml = header.to_vec();
+            ebml.resize(512, 0);
+            assert!(is_animated_format(&ebml));
+        }
     }
 
     #[test]

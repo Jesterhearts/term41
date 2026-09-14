@@ -67,11 +67,11 @@ pub(super) fn build_pipeline_for_format(
         vertex: wgpu::VertexState {
             module: &bg_shader,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<BgVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![0 => Float32x2, 1 => Uint32],
-            }],
+            })],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -110,7 +110,7 @@ pub(super) fn build_pipeline_for_format(
         vertex: wgpu::VertexState {
             module: &fg_shader,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<FgVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![
@@ -119,7 +119,7 @@ pub(super) fn build_pipeline_for_format(
                     2 => Uint32,
                     3 => Uint32
                 ],
-            }],
+            })],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -158,7 +158,7 @@ pub(super) fn build_pipeline_for_format(
         vertex: wgpu::VertexState {
             module: &image_shader,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<ImageVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![
@@ -166,7 +166,7 @@ pub(super) fn build_pipeline_for_format(
                     1 => Float32x2,
                     2 => Float32,
                 ],
-            }],
+            })],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -211,7 +211,7 @@ pub(super) fn build_pipeline_for_format(
         vertex: wgpu::VertexState {
             module: &layer_shader,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<ImageVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![
@@ -219,7 +219,7 @@ pub(super) fn build_pipeline_for_format(
                     1 => Float32x2,
                     2 => Float32,
                 ],
-            }],
+            })],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
@@ -257,7 +257,7 @@ pub(super) fn build_pipeline_for_format(
         vertex: wgpu::VertexState {
             module: &bg_image_shader,
             entry_point: Some("vs_main"),
-            buffers: &[wgpu::VertexBufferLayout {
+            buffers: &[Some(wgpu::VertexBufferLayout {
                 array_stride: std::mem::size_of::<BgImageVertex>() as u64,
                 step_mode: wgpu::VertexStepMode::Vertex,
                 attributes: &wgpu::vertex_attr_array![
@@ -265,7 +265,7 @@ pub(super) fn build_pipeline_for_format(
                     1 => Float32x2,
                     2 => Float32,
                 ],
-            }],
+            })],
             compilation_options: Default::default(),
         },
         fragment: Some(wgpu::FragmentState {
