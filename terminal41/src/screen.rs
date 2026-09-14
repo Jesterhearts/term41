@@ -440,11 +440,8 @@ pub(super) fn start_command_block(
         default_bg: screen.grid.default_bg,
         default_bg_source: screen.grid.default_bg_source,
     };
+    let completed_rows = active_block_rendered_rows_len_for_viewport(screen, viewport);
     let mut completed = std::mem::replace(&mut screen.grid, replacement);
-    let completed_rows = grid_content_rows_len(&completed)
-        .max(screen.cursor.row as usize + 1)
-        .max(1)
-        .min(completed.rows.len());
     completed.rows.truncate(completed_rows);
     let images = completed_block_images(&mut screen.images, completed_rows);
     screen.scrollback_blocks.push(CommandBlock {

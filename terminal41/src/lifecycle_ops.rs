@@ -1063,6 +1063,33 @@ mod tests {
     }
 
     #[test]
+    fn completed_sixel_output_does_not_overlap_the_next_prompt() {
+        for height in [6_u32, 30, 48, 66, 96] {
+            let mut term = TestTerm::new(40, 4, 100, 16, 8);
+            term.process(b"\x1b]133;A\x07$ \x1b]133;B\x07cat image.six\r\n\x1b]133;C\x07");
+            let bands = "~-".repeat((height / 6 - 1) as usize);
+            term.process(format!("\x1bPq{bands}~\x1b\\").as_bytes());
+
+            term.process(b"\x1b]133;D;0\x07\r\x1b]133;A\x07$ next\x1b]133;B\x07");
+
+            let images = term_visible_images(&term);
+            assert_eq!(images.len(), 1, "height {height}");
+            let image = &images[0];
+            assert_eq!(image.display_height, height);
+            let image_bottom = image.screen_row * 16 + image.display_height as i32;
+            let prompt_top =
+                crate::view::cursor_viewport_row(&term.active, &term.viewport, term.on_alt_screen)
+                    as i32
+                    * 16;
+            assert!(
+                image_bottom <= prompt_top,
+                "height {height}: image ends at pixel {image_bottom}, prompt starts at \
+                 {prompt_top}"
+            );
+        }
+    }
+
+    #[test]
     fn visible_images_draw_in_row_major_order_within_z_index() {
         let mut images = [
             visible_image(1, 2, 10, 0),
