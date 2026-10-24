@@ -3,8 +3,13 @@
 //! Wraps [`arboard`] and, when initialization fails (headless systems, CI,
 //! disabled Wayland protocols), falls back to a per-process buffer so
 //! OSC 52 round-trips still behave sensibly without producing runtime errors.
+//! Platform calls run on a worker with a bounded wait. A stalled request
+//! prevents further requests on that clipboard until it finishes, without
+//! keeping the terminal locked for the platform's full timeout.
 
 use arboard::Clipboard as ArboardClipboard;
+
+mod worker;
 
 #[macro_use]
 extern crate log;
@@ -31,7 +36,7 @@ impl Default for Clipboard {
 }
 
 enum Backend {
-    Real(ArboardClipboard),
+    Real(worker::ClipboardWorker),
     InMemory { clipboard: String, primary: String },
 }
 
@@ -41,7 +46,7 @@ impl Clipboard {
     /// If the platform backend cannot be initialized, this falls back to an
     /// in-memory clipboard and logs a warning.
     pub fn new() -> Self {
-        let backend = match ArboardClipboard::new() {
+        let backend = match worker::spawn() {
             Ok(cb) => Backend::Real(cb),
             Err(e) => {
                 warn!("clipboard unavailable, falling back to in-memory: {e}");
@@ -67,7 +72,8 @@ impl Clipboard {
         }
     }
 
-    /// Store UTF-8 text in the requested selection.
+    /// Store UTF-8 text in the requested selection. Logs a warning when the
+    /// backend fails, times out, or is still processing a timed-out request.
     pub fn set(
         &mut self,
         kind: ClipboardKind,
@@ -75,7 +81,7 @@ impl Clipboard {
     ) {
         match &mut self.backend {
             Backend::Real(cb) => {
-                let result = set_real(cb, kind, text);
+                let result = worker::set_text(cb, kind, text);
                 if let Err(e) = result {
                     warn!("clipboard set failed: {e}");
                 }
@@ -93,14 +99,15 @@ impl Clipboard {
 
     /// Read UTF-8 text from the requested selection.
     ///
-    /// Returns `None` when the platform clipboard reports an error. The
-    /// in-memory fallback always returns the stored string, possibly empty.
+    /// Returns `None` when the platform clipboard reports an error, times out,
+    /// or is still processing a timed-out request. The in-memory fallback
+    /// always returns the stored string, possibly empty.
     pub fn get(
         &mut self,
         kind: ClipboardKind,
     ) -> Option<String> {
         match &mut self.backend {
-            Backend::Real(cb) => match get_real(cb, kind) {
+            Backend::Real(cb) => match worker::get_text(cb, kind) {
                 Ok(text) => Some(text),
                 Err(e) => {
                     warn!("clipboard get failed: {e}");
@@ -127,12 +134,8 @@ impl Clipboard {
         let Backend::Real(cb) = &mut self.backend else {
             return None;
         };
-        match cb.get_image() {
-            Ok(img) => Some(ClipboardImage {
-                width: img.width as u32,
-                height: img.height as u32,
-                rgba: img.bytes.into_owned(),
-            }),
+        match worker::get_image(cb) {
+            Ok(img) => Some(img),
             Err(e) => {
                 debug!("clipboard image not available: {e}");
                 None
