@@ -1001,7 +1001,7 @@ mod tests {
     fn full_block_fills_entire_cell() {
         let g = rasterize(0x2588, 8, 12, 10.0, 1);
         assert_eq!(g.bitmap.len(), 8 * 12 * 4);
-        for chunk in g.bitmap.chunks_exact(4) {
+        for chunk in g.bitmap.as_chunks::<4>().0 {
             assert_eq!(chunk[3], 0xFF);
         }
     }
@@ -1012,7 +1012,7 @@ mod tests {
         // as solid tiles it must cover the whole cell so adjacent
         // full-braille cells form one continuous block.
         let g = rasterize(0x28FF, 8, 12, 10.0, 1);
-        for chunk in g.bitmap.chunks_exact(4) {
+        for chunk in g.bitmap.as_chunks::<4>().0 {
             assert_eq!(chunk[3], 0xFF, "expected full coverage for U+28FF");
         }
     }
@@ -1020,7 +1020,7 @@ mod tests {
     #[test]
     fn empty_braille_has_no_coverage() {
         let g = rasterize(0x2800, 8, 12, 10.0, 1);
-        for chunk in g.bitmap.chunks_exact(4) {
+        for chunk in g.bitmap.as_chunks::<4>().0 {
             assert_eq!(chunk[3], 0);
         }
     }
@@ -1032,7 +1032,13 @@ mod tests {
         let w = 10u32;
         let h = 12u32;
         let g = rasterize(0x259E, w, h, 10.0, 1);
-        let set: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
+        let set: usize = g
+            .bitmap
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|c| c[3] == 0xFF)
+            .count();
         assert_eq!(set, 2 * (w as usize / 2) * (h as usize / 2));
     }
 
@@ -1041,7 +1047,7 @@ mod tests {
         // Medium shade fills every pixel at alpha 0x80 — a flat density
         // level that tints uniformly via the fg colour.
         let g = rasterize(0x2592, 8, 12, 10.0, 1);
-        for chunk in g.bitmap.chunks_exact(4) {
+        for chunk in g.bitmap.as_chunks::<4>().0 {
             assert_eq!(chunk[3], 0x80);
         }
     }
@@ -1265,7 +1271,13 @@ mod tests {
         let w = 16u32;
         let h = 24u32;
         let g = rasterize(0xFB6C, w, h, 20.0, 1); // LEFT quarter
-        let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
+        let filled: usize = g
+            .bitmap
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|c| c[3] == 0xFF)
+            .count();
         let total = (w * h) as usize;
         let quarter = total / 4;
         assert!(
@@ -1295,7 +1307,13 @@ mod tests {
         let w = 16u32;
         let h = 24u32;
         let g = rasterize(0xFB9A, w, h, 20.0, 1); // upper + lower
-        let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
+        let filled: usize = g
+            .bitmap
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|c| c[3] == 0xFF)
+            .count();
         let total = (w * h) as usize;
         let half = total / 2;
         assert!(
@@ -1309,7 +1327,13 @@ mod tests {
         let w = 8u32;
         let h = 12u32;
         let g = rasterize(0xFB95, w, h, 10.0, 1);
-        let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
+        let filled: usize = g
+            .bitmap
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|c| c[3] == 0xFF)
+            .count();
         assert_eq!(filled, (w * h / 2) as usize);
     }
 
@@ -1318,11 +1342,25 @@ mod tests {
         let w = 8u32;
         let h = 12u32;
         let g = rasterize(0xFB95, w, h, 10.0, 4);
-        let filled: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
-        let empty: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0x00).count();
+        let filled: usize = g
+            .bitmap
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|c| c[3] == 0xFF)
+            .count();
+        let empty: usize = g
+            .bitmap
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|c| c[3] == 0x00)
+            .count();
         let shaded: usize = g
             .bitmap
-            .chunks_exact(4)
+            .as_chunks::<4>()
+            .0
+            .iter()
             .filter(|c| c[3] != 0x00 && c[3] != 0xFF)
             .count();
         assert_eq!(filled, (w * h / 2) as usize);
@@ -1365,7 +1403,7 @@ mod tests {
         let w = 16u32;
         let h = 24u32;
         let g = rasterize(0xFBA0, w, h, 20.0, 1); // single diagonal segment
-        let any_filled = g.bitmap.chunks_exact(4).any(|c| c[3] > 0);
+        let any_filled = g.bitmap.as_chunks::<4>().0.iter().any(|c| c[3] > 0);
         assert!(any_filled, "diagonal line should produce visible output");
     }
 
@@ -1400,7 +1438,13 @@ mod tests {
         let w = 16u32;
         let h = 24u32;
         let g = rasterize(0xFB9C, w, h, 20.0, 1); // upper-left triangular medium shade
-        let shaded: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0x80).count();
+        let shaded: usize = g
+            .bitmap
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|c| c[3] == 0x80)
+            .count();
         let total = (w * h) as usize;
         let half = total / 2;
         assert!(
@@ -1428,8 +1472,20 @@ mod tests {
         let w = 8u32;
         let h = 12u32;
         let g = rasterize(0xFB91, w, h, 10.0, 1); // upper solid + lower shade
-        let solid: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0xFF).count();
-        let shade: usize = g.bitmap.chunks_exact(4).filter(|c| c[3] == 0x80).count();
+        let solid: usize = g
+            .bitmap
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|c| c[3] == 0xFF)
+            .count();
+        let shade: usize = g
+            .bitmap
+            .as_chunks::<4>()
+            .0
+            .iter()
+            .filter(|c| c[3] == 0x80)
+            .count();
         assert!(solid > 0, "missing solid region");
         assert!(shade > 0, "missing shade region");
         assert_eq!(solid + shade, (w * h) as usize, "gaps in coverage");

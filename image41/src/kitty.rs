@@ -376,7 +376,7 @@ fn decode_rgb(
     }
 
     let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-    for chunk in data[..expected].chunks_exact(3) {
+    for chunk in data[..expected].as_chunks::<3>().0 {
         rgba.extend_from_slice(chunk);
         rgba.push(255);
     }

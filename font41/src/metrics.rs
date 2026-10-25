@@ -1,9 +1,11 @@
+use std::sync::Arc;
+
 use read_fonts::TableProvider;
 use read_fonts::tables::head::Head;
 use read_fonts::types::GlyphId;
 
 use crate::charmap::charmap_lookup;
-use crate::loader;
+use crate::loader::LazyFontFace;
 use crate::loader::LoadedFont;
 
 #[derive(Debug, Clone, Copy)]
@@ -88,10 +90,10 @@ pub(crate) fn aggregate_cell_metrics(
 }
 
 pub(crate) fn font_system_metrics(
+    font_faces: &[Arc<LazyFontFace>],
     final_font: &LoadedFont,
     font_size: f32,
 ) -> ScaledCellMetrics {
-    let font_faces = loader::font_faces();
     let metrics = font_faces
         .iter()
         .filter_map(|font| font.load())

@@ -306,56 +306,6 @@ pub(super) fn build_render_geometry(
     layout: &FrameLayout,
     suspend_terminal_area: bool,
 ) -> RenderGeometry {
-    let glyph_generation = renderer.glyph_atlas.generation();
-    let font_generation = font_system.font_generation();
-    let geometry = build_render_geometry_once(
-        renderer,
-        font_system,
-        snap,
-        rows,
-        tabs,
-        new_tab_text,
-        controls,
-        gutter_popup,
-        recording_popup,
-        permission_modal,
-        command_palette,
-        history_confirmation,
-        history_deletion,
-        toast,
-        preedit,
-        command_editor,
-        layout,
-        suspend_terminal_area,
-    );
-    if renderer.glyph_atlas.generation() != glyph_generation
-        || font_system.font_generation() != font_generation
-    {
-        error!("font/glyph generation changed while building frame geometry");
-    }
-    geometry
-}
-
-pub(super) fn build_render_geometry_once(
-    renderer: &mut Renderer,
-    font_system: &mut FontSystem,
-    snap: &TermSnapshot,
-    rows: &[RowSnapshot],
-    tabs: &[TabInfo],
-    new_tab_text: SmolStr,
-    controls: &WindowControls,
-    gutter_popup: Option<&GutterPopup>,
-    recording_popup: Option<&crate::renderer::RecordingPopup>,
-    permission_modal: Option<&crate::renderer::PermissionModal>,
-    command_palette: Option<&crate::window_host::CommandPaletteView>,
-    history_confirmation: Option<&crate::renderer::HistoryConfirmationModal>,
-    history_deletion: Option<&crate::window_host::HistoryDeletionView>,
-    toast: Option<&crate::renderer::Toast>,
-    preedit: Option<&crate::renderer::PreeditState>,
-    command_editor: Option<&commands41::CommandLineView>,
-    layout: &FrameLayout,
-    suspend_terminal_area: bool,
-) -> RenderGeometry {
     let mut geometry = RenderGeometry::default();
     let cursor_state = cursor_state_from_snapshot(snap, command_editor);
     let popup_clip = popup_clip(renderer, gutter_popup, layout);

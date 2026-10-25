@@ -68,6 +68,129 @@ fn shaped_glyphs_rasterize() {
 }
 
 #[test]
+fn ready_fonts_wait_for_sync_and_do_not_change_other_instances() {
+    let mut first = FontSystem::new(None, 18.0, 1);
+    let mut second = FontSystem::new(None, 18.0, 1);
+    let pending = Arc::new(std::sync::OnceLock::new());
+    first.pending_fonts = Some(pending.clone());
+    second.pending_fonts = None;
+    let cells = [SmolStr::new("A")];
+    let attrs = [CellAttrs::default()];
+    let original = first.shape_row(&cells, &attrs).remove(0);
+    let raster = first.rasterize_glyph(original.font_index, original.glyph_id, 1);
+    let dimensions = (first.cell_width, first.cell_height);
+    let generation = first.font_generation();
+
+    let fonts = Arc::new(loader::FontSet {
+        faces: vec![Arc::new(loader::LazyFontFace::new(
+            fontdb::Source::Binary(Arc::new(FAIRFAX_HD)),
+            0,
+            false,
+            false,
+            true,
+            false,
+        ))],
+        families: vec![FamilyVariants {
+            regular: 0,
+            bold: None,
+            italic: None,
+            bold_italic: None,
+        }],
+    });
+    assert!(pending.set(fonts).is_ok());
+
+    let before_sync = first.shape_row(&cells, &attrs).remove(0);
+    assert_eq!(before_sync.font_index, original.font_index);
+    assert_eq!(first.font_generation(), generation);
+    assert_eq!(
+        first
+            .rasterize_glyph(original.font_index, original.glyph_id, 1)
+            .bitmap,
+        raster.bitmap
+    );
+    assert!(!first.font_is_bold(0));
+
+    assert!(first.sync_loaded_fonts());
+    assert_ne!(first.font_generation(), generation);
+    assert_eq!((first.cell_width, first.cell_height), dimensions);
+    let after_sync = first.shape_row(&cells, &attrs).remove(0);
+    assert_eq!(after_sync.font_index, 0);
+    assert!(first.font_is_bold(after_sync.font_index));
+    assert!(!first.sync_loaded_fonts());
+    assert_eq!(second.font_generation(), generation);
+    assert!(!second.font_is_bold(0));
+    assert_eq!(
+        second.shape_row(&cells, &attrs)[0].font_index,
+        original.font_index
+    );
+}
+
+#[test]
+fn fork_shares_font_loading_but_installs_at_independent_boundaries() {
+    let mut first = FontSystem::new(None, 18.0, 1);
+    let pending = Arc::new(std::sync::OnceLock::new());
+    first.pending_fonts = Some(pending.clone());
+    let mut second = first.fork();
+    assert!(Arc::ptr_eq(
+        first.pending_fonts.as_ref().unwrap(),
+        second.pending_fonts.as_ref().unwrap()
+    ));
+    assert!(Arc::ptr_eq(&first.final_font, &second.final_font));
+    let loaded = Arc::new(loader::FontSet::default());
+    assert!(pending.set(loaded.clone()).is_ok());
+    assert!(first.sync_loaded_fonts());
+    assert_ne!(first.font_generation(), second.font_generation());
+    assert!(second.sync_loaded_fonts());
+    assert_eq!(first.font_generation(), second.font_generation());
+    assert!(Arc::ptr_eq(&first.fonts, &second.fonts));
+    assert!(Arc::ptr_eq(&loaded, &second.fonts));
+
+    let original_metrics = (first.cell_width, first.cell_height);
+    second.set_scale_factor(2.0);
+    assert_eq!((first.cell_width, first.cell_height), original_metrics);
+    assert_ne!((second.cell_width, second.cell_height), original_metrics);
+}
+
+#[test]
+fn drcs_contexts_are_isolated_between_calls() {
+    let mut fonts = FontSystem::new(None, 18.0, 1);
+    let geometry = DrcsGeometryClass::Col80Line24;
+    let glyph_map = |pixels| {
+        Arc::new(HashMap::from([(
+            (geometry, 0),
+            DrcsGlyphDef {
+                glyph_id: 0,
+                width: 2,
+                height: 2,
+                pixels,
+                full_cell: true,
+            },
+        )]))
+    };
+    let first = glyph_map(vec![255, 0, 0, 0]);
+    let second = glyph_map(vec![0, 0, 0, 255]);
+    let cells = [SmolStr::new(encode_drcs_char(0).unwrap().to_string())];
+    let attrs = [CellAttrs::default()];
+    let render = |fonts: &mut FontSystem, glyphs| {
+        let context = Some(DrcsContext { geometry, glyphs });
+        let glyph = fonts.shape_row_with_drcs(&cells, &attrs, context).remove(0);
+        fonts
+            .rasterize_glyph_with_drcs(glyph.font_index, glyph.glyph_id, 1, context)
+            .bitmap
+    };
+    let first_pixels = render(&mut fonts, &first);
+    let second_pixels = render(&mut fonts, &second);
+    assert_ne!(first_pixels, second_pixels);
+    assert_eq!(render(&mut fonts, &first), first_pixels);
+    assert!(
+        fonts
+            .rasterize_glyph_with_drcs(drcs::FONT_INDEX, 0, 1, None)
+            .bitmap
+            .is_empty()
+    );
+}
+
+#[test]
 fn glyph_cells_wide_uses_consumed_columns_and_continuations() {
     let trailing = vec![
         SmolStr::new("👩\u{200D}💻"),

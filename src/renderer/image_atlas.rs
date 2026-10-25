@@ -554,12 +554,12 @@ mod tests {
     ) -> terminal41::VisibleImage {
         terminal.process(bytes);
         terminal41::view::visible_images(
-            &terminal.active,
-            &terminal.viewport,
+            terminal.active(),
+            terminal.viewport(),
             terminal.cell_height(),
             terminal.cell_width(),
             terminal.kitty_images(),
-            &terminal.palette,
+            terminal.palette(),
             std::time::Instant::now(),
         )
         .max_by_key(|image| image.id)

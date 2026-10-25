@@ -337,18 +337,20 @@ mod viewport_reset_tests {
             8,
             config41::ColorPalette::default(),
         );
+        let mut processor = terminal41::TerminalProcessor::new();
+        processor.process_bytes(&mut terminal, b"1\r\n2\r\n3\r\n4\r\n");
         let (mut publisher, mut output) = terminal41::terminal_snapshot_buffer(&mut terminal);
         output.update();
         let first = output.read().clone();
         let first_generations: Vec<u64> = first.rows.iter().map(|row| row.generation).collect();
 
-        view::set_viewport_offset(&mut terminal.active, 1);
+        terminal.scroll_viewport_up(1);
         reset_viewport_and_invalidate(&mut terminal);
         terminal41::publish_terminal_snapshot(&mut terminal, &mut publisher);
         output.update();
         let snap = output.read().clone();
 
-        assert_eq!(view::viewport_offset(&terminal.active), 0);
+        assert_eq!(view::viewport_offset(terminal.active()), 0);
         assert!(!snap.reset_cached_rows);
         assert!(
             snap.rows
@@ -477,8 +479,8 @@ mod command_editor_context_tests {
 
         term.process(b"\x1b[?1h\x1b=");
 
-        assert!(view::app_cursor_keys(&term.active));
-        assert!(view::app_keypad(&term.active));
+        assert!(view::app_cursor_keys(term.active()));
+        assert!(view::app_keypad(term.active()));
         assert_eq!(
             command_editor_view_context(&term),
             Some(CommandEditorContext { current_dir: None })
@@ -499,7 +501,7 @@ mod command_editor_context_tests {
             term.metadata.shell_integration_phase,
             ShellIntegrationPhase::Command
         );
-        assert!(term.on_alt_screen);
+        assert!(term.on_alt_screen());
         assert_eq!(command_editor_view_context(&term), None);
         assert_eq!(command_editor_input_context(&term), None);
     }
@@ -742,7 +744,7 @@ mod popup_command_tests {
         term.process(b"cargo test");
         term.process(b"\x1b]633;E;cargo\\x20metadata\x07");
 
-        let document = command_block_document(&term.active, &term.metadata.command_metas);
+        let document = command_block_document(term.active(), &term.metadata.command_metas);
         let text = popup_command_text(
             &document,
             PromptRef {
@@ -765,7 +767,7 @@ mod popup_command_tests {
         term.process(b"\x1b]633;A\x07");
         term.process(b"\x1b]633;E;cargo\\x20test\x07");
 
-        let document = command_block_document(&term.active, &term.metadata.command_metas);
+        let document = command_block_document(term.active(), &term.metadata.command_metas);
         let text = popup_command_text(
             &document,
             PromptRef {

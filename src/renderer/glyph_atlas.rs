@@ -1,15 +1,17 @@
-//! Glyph atlas: lazily-created 512² texture pages packed with rasterized
-//! glyphs, each backed by a [`ShelfPacker`] and a shared LRU cache
+//! Glyph atlas: lazily created 1024 by 1024 texture pages packed with
+//! rasterized glyphs, each backed by a [`ShelfPacker`] and a shared LRU cache
 //! (`evictor::Lru`).
 //!
 //! Two separate resources constrain the atlas: currently-created pages (which
 //! can fill up even with the cache well under capacity) and the cache's own
-//! entry limit. On page exhaustion we explicitly `pop()` the LRU and free its
-//! region in a retry loop. On cache overflow we let `insert()` handle eviction
-//! and free the returned entry's packer region inline.
+//! entry limit. Only entries unused by the current frame may be evicted.
+//! When the frame exceeds either limit, additional glyphs are omitted and a
+//! warning is logged. Returned slots stay valid until the frame is submitted.
 
+use std::collections::HashSet;
 use std::num::NonZeroU64;
 use std::num::NonZeroUsize;
+use std::sync::Arc;
 
 use evictor::Lru;
 use font41::FontSystem;
@@ -19,8 +21,7 @@ use crate::renderer::shelf::Allocation;
 use crate::renderer::shelf::ShelfPacker;
 
 pub const ATLAS_SIZE: u32 = 1024;
-// Keep worst-case glyph texture memory equal to the old eager 2048² atlas
-// while letting the common ASCII path start at a single 512² page.
+// Bound texture memory to 64 MiB while allocating pages only as needed.
 const MAX_ATLAS_PAGES: usize = 16;
 const CACHE_CAPACITY: usize = 16384;
 const PADDING: u32 = 4;
@@ -84,6 +85,11 @@ pub struct GlyphAtlas {
     sampler: wgpu::Sampler,
     pages: Vec<GlyphAtlasPage>,
     cache: Lru<GlyphKey, GlyphSlot>,
+    frame_pins: HashSet<GlyphKey>,
+    font_generation: u64,
+    drcs_glyphs: Option<font41::DrcsGlyphMap>,
+    page_limit: usize,
+    overflow_reported: bool,
     generation: u64,
 }
 
@@ -132,6 +138,11 @@ impl GlyphAtlas {
             sampler,
             pages: Vec::new(),
             cache: Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap()),
+            frame_pins: HashSet::new(),
+            font_generation: 0,
+            drcs_glyphs: None,
+            page_limit: MAX_ATLAS_PAGES,
+            overflow_reported: false,
             generation: 0,
         }
     }
@@ -139,9 +150,62 @@ impl GlyphAtlas {
     /// Discard all cached glyphs. Called when the DPI scale factor changes
     /// so every glyph is re-rasterized at the new resolution.
     pub fn clear(&mut self) {
-        self.cache = Lru::new(NonZeroUsize::new(CACHE_CAPACITY).unwrap());
+        assert!(
+            self.frame_pins.is_empty(),
+            "cannot clear glyphs referenced by an unfinished frame"
+        );
+        self.cache = Lru::new(NonZeroUsize::new(self.cache.capacity()).unwrap());
         self.pages.clear();
         self.generation = self.generation.wrapping_add(1);
+    }
+
+    /// Pin every slot returned during this frame until submission. Font and
+    /// DRCS replacements invalidate rasters even when their dimensions match.
+    pub fn begin_frame(
+        &mut self,
+        font_generation: u64,
+        glyphs: &font41::DrcsGlyphMap,
+    ) {
+        assert!(
+            self.frame_pins.is_empty(),
+            "previous glyph frame was not submitted"
+        );
+        if self.font_generation != font_generation
+            || self.drcs_glyphs.as_ref().is_none_or(|previous| {
+                !Arc::ptr_eq(previous, glyphs) && !(previous.is_empty() && glyphs.is_empty())
+            })
+        {
+            self.clear();
+            self.font_generation = font_generation;
+            self.drcs_glyphs = Some(glyphs.clone());
+        }
+        self.overflow_reported = false;
+    }
+
+    /// Release pins only after commands using this frame's slots are submitted.
+    pub fn end_frame(&mut self) {
+        self.frame_pins.clear();
+    }
+
+    fn evict_unused(&mut self) -> bool {
+        let key = self
+            .cache
+            .keys()
+            .find(|key| !self.frame_pins.contains(key))
+            .copied();
+        let Some(slot) = key.and_then(|key| self.cache.remove(&key)) else {
+            return false;
+        };
+        free_slot(&mut self.pages, &slot);
+        self.generation = self.generation.wrapping_add(1);
+        true
+    }
+
+    fn report_full_frame(&mut self) {
+        if !self.overflow_reported {
+            warn!("glyph atlas frame capacity exceeded; omitting additional glyphs");
+            self.overflow_reported = true;
+        }
     }
 
     pub fn generation(&self) -> u64 {
@@ -160,7 +224,9 @@ impl GlyphAtlas {
     }
 
     /// Look up a glyph in the cache or rasterize and upload on miss. Returns
-    /// `None` only if the glyph is larger than the atlas itself.
+    /// `None` if the glyph is too large or the frame's pinned working set has
+    /// exhausted the entry or texture capacity. Existing frame slots stay
+    /// valid.
     ///
     /// `synthetic_bold` is only honoured when the underlying face is a colour
     /// font — stems on outline fonts would smear unpleasantly under a blind
@@ -188,12 +254,21 @@ impl GlyphAtlas {
         );
 
         if let Some(slot) = self.cache.get(&key).copied() {
+            self.frame_pins.insert(key);
             return Some(slot);
         }
 
-        let _drcs =
-            drcs.map(|(geometry, glyphs)| font41::set_drcs_context(Some(geometry), Some(glyphs)));
-        let mut glyph = font_system.rasterize_glyph(font_index, glyph_id, cells_wide as u32);
+        if self.cache.len() >= self.cache.capacity() && !self.evict_unused() {
+            self.report_full_frame();
+            return None;
+        }
+
+        let context = drcs.as_ref().map(|(geometry, glyphs)| font41::DrcsContext {
+            geometry: *geometry,
+            glyphs,
+        });
+        let mut glyph =
+            font_system.rasterize_glyph_with_drcs(font_index, glyph_id, cells_wide as u32, context);
         if synthetic_bold {
             dilate_alpha(&mut glyph);
         }
@@ -209,6 +284,7 @@ impl GlyphAtlas {
             if release_evicted(&mut self.pages, self.cache.insert(key, slot)) {
                 self.generation = self.generation.wrapping_add(1);
             }
+            self.frame_pins.insert(key);
             return Some(slot);
         }
 
@@ -224,17 +300,10 @@ impl GlyphAtlas {
             if let Some(tile) = allocate_glyph(self, device, glyph.width, glyph.height) {
                 break tile;
             }
-            // Allocated pages are full; free the LRU entry and retry. Give up
-            // if the cache is empty, the page cap has been reached, and the
-            // glyph still does not fit.
-            if !evict_one(&mut self.cache, &mut self.pages) {
-                warn!(
-                    "glyph atlas exhausted before allocating glyph {glyph_id} ({}x{})",
-                    glyph.width, glyph.height
-                );
+            if !self.evict_unused() {
+                self.report_full_frame();
                 return None;
             }
-            self.generation = self.generation.wrapping_add(1);
         };
 
         upload_glyph(
@@ -254,6 +323,7 @@ impl GlyphAtlas {
         if release_evicted(&mut self.pages, self.cache.insert(key, slot)) {
             self.generation = self.generation.wrapping_add(1);
         }
+        self.frame_pins.insert(key);
         Some(slot)
     }
 }
@@ -276,7 +346,7 @@ fn allocate_glyph(
     if let Some(tile) = allocate_in_existing_pages(atlas, width, height) {
         return Some(tile);
     }
-    if width > ATLAS_SIZE || height > ATLAS_SIZE || atlas.pages.len() >= MAX_ATLAS_PAGES {
+    if width > ATLAS_SIZE || height > ATLAS_SIZE || atlas.pages.len() >= atlas.page_limit {
         return None;
     }
 
@@ -366,19 +436,6 @@ fn create_page(
     }
 }
 
-fn evict_one(
-    cache: &mut Lru<GlyphKey, GlyphSlot>,
-    pages: &mut [GlyphAtlasPage],
-) -> bool {
-    match cache.pop() {
-        Some((_, slot)) => {
-            free_slot(pages, &slot);
-            true
-        }
-        None => false,
-    }
-}
-
 /// Return the packer region owned by a cache entry that `insert()` just
 /// evicted, if any. Empty-glyph slots carry no allocation.
 fn release_evicted(
@@ -461,4 +518,157 @@ fn upload_glyph(
             depth_or_array_layers: 1,
         },
     );
+}
+
+#[cfg(test)]
+mod tests {
+    use std::collections::HashMap;
+
+    use super::*;
+
+    fn graphics_device() -> (wgpu::Device, wgpu::Queue) {
+        pollster::block_on(async {
+            let instance = wgpu::Instance::default();
+            let adapter = instance
+                .request_adapter(&wgpu::RequestAdapterOptions::default())
+                .await
+                .expect("graphics adapter");
+            adapter
+                .request_device(&wgpu::DeviceDescriptor::default())
+                .await
+                .expect("graphics device")
+        })
+    }
+
+    fn downloadable_glyphs(coverage: u8) -> font41::DrcsGlyphMap {
+        Arc::new(
+            (0..3)
+                .map(|glyph_id| {
+                    (
+                        (font41::DrcsGeometryClass::Col80Line24, glyph_id),
+                        font41::DrcsGlyphDef {
+                            glyph_id,
+                            width: 1,
+                            height: 1,
+                            full_cell: true,
+                            pixels: vec![coverage],
+                        },
+                    )
+                })
+                .collect::<HashMap<_, _>>(),
+        )
+    }
+
+    fn cache_glyph(
+        atlas: &mut GlyphAtlas,
+        device: &wgpu::Device,
+        queue: &wgpu::Queue,
+        fonts: &mut FontSystem,
+        glyphs: &font41::DrcsGlyphMap,
+        id: u16,
+    ) -> Option<GlyphSlot> {
+        let geometry = font41::DrcsGeometryClass::Col80Line24;
+        let shaped = fonts.shape_row_with_drcs(
+            &[smol_str::SmolStr::new(
+                font41::encode_drcs_char(id).unwrap().to_string(),
+            )],
+            &[font41::attrs::CellAttrs::default()],
+            Some(font41::DrcsContext { geometry, glyphs }),
+        );
+        let glyph = &shaped[0];
+        atlas.ensure_cached(
+            device,
+            queue,
+            fonts,
+            glyph.font_index,
+            glyph.glyph_id,
+            1,
+            false,
+            Some((geometry, glyphs.clone())),
+        )
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter"]
+    fn pinned_texture_slots_survive_exhaustion_until_submission() {
+        let (device, queue) = graphics_device();
+        let mut atlas = GlyphAtlas::new(&device);
+        atlas.page_limit = 1;
+        let mut fonts = FontSystem::new(None, 18.0, 1);
+        fonts.cell_width = 600;
+        fonts.cell_height = 600;
+        let glyphs = downloadable_glyphs(255);
+        atlas.begin_frame(fonts.font_generation(), &glyphs);
+        let first = cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 0).unwrap();
+        let generation = atlas.generation();
+        assert!(cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 1).is_none());
+        let hit = cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 0).unwrap();
+        assert_eq!(
+            (hit.page_index, hit.x(), hit.y()),
+            (first.page_index, first.x(), first.y())
+        );
+        assert_eq!(atlas.generation(), generation);
+        queue.submit([]);
+        atlas.end_frame();
+
+        atlas.begin_frame(fonts.font_generation(), &glyphs);
+        let next = cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 1).unwrap();
+        assert_eq!(
+            (next.page_index, next.x(), next.y()),
+            (first.page_index, first.x(), first.y())
+        );
+        assert_ne!(atlas.generation(), generation);
+        queue.submit([]);
+        atlas.end_frame();
+    }
+
+    #[test]
+    #[ignore = "requires a graphics adapter"]
+    fn cache_capacity_keeps_hits_pinned_and_replacements_invalidate() {
+        let (device, queue) = graphics_device();
+        let mut atlas = GlyphAtlas::new(&device);
+        atlas.cache = Lru::new(NonZeroUsize::new(2).unwrap());
+        let mut fonts = FontSystem::new(None, 18.0, 1);
+        let glyphs = downloadable_glyphs(255);
+        atlas.begin_frame(fonts.font_generation(), &glyphs);
+        cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 0).unwrap();
+        cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 1).unwrap();
+        assert!(cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 2).is_none());
+        queue.submit([]);
+        atlas.end_frame();
+
+        atlas.begin_frame(fonts.font_generation(), &glyphs);
+        let hit = cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 0).unwrap();
+        cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 2).unwrap();
+        assert!(cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 1).is_none());
+        let still_pinned =
+            cache_glyph(&mut atlas, &device, &queue, &mut fonts, &glyphs, 0).unwrap();
+        assert_eq!((hit.x(), hit.y()), (still_pinned.x(), still_pinned.y()));
+        queue.submit([]);
+        atlas.end_frame();
+
+        let generation = atlas.generation();
+        let replacement = downloadable_glyphs(0);
+        atlas.begin_frame(fonts.font_generation(), &replacement);
+        assert_ne!(atlas.generation(), generation);
+        assert!(atlas.cache.is_empty());
+        cache_glyph(&mut atlas, &device, &queue, &mut fonts, &replacement, 0).unwrap();
+        queue.submit([]);
+        atlas.end_frame();
+
+        let generation = atlas.generation();
+        atlas.begin_frame(fonts.font_generation() + 1, &replacement);
+        assert_ne!(atlas.generation(), generation);
+        assert!(atlas.cache.is_empty());
+        atlas.end_frame();
+
+        let empty_tab = Arc::new(HashMap::new());
+        atlas.begin_frame(fonts.font_generation() + 1, &empty_tab);
+        let generation = atlas.generation();
+        atlas.end_frame();
+        let another_empty_tab = Arc::new(HashMap::new());
+        atlas.begin_frame(fonts.font_generation() + 1, &another_empty_tab);
+        assert_eq!(atlas.generation(), generation);
+        atlas.end_frame();
+    }
 }

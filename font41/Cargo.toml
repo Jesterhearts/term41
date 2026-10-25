@@ -10,7 +10,6 @@ fontdb                   = "0.24.0"
 harfrust                 = "0.13.3"
 icu_properties.workspace = true
 log.workspace            = true
-memmap2                  = "0.9.11"
 png.workspace            = true
 raqote                   = { version = "0.8.5", default-features = false }
 read-fonts               = "0.43.3"

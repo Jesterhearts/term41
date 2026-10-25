@@ -1,18 +1,11 @@
-use std::collections::HashMap;
-
 use font41::attrs::CellAttrs;
 use smol_str::SmolStr;
 use vte_mode41::C1Mode;
 use vte_mode41::ConformanceLevel;
 use vtepp::Params;
 
-use crate::ColorPalette;
-use crate::CursorStyle;
-use crate::DecColorState;
-use crate::FeaturePermissions;
 use crate::KittyKeyboardState;
 use crate::Screen;
-use crate::ShellIntegrationPhase;
 use crate::StatusDisplayKind;
 use crate::TerminalModes;
 use crate::Viewport;
@@ -20,9 +13,6 @@ use crate::charset;
 use crate::color::apply_sgr_groups;
 use crate::conformance;
 use crate::cursor::DecCusr;
-use crate::dec::r#macro::MacroStore;
-use crate::dec::udk::UdkState;
-use crate::drcs::DrcsStore;
 use crate::io::keyboard::handle_kitty_keyboard_groups;
 use crate::mode;
 use crate::parser::BorrowedParams;
@@ -428,39 +418,62 @@ pub(crate) fn csi_parse<'a>(
     }
 }
 
-#[bon::builder]
 fn apply_main_csi(
+    state: crate::control::ControlState<'_>,
     action: MainCsiAction<'_>,
-    screen: &mut Screen,
-    stash: &mut Screen,
-    viewport: &mut Viewport,
-    on_alt_screen: &mut bool,
-    modes: &mut TerminalModes,
-    kitty_keyboard: &mut KittyKeyboardState,
-    pending_output: &mut Vec<u8>,
-    pending_resize: &mut Option<(u32, u32)>,
-    default_cursor_style: CursorStyle,
-    cursor_style: &mut CursorStyle,
-    saved_alt_cursor_style: &mut Option<CursorStyle>,
-    cell_width: u32,
-    cell_height: u32,
-    palette: &mut ColorPalette,
-    base_palette: &ColorPalette,
-    dec_color: &mut DecColorState,
-    runtime_colors: &mut crate::RuntimeColorOverrides,
-    default_status_display: &mut StatusDisplayKind,
-    title_stack: &mut Vec<Option<String>>,
-    current_title: &mut Option<String>,
-    saved_modes: &mut HashMap<mode::PrivateMode, bool>,
-    current_prompt_row: &mut Option<u64>,
-    shell_integration_phase: &mut ShellIntegrationPhase,
-    bell_pending: &mut bool,
-    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
-    macros: &mut MacroStore,
-    udks: &mut UdkState,
-    feature_permissions: &FeaturePermissions,
-    drcs: &mut DrcsStore,
+    effects: &mut crate::TerminalEffects,
 ) {
+    let crate::control::ControlState {
+        screens,
+        cursor,
+        colors,
+        modes,
+        keyboard: kitty_keyboard,
+        metadata,
+        protocol,
+        saved_modes,
+        vt52_cursor_addr,
+    } = state;
+    let crate::control::ScreenBuffers {
+        active: screen,
+        stash,
+        viewport,
+        on_alt_screen,
+        default_status_display,
+        cell_width,
+        cell_height,
+    } = screens;
+    let crate::control::CursorStyles {
+        default: default_cursor_style,
+        current: cursor_style,
+        saved_alt: saved_alt_cursor_style,
+    } = cursor;
+    let crate::control::TerminalColors {
+        palette,
+        base: base_palette,
+        dec: dec_color,
+        overrides: runtime_colors,
+    } = colors;
+    let crate::metadata::TerminalMetadata {
+        title_stack,
+        current_title,
+        current_prompt_row,
+        shell_integration_phase,
+        ..
+    } = metadata;
+    let crate::TerminalProtocolState {
+        macros,
+        udks,
+        feature_permissions,
+        drcs,
+        ..
+    } = protocol;
+    let crate::TerminalEffects {
+        host_bytes: pending_output,
+        resize_request: pending_resize,
+        bell: bell_pending,
+        ..
+    } = effects;
     let pending_output = &mut *pending_output;
     let screen = &mut *screen;
     let mut viewport = screen::screen_viewport(screen, viewport);
@@ -931,79 +944,74 @@ fn apply_main_csi(
     }
 }
 
-#[bon::builder]
 pub(crate) fn csi_apply(
+    state: crate::control::ControlState<'_>,
     action: ParsedCsiAction<'_>,
-    screen: &mut Screen,
-    stash: &mut Screen,
-    viewport: &mut Viewport,
-    on_alt_screen: &mut bool,
-    modes: &mut TerminalModes,
-    kitty_keyboard: &mut KittyKeyboardState,
-    pending_output: &mut Vec<u8>,
-    pending_resize: &mut Option<(u32, u32)>,
-    default_cursor_style: CursorStyle,
-    cursor_style: &mut CursorStyle,
-    saved_alt_cursor_style: &mut Option<CursorStyle>,
-    cell_width: u32,
-    cell_height: u32,
-    palette: &mut ColorPalette,
-    base_palette: &ColorPalette,
-    dec_color: &mut DecColorState,
-    runtime_colors: &mut crate::RuntimeColorOverrides,
-    default_status_display: &mut StatusDisplayKind,
-    title_stack: &mut Vec<Option<String>>,
-    current_title: &mut Option<String>,
-    saved_modes: &mut HashMap<mode::PrivateMode, bool>,
-    current_prompt_row: &mut Option<u64>,
-    shell_integration_phase: &mut ShellIntegrationPhase,
-    bell_pending: &mut bool,
-    vt52_cursor_addr: &mut crate::Vt52CursorAddr,
-    macros: &mut MacroStore,
-    udks: &mut UdkState,
-    feature_permissions: &FeaturePermissions,
-    drcs: &mut DrcsStore,
+    effects: &mut crate::TerminalEffects,
 ) {
-    clamp_cursor_to_row_width(screen, viewport);
+    clamp_cursor_to_row_width(state.screens.active, state.screens.viewport);
+    if let ParsedCsiAction::Main(action) = action {
+        apply_main_csi(state, action, effects);
+        return;
+    }
+    let crate::control::ControlState {
+        screens,
+        cursor,
+        colors,
+        modes,
+        keyboard: kitty_keyboard,
+        metadata,
+        protocol,
+        saved_modes,
+        vt52_cursor_addr,
+    } = state;
+    let crate::control::ScreenBuffers {
+        active: screen,
+        stash,
+        viewport,
+        on_alt_screen,
+        default_status_display,
+        ..
+    } = screens;
+    let crate::control::CursorStyles {
+        default: default_cursor_style,
+        current: cursor_style,
+        saved_alt: saved_alt_cursor_style,
+    } = cursor;
+    let crate::control::TerminalColors {
+        palette,
+        base: base_palette,
+        dec: dec_color,
+        overrides: runtime_colors,
+    } = colors;
+    let crate::metadata::TerminalMetadata {
+        title_stack,
+        current_title,
+        current_prompt_row,
+        shell_integration_phase,
+        ..
+    } = metadata;
+    let crate::TerminalProtocolState {
+        macros,
+        udks,
+        feature_permissions,
+        drcs,
+        ..
+    } = protocol;
+    let crate::TerminalEffects {
+        host_bytes: pending_output,
+        resize_request: pending_resize,
+        bell: bell_pending,
+        ..
+    } = effects;
 
     match action {
         ParsedCsiAction::Unsupported => (),
         ParsedCsiAction::StatusLine(action) => {
             apply_status_line_csi(screen, viewport, palette, modes.insert_mode, action);
         }
-        ParsedCsiAction::Main(action) => {
-            apply_main_csi()
-                .action(action)
-                .screen(screen)
-                .stash(stash)
-                .viewport(viewport)
-                .on_alt_screen(on_alt_screen)
-                .modes(modes)
-                .kitty_keyboard(kitty_keyboard)
-                .pending_output(pending_output)
-                .pending_resize(pending_resize)
-                .default_cursor_style(default_cursor_style)
-                .cursor_style(cursor_style)
-                .saved_alt_cursor_style(saved_alt_cursor_style)
-                .cell_width(cell_width)
-                .cell_height(cell_height)
-                .palette(palette)
-                .base_palette(base_palette)
-                .dec_color(dec_color)
-                .runtime_colors(runtime_colors)
-                .default_status_display(default_status_display)
-                .title_stack(title_stack)
-                .current_title(current_title)
-                .saved_modes(saved_modes)
-                .current_prompt_row(current_prompt_row)
-                .shell_integration_phase(shell_integration_phase)
-                .bell_pending(bell_pending)
-                .vt52_cursor_addr(vt52_cursor_addr)
-                .macros(macros)
-                .udks(udks)
-                .feature_permissions(feature_permissions)
-                .drcs(drcs)
-                .call();
+        ParsedCsiAction::Main(_) => {
+            unreachable!("main CSI actions are applied before state is split")
         }
         ParsedCsiAction::SetPrivateModes {
             enable,

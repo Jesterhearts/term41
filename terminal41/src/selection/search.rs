@@ -171,14 +171,20 @@ pub fn is_cell_match(
     screen_row: u32,
     screen_col: u32,
 ) -> bool {
+    let abs_row = screen_row_to_absolute(screen, viewport, screen_row);
+    is_absolute_cell_match(search, abs_row, screen_col)
+}
+
+/// Test a cell using its absolute active-grid row, without a viewport offset.
+pub(crate) fn is_absolute_cell_match(
+    search: &SearchState,
+    absolute_row: u64,
+    col: u32,
+) -> bool {
     if !search.active || search.matches.is_empty() {
         return false;
     }
-    let abs_row = screen_row_to_absolute(screen, viewport, screen_row);
-    search
-        .matches
-        .iter()
-        .any(|m| m.contains(abs_row, screen_col))
+    search.matches.iter().any(|m| m.contains(absolute_row, col))
 }
 
 /// Whether a viewport cell belongs to the active search match.
@@ -189,14 +195,23 @@ pub fn is_cell_active_match(
     screen_row: u32,
     screen_col: u32,
 ) -> bool {
+    let abs_row = screen_row_to_absolute(screen, viewport, screen_row);
+    is_absolute_cell_active_match(search, abs_row, screen_col)
+}
+
+/// Test the focused match using an absolute active-grid row.
+pub(crate) fn is_absolute_cell_active_match(
+    search: &SearchState,
+    absolute_row: u64,
+    col: u32,
+) -> bool {
     if !search.active {
         return false;
     }
     let Some(active) = search.matches.get(search.active_idx) else {
         return false;
     };
-    let abs_row = screen_row_to_absolute(screen, viewport, screen_row);
-    active.contains(abs_row, screen_col)
+    active.contains(absolute_row, col)
 }
 
 #[must_use]

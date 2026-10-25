@@ -763,6 +763,8 @@ impl Renderer {
             frame::apply_terminal_snapshot_rows(self, snap, block_y_offset_rows);
         }
         let terminal_rows = std::mem::take(&mut self.terminal_rows);
+        self.glyph_atlas
+            .begin_frame(font_system.font_generation(), &snap.drcs_glyphs);
         self.image_atlas.begin_frame();
         let under_text_image_geometry =
             frame::build_image_geometry(self, tab_id, visible_images, &layout, true);
@@ -797,6 +799,7 @@ impl Renderer {
             over_text_image_geometry,
         );
         self.image_atlas.end_frame();
+        self.glyph_atlas.end_frame();
     }
 
     /// Clear all cached glyphs so they are re-rasterized at the current

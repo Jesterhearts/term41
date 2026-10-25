@@ -219,7 +219,7 @@ mod tests {
     use crate::palette_crate::Srgb;
 
     fn parse(s: &str) -> Config {
-        crate::schema::parse_config(s, &"<test>")
+        crate::schema::parse_config(s, &"<test>").expect("valid test configuration")
     }
 
     fn ignored_keys(s: &str) -> Vec<String> {
@@ -543,11 +543,14 @@ max_persistent_history_per_dir = 75
     }
 
     #[test]
-    fn malformed_toml_falls_back_to_defaults_with_gutter_on() {
-        // A typo shouldn't silently leave gutter off; the whole config
-        // resets to defaults, and the default gutter state is on.
-        let cfg = parse("gutter = \"yes-please\"");
-        assert!(cfg.gutter);
+    fn malformed_toml_preserves_the_parse_error() {
+        let error = crate::schema::parse_config("gutter = [", &"<test>").unwrap_err();
+        assert!(error.to_string().contains("gutter"));
+    }
+
+    #[test]
+    fn invalid_gutter_value_uses_the_field_default() {
+        assert!(parse("gutter = \"yes-please\"").gutter);
     }
 
     #[test]

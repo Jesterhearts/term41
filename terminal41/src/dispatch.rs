@@ -35,7 +35,6 @@ use crate::graphics;
 use crate::osc::handle_osc;
 use crate::parser::ParsedCsiAction;
 use crate::parser::ParsedEscAction;
-use crate::parser::csi_apply;
 use crate::parser::csi_parse;
 use crate::parser::esc_apply;
 use crate::parser::esc_parse;
@@ -251,95 +250,6 @@ pub(super) fn apply_vt52_action(
             col,
             trailing_ascii,
         ),
-    }
-}
-
-pub(super) fn apply_csi_action(
-    action: CsiAction<'_>,
-    active: &mut Screen,
-    stash: &mut Screen,
-    viewport: &mut Viewport,
-    on_alt_screen: &mut bool,
-    modes: &mut TerminalModes,
-    kitty_keyboard: &mut KittyKeyboardState,
-    pending_output: &mut Vec<u8>,
-    pending_resize: &mut Option<(u32, u32)>,
-    default_cursor_style: CursorStyle,
-    cursor_style: &mut CursorStyle,
-    saved_alt_cursor_style: &mut Option<CursorStyle>,
-    cell_width: u32,
-    cell_height: u32,
-    default_status_display: &mut StatusDisplayKind,
-    title_stack: &mut Vec<Option<String>>,
-    current_title: &mut Option<String>,
-    saved_modes: &mut HashMap<crate::mode::PrivateMode, bool>,
-    current_prompt_row: &mut Option<u64>,
-    shell_integration_phase: &mut ShellIntegrationPhase,
-    bell_pending: &mut bool,
-    vt52_cursor_addr: &mut Vt52CursorAddr,
-    macros: &mut MacroStore,
-    macro_invocation_depth: usize,
-    udks: &mut UdkState,
-    feature_permissions: &FeaturePermissions,
-    limits: TerminalLimits,
-    drcs: &mut crate::drcs::DrcsStore,
-    palette: &mut ColorPalette,
-    base_palette: &ColorPalette,
-    dec_color: &mut DecColorState,
-    runtime_colors: &mut RuntimeColorOverrides,
-) -> PendingApplication {
-    match action {
-        CsiAction::Ignore => PendingApplication::None,
-        CsiAction::Special(special) => apply_special_csi()
-            .special(special)
-            .active(active)
-            .stash(stash)
-            .palette(palette)
-            .base_palette(base_palette)
-            .dec_color(dec_color)
-            .runtime_colors(runtime_colors)
-            .pending_output(pending_output)
-            .c1_mode(modes.c1_mode)
-            .feature_permissions(feature_permissions)
-            .limits(limits)
-            .macros(macros)
-            .macro_invocation_depth(macro_invocation_depth)
-            .call(),
-        CsiAction::Parsed(action) => {
-            csi_apply()
-                .action(action)
-                .screen(active)
-                .stash(stash)
-                .viewport(viewport)
-                .on_alt_screen(on_alt_screen)
-                .modes(modes)
-                .kitty_keyboard(kitty_keyboard)
-                .pending_output(pending_output)
-                .pending_resize(pending_resize)
-                .default_cursor_style(default_cursor_style)
-                .cursor_style(cursor_style)
-                .saved_alt_cursor_style(saved_alt_cursor_style)
-                .cell_width(cell_width)
-                .cell_height(cell_height)
-                .default_status_display(default_status_display)
-                .title_stack(title_stack)
-                .current_title(current_title)
-                .saved_modes(saved_modes)
-                .current_prompt_row(current_prompt_row)
-                .shell_integration_phase(shell_integration_phase)
-                .bell_pending(bell_pending)
-                .vt52_cursor_addr(vt52_cursor_addr)
-                .macros(macros)
-                .udks(udks)
-                .feature_permissions(feature_permissions)
-                .drcs(drcs)
-                .palette(palette)
-                .base_palette(base_palette)
-                .dec_color(dec_color)
-                .runtime_colors(runtime_colors)
-                .call();
-            PendingApplication::None
-        }
     }
 }
 

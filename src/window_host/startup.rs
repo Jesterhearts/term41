@@ -166,12 +166,12 @@ pub(crate) fn present_startup_frame(
     let visible_images = {
         let terminal = active_startup_tab.terminal.lock();
         terminal41::view::visible_images(
-            &terminal.active,
-            &terminal.viewport,
+            terminal.active(),
+            terminal.viewport(),
             terminal.cell_height(),
             terminal.cell_width(),
             terminal.kitty_images(),
-            &terminal.palette,
+            terminal.palette(),
             Instant::now(),
         )
         .collect::<Vec<_>>()
@@ -379,11 +379,7 @@ pub(crate) fn clear_terminal_selection_for_tab(
         return false;
     };
     let mut terminal = target.terminal.lock();
-    if terminal.selection.take().is_none() {
-        return false;
-    }
-    terminal.invalidate_snapshot_rows();
-    true
+    terminal.clear_selection()
 }
 
 pub(crate) fn clear_command_editor_selection_for_tab(
@@ -421,12 +417,11 @@ pub(crate) fn copy_active_selection_to_clipboard(
     match source {
         SelectionCopySource::Terminal => {
             let mut terminal = target.terminal.lock();
-            if let Some(text) = selection_text(terminal.selection.as_ref(), &terminal.active) {
+            if let Some(text) = selection_text(terminal.selection(), terminal.active()) {
                 terminal.clipboard.set(kind, &text);
             }
             if clear_after_copy {
-                terminal.selection = None;
-                terminal.invalidate_snapshot_rows();
+                terminal.clear_selection();
             }
         }
         SelectionCopySource::Editor => {
@@ -856,8 +851,8 @@ pub(crate) fn request_window_size_for_tab(
     let terminal = endpoint.terminal.lock();
     request_window_grid_size(
         host,
-        terminal.viewport.cols,
-        view::total_rows(&terminal.active, &terminal.viewport),
+        terminal.viewport().cols,
+        view::total_rows(terminal.active(), terminal.viewport()),
     );
 }
 
@@ -937,21 +932,20 @@ pub(crate) fn extend_selection_to_mouse(host: &mut WindowHost) -> bool {
     };
     let mut guard = target.terminal.lock();
     let terminal = &mut *guard;
-    let Some(selection) = terminal.selection.as_ref() else {
+    let Some(selection) = terminal.selection() else {
         return false;
     };
     let Some(new_sel) = extend_rendered_selection(
         selection,
-        &terminal.active,
-        &terminal.viewport,
-        terminal.on_alt_screen,
+        terminal.active(),
+        terminal.viewport(),
+        terminal.on_alt_screen(),
         cell.0,
         cell.1,
     ) else {
         return false;
     };
-    terminal.selection = Some(new_sel);
-    terminal.invalidate_snapshot_rows();
+    terminal.set_selection(Some(new_sel));
     drop(guard);
     if let Some(tab_id) = host.input.active_tab {
         clear_command_editor_selection_for_tab(host, tab_id);
@@ -973,8 +967,8 @@ pub(crate) fn current_selection_autoscroll_direction(
     let (_, cell_height, _, _) = layout_snapshot(&host.render);
     let target = active_input_target(&mut host.input)?;
     let terminal = target.terminal.lock();
-    terminal.selection.as_ref()?;
-    let viewport_rows = terminal.viewport.rows;
+    terminal.selection()?;
+    let viewport_rows = terminal.viewport().rows;
     selection_autoscroll_direction(mouse_y, cell_height, viewport_rows)
 }
 
@@ -1021,30 +1015,27 @@ pub(crate) fn apply_selection_autoscroll(
     };
     let mut guard = target.terminal.lock();
     let terminal = &mut *guard;
-    if terminal.selection.is_none() {
+    if terminal.selection().is_none() {
         return false;
     }
     let scrolled = match direction {
-        SelectionAutoscroll::Up => {
-            let viewport = terminal.viewport;
-            view::scroll_viewport_up(&mut terminal.active, &viewport, 1)
-        }
-        SelectionAutoscroll::Down => view::scroll_viewport_down(&mut terminal.active, 1),
+        SelectionAutoscroll::Up => terminal.scroll_viewport_up(1),
+        SelectionAutoscroll::Down => terminal.scroll_viewport_down(1),
     };
     if scrolled == 0 {
         return false;
     }
-    if let Some(selection) = terminal.selection.as_ref()
+    if let Some(selection) = terminal.selection()
         && let Some(new_sel) = extend_rendered_selection(
             selection,
-            &terminal.active,
-            &terminal.viewport,
-            terminal.on_alt_screen,
+            terminal.active(),
+            terminal.viewport(),
+            terminal.on_alt_screen(),
             cell.0,
             cell.1,
         )
     {
-        terminal.selection = Some(new_sel);
+        terminal.set_selection(Some(new_sel));
     }
     terminal.invalidate_snapshot_rows();
     true

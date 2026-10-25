@@ -1,5 +1,3 @@
-use std::cell::Cell;
-use std::cell::RefCell;
 use std::collections::HashMap;
 use std::sync::Arc;
 
@@ -46,36 +44,11 @@ pub struct GlyphDef {
 /// Shared map of DRCS glyph definitions keyed by geometry and glyph id.
 pub type GlyphMap = Arc<HashMap<(GeometryClass, u16), GlyphDef>>;
 
-thread_local! {
-    static CURRENT_GEOMETRY: Cell<Option<GeometryClass>> = const { Cell::new(None) };
-    static CURRENT_GLYPHS: RefCell<Option<GlyphMap>> = const { RefCell::new(None) };
-}
-
-/// Guard that restores the previous thread-local DRCS context on drop.
-pub struct GeometryGuard {
-    geometry: Option<GeometryClass>,
-    glyphs: Option<GlyphMap>,
-}
-
-impl Drop for GeometryGuard {
-    fn drop(&mut self) {
-        CURRENT_GEOMETRY.set(self.geometry);
-        CURRENT_GLYPHS.replace(self.glyphs.take());
-    }
-}
-
-/// Install the DRCS context used by subsequent glyph rasterization on this
-/// thread, returning a guard that restores the previous context.
-pub fn set_context(
-    geometry: Option<GeometryClass>,
-    glyphs: Option<GlyphMap>,
-) -> GeometryGuard {
-    let previous_geometry = CURRENT_GEOMETRY.replace(geometry);
-    let previous_glyphs = CURRENT_GLYPHS.replace(glyphs);
-    GeometryGuard {
-        geometry: previous_geometry,
-        glyphs: previous_glyphs,
-    }
+/// Session-local downloadable fonts used by one shaping or rasterization call.
+#[derive(Clone, Copy)]
+pub struct Context<'a> {
+    pub geometry: GeometryClass,
+    pub glyphs: &'a GlyphMap,
 }
 
 /// Encode a DRCS glyph id as a private-use Unicode scalar.
@@ -83,9 +56,13 @@ pub fn encode_char(glyph_id: u16) -> Option<char> {
     char::from_u32(PUA_BASE + glyph_id as u32)
 }
 
-pub fn encode_single(cell: &str) -> Option<u16> {
+pub fn encode_single(
+    cell: &str,
+    context: Option<Context<'_>>,
+) -> Option<u16> {
     let glyph_id = private_use_glyph_id(cell)?;
-    if active_glyph_exists(glyph_id) {
+    let context = context?;
+    if resolve_glyph(context.glyphs, context.geometry, glyph_id).is_some() {
         Some(glyph_id)
     } else {
         None
@@ -105,30 +82,16 @@ fn private_use_glyph_id(cell: &str) -> Option<u16> {
     Some((cp - PUA_BASE) as u16)
 }
 
-fn active_glyph_exists(glyph_id: u16) -> bool {
-    let Some(geometry) = CURRENT_GEOMETRY.get() else {
-        return false;
-    };
-    let glyphs = CURRENT_GLYPHS.with(|current| current.borrow().as_ref().cloned());
-    let Some(glyphs) = glyphs else {
-        return false;
-    };
-    resolve_glyph(&glyphs, geometry, glyph_id).is_some()
-}
-
 pub fn rasterize(
     glyph_id: u16,
     cell_width: u32,
     cell_height: u32,
+    context: Option<Context<'_>>,
 ) -> RasterizedGlyph {
-    let Some(geometry) = CURRENT_GEOMETRY.get() else {
+    let Some(context) = context else {
         return empty();
     };
-    let glyphs = CURRENT_GLYPHS.with(|current| current.borrow().as_ref().cloned());
-    let Some(glyphs) = glyphs else {
-        return empty();
-    };
-    let Some(glyph) = resolve_glyph(&glyphs, geometry, glyph_id) else {
+    let Some(glyph) = resolve_glyph(context.glyphs, context.geometry, glyph_id) else {
         return empty();
     };
 
@@ -263,20 +226,26 @@ mod tests {
         let ch = encode_char(glyph_id).unwrap();
 
         assert_eq!(private_use_glyph_id(&ch.to_string()), Some(glyph_id));
-        assert_eq!(encode_single(&ch.to_string()), None);
+        assert_eq!(encode_single(&ch.to_string(), None), None);
 
         let glyphs: GlyphMap = Arc::new(HashMap::from([(
             (GeometryClass::Col80Line24, glyph_id),
             single_pixel_glyph(glyph_id),
         )]));
-        let _guard = set_context(Some(GeometryClass::Col80Line24), Some(glyphs));
-
-        assert_eq!(encode_single(&ch.to_string()), Some(glyph_id));
+        let context = Context {
+            geometry: GeometryClass::Col80Line24,
+            glyphs: &glyphs,
+        };
+        assert_eq!(
+            encode_single(&ch.to_string(), Some(context)),
+            Some(glyph_id)
+        );
+        assert_eq!(encode_single(&ch.to_string(), None), None);
     }
 
     #[test]
     fn encode_single_does_not_swallow_undefined_nerd_font_pua() {
-        assert_eq!(encode_single("\u{f0001}"), None);
+        assert_eq!(encode_single("\u{f0001}", None), None);
     }
 
     #[test]
@@ -286,8 +255,11 @@ mod tests {
             (GeometryClass::Col80Line24, glyph_id),
             single_pixel_glyph(glyph_id),
         )]));
-        let _guard = set_context(Some(GeometryClass::Col80Line48), Some(glyphs));
-        let raster = rasterize(glyph_id, 10, 8);
+        let context = Context {
+            geometry: GeometryClass::Col80Line48,
+            glyphs: &glyphs,
+        };
+        let raster = rasterize(glyph_id, 10, 8, Some(context));
         assert!(raster.width > 0);
         assert!(raster.height > 0);
         assert!(raster.bitmap.iter().any(|&b| b != 0));
@@ -312,8 +284,11 @@ mod tests {
                 },
             ),
         ]));
-        let _guard = set_context(Some(GeometryClass::Col80Line48), Some(glyphs));
-        let raster = rasterize(glyph_id, 10, 8);
+        let context = Context {
+            geometry: GeometryClass::Col80Line48,
+            glyphs: &glyphs,
+        };
+        let raster = rasterize(glyph_id, 10, 8, Some(context));
         assert!(raster.bitmap.iter().any(|&b| b != 0));
     }
 }

@@ -14,6 +14,7 @@ mod word;
 
 pub use active::extend_selection;
 pub use active::extend_selection_from_start;
+pub use active::is_absolute_cell_selected;
 pub use active::is_cell_selected;
 pub use active::start_selection;
 pub(crate) use coords::absolute_row_to_local;
@@ -28,6 +29,8 @@ pub use rendered::is_rendered_cell_selected;
 pub use rendered::rendered_document_row_at_viewport_row;
 pub use rendered::start_rendered_selection;
 pub use search::close_search;
+pub(crate) use search::is_absolute_cell_active_match;
+pub(crate) use search::is_absolute_cell_match;
 pub use search::is_cell_active_match;
 pub use search::is_cell_match;
 pub use search::open_search;

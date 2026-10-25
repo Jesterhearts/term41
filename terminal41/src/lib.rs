@@ -13,6 +13,7 @@ mod apply;
 mod charset;
 mod color;
 mod conformance;
+mod control;
 mod cursor;
 mod dcs;
 mod dec;

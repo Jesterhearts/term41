@@ -21,7 +21,6 @@ use crate::bitmap;
 use crate::colr;
 use crate::drcs;
 use crate::legacy;
-use crate::loader;
 use crate::loader::load_font_candidate;
 use crate::loader::loaded_font_ref;
 use crate::svg;
@@ -31,6 +30,7 @@ pub(crate) fn rasterize_glyph(
     font_index: usize,
     glyph_index: u16,
     cells_wide: u32,
+    drcs: Option<drcs::Context<'_>>,
 ) -> RasterizedGlyph {
     // Legacy shapes (block elements, braille, sextants, SFLC 1/8 blocks)
     // bypass the font entirely -- they render as cell-filling solid tiles
@@ -48,12 +48,16 @@ pub(crate) fn rasterize_glyph(
     }
     if font_index == drcs::FONT_INDEX {
         debug!("rasterizing DRCS glyph {glyph_index} for cell span {cells_wide}");
-        return drcs::rasterize(glyph_index, font_system.cell_width, font_system.cell_height);
+        return drcs::rasterize(
+            glyph_index,
+            font_system.cell_width,
+            font_system.cell_height,
+            drcs,
+        );
     }
 
-    let font_faces = loader::font_faces();
-    let Some(font_candidate) =
-        load_font_candidate(font_index, &font_faces, &font_system.final_font)
+    let font_faces = &font_system.fonts.faces;
+    let Some(font_candidate) = load_font_candidate(font_index, font_faces, &font_system.final_font)
     else {
         return empty_glyph();
     };

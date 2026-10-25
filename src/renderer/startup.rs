@@ -80,6 +80,7 @@ pub(crate) struct StartupPresenter {
     surface: Surface<Arc<Window>, Arc<Window>>,
     font_system: FontSystem,
     glyph_cache: HashMap<StartupGlyphKey, RasterizedGlyph>,
+    drcs_glyphs: Option<font41::DrcsGlyphMap>,
     gutter_enabled: bool,
     background: Option<CachedBackground>,
     first_frame: bool,
@@ -90,9 +91,7 @@ pub(crate) struct StartupPresenter {
 impl StartupPresenter {
     pub(crate) fn new(
         window: Arc<Window>,
-        fonts: Option<String>,
-        font_size: f32,
-        supersampling: u32,
+        mut font_system: FontSystem,
         scale_factor: f64,
         gutter_enabled: bool,
         background_path: Option<PathBuf>,
@@ -112,7 +111,6 @@ impl StartupPresenter {
             }
         };
 
-        let mut font_system = FontSystem::new(fonts, font_size, supersampling);
         if scale_factor != 1.0 {
             font_system.set_scale_factor(scale_factor as f32);
         }
@@ -122,6 +120,7 @@ impl StartupPresenter {
             surface,
             font_system,
             glyph_cache: HashMap::new(),
+            drcs_glyphs: None,
             gutter_enabled,
             background: background_path.and_then(|path| load_cached_background(&path)),
             first_frame: true,
@@ -143,6 +142,16 @@ impl StartupPresenter {
         command_editor: Option<&commands41::CommandLineView>,
         maximized: bool,
     ) -> Option<Duration> {
+        if self.font_system.sync_loaded_fonts() {
+            self.glyph_cache.clear();
+        }
+        if self.drcs_glyphs.as_ref().is_none_or(|glyphs| {
+            !Arc::ptr_eq(glyphs, &snap.drcs_glyphs)
+                && !(glyphs.is_empty() && snap.drcs_glyphs.is_empty())
+        }) {
+            self.glyph_cache.clear();
+            self.drcs_glyphs = Some(snap.drcs_glyphs.clone());
+        }
         let size = window.inner_size();
         let width = NonZeroU32::new(size.width.max(1))?;
         let height = NonZeroU32::new(size.height.max(1))?;
@@ -1390,9 +1399,12 @@ fn cached_glyph(
         return glyph.clone();
     }
 
-    let _drcs =
-        drcs.map(|(geometry, glyphs)| font41::set_drcs_context(Some(geometry), Some(glyphs)));
-    let mut glyph = font_system.rasterize_glyph(font_index, glyph_id, cells_wide as u32);
+    let context = drcs.as_ref().map(|(geometry, glyphs)| font41::DrcsContext {
+        geometry: *geometry,
+        glyphs,
+    });
+    let mut glyph =
+        font_system.rasterize_glyph_with_drcs(font_index, glyph_id, cells_wide as u32, context);
     if synthetic_bold {
         dilate_alpha(&mut glyph);
     }

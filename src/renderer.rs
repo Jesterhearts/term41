@@ -34,7 +34,6 @@ use config41::config;
 use config41::keybindings::Action;
 use font41::FontSystem;
 use parking_lot::Mutex;
-use terminal41::StatusDisplayKind;
 use terminal41::VisibleImage;
 use terminal41::settings;
 use tracing::debug_span;
@@ -195,9 +194,8 @@ pub struct RenderHost {
 }
 
 // ---------------------------------------------------------------------------
-// Terminal thread — processes PTY data on its own thread so rendering and
-// terminal updates are decoupled. The parser runs outside the terminal lock;
-// only per-action state mutations hold the lock.
+// PTY processing runs on a separate thread. Each byte chunk is parsed and
+// applied under the terminal lock; effects are delivered after releasing it.
 // ---------------------------------------------------------------------------
 
 impl RenderHost {
@@ -1014,62 +1012,7 @@ impl RenderHost {
 
         for tab in &mut self.tabs {
             let mut terminal = tab.terminal.lock();
-            let terminal = &mut *terminal;
-            let terminal41::Terminal {
-                active,
-                stash,
-                on_alt_screen,
-                viewport,
-                cursor_style,
-                default_cursor_style,
-                palette,
-                base_palette,
-                dec_color,
-                runtime_colors,
-                default_status_display,
-                emoji_compatibility_mode,
-                protocol,
-                ..
-            } = terminal;
-            settings::set_default_cursor_style(
-                default_cursor_style,
-                cursor_style,
-                cfg.cursor_style,
-            );
-            settings::set_emoji_compatibility_mode(
-                emoji_compatibility_mode,
-                cfg.compatibility.emoji,
-            );
-            settings::set_default_status_display(
-                active,
-                stash,
-                viewport,
-                palette,
-                default_status_display,
-                match cfg.status_line {
-                    config41::StatusLineMode::Off => StatusDisplayKind::None,
-                    config41::StatusLineMode::Indicator => StatusDisplayKind::Indicator,
-                },
-            );
-            settings::set_scrollback_policy(
-                active,
-                stash,
-                *on_alt_screen,
-                viewport,
-                cfg.scrollback_lines,
-            );
-            settings::set_feature_permissions(protocol, cfg.feature_permissions.clone());
-            settings::set_terminal_limits(protocol, cfg.limits);
-            settings::set_palette(
-                active,
-                stash,
-                palette,
-                base_palette,
-                dec_color,
-                runtime_colors,
-                cfg.palette.clone(),
-            );
-            terminal.invalidate_snapshot_rows();
+            terminal.apply_settings(settings::RuntimeSettings::from(&cfg));
             crate::unpark_thread_if_started(&tab.terminal_thread.thread_handle);
         }
         self.config.keybindings = cfg.keybindings;
@@ -1291,12 +1234,12 @@ impl RenderHost {
                     let terminal = self.tabs[active_idx].terminal.lock();
                     let images = debug_span!("recording visible images").in_scope(|| {
                         terminal41::view::visible_images(
-                            &terminal.active,
-                            &terminal.viewport,
+                            terminal.active(),
+                            terminal.viewport(),
                             terminal.cell_height(),
                             terminal.cell_width(),
                             terminal.kitty_images(),
-                            &terminal.palette,
+                            terminal.palette(),
                             Instant::now(),
                         )
                         .collect::<Vec<_>>()

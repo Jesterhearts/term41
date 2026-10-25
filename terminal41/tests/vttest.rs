@@ -200,7 +200,7 @@ fn deccolm_set_resizes_to_132() {
     let mut t = VtTerm::new_80x24();
     // Mode 40 must be enabled before DECCOLM is honoured.
     t.process(b"\x1b[?40h\x1b[?3h");
-    assert_eq!(t.inner.viewport.cols, 132);
+    assert_eq!(t.inner.viewport().cols, 132);
     assert_eq!(t.cursor(), (0, 0));
 }
 
@@ -210,7 +210,7 @@ fn deccolm_reset_restores_80() {
     t.process(b"\x1b[?40h");
     t.process(b"\x1b[?3h");
     t.process(b"\x1b[?3l");
-    assert_eq!(t.inner.viewport.cols, 80);
+    assert_eq!(t.inner.viewport().cols, 80);
 }
 
 // ---------------------------------------------------------------------------

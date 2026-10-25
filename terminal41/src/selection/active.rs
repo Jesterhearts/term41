@@ -181,6 +181,17 @@ pub fn is_cell_selected(
     screen_row: u32,
     screen_col: u32,
 ) -> bool {
+    let abs_row = screen_row_to_absolute(screen, viewport, screen_row);
+    is_absolute_cell_selected(selection, abs_row, screen_col)
+}
+
+/// Test a cell using its absolute active-grid row: trimmed rows plus local
+/// index. Empty selections and rendered-document selections do not match.
+pub fn is_absolute_cell_selected(
+    selection: Option<&Selection>,
+    absolute_row: u64,
+    col: u32,
+) -> bool {
     let Some(selection) = selection else {
         return false;
     };
@@ -190,9 +201,8 @@ pub fn is_cell_selected(
     if selection.rendered {
         return false;
     }
-    let abs_row = screen_row_to_absolute(screen, viewport, screen_row);
     selection.contains(SelectionPoint {
-        row: abs_row,
-        col: screen_col,
+        row: absolute_row,
+        col,
     })
 }

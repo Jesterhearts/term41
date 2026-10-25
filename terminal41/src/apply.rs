@@ -84,9 +84,9 @@ fn legacy_emoji_compatibility_active(terminal: &Terminal) -> bool {
     }
 }
 
-/// Apply a single parsed VTE action to the terminal state. Called by the
-/// terminal thread with the lock held - the parser runs *outside* the lock
-/// so the SIMD byte-scanning path never blocks rendering.
+/// Apply a single parsed VTE action to the terminal state. The runtime holds
+/// the terminal lock while parsing and applying a byte chunk, then delivers
+/// the collected effects after releasing the lock.
 ///
 /// Hook/Put/Unhook (DCS accumulation) are handled by the terminal thread
 /// directly and should not be passed here.
@@ -145,40 +145,9 @@ pub(crate) fn apply(
             );
             dispatch::PendingApplication::None
         }
-        dispatch::TerminalAction::Csi(action) => dispatch::apply_csi_action(
-            action,
-            &mut terminal.active,
-            &mut terminal.stash,
-            &mut terminal.viewport,
-            &mut terminal.on_alt_screen,
-            &mut terminal.modes,
-            &mut terminal.kitty_keyboard,
-            &mut effects.host_bytes,
-            &mut effects.resize_request,
-            terminal.default_cursor_style,
-            &mut terminal.cursor_style,
-            &mut terminal.saved_alt_cursor_style,
-            terminal.cell_width,
-            terminal.cell_height,
-            &mut terminal.default_status_display,
-            &mut terminal.metadata.title_stack,
-            &mut terminal.metadata.current_title,
-            &mut terminal.saved_private_modes,
-            &mut terminal.metadata.current_prompt_row,
-            &mut terminal.metadata.shell_integration_phase,
-            &mut effects.bell,
-            &mut terminal.vt52_cursor_addr,
-            &mut terminal.protocol.macros,
-            terminal.protocol.macro_invocation_depth,
-            &mut terminal.protocol.udks,
-            &terminal.protocol.feature_permissions,
-            terminal.protocol.limits,
-            &mut terminal.protocol.drcs,
-            &mut terminal.palette,
-            &terminal.base_palette,
-            &mut terminal.dec_color,
-            &mut terminal.runtime_colors,
-        ),
+        dispatch::TerminalAction::Csi(action) => {
+            crate::control::apply_csi(crate::control::ControlState::new(terminal), action, effects)
+        }
         dispatch::TerminalAction::Esc(action) => {
             dispatch::apply_esc_action(
                 action,

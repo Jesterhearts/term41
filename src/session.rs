@@ -125,19 +125,11 @@ pub(crate) fn spawn_session(
         config.palette.clone(),
     );
     debug_assert_eq!(
-        terminal.viewport.rows,
+        terminal.viewport().rows,
         main_area_rows(rows, config.status_line),
         "PTY row count and terminal viewport disagree"
     );
-    settings::set_default_cursor_style(
-        &mut terminal.default_cursor_style,
-        &mut terminal.cursor_style,
-        config.cursor_style,
-    );
-    settings::set_emoji_compatibility_mode(
-        &mut terminal.emoji_compatibility_mode,
-        config.compatibility.emoji,
-    );
+    terminal.apply_settings(settings::RuntimeSettings::from(config));
 
     let (snapshot_publisher, snapshot_output) = terminal41::terminal_snapshot_buffer(&mut terminal);
     let terminal = Arc::new(Mutex::new(terminal));

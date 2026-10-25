@@ -33,7 +33,6 @@ use terminal41::prompt::CommandBlockCommand;
 use terminal41::prompt::CommandTextSource;
 use terminal41::prompt::PromptRef;
 use terminal41::prompt::command_block_for_prompt;
-use terminal41::view;
 use winit::event_loop::EventLoop;
 use winit::event_loop::EventLoopProxy;
 use winit::keyboard::ModifiersState;
@@ -167,11 +166,7 @@ fn install_log_toast_forwarder(proxy: EventLoopProxy<AppEvent>) {
 }
 
 fn reset_viewport_and_invalidate(terminal: &mut Terminal) {
-    let offset = view::viewport_offset(&terminal.active);
-    view::reset_viewport(&mut terminal.active);
-    if view::viewport_offset(&terminal.active) != offset {
-        terminal.invalidate_snapshot_rows();
-    }
+    terminal.set_viewport_offset(0);
 }
 
 fn reset_tab_viewport_and_invalidate(
@@ -428,9 +423,7 @@ fn main() {
     let cell_width = font_system.cell_width;
     let cell_height = font_system.cell_height;
     let opacity = config.opacity;
-    let startup_fonts = config.fonts.clone();
-    let startup_font_size = config.font_size;
-    let startup_supersampling = config.font_supersampling;
+    let startup_font_system = font_system.fork();
     let startup_dpi_scale = config.dpi_scale;
     let startup_gutter = config.gutter;
     let startup_keybindings = config.keybindings.clone();
@@ -531,6 +524,7 @@ fn main() {
         window: None,
         startup: StartupState {
             presenter: None,
+            font_system: Some(startup_font_system),
             tabs: vec![initial_session.tab],
             next_redraw: None,
             release_tx: Some(startup_release_tx),
@@ -581,9 +575,6 @@ fn main() {
             opacity,
             cell_width,
             cell_height,
-            startup_fonts,
-            startup_font_size,
-            startup_supersampling,
             startup_dpi_scale,
             startup_gutter,
         },

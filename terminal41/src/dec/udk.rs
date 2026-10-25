@@ -344,7 +344,9 @@ pub fn write_modifier_report(
 
 fn param_pairs<'a>(params: &'a [&'a [u16]]) -> impl Iterator<Item = (u16, u16)> + 'a {
     params
-        .chunks_exact(2)
+        .as_chunks::<2>()
+        .0
+        .iter()
         .filter_map(|pair| Some((pair[0].first().copied()?, pair[1].first().copied()?)))
 }
 
@@ -362,7 +364,9 @@ fn decode_hex(hex: &[u8]) -> Option<Vec<u8>> {
     if !hex.len().is_multiple_of(2) {
         return None;
     }
-    hex.chunks_exact(2)
+    hex.as_chunks::<2>()
+        .0
+        .iter()
         .map(|chunk| Some((hex_nibble(chunk[0])? << 4) | hex_nibble(chunk[1])?))
         .collect()
 }

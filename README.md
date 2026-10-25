@@ -290,12 +290,12 @@ $XDG_CONFIG_HOME/term41/config.toml
 
 On Linux this is usually `~/.config/term41/config.toml`.
 
-Everything is optional. If the file is missing or broken, term41 falls back to built-in defaults. It
-tries hard to parse the config, so a failure in one setting shouldn't break all the others. If
-something isn't working correctly, try running with `warning` level logging, as parsing issues
-should be logged.
+Everything is optional. At startup, a missing or unparseable file uses built-in defaults. Most
+settings live-reload on save. If a reload cannot read or parse the file, term41 logs the error and
+keeps the last valid configuration until a later save succeeds.
 
-Most settings live-reload on save.
+Some individual settings accept invalid values by using their field defaults. Run with `warning`
+level logging to see parsing issues.
 
 Example:
 

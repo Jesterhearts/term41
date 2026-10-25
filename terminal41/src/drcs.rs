@@ -626,7 +626,7 @@ mod integration_tests {
         let glyphs = term.drcs_render_glyphs();
         let geometry = font41::DrcsGeometryClass::Col80Line24;
 
-        for byte in [b':', b'<', b'/', b'`', b'w', b'W', b'n', b'a'] {
+        for byte in *b":</`wWna" {
             let glyph_id = byte as u16 - b'!' as u16;
             assert!(
                 glyphs.contains_key(&(geometry, glyph_id)),
@@ -643,19 +643,26 @@ mod integration_tests {
         }
 
         let mut font_system = font41::FontSystem::new(None, 16.0, 1);
-        let _guard = font41::set_drcs_context(
-            Some(font41::DrcsGeometryClass::Col80Line24),
-            Some(term.drcs_render_glyphs()),
-        );
+        let glyphs = term.drcs_render_glyphs();
+        let context = font41::DrcsContext {
+            geometry: font41::DrcsGeometryClass::Col80Line24,
+            glyphs: &glyphs,
+        };
 
-        for byte in [b':', b'<', b'/', b'`', b'w', b'W', b'n', b'a'] {
+        for byte in *b":</`wWna" {
             let glyph_id = byte as u16 - b'!' as u16;
             let cell = font41::encode_drcs_char(glyph_id).unwrap().to_string();
-            let shaped = font_system.shape_row(
+            let shaped = font_system.shape_row_with_drcs(
                 &[smol_str::SmolStr::new(cell)],
                 &[font41::attrs::CellAttrs::default()],
+                Some(context),
             );
-            let raster = font_system.rasterize_glyph(shaped[0].font_index, shaped[0].glyph_id, 1);
+            let raster = font_system.rasterize_glyph_with_drcs(
+                shaped[0].font_index,
+                shaped[0].glyph_id,
+                1,
+                Some(context),
+            );
             assert!(
                 raster.width > 0 && raster.height > 0 && !raster.bitmap.is_empty(),
                 "empty raster for byte {byte:?} -> id {glyph_id}"

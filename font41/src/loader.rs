@@ -1,9 +1,7 @@
 use std::collections::HashSet;
 use std::sync::Arc;
 use std::sync::Mutex;
-use std::sync::RwLock;
-use std::sync::atomic::AtomicU64;
-use std::sync::atomic::Ordering;
+use std::sync::OnceLock;
 use std::thread;
 
 use harfrust::FontRef;
@@ -48,10 +46,10 @@ pub(crate) fn loaded_font_ref(loaded: &LoadedFont) -> Result<FontRef<'_>, read_f
     FontRef::from_index(font_bytes(&loaded.data), loaded.face_index)
 }
 
-/// A configured font face whose bytes are mapped only when a row needs it.
+/// A configured font face whose bytes are loaded only when a row needs it.
 /// The descriptor is cheap to keep resident: it stores only the selected
 /// source, face index, and style/color hints, while the expensive file
-/// mapping lives behind `loaded`.
+/// byte buffer lives behind `loaded`.
 pub(crate) struct LazyFontFace {
     source: fontdb::Source,
     face_index: u32,
@@ -105,35 +103,20 @@ impl LazyFontFace {
     }
 }
 
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
-enum FontLoadState {
-    NotStarted,
-    Loading,
-    Loaded,
+/// Faces and their family indices are published and retained as one snapshot.
+#[derive(Default)]
+pub(crate) struct FontSet {
+    pub(crate) faces: Vec<Arc<LazyFontFace>>,
+    pub(crate) families: Vec<FamilyVariants>,
 }
 
-static FONTS: RwLock<Vec<Arc<LazyFontFace>>> = RwLock::new(Vec::new());
-static FAMILIES: RwLock<Vec<FamilyVariants>> = RwLock::new(Vec::new());
-static FONT_LOAD_STATE: Mutex<FontLoadState> = Mutex::new(FontLoadState::NotStarted);
-static FONT_LOAD_EPOCH: AtomicU64 = AtomicU64::new(0);
-static INSTALLED_FONT_GENERATION: AtomicU64 = AtomicU64::new(0);
+pub(crate) type PendingFonts = Arc<OnceLock<Arc<FontSet>>>;
 
-pub(crate) fn font_faces() -> Vec<Arc<LazyFontFace>> {
-    FONTS.read().unwrap().clone()
-}
-
-pub(crate) fn family_variants() -> Vec<FamilyVariants> {
-    FAMILIES.read().unwrap().clone()
-}
-
-pub(crate) fn installed_font_generation() -> u64 {
-    INSTALLED_FONT_GENERATION.load(Ordering::Acquire)
-}
-
-fn load_fonts(fonts_config: Option<String>) -> (Vec<Arc<LazyFontFace>>, Vec<FamilyVariants>) {
+pub(crate) fn load_fonts(fonts_config: Option<String>) -> Arc<FontSet> {
     let mut db = fontdb::Database::new();
     db.load_system_fonts();
-    load_fonts_from_database(&db, fonts_config.as_deref())
+    let (faces, families) = load_fonts_from_database(&db, fonts_config.as_deref());
+    Arc::new(FontSet { faces, families })
 }
 
 fn load_fonts_from_database(
@@ -228,50 +211,18 @@ fn load_fonts_from_database(
     (fonts, family_variants)
 }
 
-fn install_fonts(
-    fonts: Vec<Arc<LazyFontFace>>,
-    families: Vec<FamilyVariants>,
-) {
-    *FONTS.write().unwrap() = fonts;
-    *FAMILIES.write().unwrap() = families;
-    INSTALLED_FONT_GENERATION.fetch_add(1, Ordering::AcqRel);
-}
-
-pub(crate) fn start_background_font_load(fonts_config: Option<String>) {
-    let mut state = FONT_LOAD_STATE.lock().unwrap();
-    if *state != FontLoadState::NotStarted {
-        return;
-    }
-
-    *state = FontLoadState::Loading;
-    let epoch = FONT_LOAD_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
+pub(crate) fn start_background_font_load(fonts_config: Option<String>) -> PendingFonts {
+    let pending = Arc::new(OnceLock::new());
+    let output = pending.clone();
     let spawn_result = thread::Builder::new()
         .name("font-loader".into())
-        .spawn(move || finish_background_font_load(epoch, fonts_config));
+        .spawn(move || {
+            let _ = output.set(load_fonts(fonts_config));
+        });
     if let Err(err) = spawn_result {
         warn!("failed to start font-loader thread: {err}");
-        *state = FontLoadState::NotStarted;
     }
-}
-
-fn finish_background_font_load(
-    epoch: u64,
-    fonts_config: Option<String>,
-) {
-    let (fonts, families) = load_fonts(fonts_config);
-    if FONT_LOAD_EPOCH.load(Ordering::Acquire) == epoch {
-        install_fonts(fonts, families);
-        *FONT_LOAD_STATE.lock().unwrap() = FontLoadState::Loaded;
-    }
-}
-
-pub(crate) fn reload_fonts(fonts_config: Option<String>) {
-    let epoch = FONT_LOAD_EPOCH.fetch_add(1, Ordering::AcqRel) + 1;
-    let (fonts, families) = load_fonts(fonts_config);
-    if FONT_LOAD_EPOCH.load(Ordering::Acquire) == epoch {
-        install_fonts(fonts, families);
-        *FONT_LOAD_STATE.lock().unwrap() = FontLoadState::Loaded;
-    }
+    pending
 }
 
 pub(crate) enum LoadedFontCandidate<'a> {
@@ -331,15 +282,15 @@ fn shared_font_data_from_source(source: &fontdb::Source) -> Option<SharedFontDat
     match source {
         fontdb::Source::Binary(data) => Some(data.clone()),
         fontdb::Source::File(path) => {
-            let file = std::fs::File::open(path).ok()?;
-            // SAFETY: term41 only reads font files through the returned
-            // mapping. The usual mmap caveat applies: external mutation of
-            // installed font files while the terminal is running can expose
-            // changed bytes to this process.
-            let data = unsafe { memmap2::MmapOptions::new().map(&file).ok()? };
-            Some(Arc::new(data) as SharedFontData)
+            // Own the bytes so font updates cannot mutate a live shaping
+            // snapshot.
+            let data = std::fs::read(path).ok()?;
+            Some(Arc::new(data))
         }
-        fontdb::Source::SharedFile(_, data) => Some(data.clone()),
+        fontdb::Source::SharedFile(path, _) => {
+            let data = std::fs::read(path).ok()?;
+            Some(Arc::new(data))
+        }
     }
 }
 
@@ -360,4 +311,31 @@ pub(crate) fn lazy_font_face(
         is_bold,
         is_italic,
     )))
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    #[test]
+    fn loaded_font_bytes_survive_file_truncation_and_removal() {
+        let path =
+            std::env::temp_dir().join(format!("term41-owned-font-{}.ttf", std::process::id()));
+        std::fs::write(&path, crate::FAIRFAX_HD).unwrap();
+        let face = LazyFontFace::new(
+            fontdb::Source::File(path.clone()),
+            0,
+            false,
+            false,
+            false,
+            false,
+        );
+        let loaded = face.load().unwrap();
+        std::fs::write(&path, []).unwrap();
+        assert_eq!(font_bytes(&loaded.data), crate::FAIRFAX_HD);
+        assert!(loaded_font_ref(&loaded).is_ok());
+        std::fs::remove_file(&path).unwrap();
+        assert!(Arc::ptr_eq(&loaded, &face.load().unwrap()));
+        assert_eq!(font_bytes(&loaded.data), crate::FAIRFAX_HD);
+    }
 }

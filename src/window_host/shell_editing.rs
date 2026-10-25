@@ -28,7 +28,7 @@ fn prepare_shell_input(
     editing: &mut ShellEditing,
 ) {
     let prompt = terminal41::view::shell_prompt_document_row(terminal);
-    if terminal.on_alt_screen
+    if terminal.on_alt_screen()
         || matches!(
             terminal.metadata.shell_integration_phase,
             ShellIntegrationPhase::Output | ShellIntegrationPhase::Finished
@@ -88,7 +88,7 @@ pub(crate) fn sync_shell_input(
         return Ok(());
     }
     let bracketed_paste = terminal.modes.bracketed_paste;
-    let app_cursor = terminal41::view::app_cursor_keys(&terminal.active);
+    let app_cursor = terminal41::view::app_cursor_keys(terminal.active());
     drop(terminal);
     let (text, cursor) = target.shell_editing.sent.as_ref().unwrap();
     let bytes = super::shell_edit::shell_edit_bytes(

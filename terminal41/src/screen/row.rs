@@ -38,28 +38,28 @@ pub enum LineAttr {
 #[derive(Debug, Default)]
 pub struct Row {
     /// Grapheme cluster stored in each cell.
-    pub cells: Vec<SmolStr>,
+    pub(crate) cells: Vec<SmolStr>,
     /// Per-cell foreground colors.
-    pub fg: Vec<Srgb<u8>>,
+    pub(crate) fg: Vec<Srgb<u8>>,
     /// Color source for each foreground.
     pub(crate) fg_index: Vec<ColorSource>,
     /// Per-cell background colors.
-    pub bg: Vec<Srgb<u8>>,
+    pub(crate) bg: Vec<Srgb<u8>>,
     /// Color source for each background.
     pub(crate) bg_index: Vec<ColorSource>,
     /// Per-cell text attributes (bold/italic/strikethrough). Set from
     /// `screen.attrs` at write time alongside `fg`/`bg`.
-    pub attrs: Vec<CellAttrs>,
+    pub(crate) attrs: Vec<CellAttrs>,
     /// Per-cell underline color override. `None` means "use the cell's
     /// foreground color" (the default). Set via SGR 58, cleared by SGR 59.
-    pub underline_color: Vec<Option<Srgb<u8>>>,
+    pub(crate) underline_color: Vec<Option<Srgb<u8>>>,
     /// Color source for each explicit underline color.
     pub(crate) underline_index: Vec<ColorSource>,
     /// Hyperlink id per cell, set from the screen's current OSC 8 span at
     /// write time. `None` for plain cells; reused ids share the same target
     /// in the screen's hyperlink registry so adjacent cells of one link
     /// render as one underlined region.
-    pub links: Vec<Option<HyperlinkId>>,
+    pub(crate) links: Vec<Option<HyperlinkId>>,
     /// True if this row continues into the next row (soft wrap).
     pub wrapped: bool,
     /// OSC 133 `A` was emitted on this row — shell prompt starts here.
@@ -93,6 +93,31 @@ pub struct Row {
 }
 
 impl Row {
+    /// Cell clusters and parallel attributes always have the same length.
+    pub fn cells(&self) -> &[SmolStr] {
+        &self.cells
+    }
+
+    pub fn foregrounds(&self) -> &[Srgb<u8>] {
+        &self.fg
+    }
+
+    pub fn backgrounds(&self) -> &[Srgb<u8>] {
+        &self.bg
+    }
+
+    pub fn attributes(&self) -> &[CellAttrs] {
+        &self.attrs
+    }
+
+    pub fn underline_colors(&self) -> &[Option<Srgb<u8>>] {
+        &self.underline_color
+    }
+
+    pub fn hyperlinks(&self) -> &[Option<HyperlinkId>] {
+        &self.links
+    }
+
     /// Return the color source for each foreground cell.
     pub fn fg_sources(&self) -> &[ColorSource] {
         &self.fg_index

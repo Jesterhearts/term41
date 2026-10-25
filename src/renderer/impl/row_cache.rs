@@ -14,6 +14,8 @@ use crate::renderer::paint::blink_animation_enabled;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::row_paintable_cols;
 
+/// Reuse tracks baked pixels in the terminal layer, not atlas-backed geometry.
+/// A cache hit holds no atlas references and does not need frame pins.
 pub(super) struct CachedRowKey {
     pub(super) key: RowRenderKey,
 }

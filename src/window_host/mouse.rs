@@ -20,9 +20,7 @@ use terminal41::prompt::PromptRef;
 use terminal41::prompt::command_block_document;
 use terminal41::prompt::command_block_for_prompt;
 use terminal41::prompt::command_block_for_screen_row;
-use terminal41::prompt::select_command_for_prompt;
 use terminal41::selection::SelectionMode;
-use terminal41::selection::copy_selection;
 use terminal41::selection::extend_rendered_selection;
 use terminal41::selection::start_rendered_selection;
 use terminal41::view;
@@ -334,9 +332,7 @@ pub(crate) fn insert_command_editor_text(
     {
         let mut terminal = target.terminal.lock();
         reset_viewport_and_invalidate(&mut terminal);
-        if terminal.selection.take().is_some() {
-            terminal.invalidate_snapshot_rows();
-        }
+        terminal.clear_selection();
     }
     set_command_editor_view(host, tab_id, view);
     true
@@ -367,6 +363,12 @@ pub(crate) fn permission_choice_at(
     )
 }
 
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum MouseHandling {
+    Handled,
+    Unhandled,
+}
+
 pub(crate) fn handle_mouse_input(
     host: &mut WindowHost,
     pressed: bool,
@@ -385,6 +387,40 @@ pub(crate) fn handle_mouse_input(
         finish_tab_drag(host);
         return;
     }
+    if handle_modal_mouse_input(host, pressed, button) == MouseHandling::Handled {
+        return;
+    }
+    let term_button = match button {
+        MouseButton::Left => TermMouseButton::Left,
+        MouseButton::Middle => TermMouseButton::Middle,
+        MouseButton::Right => TermMouseButton::Right,
+        _ => return,
+    };
+    host.mouse.mouse_buttons.set(button, pressed);
+
+    if handle_window_mouse_input(host, pressed, button) == MouseHandling::Handled
+        || handle_tab_bar_mouse_input(host, pressed, button) == MouseHandling::Handled
+        || handle_popup_mouse_input(host, pressed, button) == MouseHandling::Handled
+        || handle_editor_mouse_input(host, pressed, button) == MouseHandling::Handled
+    {
+        return;
+    }
+    if pressed {
+        host.mouse.last_motion_position = None;
+    }
+    if finish_mouse_selection(host, pressed, button) == MouseHandling::Handled
+        || report_mouse_button_to_app(host, pressed, term_button) == MouseHandling::Handled
+    {
+        return;
+    }
+    handle_terminal_mouse_input(host, pressed, button);
+}
+
+fn handle_modal_mouse_input(
+    host: &mut WindowHost,
+    pressed: bool,
+    button: MouseButton,
+) -> MouseHandling {
     if host.modals.permission_modal.is_some() {
         if pressed
             && button == MouseButton::Left
@@ -401,22 +437,22 @@ pub(crate) fn handle_mouse_input(
             };
             settle_permission_modal(host, decision);
         }
-        return;
+        return MouseHandling::Handled;
     }
     if history_confirmation_is_open(&host.render) || history_deletion_is_open(&host.render) {
-        return;
+        return MouseHandling::Handled;
     }
     if host.modals.recording_popup.is_some() {
-        return;
+        return MouseHandling::Handled;
     }
-    let term_button = match button {
-        MouseButton::Left => TermMouseButton::Left,
-        MouseButton::Middle => TermMouseButton::Middle,
-        MouseButton::Right => TermMouseButton::Right,
-        _ => return,
-    };
-    host.mouse.mouse_buttons.set(button, pressed);
+    MouseHandling::Unhandled
+}
 
+fn handle_window_mouse_input(
+    host: &mut WindowHost,
+    pressed: bool,
+    button: MouseButton,
+) -> MouseHandling {
     if pressed
         && button == MouseButton::Left
         && let Some(dir) = resize_direction_at(host.window.as_ref(), &host.mouse, &host.metrics)
@@ -424,7 +460,7 @@ pub(crate) fn handle_mouse_input(
         if let Some(w) = &host.window {
             let _ = w.drag_resize_window(dir);
         }
-        return;
+        return MouseHandling::Handled;
     }
 
     if pressed
@@ -444,9 +480,16 @@ pub(crate) fn handle_mouse_input(
                 }
             }
         }
-        return;
+        return MouseHandling::Handled;
     }
+    MouseHandling::Unhandled
+}
 
+fn handle_tab_bar_mouse_input(
+    host: &mut WindowHost,
+    pressed: bool,
+    button: MouseButton,
+) -> MouseHandling {
     if pressed
         && button == MouseButton::Left
         && is_on_new_tab_button(&host.mouse, &host.render, &host.metrics)
@@ -460,7 +503,7 @@ pub(crate) fn handle_mouse_input(
             &host.startup,
             host.window.as_ref(),
         );
-        return;
+        return MouseHandling::Handled;
     }
 
     if pressed
@@ -497,7 +540,7 @@ pub(crate) fn handle_mouse_input(
                 host.window.as_ref(),
             );
         }
-        return;
+        return MouseHandling::Handled;
     }
 
     if pressed && button == MouseButton::Middle && is_in_tab_bar(&host.mouse, &host.render) {
@@ -512,7 +555,7 @@ pub(crate) fn handle_mouse_input(
             &host.startup,
             host.window.as_ref(),
         );
-        return;
+        return MouseHandling::Handled;
     }
 
     if pressed && button == MouseButton::Right && is_in_tab_bar(&host.mouse, &host.render) {
@@ -542,9 +585,16 @@ pub(crate) fn handle_mouse_input(
             &host.startup,
             host.window.as_ref(),
         );
-        return;
+        return MouseHandling::Handled;
     }
+    MouseHandling::Unhandled
+}
 
+fn handle_popup_mouse_input(
+    host: &mut WindowHost,
+    pressed: bool,
+    button: MouseButton,
+) -> MouseHandling {
     if pressed
         && button == MouseButton::Left
         && host.render.input_state.lock().tab_context_menu.is_some()
@@ -564,7 +614,7 @@ pub(crate) fn handle_mouse_input(
             &host.startup,
             host.window.as_ref(),
         );
-        return;
+        return MouseHandling::Handled;
     }
 
     if pressed
@@ -578,7 +628,7 @@ pub(crate) fn handle_mouse_input(
             host.mouse.pos.1,
         ) {
             execute_popup_action(host, item);
-            return;
+            return MouseHandling::Handled;
         }
         close_gutter_popup(&host.render, &mut host.input);
         if !is_in_gutter(&host.mouse, &host.render) {
@@ -588,16 +638,23 @@ pub(crate) fn handle_mouse_input(
                 &host.startup,
                 host.window.as_ref(),
             );
-            return;
+            return MouseHandling::Handled;
         }
     }
 
     if pressed && button == MouseButton::Left && is_in_gutter(&host.mouse, &host.render) {
         let (_, screen_row) = cell_at(host, host.mouse.pos.0, host.mouse.pos.1);
         open_gutter_popup(host, screen_row);
-        return;
+        return MouseHandling::Handled;
     }
+    MouseHandling::Unhandled
+}
 
+fn handle_editor_mouse_input(
+    host: &mut WindowHost,
+    pressed: bool,
+    button: MouseButton,
+) -> MouseHandling {
     let command_editor_open = {
         let state = host.render.input_state.lock();
         command_editor_view_open_for_input_tab(&state, host.input.active_tab)
@@ -614,29 +671,26 @@ pub(crate) fn handle_mouse_input(
                 &host.startup,
                 host.window.as_ref(),
             );
-            return;
+            return MouseHandling::Handled;
         }
     }
+    MouseHandling::Unhandled
+}
 
-    if pressed {
-        host.mouse.last_motion_position = None;
-    }
-
+fn finish_mouse_selection(
+    host: &mut WindowHost,
+    pressed: bool,
+    button: MouseButton,
+) -> MouseHandling {
     if !pressed && button == MouseButton::Left && host.mouse.left_drag_active {
         stop_selection_drag(&mut host.mouse);
         if let Some(target) = active_input_target(&mut host.input) {
             let mut guard = target.terminal.lock();
             let terminal = &mut *guard;
             if terminal.has_selection() {
-                copy_selection(
-                    &mut terminal.clipboard,
-                    terminal.selection.as_ref(),
-                    &terminal.active,
-                    ClipboardKind::Primary,
-                );
+                terminal.copy_selection(ClipboardKind::Primary);
             } else {
-                terminal.selection = None;
-                terminal.invalidate_snapshot_rows();
+                terminal.clear_selection();
             }
         }
         notify_interaction_changed(
@@ -645,9 +699,16 @@ pub(crate) fn handle_mouse_input(
             &host.startup,
             host.window.as_ref(),
         );
-        return;
+        return MouseHandling::Handled;
     }
+    MouseHandling::Unhandled
+}
 
+fn report_mouse_button_to_app(
+    host: &mut WindowHost,
+    pressed: bool,
+    term_button: TermMouseButton,
+) -> MouseHandling {
     if forward_mouse_to_app(&host.keyboard, &mut host.input)
         && let Some(pos) = app_mouse_report_position_at(host, host.mouse.pos.0, host.mouse.pos.1)
     {
@@ -658,7 +719,7 @@ pub(crate) fn handle_mouse_input(
         };
         let mods = mouse_modifiers(&host.keyboard);
         let Some(target) = active_input_target(&mut host.input) else {
-            return;
+            return MouseHandling::Handled;
         };
         emit_host_input(
             target,
@@ -679,9 +740,16 @@ pub(crate) fn handle_mouse_input(
             &host.startup,
             host.window.as_ref(),
         );
-        return;
+        return MouseHandling::Handled;
     }
+    MouseHandling::Unhandled
+}
 
+fn handle_terminal_mouse_input(
+    host: &mut WindowHost,
+    pressed: bool,
+    button: MouseButton,
+) {
     let (col, viewport_row) = cell_at(host, host.mouse.pos.0, host.mouse.pos.1);
     match (button, pressed) {
         (MouseButton::Left, true) => {
@@ -690,14 +758,14 @@ pub(crate) fn handle_mouse_input(
             {
                 let url = target.terminal.lock();
                 let row = terminal41::selection::active_screen_row_at_viewport_row(
-                    &url.active,
-                    &url.viewport,
-                    url.on_alt_screen,
+                    url.active(),
+                    url.viewport(),
+                    url.on_alt_screen(),
                     viewport_row,
                 );
                 let url = row
                     .and_then(|row| {
-                        view::hyperlink_at(&url.active, &url.viewport, &url.hyperlinks, row, col)
+                        view::hyperlink_at(url.active(), url.viewport(), &url.hyperlinks, row, col)
                     })
                     .map(str::to_owned);
                 if let Some(url) = url {
@@ -710,18 +778,17 @@ pub(crate) fn handle_mouse_input(
             if host.keyboard.modifiers.shift_key() {
                 let extended = if let Some(target) = active_input_target(&mut host.input) {
                     let mut terminal = target.terminal.lock();
-                    if let Some(selection) = terminal.selection.as_ref()
+                    if let Some(selection) = terminal.selection()
                         && let Some(new_selection) = extend_rendered_selection(
                             selection,
-                            &terminal.active,
-                            &terminal.viewport,
-                            terminal.on_alt_screen,
+                            terminal.active(),
+                            terminal.viewport(),
+                            terminal.on_alt_screen(),
                             col,
                             viewport_row,
                         )
                     {
-                        terminal.selection = Some(new_selection);
-                        terminal.invalidate_snapshot_rows();
+                        terminal.set_selection(Some(new_selection));
                         true
                     } else {
                         false
@@ -756,15 +823,15 @@ pub(crate) fn handle_mouse_input(
             if let Some(target) = active_input_target(&mut host.input) {
                 let mut target = target.terminal.lock();
                 let target = &mut *target;
-                target.selection = start_rendered_selection(
-                    &target.active,
-                    &target.viewport,
-                    target.on_alt_screen,
+                let selection = start_rendered_selection(
+                    target.active(),
+                    target.viewport(),
+                    target.on_alt_screen(),
                     col,
                     viewport_row,
                     mode,
                 );
-                target.invalidate_snapshot_rows();
+                target.set_selection(selection);
             }
             if let Some(tab_id) = host.input.active_tab {
                 clear_command_editor_selection_for_tab(host, tab_id);
@@ -785,14 +852,8 @@ pub(crate) fn handle_mouse_input(
                 let mut guard = target.terminal.lock();
                 let terminal = &mut *guard;
                 if terminal.has_selection() {
-                    copy_selection(
-                        &mut terminal.clipboard,
-                        terminal.selection.as_ref(),
-                        &terminal.active,
-                        ClipboardKind::Clipboard,
-                    );
-                    terminal.selection = None;
-                    terminal.invalidate_snapshot_rows();
+                    terminal.copy_selection(ClipboardKind::Clipboard);
+                    terminal.clear_selection();
                 } else {
                     drop(guard);
                     emit_host_input(
@@ -1010,13 +1071,9 @@ pub(crate) fn handle_mouse_wheel(
     if let Some(target) = active_input_target(&mut host.input) {
         let mut terminal = target.terminal.lock();
         if y_lines < 0 {
-            let viewport = terminal.viewport;
-            view::scroll_viewport_up(&mut terminal.active, &viewport, y_lines.unsigned_abs());
+            terminal.scroll_viewport_up(y_lines.unsigned_abs());
         } else if y_lines > 0 {
-            view::scroll_viewport_down(&mut terminal.active, y_lines as u32);
-        }
-        if y_lines != 0 {
-            terminal.invalidate_snapshot_rows();
+            terminal.scroll_viewport_down(y_lines as u32);
         }
     }
     notify_interaction_changed(
@@ -1048,8 +1105,7 @@ pub(crate) fn close_gutter_popup(
     let had_popup = render.input_state.lock().gutter_popup.take().is_some();
     if had_popup && let Some(target) = active_input_target(input) {
         let mut terminal = target.terminal.lock();
-        terminal.selection = None;
-        terminal.invalidate_snapshot_rows();
+        terminal.clear_selection();
     }
 }
 
@@ -1062,19 +1118,16 @@ pub(crate) fn open_gutter_popup(
     };
     let mut guard = target.terminal.lock();
     let terminal = &mut *guard;
-    let document = command_block_document(&terminal.active, &terminal.metadata.command_metas);
-    let Some(block) =
-        command_block_for_screen_row(&document, &terminal.active, &terminal.viewport, screen_row)
-    else {
+    let document = command_block_document(terminal.active(), &terminal.metadata.command_metas);
+    let Some(block) = command_block_for_screen_row(
+        &document,
+        terminal.active(),
+        terminal.viewport(),
+        screen_row,
+    ) else {
         return;
     };
-    select_command_for_prompt(
-        &mut terminal.selection,
-        block.prompt,
-        &terminal.metadata.command_metas,
-        &terminal.active,
-    );
-    terminal.invalidate_snapshot_rows();
+    terminal.select_command_for_prompt(block.prompt);
     let duration_text = block.duration.map(format_duration);
     drop(guard);
     if let Some(tab_id) = host.input.active_tab {
@@ -1105,11 +1158,10 @@ fn popup_rerun_command_for_tab(
 ) -> Option<(CommandBlockCommand, bool)> {
     let target = host.input.endpoints.get_mut(&tab_id)?;
     let mut terminal = target.terminal.lock();
-    let document = command_block_document(&terminal.active, &terminal.metadata.command_metas);
+    let document = command_block_document(terminal.active(), &terminal.metadata.command_metas);
     let command = popup_command_text(&document, prompt)?;
     let bracketed_paste_enabled = terminal.modes.bracketed_paste;
-    terminal.selection = None;
-    terminal.invalidate_snapshot_rows();
+    terminal.clear_selection();
     Some((command, bracketed_paste_enabled))
 }
 
@@ -1163,13 +1215,12 @@ pub(crate) fn execute_popup_action(
             let mut guard = target.terminal.lock();
             let terminal = &mut *guard;
             let document =
-                command_block_document(&terminal.active, &terminal.metadata.command_metas);
+                command_block_document(terminal.active(), &terminal.metadata.command_metas);
             if let Some(command) = popup_command_text(&document, popup.prompt) {
                 let text = popup_rerun_command_text(command);
                 copy_to_clipboard(&mut terminal.clipboard, &text);
             }
-            terminal.selection = None;
-            terminal.invalidate_snapshot_rows();
+            terminal.clear_selection();
         }
         2 => {
             let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
@@ -1177,14 +1228,13 @@ pub(crate) fn execute_popup_action(
             };
             let mut terminal = target.terminal.lock();
             let document =
-                command_block_document(&terminal.active, &terminal.metadata.command_metas);
+                command_block_document(terminal.active(), &terminal.metadata.command_metas);
             if let Some(text) = command_block_for_prompt(&document, popup.prompt)
                 .and_then(|block| block.command_and_output.as_deref())
             {
                 copy_to_clipboard(&mut terminal.clipboard, text.trim());
             }
-            terminal.selection = None;
-            terminal.invalidate_snapshot_rows();
+            terminal.clear_selection();
         }
         3 => {
             let Some(target) = host.input.endpoints.get_mut(&tab_id) else {
@@ -1192,14 +1242,13 @@ pub(crate) fn execute_popup_action(
             };
             let mut terminal = target.terminal.lock();
             let document =
-                command_block_document(&terminal.active, &terminal.metadata.command_metas);
+                command_block_document(terminal.active(), &terminal.metadata.command_metas);
             if let Some(text) = command_block_for_prompt(&document, popup.prompt)
                 .and_then(|block| block.output.as_deref())
             {
                 copy_to_clipboard(&mut terminal.clipboard, text.trim());
             }
-            terminal.selection = None;
-            terminal.invalidate_snapshot_rows();
+            terminal.clear_selection();
         }
         _ => return,
     }
@@ -1279,8 +1328,8 @@ pub(crate) fn mouse_report_position_at(
         };
     };
     let terminal = target.terminal.lock();
-    let cols = terminal.viewport.cols.max(1);
-    let rows = terminal.viewport.rows.max(1);
+    let cols = terminal.viewport().cols.max(1);
+    let rows = terminal.viewport().rows.max(1);
     mouse_report_position_from_pixels(raw_x, raw_y, cell_w, cell_h, gutter_w, cols, rows, 0)
 }
 
@@ -1302,9 +1351,9 @@ pub(crate) fn app_mouse_report_position_for_terminal(
     cell_h: u32,
 ) -> Option<MouseReportPosition> {
     let row = terminal41::selection::active_screen_row_at_viewport_row(
-        &terminal.active,
-        &terminal.viewport,
-        terminal.on_alt_screen,
+        terminal.active(),
+        terminal.viewport(),
+        terminal.on_alt_screen(),
         pos.row,
     )?;
     let cell_h = cell_h.max(1);
@@ -1313,7 +1362,7 @@ pub(crate) fn app_mouse_report_position_for_terminal(
         .saturating_add(pos.pixel_y % cell_h)
         .min(
             terminal
-                .viewport
+                .viewport()
                 .rows
                 .max(1)
                 .saturating_mul(cell_h)

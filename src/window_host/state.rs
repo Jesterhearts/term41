@@ -203,6 +203,8 @@ pub(crate) struct WindowHost {
 
 pub(crate) struct StartupState {
     pub(crate) presenter: Option<StartupPresenter>,
+    /// Transferred to the presenter when the initial window is created.
+    pub(crate) font_system: Option<font41::FontSystem>,
     pub(crate) tabs: Vec<Tab>,
     pub(crate) next_redraw: Option<Instant>,
     pub(crate) release_tx: Option<mpsc::SyncSender<Vec<Tab>>>,
@@ -297,9 +299,6 @@ pub(crate) struct WindowMetrics {
     pub(crate) opacity: f32,
     pub(crate) cell_width: u32,
     pub(crate) cell_height: u32,
-    pub(crate) startup_fonts: Option<String>,
-    pub(crate) startup_font_size: f32,
-    pub(crate) startup_supersampling: u32,
     pub(crate) startup_dpi_scale: Option<f32>,
     pub(crate) startup_gutter: bool,
 }

@@ -12,6 +12,149 @@ use crate::prompt;
 use crate::screen;
 use crate::selection;
 
+/// A command-block boundary relative to the current viewport.
+pub enum ScrollTarget {
+    PreviousPrompt,
+    NextPrompt,
+    PreviousCommand,
+    PreviousFailedCommand,
+    PreviousSuccessfulCommand,
+}
+
+/// An edit or navigation step in the terminal's search interface.
+pub enum SearchAction<'a> {
+    Open,
+    Close,
+    Append(&'a str),
+    Backspace,
+    Previous,
+    Next,
+}
+
+impl crate::Terminal {
+    /// Scroll into history and invalidate the rows whose presentation changed.
+    pub fn scroll_viewport_up(
+        &mut self,
+        lines: u32,
+    ) -> u32 {
+        let delta = scroll_viewport_up(&mut self.active, &self.viewport, lines);
+        if delta != 0 {
+            self.invalidate_snapshot_rows();
+        }
+        delta
+    }
+
+    /// Scroll toward the live bottom and invalidate changed rows.
+    pub fn scroll_viewport_down(
+        &mut self,
+        lines: u32,
+    ) -> u32 {
+        let delta = scroll_viewport_down(&mut self.active, lines);
+        if delta != 0 {
+            self.invalidate_snapshot_rows();
+        }
+        delta
+    }
+
+    /// Move to a bounded scrollback offset and invalidate changed rows.
+    pub fn set_viewport_offset(
+        &mut self,
+        offset: u32,
+    ) {
+        if screen::page_memory_active(&self.active) {
+            return;
+        }
+        let max = screen::rendered_scrollback_len(&self.active, &self.viewport);
+        let offset = offset.min(max);
+        if self.active.offset != offset {
+            self.active.offset = offset;
+            self.invalidate_snapshot_rows();
+        }
+    }
+
+    pub fn scroll_to(
+        &mut self,
+        target: ScrollTarget,
+    ) {
+        let document = prompt::command_block_document(&self.active, &self.metadata.command_metas);
+        match target {
+            ScrollTarget::PreviousPrompt => {
+                scroll_to_prev_prompt(&mut self.active, &self.viewport, &document)
+            }
+            ScrollTarget::NextPrompt => {
+                scroll_to_next_prompt(&mut self.active, &self.viewport, &document)
+            }
+            ScrollTarget::PreviousCommand => {
+                scroll_to_prev_command(&mut self.active, &self.viewport, &document)
+            }
+            ScrollTarget::PreviousFailedCommand => {
+                scroll_to_prev_failed_command(&mut self.active, &self.viewport, &document)
+            }
+            ScrollTarget::PreviousSuccessfulCommand => {
+                scroll_to_prev_successful_command(&mut self.active, &self.viewport, &document)
+            }
+        }
+        self.invalidate_snapshot_rows();
+    }
+
+    /// Update search, selection, and viewport as one presentation change.
+    pub fn update_search(
+        &mut self,
+        action: SearchAction<'_>,
+    ) {
+        let offset = match action {
+            SearchAction::Open => {
+                selection::open_search(&mut self.search);
+                self.active.offset
+            }
+            SearchAction::Close => {
+                selection::close_search(&mut self.search, &mut self.selection);
+                self.active.offset
+            }
+            SearchAction::Append(text) => {
+                selection::search_append(&mut self.search, &self.active, &self.viewport, text)
+            }
+            SearchAction::Backspace => {
+                selection::search_backspace(&mut self.search, &self.active, &self.viewport)
+            }
+            SearchAction::Previous => {
+                selection::search_step_prev(&mut self.search, &self.active, &self.viewport)
+            }
+            SearchAction::Next => {
+                selection::search_step_next(&mut self.search, &self.active, &self.viewport)
+            }
+        };
+        self.set_viewport_offset(offset);
+        self.invalidate_snapshot_rows();
+    }
+
+    /// Copy the current selection without exposing mutable screen state.
+    pub fn copy_selection(
+        &mut self,
+        kind: clip41::ClipboardKind,
+    ) {
+        selection::copy_selection(
+            &mut self.clipboard,
+            self.selection.as_ref(),
+            &self.active,
+            kind,
+        );
+    }
+
+    pub fn select_command_for_prompt(
+        &mut self,
+        prompt: prompt::PromptRef,
+    ) {
+        prompt::select_command_for_prompt(
+            &mut self.selection,
+            prompt,
+            &self.metadata.command_metas,
+            &self.active,
+        );
+        self.invalidate_snapshot_rows();
+    }
+}
+
 /// Return the number of rows currently presented to the host, including any
 /// visible status line row that consumes part of the window height.
 pub fn total_rows(
@@ -173,17 +316,6 @@ pub fn viewport_offset(screen: &Screen) -> u32 {
     screen.offset
 }
 
-/// Move the viewport to an absolute scrollback offset.
-///
-/// Used by search navigation, which computes the offset a match needs from the
-/// match list rather than by stepping.
-pub fn set_viewport_offset(
-    screen: &mut Screen,
-    offset: u32,
-) {
-    screen.offset = offset;
-}
-
 /// Total rows in the rendered document: every completed command block plus
 /// its separator row, then the active block.
 pub fn rendered_rows_len(
@@ -210,9 +342,9 @@ pub struct StickyPrompt<'a> {
     pub row: &'a Row,
     /// Its row number in the rendered document.
     pub rendered_row: u64,
-    /// Its row within the active block, when the prompt lives there rather
-    /// than in a completed block.
-    pub active_row: Option<u32>,
+    /// Its absolute active-grid row, or `None` for a completed block.
+    /// This includes trimmed rows but excludes preceding completed blocks.
+    pub active_absolute_row: Option<u64>,
 }
 
 /// Find the closest prompt row at or above the top of the view, so the
@@ -229,7 +361,7 @@ pub fn sticky_prompt_above_view<'a>(
     Some(StickyPrompt {
         row: found.row,
         rendered_row: found.rendered_row,
-        active_row: found.active_row,
+        active_absolute_row: found.active_absolute_row,
     })
 }
 

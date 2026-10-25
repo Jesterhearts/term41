@@ -41,22 +41,22 @@ use crate::snapshot::SnapshotState;
 #[derive(Debug)]
 pub struct Terminal {
     /// Currently visible screen buffer.
-    pub active: Screen,
+    pub(crate) active: Screen,
     /// Inactive screen buffer used for primary/alternate-screen swapping.
-    pub stash: Screen,
+    pub(crate) stash: Screen,
     /// Window-sized viewport shared by the active and stashed screens.
-    pub viewport: Viewport,
+    pub(crate) viewport: Viewport,
 
     /// `true` when the alt screen is active, `false` when the primary
     /// screen is active. Initialized to `false`; `stash` starts as the alt
     /// screen.
-    pub on_alt_screen: bool,
+    pub(crate) on_alt_screen: bool,
 
     /// Cell height in pixels, used to convert sixel image pixel height to rows.
-    pub cell_height: u32,
+    pub(crate) cell_height: u32,
     /// Cell width in pixels. Stored for kitty display-sizing (`c=`/`r=` keys)
     /// once that path is wired up.
-    pub cell_width: u32,
+    pub(crate) cell_width: u32,
 
     /// System clipboard gateway. Shared between OSC 52 and mouse-driven
     /// copy/paste paths.
@@ -68,7 +68,7 @@ pub struct Terminal {
 
     /// Active text selection, if any. Positions use absolute row indices so
     /// the selection stays locked to content across scrollback trimming.
-    pub selection: Option<Selection>,
+    pub(crate) selection: Option<Selection>,
 
     /// Search-in-scrollback state: open/closed, query text, match cache.
     /// When `active`, the host reroutes keyboard events into this struct
@@ -109,14 +109,14 @@ pub struct Terminal {
 
     /// Runtime color palette. Stored here so SGR resets, OSC color queries,
     /// and the renderer can all resolve themed colors.
-    pub palette: ColorPalette,
+    pub(crate) palette: ColorPalette,
     /// User/theme palette before DEC color-table overrides are applied.
-    pub base_palette: ColorPalette,
+    pub(crate) base_palette: ColorPalette,
     /// DEC color-table and lookup-mode state.
-    pub dec_color: DecColorState,
+    pub(crate) dec_color: DecColorState,
     /// Per-session OSC indexed and dynamic-color overrides.
     #[doc(hidden)]
-    pub runtime_colors: RuntimeColorOverrides,
+    pub(crate) runtime_colors: RuntimeColorOverrides,
 
     /// State machine for the VT52 `ESC Y Pr Pc` direct cursor address. After
     /// `ESC Y` is dispatched, the next 1-2 byte actions carry the row and
@@ -135,6 +135,44 @@ pub struct Terminal {
 }
 
 impl Terminal {
+    pub fn active(&self) -> &Screen {
+        &self.active
+    }
+
+    pub fn viewport(&self) -> &Viewport {
+        &self.viewport
+    }
+
+    pub fn on_alt_screen(&self) -> bool {
+        self.on_alt_screen
+    }
+
+    pub fn palette(&self) -> &ColorPalette {
+        &self.palette
+    }
+
+    pub fn selection(&self) -> Option<&Selection> {
+        self.selection.as_ref()
+    }
+
+    /// Replace the selection and invalidate its published highlights together.
+    pub fn set_selection(
+        &mut self,
+        selection: Option<Selection>,
+    ) {
+        self.selection = selection;
+        self.snapshot.mark_all();
+    }
+
+    /// Clear a selection and return whether any selection state was present.
+    pub fn clear_selection(&mut self) -> bool {
+        if self.selection.take().is_none() {
+            return false;
+        }
+        self.snapshot.mark_all();
+        true
+    }
+
     /// Create a terminal with primary and alternate screen buffers.
     pub fn new(
         cols: u32,

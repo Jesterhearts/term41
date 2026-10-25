@@ -132,7 +132,7 @@ fn decode_repeat_sequence(payload: &[u8]) -> Option<(Vec<u8>, usize)> {
         return None;
     }
     let mut decoded = Vec::with_capacity(body.len() / 2 * count);
-    for chunk in body.chunks_exact(2) {
+    for chunk in body.as_chunks::<2>().0 {
         decoded.push(decode_hex_byte(chunk)?);
     }
     let repeated = decoded.repeat(count);

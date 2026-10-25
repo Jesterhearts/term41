@@ -202,9 +202,8 @@ pub(crate) struct StickyPrompt<'a> {
     pub(crate) row: &'a Row,
     /// Its row number in the rendered document.
     pub(crate) rendered_row: u64,
-    /// Its row within the active block, when the prompt lives there rather
-    /// than in a completed block.
-    pub(crate) active_row: Option<u32>,
+    /// Its absolute active-grid row, or `None` for a completed block.
+    pub(crate) active_absolute_row: Option<u64>,
 }
 
 /// Rendered-document row currently shown at the top of the view.
@@ -258,14 +257,19 @@ pub(crate) fn sticky_prompt_above_view<'a>(
         return None;
     }
     let active_start = block_start + screen.grid.total_popped as u64;
-    last_prompt_before(&screen.grid.rows, idx, active_start, Some(active_start))
+    last_prompt_before(
+        &screen.grid.rows,
+        idx,
+        active_start,
+        Some(screen.grid.total_popped as u64),
+    )
 }
 
 fn last_prompt_before<'a>(
     rows: &'a VecDeque<Row>,
     local_top: u32,
     block_start: u64,
-    active_block_start: Option<u64>,
+    active_grid_base: Option<u64>,
 ) -> Option<StickyPrompt<'a>> {
     let prompt_local = rows
         .iter()
@@ -275,7 +279,7 @@ fn last_prompt_before<'a>(
     Some(StickyPrompt {
         row: &rows[prompt_local],
         rendered_row,
-        active_row: active_block_start.map(|start| (rendered_row - start) as u32),
+        active_absolute_row: active_grid_base.map(|base| base + prompt_local as u64),
     })
 }
 

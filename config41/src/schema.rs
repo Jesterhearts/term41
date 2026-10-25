@@ -144,14 +144,8 @@ pub(crate) struct ConfigFile {
 pub(crate) fn parse_config(
     contents: &str,
     source: &dyn Display,
-) -> Config {
-    let (file, ignored_keys) = match parse_config_file(contents) {
-        Ok(parsed) => parsed,
-        Err(e) => {
-            warn!("failed to parse {source}: {e}");
-            return Config::default();
-        }
-    };
+) -> Result<Config, toml::de::Error> {
+    let (file, ignored_keys) = parse_config_file(contents)?;
     for key in ignored_keys {
         warn!("ignored unknown config key: {key}");
     }
@@ -165,7 +159,7 @@ pub(crate) fn parse_config(
     let command_editor = build_command_editor(file.command_editor);
     let new_tab_text = file.new_tab_text.unwrap_or('⮒'.to_smolstr());
 
-    Config {
+    Ok(Config {
         opacity: file.opacity.unwrap_or(1.0),
         fonts: file.fonts,
         font_size: file.font_size.unwrap_or(24.0).max(1.0),
@@ -189,7 +183,7 @@ pub(crate) fn parse_config(
         shell_integration,
         command_editor,
         new_tab_text,
-    }
+    })
 }
 
 pub(crate) fn parse_config_file(

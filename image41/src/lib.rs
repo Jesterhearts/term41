@@ -151,7 +151,7 @@ pub fn decode_png(data: &[u8]) -> Option<DecodedImage> {
         png::ColorType::Rgba => raw.to_vec(),
         png::ColorType::Rgb => {
             let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-            for chunk in raw.chunks_exact(3) {
+            for chunk in raw.as_chunks::<3>().0 {
                 rgba.extend_from_slice(chunk);
                 rgba.push(255);
             }
@@ -159,7 +159,7 @@ pub fn decode_png(data: &[u8]) -> Option<DecodedImage> {
         }
         png::ColorType::GrayscaleAlpha => {
             let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
-            for chunk in raw.chunks_exact(2) {
+            for chunk in raw.as_chunks::<2>().0 {
                 let g = chunk[0];
                 let a = chunk[1];
                 rgba.extend_from_slice(&[g, g, g, a]);

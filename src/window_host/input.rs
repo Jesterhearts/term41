@@ -13,15 +13,10 @@ use terminal41::HostInput;
 use terminal41::KittyFileRequest;
 use terminal41::TerminalEffects;
 use terminal41::apply_host_input;
-use terminal41::prompt::command_block_document;
-use terminal41::selection::close_search;
-use terminal41::selection::open_search;
 use terminal41::selection::search_active;
-use terminal41::selection::search_append;
-use terminal41::selection::search_backspace;
-use terminal41::selection::search_step_next;
-use terminal41::selection::search_step_prev;
 use terminal41::view;
+use terminal41::view::ScrollTarget;
+use terminal41::view::SearchAction;
 use winit::event::ElementState;
 use winit::event::KeyEvent;
 use winit::keyboard::Key;
@@ -576,47 +571,16 @@ pub(crate) fn handle_search_key(
     let shift = keyboard.modifiers.shift_key();
     let mut guard = target.terminal.lock();
     let terminal = &mut *guard;
-    match key {
-        Key::Named(NamedKey::Escape) => {
-            close_search(&mut terminal.search, &mut terminal.selection);
-        }
-        Key::Named(NamedKey::Backspace) => {
-            let offset =
-                search_backspace(&mut terminal.search, &terminal.active, &terminal.viewport);
-            view::set_viewport_offset(&mut terminal.active, offset);
-        }
-        Key::Named(NamedKey::Enter) => {
-            if shift {
-                let offset =
-                    search_step_prev(&mut terminal.search, &terminal.active, &terminal.viewport);
-                view::set_viewport_offset(&mut terminal.active, offset);
-            } else {
-                let offset =
-                    search_step_next(&mut terminal.search, &terminal.active, &terminal.viewport);
-                view::set_viewport_offset(&mut terminal.active, offset);
-            }
-        }
-        Key::Named(NamedKey::Space) => {
-            let offset = search_append(
-                &mut terminal.search,
-                &terminal.active,
-                &terminal.viewport,
-                " ",
-            );
-            view::set_viewport_offset(&mut terminal.active, offset);
-        }
-        Key::Character(s) => {
-            let offset = search_append(
-                &mut terminal.search,
-                &terminal.active,
-                &terminal.viewport,
-                s,
-            );
-            view::set_viewport_offset(&mut terminal.active, offset);
-        }
-        _ => {}
-    }
-    terminal.invalidate_snapshot_rows();
+    let action = match key {
+        Key::Named(NamedKey::Escape) => SearchAction::Close,
+        Key::Named(NamedKey::Backspace) => SearchAction::Backspace,
+        Key::Named(NamedKey::Enter) if shift => SearchAction::Previous,
+        Key::Named(NamedKey::Enter) => SearchAction::Next,
+        Key::Named(NamedKey::Space) => SearchAction::Append(" "),
+        Key::Character(s) => SearchAction::Append(s),
+        _ => return,
+    };
+    terminal.update_search(action);
 }
 
 pub(crate) fn handle_command_editor_key(
@@ -840,17 +804,14 @@ pub(crate) fn run_local_action(
     match action {
         Action::ScrollPageUp => {
             let mut terminal = target.terminal.lock();
-            let rows = terminal.viewport.rows;
-            let viewport = terminal.viewport;
-            view::scroll_viewport_up(&mut terminal.active, &viewport, rows);
-            terminal.invalidate_snapshot_rows();
+            let rows = terminal.viewport().rows;
+            terminal.scroll_viewport_up(rows);
             true
         }
         Action::ScrollPageDown => {
             let mut terminal = target.terminal.lock();
-            let rows = terminal.viewport.rows;
-            view::scroll_viewport_down(&mut terminal.active, rows);
-            terminal.invalidate_snapshot_rows();
+            let rows = terminal.viewport().rows;
+            terminal.scroll_viewport_down(rows);
             true
         }
         Action::Copy => true,
@@ -866,53 +827,32 @@ pub(crate) fn run_local_action(
         }
         Action::OpenSearch => {
             let mut terminal = target.terminal.lock();
-            open_search(&mut terminal.search);
-            terminal.invalidate_snapshot_rows();
+            terminal.update_search(SearchAction::Open);
             true
         }
         Action::ScrollPrevPrompt => {
             let mut terminal = target.terminal.lock();
-            let viewport = terminal.viewport;
-            let document =
-                command_block_document(&terminal.active, &terminal.metadata.command_metas);
-            view::scroll_to_prev_prompt(&mut terminal.active, &viewport, &document);
-            terminal.invalidate_snapshot_rows();
+            terminal.scroll_to(ScrollTarget::PreviousPrompt);
             true
         }
         Action::ScrollNextPrompt => {
             let mut terminal = target.terminal.lock();
-            let viewport = terminal.viewport;
-            let document =
-                command_block_document(&terminal.active, &terminal.metadata.command_metas);
-            view::scroll_to_next_prompt(&mut terminal.active, &viewport, &document);
-            terminal.invalidate_snapshot_rows();
+            terminal.scroll_to(ScrollTarget::NextPrompt);
             true
         }
         Action::JumpToPreviousFailed => {
             let mut terminal = target.terminal.lock();
-            let viewport = terminal.viewport;
-            let document =
-                command_block_document(&terminal.active, &terminal.metadata.command_metas);
-            view::scroll_to_prev_failed_command(&mut terminal.active, &viewport, &document);
-            terminal.invalidate_snapshot_rows();
+            terminal.scroll_to(ScrollTarget::PreviousFailedCommand);
             true
         }
         Action::JumpToPreviousCommand => {
             let mut terminal = target.terminal.lock();
-            let viewport = terminal.viewport;
-            let document =
-                command_block_document(&terminal.active, &terminal.metadata.command_metas);
-            view::scroll_to_prev_command(&mut terminal.active, &viewport, &document);
-            terminal.invalidate_snapshot_rows();
+            terminal.scroll_to(ScrollTarget::PreviousCommand);
             true
         }
         Action::JumpToPreviousSuccessful => {
             let mut terminal = target.terminal.lock();
-            let viewport = terminal.viewport;
-            let document =
-                command_block_document(&terminal.active, &terminal.metadata.command_metas);
-            view::scroll_to_prev_successful_command(&mut terminal.active, &viewport, &document);
-            terminal.invalidate_snapshot_rows();
+            terminal.scroll_to(ScrollTarget::PreviousSuccessfulCommand);
             true
         }
         Action::OpenNewWindow => {
@@ -1191,8 +1131,8 @@ pub(crate) fn handle_key_event(
     let (app_cursor_keys, app_keypad, c1_mode) = {
         let terminal = target.terminal.lock();
         (
-            view::app_cursor_keys(&terminal.active),
-            view::app_keypad(&terminal.active),
+            view::app_cursor_keys(terminal.active()),
+            view::app_keypad(terminal.active()),
             terminal.modes.c1_mode,
         )
     };
@@ -1321,8 +1261,8 @@ fn forward_recorded_repeat(
                 let terminal = target.terminal.lock();
                 (
                     terminal.kitty_keyboard.current(),
-                    view::app_cursor_keys(&terminal.active),
-                    view::app_keypad(&terminal.active),
+                    view::app_cursor_keys(terminal.active()),
+                    view::app_keypad(terminal.active()),
                     terminal.modes.c1_mode,
                 )
             };

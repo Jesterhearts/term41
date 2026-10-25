@@ -221,15 +221,15 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             .map(|s| s as f64)
             .unwrap_or_else(|| window.scale_factor());
         let startup_background = startup_snapshot_path();
-        self.startup.presenter = StartupPresenter::new(
-            window.clone(),
-            self.metrics.startup_fonts.clone(),
-            self.metrics.startup_font_size,
-            self.metrics.startup_supersampling,
-            scale_factor,
-            self.metrics.startup_gutter,
-            startup_background,
-        );
+        self.startup.presenter = self.startup.font_system.take().and_then(|fonts| {
+            StartupPresenter::new(
+                window.clone(),
+                fonts,
+                scale_factor,
+                self.metrics.startup_gutter,
+                startup_background,
+            )
+        });
         if present_startup_frame(self, event_loop, &window) {
             window.request_redraw();
         }

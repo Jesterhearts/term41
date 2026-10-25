@@ -77,11 +77,15 @@ pub(crate) fn collect_row_glyphs(
     blink_off: bool,
     rapid_blink_off: bool,
 ) -> Vec<CollectedGlyph> {
-    let _drcs = font41::set_drcs_context(drcs_geometry_class(snap), Some(snap.drcs_glyphs.clone()));
+    let drcs = drcs_geometry_class(snap).map(|geometry| font41::DrcsContext {
+        geometry,
+        glyphs: &snap.drcs_glyphs,
+    });
     let paintable_cols = row_paintable_cols(snap_row);
-    let shaped = font_system.shape_row(
+    let shaped = font_system.shape_row_with_drcs(
         &snap_row.cells[..paintable_cols],
         &snap_row.attrs[..paintable_cols],
+        drcs,
     );
     let mut collected = Vec::with_capacity(shaped.len());
 

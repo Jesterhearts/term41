@@ -19,6 +19,90 @@ use crate::lifecycle_ops;
 use crate::screen::palette_sync::apply_screen_palette;
 use crate::screen::palette_sync::sync_screen_erase_defaults;
 
+/// Configuration values owned by the terminal engine. Applying these together
+/// keeps both screens, runtime colors, and published snapshots consistent.
+pub struct RuntimeSettings<'a> {
+    pub cursor_style: CursorStyle,
+    pub emoji: EmojiCompatibilityMode,
+    pub status_display: StatusDisplayKind,
+    pub scrollback_lines: u32,
+    pub permissions: &'a FeaturePermissions,
+    pub limits: TerminalLimits,
+    pub palette: &'a ColorPalette,
+}
+
+impl<'a> From<&'a config41::Config> for RuntimeSettings<'a> {
+    fn from(config: &'a config41::Config) -> Self {
+        Self {
+            cursor_style: config.cursor_style,
+            emoji: config.compatibility.emoji,
+            status_display: match config.status_line {
+                config41::StatusLineMode::Off => StatusDisplayKind::None,
+                config41::StatusLineMode::Indicator => StatusDisplayKind::Indicator,
+            },
+            scrollback_lines: config.scrollback_lines,
+            permissions: &config.feature_permissions,
+            limits: config.limits,
+            palette: &config.palette,
+        }
+    }
+}
+
+impl crate::Terminal {
+    /// Apply terminal settings atomically with respect to snapshot
+    /// invalidation.
+    pub fn apply_settings(
+        &mut self,
+        settings: RuntimeSettings<'_>,
+    ) {
+        set_default_cursor_style(
+            &mut self.default_cursor_style,
+            &mut self.cursor_style,
+            settings.cursor_style,
+        );
+        set_emoji_compatibility_mode(&mut self.emoji_compatibility_mode, settings.emoji);
+        set_default_status_display(
+            &mut self.active,
+            &mut self.stash,
+            &mut self.viewport,
+            &self.palette,
+            &mut self.default_status_display,
+            settings.status_display,
+        );
+        set_scrollback_policy(
+            &mut self.active,
+            &mut self.stash,
+            self.on_alt_screen,
+            &self.viewport,
+            settings.scrollback_lines,
+        );
+        set_feature_permissions(&mut self.protocol, settings.permissions.clone());
+        set_terminal_limits(&mut self.protocol, settings.limits);
+        set_palette(
+            &mut self.active,
+            &mut self.stash,
+            &mut self.palette,
+            &mut self.base_palette,
+            &mut self.dec_color,
+            &self.runtime_colors,
+            settings.palette.clone(),
+        );
+        self.invalidate_snapshot_rows();
+    }
+
+    /// Update the pixel dimensions used by image protocols. Zero is clamped to
+    /// one pixel, matching the minimum rendered cell size.
+    pub fn set_cell_dimensions(
+        &mut self,
+        width: u32,
+        height: u32,
+    ) {
+        self.cell_width = width.max(1);
+        self.cell_height = height.max(1);
+        self.invalidate_snapshot_rows();
+    }
+}
+
 /// Replace the default cursor style.
 pub fn set_default_cursor_style(
     default_cursor_style: &mut CursorStyle,

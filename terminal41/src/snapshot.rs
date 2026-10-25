@@ -11,9 +11,9 @@ use crate::StatusDisplayKind;
 use crate::Terminal;
 use crate::host;
 use crate::prompt;
-use crate::selection::is_cell_active_match;
-use crate::selection::is_cell_match;
-use crate::selection::is_cell_selected;
+use crate::selection::is_absolute_cell_active_match;
+use crate::selection::is_absolute_cell_match;
+use crate::selection::is_absolute_cell_selected;
 use crate::selection::is_rendered_cell_selected;
 use crate::selection::search_active;
 use crate::selection::search_state;
@@ -149,9 +149,7 @@ impl SnapshotState {
 
     pub(crate) fn mark_all(&mut self) {
         let generation = self.next_generation();
-        for row_generation in &mut self.row_generations {
-            *row_generation = generation;
-        }
+        self.row_generations.fill(generation);
     }
 }
 
@@ -320,7 +318,17 @@ fn snapshot_rendered_row(
     if terminal.on_alt_screen {
         return match visible_grid_row(terminal, row) {
             Some(grid_row) => {
-                snapshot_grid_row(terminal, row, grid_row, generation, Some(row), None)
+                let base = terminal.viewport.top_index(terminal.active.grid.rows.len());
+                let absolute_row =
+                    (terminal.active.grid.total_popped + base) as u64 + u64::from(row);
+                snapshot_grid_row(
+                    terminal,
+                    row,
+                    grid_row,
+                    generation,
+                    Some(absolute_row),
+                    None,
+                )
             }
             None => blank_terminal_row(row, terminal.viewport.cols, &terminal.palette, generation),
         };
@@ -331,14 +339,14 @@ fn snapshot_rendered_row(
         }
         RenderedRow::Active {
             rendered_row,
-            block_row,
+            absolute_row,
             grid_row,
         } => snapshot_grid_row(
             terminal,
             row,
             grid_row,
             generation,
-            Some(block_row),
+            Some(absolute_row),
             Some(rendered_row),
         ),
         RenderedRow::History {
@@ -368,7 +376,7 @@ fn snapshot_grid_row(
     row: u32,
     grid_row: &crate::Row,
     generation: u64,
-    active_screen_row: Option<u32>,
+    active_absolute_row: Option<u64>,
     rendered_row: Option<u64>,
 ) -> RowSnapshot {
     let is_double = !matches!(grid_row.line_attr, LineAttr::Normal);
@@ -394,40 +402,22 @@ fn snapshot_grid_row(
             .map(|c| {
                 rendered_row.is_some_and(|rendered_row| {
                     is_rendered_cell_selected(terminal.selection.as_ref(), rendered_row, c)
-                }) || active_screen_row.is_some_and(|active_row| {
-                    is_cell_selected(
-                        terminal.selection.as_ref(),
-                        &terminal.active,
-                        &terminal.viewport,
-                        active_row,
-                        c,
-                    )
+                }) || active_absolute_row.is_some_and(|absolute_row| {
+                    is_absolute_cell_selected(terminal.selection.as_ref(), absolute_row, c)
                 })
             })
             .collect(),
         matched: (0..cols)
             .map(|c| {
-                active_screen_row.is_some_and(|active_row| {
-                    is_cell_match(
-                        &terminal.search,
-                        &terminal.active,
-                        &terminal.viewport,
-                        active_row,
-                        c,
-                    )
+                active_absolute_row.is_some_and(|absolute_row| {
+                    is_absolute_cell_match(&terminal.search, absolute_row, c)
                 })
             })
             .collect(),
         active_match: (0..cols)
             .map(|c| {
-                active_screen_row.is_some_and(|active_row| {
-                    is_cell_active_match(
-                        &terminal.search,
-                        &terminal.active,
-                        &terminal.viewport,
-                        active_row,
-                        c,
-                    )
+                active_absolute_row.is_some_and(|absolute_row| {
+                    is_absolute_cell_active_match(&terminal.search, absolute_row, c)
                 })
             })
             .collect(),
@@ -448,7 +438,7 @@ enum RenderedRow<'a> {
     },
     Active {
         rendered_row: u64,
-        block_row: u32,
+        absolute_row: u64,
         grid_row: &'a crate::Row,
     },
 }
@@ -478,10 +468,11 @@ fn rendered_row<'a>(
         rendered_base += 1;
     }
     let local = idx.min(terminal.active.grid.rows.len().saturating_sub(1) as u32);
-    let rendered_row = rendered_base + terminal.active.grid.total_popped as u64 + u64::from(local);
+    let absolute_row = terminal.active.grid.total_popped as u64 + u64::from(local);
+    let rendered_row = rendered_base + absolute_row;
     RenderedRow::Active {
         rendered_row,
-        block_row: local,
+        absolute_row,
         grid_row: &terminal.active.grid.rows[local as usize],
     }
 }

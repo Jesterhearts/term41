@@ -18,7 +18,6 @@ use crate::drcs;
 use crate::families;
 use crate::families::FamilyVariants;
 use crate::legacy;
-use crate::loader;
 use crate::loader::LazyFontFace;
 use crate::loader::LoadedFont;
 use crate::loader::load_font_candidate;
@@ -37,15 +36,15 @@ pub(crate) fn shape_row(
     font_system: &mut FontSystem,
     cells: &[SmolStr],
     attrs: &[CellAttrs],
+    drcs: Option<drcs::Context<'_>>,
 ) -> Vec<ShapedGlyph> {
-    font_system.sync_font_generation();
-
     if cells.is_empty() {
         return vec![];
     }
 
-    let font_faces = loader::font_faces();
-    let family_variants = loader::family_variants();
+    let fonts = font_system.fonts.clone();
+    let font_faces = &fonts.faces;
+    let family_variants = &fonts.families;
     let final_font_index = font_faces.len();
 
     trace!(
@@ -70,7 +69,7 @@ pub(crate) fn shape_row(
     let preferred = preferred_fonts_for_cells(
         cells,
         attrs,
-        &family_variants,
+        family_variants,
         final_font_index,
         &wants_color,
         &wants_nerd_symbol,
@@ -79,7 +78,7 @@ pub(crate) fn shape_row(
 
     let mut has_glyph = vec![false; cells.len()];
     let mut result: Vec<ShapedGlyph> = Vec::with_capacity(cells.len());
-    add_synthetic_glyphs(cells, &mut has_glyph, &mut result);
+    add_synthetic_glyphs(cells, &mut has_glyph, &mut result, drcs);
 
     if all_visible_cells_covered(cells, &has_glyph) {
         return result;
@@ -91,7 +90,7 @@ pub(crate) fn shape_row(
             cells,
             row_text: &row_text,
             col_map: &col_map,
-            font_faces: &font_faces,
+            font_faces,
             preferred: &preferred,
             wants_color: &wants_color,
             wants_nerd_symbol: &wants_nerd_symbol,
@@ -198,6 +197,7 @@ fn add_synthetic_glyphs(
     cells: &[SmolStr],
     has_glyph: &mut [bool],
     result: &mut Vec<ShapedGlyph>,
+    drcs: Option<drcs::Context<'_>>,
 ) {
     for (col, cell) in cells.iter().enumerate() {
         if let Some(glyph_id) = legacy::encode_single(cell) {
@@ -210,7 +210,7 @@ fn add_synthetic_glyphs(
                 y_offset: 0.0,
             });
             has_glyph[col] = true;
-        } else if let Some(glyph_id) = drcs::encode_single(cell) {
+        } else if let Some(glyph_id) = drcs::encode_single(cell, drcs) {
             result.push(ShapedGlyph {
                 glyph_id,
                 font_index: drcs::FONT_INDEX,

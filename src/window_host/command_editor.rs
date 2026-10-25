@@ -23,7 +23,7 @@ pub(crate) struct CommandEditorContext {
 }
 
 pub(crate) fn command_editor_view_context(terminal: &Terminal) -> Option<CommandEditorContext> {
-    if terminal.on_alt_screen
+    if terminal.on_alt_screen()
         || !matches!(
             terminal.metadata.shell_integration_phase,
             terminal41::ShellIntegrationPhase::Command | terminal41::ShellIntegrationPhase::Prompt
