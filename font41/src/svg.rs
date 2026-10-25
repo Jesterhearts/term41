@@ -27,10 +27,7 @@ pub fn rasterize_svg(
     cell_height: u32,
 ) -> Option<RasterizedGlyph> {
     let svg = font.svg().ok()?;
-    let raw = svg
-        .glyph_data(GlyphId::new(glyph_id as u32))
-        .ok()
-        .flatten()?;
+    let raw = svg.glyph_data(GlyphId::new(glyph_id as u32))?;
 
     let decompressed = maybe_decompress(raw)?;
     let svg_bytes: &[u8] = decompressed.as_deref().unwrap_or(raw);

@@ -4,10 +4,10 @@ use std::sync::Mutex;
 use std::sync::OnceLock;
 use std::thread;
 
-use harfrust::FontRef;
-use harfrust::ShaperData;
+use harfrust::Font;
 use log::info;
 use log::warn;
+use read_fonts::FontRef;
 use read_fonts::TableProvider;
 
 use crate::color_tables::color_tables;
@@ -22,7 +22,7 @@ pub(crate) type SharedFontData = Arc<dyn AsRef<[u8]> + Send + Sync>;
 pub(crate) struct LoadedFont {
     pub(crate) data: SharedFontData,
     pub(crate) face_index: u32,
-    pub(crate) shaper_data: ShaperData,
+    pub(crate) shaping_font: Font,
     pub(crate) units_per_em: f32,
     pub(crate) metrics: FontEmMetrics,
     /// True if the font carries colour glyph tables (COLR, CBDT, sbix, or
@@ -258,8 +258,7 @@ pub(crate) fn load_font(
     is_italic: bool,
 ) -> Option<LoadedFont> {
     let bytes = font_bytes(&data);
-    let font_ref = FontRef::from_index(bytes, face_index).ok()?;
-    let shaper_data = ShaperData::new(&font_ref);
+    let shaping_font = Font::new(data.clone(), face_index)?;
     let rf = read_fonts::FontRef::from_index(bytes, face_index).ok()?;
     let head = rf.head().ok()?;
     let units_per_em = head.units_per_em() as f32;
@@ -269,7 +268,7 @@ pub(crate) fn load_font(
     Some(LoadedFont {
         data,
         face_index,
-        shaper_data,
+        shaping_font,
         units_per_em,
         metrics,
         is_color,

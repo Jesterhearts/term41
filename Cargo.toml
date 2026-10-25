@@ -35,7 +35,7 @@ flate2               = "1.1.10"
 font41               = { path = "font41" }
 history41            = { path = "history41" }
 hooks41              = { path = "hooks41" }
-icu_properties       = "2.3.0"
+icu_properties       = "2.4.0"
 image41              = { path = "image41" }
 infer                = { version = "0.22.0", default-features = false }
 log                  = "0.4.34"
@@ -45,13 +45,13 @@ palette              = { version = "0.7.7", default-features = false, features =
   "named_from_str",
   "std",
 ] }
-parking_lot          = { version = "0.12.5" }
+parking_lot          = { version = "0.13.0" }
 png                  = "0.18.1"
 pty-pipe41           = { path = "pty-pipe41" }
-rusqlite             = { version = "0.40.2", features = ["bundled"] }
+rusqlite             = { version = "0.41.0", features = ["bundled"] }
 serde                = { version = "1.0.229", features = ["derive"] }
 shellhist41          = { path = "shellhist41" }
-smol_str             = { version = "0.3.6", features = ["serde"] }
+smol_str             = { version = "0.3.7", features = ["serde"] }
 tether-map           = "0.2.1"
 tracing              = "0.1.44"
 triple_buffer        = "9.0.0"
@@ -67,7 +67,7 @@ harness = false
 name    = "vte_parse"
 
 [dependencies]
-arc-swap                       = "1.9.2"
+arc-swap                       = "1.9.3"
 atomic-write-file              = "0.3.1"
 bitflags.workspace             = true
 bytemuck                       = { version = "1.25.2", features = [
@@ -83,18 +83,18 @@ evictor                        = "0.7.2"
 flate2.workspace               = true
 font41.workspace               = true
 fontdb                         = "0.24.0"
-harfrust                       = "0.13.3"
+harfrust                       = "0.15.0"
 history41.workspace            = true
 hooks41.workspace              = true
 image41.workspace              = true
 infer.workspace                = true
 log.workspace                  = true
-mlua                           = { version = "0.12.1", default-features = false, features = [
+mlua                           = { version = "0.12.2", default-features = false, features = [
   "lua54",
   "vendored"
 ] }
 nucleo-matcher.workspace       = true
-open                           = "5.4.4"
+open                           = "5.4.5"
 palette.workspace              = true
 parking_lot.workspace          = true
 png.workspace                  = true
@@ -129,8 +129,8 @@ criterion = { version = "0.8.2", default-features = false, features = [
 ] }
 
 [build-dependencies]
-embed-resource = "3.0.11"
-ico            = "0.5.0"
+embed-resource = "3.0.12"
+ico            = "0.6.0"
 
 [features]
 default              = ["ffmpeg", "vulkan", "wayland-data-control"]

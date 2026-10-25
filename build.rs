@@ -37,7 +37,7 @@ fn write_windows_icon(
     source_png: &Path,
     target_ico: &Path,
 ) -> io::Result<()> {
-    let image = ico::IconImage::read_png(File::open(source_png)?)?;
+    let image = ico::IconImage::read_png(io::BufReader::new(File::open(source_png)?))?;
     let mut icon_dir = ico::IconDir::new(ico::ResourceType::Icon);
     icon_dir.add_entry(ico::IconDirEntry::encode(&image)?);
     icon_dir.write(File::create(target_ico)?)

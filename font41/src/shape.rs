@@ -1,14 +1,16 @@
 use std::sync::Arc;
 
+use harfrust::Buffer;
 use harfrust::Direction;
 use harfrust::Script;
 use harfrust::ShapeOptions;
-use harfrust::UnicodeBuffer;
+use harfrust::ShaperFont;
 use icu_properties::props::BinaryProperty;
 use icu_properties::props::EmojiComponent;
 use icu_properties::props::EnumeratedProperty;
 use icu_properties::props::GeneralCategory;
 use log::trace;
+use log::warn;
 use smol_str::SmolStr;
 
 use crate::FontSystem;
@@ -29,7 +31,7 @@ use crate::rasterize::outline_glyph_bounds;
 pub(crate) struct PlanKey {
     font_index: usize,
     direction: Direction,
-    script: Script,
+    script: Option<Script>,
 }
 
 pub(crate) fn shape_row(
@@ -125,7 +127,7 @@ struct ApplyShapedInputs<'a> {
     font_idx: usize,
     loaded: &'a LoadedFont,
     font_ref: &'a read_fonts::FontRef<'a>,
-    output: &'a harfrust::GlyphBuffer,
+    output: &'a Buffer,
     preferred: &'a [Option<usize>],
     wants_nerd_symbol: &'a [bool],
     pass: usize,
@@ -258,7 +260,7 @@ fn shape_with_font_fallback(
                 Err(_) => continue,
             };
 
-            let mut buffer = UnicodeBuffer::new();
+            let mut buffer = Buffer::new();
             buffer.push_str(inputs.row_text);
             buffer.guess_segment_properties();
 
@@ -271,19 +273,23 @@ fn shape_with_font_fallback(
             };
 
             font_system.plan_cache.entry(key).or_insert_with(|| {
-                let shaper = loaded.shaper_data.shaper(&font_ref).build();
                 harfrust::ShapePlan::new(
-                    &shaper,
+                    &loaded.shaping_font,
                     direction,
-                    Some(script),
-                    buffer.language().as_ref(),
+                    script,
+                    buffer.language(),
                     &[],
                 )
             });
             let plan = &font_system.plan_cache[&key];
 
-            let shaper = loaded.shaper_data.shaper(&font_ref).build();
-            let output = shaper.shape(buffer, ShapeOptions::new().plan(Some(plan)));
+            let shaper = ShaperFont::new(&loaded.shaping_font);
+            if let Err(err) =
+                harfrust::shape(&shaper, &mut buffer, ShapeOptions::new().plan(Some(plan)))
+            {
+                warn!("failed to shape row with font {font_idx}: {err}");
+                continue;
+            }
 
             apply_shaped_output(
                 font_system,
@@ -293,7 +299,7 @@ fn shape_with_font_fallback(
                     font_idx,
                     loaded,
                     font_ref: &font_ref,
-                    output: &output,
+                    output: &buffer,
                     preferred: inputs.preferred,
                     wants_nerd_symbol: inputs.wants_nerd_symbol,
                     pass,

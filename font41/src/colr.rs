@@ -136,10 +136,7 @@ fn rasterize_colr_v1<'a>(
     glyph_id: u16,
     layout: &ColrLayout,
 ) -> Option<RasterizedGlyph> {
-    let (root_paint, root_id) = colr
-        .v1_base_glyph(GlyphId::new(glyph_id as u32))
-        .ok()
-        .flatten()?;
+    let (root_paint, root_id) = colr.v1_base_glyph(GlyphId::new(glyph_id as u32))?;
 
     let mut painter = Painter {
         colr,
@@ -175,10 +172,7 @@ fn rasterize_colr_v0<'a>(
     glyph_id: u16,
     layout: &ColrLayout,
 ) -> Option<RasterizedGlyph> {
-    let layers = colr
-        .v0_base_glyph(GlyphId::new(glyph_id as u32))
-        .ok()
-        .flatten()?;
+    let layers = colr.v0_base_glyph(GlyphId::new(glyph_id as u32))?;
     let mut painter = Painter {
         colr: colr.clone(),
         palette,
@@ -192,7 +186,7 @@ fn rasterize_colr_v0<'a>(
         visited: HashSet::new(),
     };
     for layer_index in layers {
-        let Ok((layer_glyph, palette_index)) = colr.v0_layer(layer_index) else {
+        let Some((layer_glyph, palette_index)) = colr.v0_layer(layer_index) else {
             continue;
         };
         painter.paint_colr_v0_layer(layer_glyph.to_u16(), palette_index);
@@ -254,7 +248,7 @@ impl<'a> Painter<'a> {
                 let first = p.first_layer_index() as usize;
                 let count = p.num_layers() as usize;
                 for i in 0..count {
-                    let Ok((sub, id)) = self.colr.v1_layer(first + i) else {
+                    let Some((sub, id)) = self.colr.v1_layer(first + i) else {
                         continue;
                     };
                     if !self.visited.insert(id) {
@@ -383,18 +377,18 @@ impl<'a> Painter<'a> {
                 );
             }
             Paint::Glyph(p) => {
-                let Some(path) = self.extract_outline(p.glyph_id().to_u16()) else {
-                    return;
-                };
-                let prev = self.current_path.replace(path);
                 if let Ok(sub) = p.paint() {
-                    self.paint(&sub);
+                    self.paint_glyph(p.glyph_id().to_u16() as u32, &sub);
                 }
-                self.current_path = prev;
+            }
+            Paint::Glyph2(p) => {
+                if let Ok(sub) = p.paint() {
+                    self.paint_glyph(p.glyph_id().to_u32(), &sub);
+                }
             }
             Paint::ColrGlyph(p) => {
                 let gid = GlyphId::new(p.glyph_id().to_u16() as u32);
-                let Ok(Some((sub, id))) = self.colr.v1_base_glyph(gid) else {
+                let Some((sub, id)) = self.colr.v1_base_glyph(gid) else {
                     return;
                 };
                 if !self.visited.insert(id) {
@@ -636,6 +630,24 @@ impl<'a> Painter<'a> {
                 self.paint_composite(&backdrop, &source, p.composite_mode());
             }
         }
+    }
+
+    fn paint_glyph(
+        &mut self,
+        glyph_id: u32,
+        paint: &Paint<'_>,
+    ) {
+        // The outline renderer uses 16-bit glyph IDs. Skip larger IDs rather
+        // than truncating them and drawing an unrelated glyph.
+        let Ok(glyph_id) = u16::try_from(glyph_id) else {
+            return;
+        };
+        let Some(path) = self.extract_outline(glyph_id) else {
+            return;
+        };
+        let prev = self.current_path.replace(path);
+        self.paint(paint);
+        self.current_path = prev;
     }
 
     fn paint_colr_v0_layer(

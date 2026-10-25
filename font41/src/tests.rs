@@ -39,7 +39,15 @@ fn face_info(
 fn shaped_glyphs_rasterize() {
     let mut fs = FontSystem::new(None, 18.0, 4);
 
-    for text in [":: ", "a::b ", "Hello "] {
+    for text in [
+        ":: ",
+        "a::b ",
+        "Hello ",
+        "123! ",
+        "caf\u{e9} ",
+        ":: ",
+        "Hello ",
+    ] {
         let cells: Vec<SmolStr> = text
             .chars()
             .map(|c| {
@@ -49,6 +57,18 @@ fn shaped_glyphs_rasterize() {
             .collect();
         let attrs = vec![CellAttrs::default(); cells.len()];
         let shaped = fs.shape_row(&cells, &attrs);
+        for (col, cell) in cells.iter().enumerate() {
+            if cell == " " {
+                continue;
+            }
+            assert!(
+                shaped.iter().any(|glyph| {
+                    let start = glyph.col as usize;
+                    (start..start + glyph.cells_wide as usize).contains(&col)
+                }),
+                "cell {col} ({cell:?}) in {text:?} must have a shaped glyph",
+            );
+        }
         for sg in &shaped {
             let cell = &cells[sg.col as usize];
             if cell == " " {
