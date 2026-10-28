@@ -529,8 +529,13 @@ fn next_startup_redraw_delay(
         let rapid_delay = duration_until_next_phase(started, CURSOR_BLINK_HALF_PERIOD / 2);
         delay = Some(delay.map_or(rapid_delay, |d| d.min(rapid_delay)));
     }
-    if startup_frame_has_animated_images(frame) {
-        delay = Some(delay.map_or(super::FRAME_DURATION, |d| d.min(super::FRAME_DURATION)));
+    if let Some(image_delay) = frame
+        .visible_images
+        .iter()
+        .filter_map(|image| image.next_frame_in)
+        .min()
+    {
+        delay = Some(delay.map_or(image_delay, |d| d.min(image_delay)));
     }
     delay
 }
@@ -549,13 +554,6 @@ fn startup_frame_has_blinking_text(
             .copied()
             .any(|attrs| attrs.contains(blink_attr) && blink_animation_enabled(&frame.snap, attrs))
     })
-}
-
-fn startup_frame_has_animated_images(frame: &StartupFrame) -> bool {
-    frame
-        .visible_images
-        .iter()
-        .any(|image| image.image.is_animated())
 }
 
 fn duration_until_next_phase(
@@ -1636,6 +1634,49 @@ mod tests {
         blit_scaled_rgba(&mut buffer, 1, 1, 0, 0, 0, 0, 1, 1, 1, 1, &pixels);
 
         assert_eq!(buffer[0], 0x80007f);
+    }
+
+    #[test]
+    fn kitty_animation_paints_selected_pixels_and_stops_redraws_after_playback() {
+        let mut term = terminal41::test_support::TestTerm::new_80x24();
+        term.process(
+            concat!(
+                "\x1b_Ga=T,i=7,s=1,v=1,C=1;/wAA/w==\x1b\\",
+                "\x1b_Ga=f,i=7,s=1,v=1,z=1000;AAD//w==\x1b\\",
+                "\x1b_Ga=a,i=7,r=1,z=1000,s=3,v=2\x1b\\",
+            )
+            .as_bytes(),
+        );
+        let now = Instant::now();
+        let layout = FrameLayout {
+            cell_w: 8.0,
+            cell_h: 16.0,
+            baseline: 0.0,
+            gutter_px: 0.0,
+            tab_bar_h: 0.0,
+            terminal_y_offset: 0.0,
+            block_y_offset: 0.0,
+        };
+        for (time, expected, animating) in [
+            (now, 0xff0000, true),
+            (now + Duration::from_secs(3), 0x0000ff, false),
+        ] {
+            let images = terminal41::view::visible_images(
+                term.active(),
+                term.viewport(),
+                term.cell_height(),
+                term.cell_width(),
+                term.kitty_images(),
+                term.palette(),
+                time,
+            )
+            .collect();
+            let frame = build_startup_frame(test_snapshot(80, 24, &[]), images, now);
+            let mut buffer = [0u32; 1];
+            paint_visible_images(&mut buffer, 1, 1, &frame.visible_images, &layout, 0);
+            assert_eq!(buffer[0], expected);
+            assert_eq!(next_startup_redraw_delay(&frame, now).is_some(), animating);
+        }
     }
 
     #[test]

@@ -17,13 +17,23 @@ use std::path::PathBuf;
 use std::time::Instant;
 
 use crate::DecodedImage;
-use crate::decode_png_or_jpeg;
+
+mod animation;
+pub use animation::KittyAnimationError;
+pub use animation::KittyFrameIdentity;
+pub use animation::KittyPresentation;
+use animation::StoredImage;
 
 // ---------------------------------------------------------------------------
 // Parsed command
 // ---------------------------------------------------------------------------
 
 /// All key=value fields from a single kitty graphics APC escape.
+///
+/// Animation actions reuse the layout keys: `s/v` are state/loops for `a=a`,
+/// `r/c` are frame numbers, `z` is the frame gap, and `X/Y/C` select
+/// composition coordinates, background color, or overwrite mode as defined by
+/// the action.
 #[derive(Debug, Clone)]
 pub struct KittyCommand {
     /// `a` — action (default `t`).
@@ -175,9 +185,9 @@ fn parse_u32(val: &[u8]) -> u32 {
 
 fn parse_i32(val: &[u8]) -> i32 {
     if val.first() == Some(&b'-') {
-        -(parse_u32(&val[1..]) as i32)
+        -(i64::from(parse_u32(&val[1..])).min(1_i64 << 31)) as i32
     } else {
-        parse_u32(val) as i32
+        parse_u32(val).min(i32::MAX as u32) as i32
     }
 }
 
@@ -248,12 +258,21 @@ pub fn decode_payload(
     cmd: &KittyCommand,
     raw_b64: &[u8],
 ) -> Option<DecodedImage> {
+    decode_payload_bounded(cmd, raw_b64, usize::MAX)
+}
+
+/// Decode with a bound on inflated data and decoded RGBA bytes.
+pub fn decode_payload_bounded(
+    cmd: &KittyCommand,
+    raw_b64: &[u8],
+    max_bytes: usize,
+) -> Option<DecodedImage> {
     use base64::Engine;
     let engine = base64::engine::general_purpose::STANDARD;
 
     let decoded = engine.decode(raw_b64).ok()?;
 
-    decode_data(cmd, decoded)
+    decode_data(cmd, decoded, max_bytes)
 }
 
 /// Load image data from a file path (base64-encoded in the payload).
@@ -309,16 +328,18 @@ pub fn decode_file_payload_from_path(
         let _ = std::fs::remove_file(path);
     }
 
-    decode_data(cmd, file_data)
+    decode_data(cmd, file_data, max_bytes)
 }
 
 fn decode_data(
     cmd: &KittyCommand,
     data: Vec<u8>,
+    max_bytes: usize,
 ) -> Option<DecodedImage> {
     let pixels = if cmd.compression == b'z' {
         let mut inflated = Vec::new();
         flate2::read::ZlibDecoder::new(&data[..])
+            .take((max_bytes as u64).saturating_add(1))
             .read_to_end(&mut inflated)
             .ok()?;
         inflated
@@ -326,8 +347,15 @@ fn decode_data(
         data
     };
 
+    if pixels.len() > max_bytes {
+        return None;
+    }
+    if cmd.format != 100 && rgba_bytes(cmd.width, cmd.height)? > max_bytes {
+        return None;
+    }
+
     match cmd.format {
-        100 => decode_png_or_jpeg(&pixels),
+        100 => crate::decode_png_or_jpeg_bounded(&pixels, max_bytes),
         24 => decode_rgb(&pixels, cmd.width, cmd.height),
         _ => decode_rgba(&pixels, cmd.width, cmd.height),
     }
@@ -370,12 +398,13 @@ fn decode_rgb(
     width: u32,
     height: u32,
 ) -> Option<DecodedImage> {
-    let expected = width as usize * height as usize * 3;
+    let rgba_size = rgba_bytes(width, height)?;
+    let expected = rgba_size / 4 * 3;
     if width == 0 || height == 0 || data.len() < expected {
         return None;
     }
 
-    let mut rgba = Vec::with_capacity(width as usize * height as usize * 4);
+    let mut rgba = Vec::with_capacity(rgba_size);
     for chunk in data[..expected].as_chunks::<3>().0 {
         rgba.extend_from_slice(chunk);
         rgba.push(255);
@@ -389,7 +418,7 @@ fn decode_rgba(
     width: u32,
     height: u32,
 ) -> Option<DecodedImage> {
-    let expected = width as usize * height as usize * 4;
+    let expected = rgba_bytes(width, height)?;
     if width == 0 || height == 0 || data.len() < expected {
         return None;
     }
@@ -399,6 +428,15 @@ fn decode_rgba(
         height,
         data[..expected].to_vec(),
     ))
+}
+
+pub(crate) fn rgba_bytes(
+    width: u32,
+    height: u32,
+) -> Option<usize> {
+    (width as usize)
+        .checked_mul(height as usize)?
+        .checked_mul(4)
 }
 
 /// Apply source-rectangle cropping to a decoded image.
@@ -423,9 +461,7 @@ pub fn crop_source_rect(
         return image;
     }
 
-    // Cropping is only sensible for static single-frame images; the kitty
-    // protocol doesn't transmit animations, so this code never needs to
-    // track cropping across a frame sequence.
+    // Kitty presentation snapshots contain only the selected animation frame.
     let src_pixels = &image.frames[0].pixels;
     let mut pixels = Vec::with_capacity(src_w as usize * src_h as usize * 4);
     for row in src_y..src_y + src_h {
@@ -446,9 +482,10 @@ pub fn crop_source_rect(
 #[derive(Debug)]
 pub struct KittyImageStore {
     /// Images keyed by their kitty image id.
-    images: HashMap<u32, DecodedImage>,
-    /// Monotonic generation per stored image id. Renderer cache ids include
-    /// this so replacing an image under the same kitty id uploads new pixels.
+    images: HashMap<u32, StoredImage>,
+    /// Identity of each image transmission. Frame mutations preserve identity;
+    /// replacing the root invalidates placements bound to its previous
+    /// identity.
     image_generations: HashMap<u32, u64>,
     next_generation: u64,
     /// Virtual placements used by Unicode placeholders, keyed by
@@ -485,6 +522,7 @@ pub struct KittyVirtualPlacement {
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KittyStoreError {
     StorageLimitExceeded,
+    InvalidImage,
 }
 
 impl Default for KittyImageStore {
@@ -536,18 +574,25 @@ impl KittyImageStore {
         id
     }
 
-    /// Store or replace a decoded image under `id`.
+    /// Store or replace a single-frame RGBA image under `id`.
+    /// Replacement resets animation state and invalidates the previous image
+    /// identity.
     pub fn store(
         &mut self,
         id: u32,
         image: DecodedImage,
         max_storage_bytes: usize,
     ) -> Result<(), KittyStoreError> {
+        if !animation::valid_image(&image) {
+            return Err(KittyStoreError::InvalidImage);
+        }
         if !self.can_store(id, &image, max_storage_bytes) {
             return Err(KittyStoreError::StorageLimitExceeded);
         }
         self.used_bytes = self.projected_storage_bytes(id, &image);
-        self.images.insert(id, image);
+        self.images
+            .insert(id, StoredImage::new(image, self.next_generation));
+        self.remove_virtual_placements(id, None);
         self.image_generations.insert(id, self.next_generation);
         self.next_generation = self.next_generation.wrapping_add(1).max(1);
         Ok(())
@@ -567,18 +612,19 @@ impl KittyImageStore {
         id: u32,
         image: &DecodedImage,
     ) -> usize {
-        let previous_bytes = self.images.get(&id).map_or(0, image_storage_bytes);
+        let previous_bytes = self.images.get(&id).map_or(0, StoredImage::storage_bytes);
         self.used_bytes
             .saturating_sub(previous_bytes)
             .saturating_add(image_storage_bytes(image))
     }
 
-    /// Return the image stored under `id`, if any.
+    /// Return the root frame stored under `id`, if any.
+    /// Use [`Self::presentation`] to select a frame for display.
     pub fn get(
         &self,
         id: u32,
     ) -> Option<&DecodedImage> {
-        self.images.get(&id)
+        self.images.get(&id).map(StoredImage::root)
     }
 
     pub fn image_generation(
@@ -655,7 +701,7 @@ impl KittyImageStore {
         id: u32,
     ) {
         if let Some(image) = self.images.remove(&id) {
-            self.used_bytes = self.used_bytes.saturating_sub(image_storage_bytes(&image));
+            self.used_bytes = self.used_bytes.saturating_sub(image.storage_bytes());
         }
         self.image_generations.remove(&id);
         self.remove_virtual_placements(id, None);
@@ -680,7 +726,7 @@ impl KittyImageStore {
         self.images.retain(|&id, image| {
             let keep = id < lo || id > hi;
             if !keep {
-                self.used_bytes = self.used_bytes.saturating_sub(image_storage_bytes(image));
+                self.used_bytes = self.used_bytes.saturating_sub(image.storage_bytes());
                 self.image_generations.remove(&id);
             }
             keep
@@ -769,6 +815,7 @@ impl ChunkedTransmission {
         max_payload_bytes: usize,
     ) -> Result<Option<KittyCommand>, ChunkedTransmissionError> {
         let more = cmd.more;
+        let quiet = cmd.quiet;
         if self.payload.len().saturating_add(cmd.payload.len()) > max_payload_bytes {
             self.clear();
             return Err(ChunkedTransmissionError::PayloadLimitExceeded);
@@ -781,6 +828,9 @@ impl ChunkedTransmission {
 
         if let Some(ref mut stored) = self.cmd {
             stored.more = more;
+            if quiet != 0 {
+                stored.quiet = quiet;
+            }
         }
 
         if more == 1 {
@@ -821,6 +871,54 @@ pub fn format_response(
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    #[test]
+    fn bounded_decode_rejects_expansion_and_dimension_overflow() {
+        use std::io::Write;
+
+        use base64::Engine;
+
+        let mut encoder =
+            flate2::write::ZlibEncoder::new(Vec::new(), flate2::Compression::default());
+        encoder.write_all(&[0; 1024]).unwrap();
+        let payload = base64::engine::general_purpose::STANDARD.encode(encoder.finish().unwrap());
+        let compressed = parse_command(b"a=f,f=32,s=1,v=1,o=z");
+        assert!(decode_payload_bounded(&compressed, payload.as_bytes(), 16).is_none());
+
+        let huge = parse_command(b"a=f,f=32,s=4294967295,v=4294967295");
+        assert!(decode_payload_bounded(&huge, b"AAAAAA==", usize::MAX).is_none());
+        let cmd = parse_command(b"a=f,f=32,s=1,v=1");
+        assert!(decode_payload_bounded(&cmd, b"AAAAAA==", 4).is_some());
+        assert!(decode_payload_bounded(&cmd, b"AAAAAA==", 3).is_none());
+    }
+
+    #[test]
+    fn bounded_png_decode_checks_canvas_size_before_pixel_allocation() {
+        use base64::Engine;
+
+        let mut png = Vec::new();
+        {
+            let mut encoder = png::Encoder::new(&mut png, 32, 32);
+            encoder.set_color(png::ColorType::Rgba);
+            encoder.set_depth(png::BitDepth::Eight);
+            encoder
+                .write_header()
+                .unwrap()
+                .write_image_data(&[0; 4096])
+                .unwrap();
+        }
+        assert!(png.len() < 1024);
+        let payload = base64::engine::general_purpose::STANDARD.encode(png);
+        let cmd = parse_command(b"a=f,f=100");
+        assert!(decode_payload_bounded(&cmd, payload.as_bytes(), 1024).is_none());
+        assert!(decode_payload_bounded(&cmd, payload.as_bytes(), 4096).is_some());
+    }
+
+    #[test]
+    fn animation_gap_accepts_the_full_signed_integer_range() {
+        assert_eq!(parse_command(b"a=f,z=-2147483648").z_index, i32::MIN);
+        assert_eq!(parse_command(b"a=f,z=2147483647").z_index, i32::MAX);
+    }
 
     #[test]
     fn parse_transmit_display_png() {

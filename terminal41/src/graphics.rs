@@ -15,6 +15,8 @@ use crate::conformance;
 use crate::lifecycle_ops;
 use crate::screen;
 
+mod animation;
+
 pub(crate) fn handle_kitty_graphics(
     data: &[u8],
     store: &mut image41::kitty::KittyImageStore,
@@ -36,15 +38,20 @@ pub(crate) fn handle_kitty_graphics(
     }
 
     let parsed = image41::kitty::parse_command(&data[1..]);
-    if parsed.payload.len() > limits.kitty_graphics_payload_bytes {
+    if parsed.action != b'd'
+        && chunked.payload.len().saturating_add(parsed.payload.len())
+            > limits.kitty_graphics_payload_bytes
+    {
+        let response = chunked.cmd.as_ref().unwrap_or(&parsed);
         send_kitty_response(
-            &parsed,
-            response_image_id(&parsed),
+            response,
+            response_image_id(response),
             false,
             "ENOSPC",
             c1_mode,
             pending_output,
         );
+        chunked.clear();
         return;
     }
     let cmd = if parsed.action == b'd' {
@@ -60,6 +67,18 @@ pub(crate) fn handle_kitty_graphics(
             }
         }
     };
+
+    if command_has_conflicting_ids(&cmd) {
+        send_kitty_response(
+            &cmd,
+            response_image_id(&cmd),
+            false,
+            "EINVAL",
+            c1_mode,
+            pending_output,
+        );
+        return;
+    }
 
     match cmd.action {
         b'q' => handle_kitty_query(
@@ -127,14 +146,22 @@ pub(crate) fn handle_kitty_graphics(
             cell_height,
             cell_width,
         ),
-        b'a' | b'c' | b'f' => send_kitty_response(
+        b'f' => animation::handle_frame(
             &cmd,
-            response_image_id(&cmd),
-            false,
-            "ENOTSUP",
+            store,
+            screen,
+            viewport,
+            next_image_id,
+            cell_height,
+            cell_width,
             c1_mode,
             pending_output,
+            limits,
+            file_requests,
+            file_permission,
+            palette,
         ),
+        b'a' | b'c' => animation::handle_control(&cmd, store, c1_mode, pending_output),
         _ => {}
     }
 }
@@ -164,6 +191,12 @@ impl KittyFileRequest {
 enum KittyFileAction {
     Query,
     Transmit,
+    Frame {
+        image_id: u32,
+        generation: u64,
+        target: Option<image41::kitty::KittyFrameIdentity>,
+        base: Option<image41::kitty::KittyFrameIdentity>,
+    },
     TransmitDisplay {
         row: usize,
         col: u32,
@@ -188,7 +221,11 @@ fn decode_kitty_image(
             true,
             limits.kitty_graphics_storage_bytes,
         ),
-        _ => image41::kitty::decode_payload(cmd, &cmd.payload),
+        _ => image41::kitty::decode_payload_bounded(
+            cmd,
+            &cmd.payload,
+            limits.kitty_graphics_storage_bytes,
+        ),
     }
 }
 
@@ -295,7 +332,10 @@ fn store_kitty_image(
     }
     store
         .store(id, image, limits.kitty_graphics_storage_bytes)
-        .map_err(|_| "ENOSPC")
+        .map_err(|error| match error {
+            image41::kitty::KittyStoreError::StorageLimitExceeded => "ENOSPC",
+            image41::kitty::KittyStoreError::InvalidImage => "EINVAL",
+        })
 }
 
 pub(crate) fn apply_kitty_file_request(
@@ -317,6 +357,45 @@ pub(crate) fn apply_kitty_file_request(
         request.limits.kitty_graphics_storage_bytes,
     );
     match (request.action, decoded) {
+        (
+            KittyFileAction::Frame {
+                image_id,
+                generation,
+                target,
+                base,
+            },
+            decoded,
+        ) => {
+            let current_base = if target.is_none() {
+                store.frame_identity(image_id, cmd.columns)
+            } else {
+                None
+            };
+            if store.image_generation(image_id) != generation
+                || store.get(image_id).is_none()
+                || store.frame_identity(image_id, cmd.rows) != target
+                || current_base != base
+            {
+                send_kitty_response(
+                    &cmd,
+                    image_id,
+                    false,
+                    "ENOENT",
+                    request.c1_mode,
+                    pending_output,
+                );
+            } else {
+                animation::finish_frame(
+                    &cmd,
+                    image_id,
+                    decoded,
+                    store,
+                    request.limits,
+                    request.c1_mode,
+                    pending_output,
+                );
+            }
+        }
         (KittyFileAction::Query, Some(_)) => {
             send_kitty_response(
                 &cmd,
@@ -385,6 +464,7 @@ pub(crate) fn apply_kitty_file_request(
                 image,
                 &cmd,
                 id,
+                store,
                 screen,
                 viewport,
                 next_image_id,
@@ -425,6 +505,7 @@ fn place_kitty_image(
     image: image41::DecodedImage,
     cmd: &image41::kitty::KittyCommand,
     kitty_image_id: u32,
+    store: &image41::kitty::KittyImageStore,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -436,6 +517,7 @@ fn place_kitty_image(
         image,
         cmd,
         kitty_image_id,
+        store,
         screen,
         viewport,
         next_image_id,
@@ -452,6 +534,7 @@ fn place_kitty_image_at(
     image: image41::DecodedImage,
     cmd: &image41::kitty::KittyCommand,
     kitty_image_id: u32,
+    store: &image41::kitty::KittyImageStore,
     screen: &mut Screen,
     viewport: &Viewport,
     next_image_id: &mut u64,
@@ -494,6 +577,15 @@ fn place_kitty_image_at(
     };
 
     let image_rows = display_height.div_ceil(cell_height);
+
+    let image = if kitty_image_id == 0 {
+        crate::image::PlacedImageData::Inline(image)
+    } else {
+        crate::image::PlacedImageData::Kitty {
+            generation: store.image_generation(kitty_image_id),
+            source_rect: [cmd.src_x, cmd.src_y, cmd.src_w, cmd.src_h],
+        }
+    };
 
     screen.images.insert(
         id,
@@ -588,10 +680,15 @@ fn send_kitty_response(
     } else {
         String::new()
     };
+    let frame = if matches!(cmd.action, b'f' | b'a') && cmd.rows != 0 {
+        format!(",r={}", cmd.rows)
+    } else {
+        String::new()
+    };
     conformance::write_apc(
         pending_output,
         c1_mode,
-        format_args!("Gi={image_id}{image_number}{placement};{status}"),
+        format_args!("Gi={image_id}{image_number}{placement}{frame};{status}"),
     );
 }
 
@@ -835,6 +932,7 @@ fn handle_kitty_transmit_display(
                 image,
                 cmd,
                 id,
+                store,
                 screen,
                 viewport,
                 next_image_id,
@@ -901,6 +999,7 @@ fn handle_kitty_place(
                 image,
                 cmd,
                 id,
+                store,
                 screen,
                 viewport,
                 next_image_id,
@@ -930,6 +1029,14 @@ fn handle_kitty_delete(
     chunked.clear();
     let uppercase = cmd.delete.is_ascii_uppercase();
     match cmd.delete.to_ascii_lowercase() {
+        b'f' => {
+            if let Ok(id) = animation::existing_image_id(cmd, store) {
+                let _ = store.delete_frame(id, cmd.rows, uppercase, Instant::now());
+                if store.get(id).is_none() {
+                    crate::screen::retain_images(screen, |img| img.kitty_image_id != Some(id));
+                }
+            }
+        }
         b'a' | 0 => {
             crate::screen::clear_images(screen);
             if uppercase {
@@ -1168,7 +1275,7 @@ fn place_iterm_image(
     screen.images.insert(
         id,
         PlacedImage {
-            image,
+            image: crate::PlacedImageData::Inline(image),
             id,
             kitty_image_id: None,
             kitty_placement_id: None,

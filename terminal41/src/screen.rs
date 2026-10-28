@@ -1896,7 +1896,11 @@ mod integration_tests {
         term.active.images.insert(
             id,
             crate::PlacedImage {
-                image: image41::DecodedImage::single_frame(1, 16, vec![]),
+                image: crate::PlacedImageData::Inline(image41::DecodedImage::single_frame(
+                    1,
+                    16,
+                    vec![],
+                )),
                 id,
                 kitty_image_id: None,
                 kitty_placement_id: None,

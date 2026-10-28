@@ -83,6 +83,7 @@ pub use crate::effects::TerminalEffects;
 pub(crate) use crate::feature::apply_status_display_mode;
 pub use crate::graphics::KittyFileRequest;
 pub use crate::image::PlacedImage;
+pub use crate::image::PlacedImageData;
 pub use crate::image::VisibleImage;
 pub use crate::image::is_kitty_unicode_placeholder_cell;
 pub use crate::io::clipboard::ClipboardRequest;

@@ -530,11 +530,18 @@ impl RenderHost {
         }
         let tab = self.active_tab()?;
         let snap = tab.snapshot_output.output_buffer();
-        if snap.cursor.is_some() && snap.cursor_style.blink {
+        let cursor_wait = if snap.cursor.is_some() && snap.cursor_style.blink {
             Some(r#impl::CURSOR_BLINK_HALF_PERIOD.saturating_sub(last_frame_duration))
         } else {
             None
-        }
+        };
+        let image_wait = self
+            .last_visible_images
+            .iter()
+            .filter_map(|image| image.next_frame_in)
+            .min()
+            .map(|delay| delay.saturating_sub(last_frame_duration));
+        cursor_wait.into_iter().chain(image_wait).min()
     }
 
     // -- Event dispatch -----------------------------------------------------

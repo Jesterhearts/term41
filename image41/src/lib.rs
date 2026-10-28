@@ -118,10 +118,17 @@ pub fn decode_image(data: &[u8]) -> Option<DecodedImage> {
 /// [`decode_image`] instead; protocols with a PNG-shaped escape hatch can use
 /// this for the PNG baseline plus term41's JPEG compatibility extension.
 pub fn decode_png_or_jpeg(data: &[u8]) -> Option<DecodedImage> {
+    decode_png_or_jpeg_bounded(data, usize::MAX)
+}
+
+pub(crate) fn decode_png_or_jpeg_bounded(
+    data: &[u8],
+    max_bytes: usize,
+) -> Option<DecodedImage> {
     let kind = infer::get(data)?;
     match kind.mime_type() {
-        "image/png" => decode_png(data),
-        "image/jpeg" => decode_jpeg(data),
+        "image/png" => decode_png_bounded(data, max_bytes),
+        "image/jpeg" => decode_jpeg_bounded(data, max_bytes),
         _ => None,
     }
 }
@@ -130,12 +137,22 @@ pub fn decode_png_or_jpeg(data: &[u8]) -> Option<DecodedImage> {
 /// decode failure — unsupported bit depth (16-bit), indexed colour, or
 /// malformed data.
 pub fn decode_png(data: &[u8]) -> Option<DecodedImage> {
+    decode_png_bounded(data, usize::MAX)
+}
+
+fn decode_png_bounded(
+    data: &[u8],
+    max_bytes: usize,
+) -> Option<DecodedImage> {
     let decoder = png::Decoder::new(std::io::Cursor::new(data));
     let mut reader = decoder.read_info().ok()?;
 
     let info = reader.info();
     let width = info.width;
     let height = info.height;
+    if kitty::rgba_bytes(width, height)? > max_bytes {
+        return None;
+    }
     let color_type = info.color_type;
     let bit_depth = info.bit_depth;
 
@@ -185,6 +202,13 @@ pub fn decode_png(data: &[u8]) -> Option<DecodedImage> {
 /// Decode a JPEG into RGBA pixels. JPEG has no alpha channel, so the decoder
 /// expands every pixel to opaque RGBA for the renderer.
 pub fn decode_jpeg(data: &[u8]) -> Option<DecodedImage> {
+    decode_jpeg_bounded(data, usize::MAX)
+}
+
+fn decode_jpeg_bounded(
+    data: &[u8],
+    max_bytes: usize,
+) -> Option<DecodedImage> {
     use zune_jpeg::JpegDecoder;
     use zune_jpeg::zune_core::bytestream::ZCursor;
     use zune_jpeg::zune_core::colorspace::ColorSpace;
@@ -192,11 +216,15 @@ pub fn decode_jpeg(data: &[u8]) -> Option<DecodedImage> {
 
     let options = DecoderOptions::default().jpeg_set_out_colorspace(ColorSpace::RGBA);
     let mut decoder = JpegDecoder::new_with_options(ZCursor::new(data), options);
-    let pixels = decoder.decode().ok()?;
+    decoder.decode_headers().ok()?;
     let (width, height) = decoder.dimensions()?;
     let width = u32::try_from(width).ok()?;
     let height = u32::try_from(height).ok()?;
-    let expected_len = width as usize * height as usize * 4;
+    let expected_len = kitty::rgba_bytes(width, height)?;
+    if expected_len > max_bytes {
+        return None;
+    }
+    let pixels = decoder.decode().ok()?;
     if pixels.len() != expected_len {
         return None;
     }

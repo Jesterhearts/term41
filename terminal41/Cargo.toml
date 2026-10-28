@@ -6,9 +6,7 @@ edition = "2024"
 [dependencies]
 base64.workspace         = true
 bitflags.workspace       = true
-bon                      = { version = "3.10.3", default-features = false, features = [
-  "std"
-] }
+bon                      = { version = "3.10.3", default-features = false, features = ["std"] }
 clip41.workspace         = true
 config41.workspace       = true
 font41.workspace         = true
@@ -28,3 +26,7 @@ unicode-width.workspace  = true
 utils41.workspace        = true
 vte-mode41.workspace     = true
 vtepp.workspace          = true
+
+[dev-dependencies]
+flate2.workspace = true
+png.workspace    = true

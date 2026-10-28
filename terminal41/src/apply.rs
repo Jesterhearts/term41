@@ -267,7 +267,7 @@ pub fn place_sixel_image(
     terminal.active.images.insert(
         id,
         PlacedImage {
-            image,
+            image: crate::PlacedImageData::Inline(image),
             id,
             kitty_image_id: None,
             kitty_placement_id: None,

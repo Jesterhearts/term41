@@ -295,8 +295,14 @@ pub(crate) fn visible_images(
     let view = selection::active_viewport(screen, viewport);
     let (viewport_top, viewport_bottom) = image_viewport_bounds(screen, view);
 
-    let mut visible =
-        visible_physical_images(screen, cell_height, viewport_top, viewport_bottom, now);
+    let mut visible = visible_physical_images(
+        screen,
+        cell_height,
+        viewport_top,
+        viewport_bottom,
+        kitty_images,
+        now,
+    );
     append_unicode_placeholder_images(
         &mut visible,
         screen,
@@ -350,6 +356,7 @@ fn visible_physical_images(
     cell_height: u32,
     viewport_top: usize,
     viewport_bottom: usize,
+    kitty_images: &image41::kitty::KittyImageStore,
     now: Instant,
 ) -> Vec<VisibleImage> {
     let mut visible = Vec::new();
@@ -361,6 +368,7 @@ fn visible_physical_images(
             cell_height,
             viewport_top,
             viewport_bottom,
+            kitty_images,
             now,
         );
         return visible;
@@ -375,6 +383,7 @@ fn visible_physical_images(
             cell_height,
             viewport_top,
             viewport_bottom,
+            kitty_images,
             now,
         );
         rendered_base += screen::command_block_rendered_rows_len(block) + 1;
@@ -386,11 +395,13 @@ fn visible_physical_images(
         cell_height,
         viewport_top,
         viewport_bottom,
+        kitty_images,
         now,
     );
     visible
 }
 
+#[allow(clippy::too_many_arguments)]
 fn append_visible_physical_images<'a>(
     visible: &mut Vec<VisibleImage>,
     images: impl Iterator<Item = &'a PlacedImage>,
@@ -398,6 +409,7 @@ fn append_visible_physical_images<'a>(
     cell_height: u32,
     viewport_top: usize,
     viewport_bottom: usize,
+    kitty_images: &image41::kitty::KittyImageStore,
     now: Instant,
 ) {
     for img in images {
@@ -407,10 +419,50 @@ fn append_visible_physical_images<'a>(
         if rendered_row >= viewport_bottom || img_bottom <= viewport_top {
             continue;
         }
-        let elapsed = now.saturating_duration_since(img.placed_at);
+        let (image, id, frame_index, next_frame_in) = match &img.image {
+            crate::PlacedImageData::Inline(image) => {
+                let elapsed = now.saturating_duration_since(img.placed_at);
+                let next_frame_in = image
+                    .is_animated()
+                    .then_some(std::time::Duration::from_millis(16));
+                (
+                    image.clone(),
+                    img.id,
+                    image.frame_at(elapsed),
+                    next_frame_in,
+                )
+            }
+            crate::PlacedImageData::Kitty {
+                generation,
+                source_rect,
+            } => {
+                let Some(image_id) = img.kitty_image_id else {
+                    continue;
+                };
+                if kitty_images.image_generation(image_id) != *generation {
+                    continue;
+                }
+                let Some(presentation) = kitty_images.presentation(image_id, now) else {
+                    continue;
+                };
+                let [src_x, src_y, src_w, src_h] = *source_rect;
+                let image = image41::kitty::crop_source_rect(
+                    presentation.image.clone(),
+                    &image41::kitty::KittyCommand {
+                        src_x,
+                        src_y,
+                        src_w,
+                        src_h,
+                        ..Default::default()
+                    },
+                );
+                let id = physical_visible_image_id(image_id, presentation.revision, img.id);
+                (image, id, 0, presentation.next_frame_in)
+            }
+        };
         visible.push(VisibleImage {
-            image: img.image.clone(),
-            id: img.id,
+            image,
+            id,
             kitty_image_id: img.kitty_image_id,
             screen_row: rendered_row as i32 - viewport_top as i32,
             screen_col: img.col,
@@ -418,7 +470,8 @@ fn append_visible_physical_images<'a>(
             cell_y_offset: img.cell_y_offset,
             display_width: img.display_width,
             display_height: img.display_height,
-            frame_index: img.image.frame_at(elapsed),
+            frame_index,
+            next_frame_in,
             z_index: img.z_index,
         });
     }
@@ -586,7 +639,7 @@ fn append_unicode_placeholder_images_from_rows<'a>(
             };
             previous = Some(cell);
 
-            let Some((image_id, placement, image)) = resolve_placeholder_image(kitty_images, cell)
+            let Some((image_id, placement, _)) = resolve_placeholder_image(kitty_images, cell)
             else {
                 continue;
             };
@@ -606,7 +659,10 @@ fn append_unicode_placeholder_images_from_rows<'a>(
                 continue;
             }
 
-            let image = virtual_source_image(image, placement);
+            let Some(presentation) = kitty_images.presentation(image_id, now) else {
+                continue;
+            };
+            let image = virtual_source_image(presentation.image, placement);
             let (display_width, display_height) =
                 virtual_display_size(&image, placement, cell_width, cell_height);
             if display_width == 0 || display_height == 0 {
@@ -616,13 +672,11 @@ fn append_unicode_placeholder_images_from_rows<'a>(
             if anchor_row >= viewport_bottom || anchor_row + img_rows <= viewport_top {
                 continue;
             }
-            let elapsed = now.saturating_duration_since(placement.created_at);
-            let frame_index = image.frame_at(elapsed);
             visible.push(VisibleImage {
                 image,
                 id: virtual_visible_image_id(
                     image_id,
-                    kitty_images.image_generation(image_id),
+                    presentation.revision,
                     placement.generation,
                     placement.placement_id,
                 ),
@@ -633,7 +687,8 @@ fn append_unicode_placeholder_images_from_rows<'a>(
                 cell_y_offset: placement.cell_y_offset,
                 display_width,
                 display_height,
-                frame_index,
+                frame_index: 0,
+                next_frame_in: presentation.next_frame_in,
                 z_index: placement.z_index,
             });
         }
@@ -816,6 +871,17 @@ fn virtual_visible_image_id(
         hash = hash.wrapping_mul(0x0000_0100_0000_01b3);
     }
     hash | (1_u64 << 63)
+}
+
+fn physical_visible_image_id(
+    image_id: u32,
+    revision: u64,
+    placement_id: u64,
+) -> u64 {
+    // Physical and virtual placement counters can have the same value. Keep
+    // their cache keys in separate namespaces even when their crops differ.
+    let hash = virtual_visible_image_id(image_id, revision, placement_id, 0);
+    (hash & ((1_u64 << 62) - 1)) | (1_u64 << 62)
 }
 
 fn kitty_diacritic_value(ch: char) -> Option<u8> {
@@ -1005,6 +1071,7 @@ mod tests {
             display_width: 1,
             display_height: 1,
             frame_index: 0,
+            next_frame_in: None,
             z_index,
         }
     }
@@ -1018,7 +1085,11 @@ mod tests {
         term.active.images.insert(
             id,
             PlacedImage {
-                image: image41::DecodedImage::single_frame(1, 16, vec![0, 0, 0, 255]),
+                image: crate::PlacedImageData::Inline(image41::DecodedImage::single_frame(
+                    1,
+                    16,
+                    vec![0, 0, 0, 255],
+                )),
                 id,
                 kitty_image_id: None,
                 kitty_placement_id: None,

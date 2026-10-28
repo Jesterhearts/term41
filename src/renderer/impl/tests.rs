@@ -484,6 +484,7 @@ mod geometry_tests {
             display_width: 1,
             display_height: 1,
             frame_index: 0,
+            next_frame_in: None,
             z_index,
         }
     }

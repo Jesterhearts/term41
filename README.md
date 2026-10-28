@@ -91,19 +91,19 @@ Legend:
 
 ### Kitty Protocols
 
-| Area                                   | Status                        | Notes                                                                                                                        |
-| -------------------------------------- | ----------------------------- | ---------------------------------------------------------------------------------------------------------------------------- |
-| Kitty keyboard protocol                | ✅ Supported                  | Per-screen mode stacks, alternate keys, press/repeat/release events, associated text, IME commits, and 7-bit/8-bit controls. |
-| Kitty graphics direct payloads         | ✅ Supported                  | RGB, RGBA, PNG, zlib compression, chunking, transmit, transmit-and-display, and placement.                                   |
-| Kitty graphics file/temp-file payloads | ✅ Supported                  | File and temp-file media with byte range support and safe temp-file deletion rules.                                          |
-| Kitty graphics placement model         | ✅ Supported                  | Image IDs, image numbers, placement IDs, relative placements, cell offsets, z-index, and expanded delete selectors.          |
-| Kitty graphics shared memory (`t=s`)   | ❌ Unplanned                  | Rejected as a local cross-process attack surface.                                                                            |
-| Kitty graphics Unicode placeholders    | ✅ Supported                  | `U=1` virtual placements render from `U+10EEEE` placeholder cells with row/column/image-id combining marks.                  |
-| Kitty graphics animation actions       | 🟨 Planned, not supported yet | Needs separate frame mutation, lifecycle, and quota design.                                                                  |
-| Kitty text sizing protocol             | 🟦 Watching                   | Could be useful, but affects shaping, selection, hit testing, scrollback, and reflow.                                        |
-| Kitty mouse pointer shapes             | 🟦 Watching                   | Reasonable if real applications use it; should stay scoped to terminal content.                                              |
-| Kitty color protocol additions         | 🟦 Watching                   | Watch for real app demand beyond existing OSC 4/10/11 and DEC color support.                                                 |
-| Kitty file transfer                    | ❌ Unplanned                  | Local file brokerage from untrusted PTY output is outside scope.                                                             |
+| Area                                   | Status       | Notes                                                                                                                        |
+| -------------------------------------- | ------------ | ---------------------------------------------------------------------------------------------------------------------------- |
+| Kitty keyboard protocol                | ✅ Supported | Per-screen mode stacks, alternate keys, press/repeat/release events, associated text, IME commits, and 7-bit/8-bit controls. |
+| Kitty graphics direct payloads         | ✅ Supported | RGB, RGBA, PNG, zlib compression, chunking, transmit, transmit-and-display, and placement.                                   |
+| Kitty graphics file/temp-file payloads | ✅ Supported | File and temp-file media with byte range support and safe temp-file deletion rules.                                          |
+| Kitty graphics placement model         | ✅ Supported | Image IDs, image numbers, placement IDs, relative placements, cell offsets, z-index, and expanded delete selectors.          |
+| Kitty graphics shared memory (`t=s`)   | ❌ Unplanned | Rejected as a local cross-process attack surface.                                                                            |
+| Kitty graphics Unicode placeholders    | ✅ Supported | `U=1` virtual placements render from `U+10EEEE` placeholder cells with row/column/image-id combining marks.                  |
+| Kitty graphics animation actions       | Supported    | Frame upload/editing, composition, deletion, client-driven selection, and timed playback with loading mode and loop limits.  |
+| Kitty text sizing protocol             | 🟦 Watching  | Could be useful, but affects shaping, selection, hit testing, scrollback, and reflow.                                        |
+| Kitty mouse pointer shapes             | 🟦 Watching  | Reasonable if real applications use it; should stay scoped to terminal content.                                              |
+| Kitty color protocol additions         | 🟦 Watching  | Watch for real app demand beyond existing OSC 4/10/11 and DEC color support.                                                 |
+| Kitty file transfer                    | ❌ Unplanned | Local file brokerage from untrusted PTY output is outside scope.                                                             |
 
 ### iTerm2 / OSC 1337
 
@@ -264,10 +264,18 @@ modal applies only to the single clipboard request that triggered the prompt.
 ### Images and Media
 
 - sixel graphics
-- Kitty graphics protocol, including Unicode placeholder placements
+- Kitty graphics protocol, including Unicode placeholder placements and animation frames
 - OSC 1337 inline images
 - PNG and JPEG always available
 - GIF/video formats available with the `ffmpeg` feature
+
+Kitty animation commands (`a=f`, `a=a`, `a=c`, and `a=d,d=f/F`) work without FFmpeg. Frames share
+one clock across physical and Unicode placeholder placements. Each frame is stored as a full RGBA
+canvas and counts toward `kitty_graphics_storage_bytes` (128 MiB by default); each image can have at
+most 4096 frames. New frames that exceed either limit return `ENOSPC` without changing the image.
+
+To try terminal-driven playback, run `python3 examples/kitty_animation.py`. The program exits after
+uploading the frames, and the terminal plays three loops.
 
 ### Input, Selection, and Shell Integration
 

@@ -1,5 +1,6 @@
 use std::collections::BTreeMap;
 use std::collections::VecDeque;
+use std::time::Duration;
 use std::time::Instant;
 
 use image41::DecodedImage;
@@ -18,8 +19,8 @@ pub fn is_kitty_unicode_placeholder_cell(cell: &str) -> bool {
 /// Inline image placed in the terminal grid.
 #[derive(Debug, Clone)]
 pub struct PlacedImage {
-    /// Decoded image pixels and frames.
-    pub image: DecodedImage,
+    /// Inline pixels or a reference to shared Kitty frame data.
+    pub image: PlacedImageData,
     /// Terminal-local image id used for storage and renderer diffing.
     pub id: u64,
     /// Kitty protocol image id, when this placement came from kitty graphics.
@@ -44,10 +45,22 @@ pub struct PlacedImage {
     /// Kitty z-index. Negative images render below text; zero and positive
     /// images render above text. Sixel/iTerm placements use zero.
     pub z_index: i32,
-    /// Wall-clock timestamp of placement. Drives the animation clock for
-    /// multi-frame images (`Instant::now() - placed_at` modulo
-    /// `image.cycle_duration()` selects the current frame).
+    /// Placement time for inline GIF/video playback. Kitty placements use the
+    /// shared image clock instead.
     pub placed_at: Instant,
+}
+
+#[derive(Debug, Clone)]
+pub enum PlacedImageData {
+    Inline(DecodedImage),
+    Kitty {
+        /// Store identity prevents a stale placement from binding to a reused
+        /// image id.
+        generation: u64,
+        /// Source x, y, width, height. Zero dimensions use the remaining image
+        /// area.
+        source_rect: [u32; 4],
+    },
 }
 
 /// A snapshot of an image visible in the current viewport.
@@ -74,9 +87,12 @@ pub struct VisibleImage {
     pub display_width: u32,
     /// Final rendered pixel height (see [`PlacedImage::display_height`]).
     pub display_height: u32,
-    /// Index into `image.frames` to render right now. Always `0` for static
-    /// images; selected by [`DecodedImage::frame_at`] for animated ones.
+    /// Index into `image.frames` to render. Kitty snapshots contain only the
+    /// selected frame, at index zero. Inline animations use
+    /// [`DecodedImage::frame_at`].
     pub frame_index: usize,
+    /// Time until the next animation change, or none when no redraw is needed.
+    pub next_frame_in: Option<Duration>,
     /// Vertical stacking order.
     pub z_index: i32,
 }
@@ -401,7 +417,7 @@ mod tests {
         term.active.images.insert(
             id,
             PlacedImage {
-                image: DecodedImage::single_frame(1, height_px, vec![]),
+                image: PlacedImageData::Inline(DecodedImage::single_frame(1, height_px, vec![])),
                 id,
                 kitty_image_id: None,
                 kitty_placement_id: None,
