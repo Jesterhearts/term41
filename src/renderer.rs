@@ -282,7 +282,7 @@ impl RenderHost {
 
         if !cfg!(feature = "hardware-accelerated") {
             info!("hardware acceleration disabled; using software rendering");
-            self.run_software_loop();
+            self.run_software_loop(&startup_release_rx);
         }
 
         let mut last_frame_time = Instant::now();
@@ -298,28 +298,7 @@ impl RenderHost {
             last_frame_time = Instant::now();
             first_frame = false;
 
-            // Batch-drain all pending input events from the window thread.
-            // Clone into a local buffer so we can commit() (freeing ring
-            // buffer slots for the writer) before processing, which also
-            // avoids a borrow conflict with &mut self in handle_render_event.
-            self.drain_render_events();
-
-            // Drain child-exit notifications.
-            self.drain_child_exit_notifications();
-
-            // Hot-reload config if the watcher flagged a change.
-            self.reload_config_if_requested();
             self.sync_loaded_font_metrics();
-
-            if self.should_exit || self.event_rx.is_abandoned() {
-                break;
-            }
-
-            // Keep the IME's candidate popup anchored to the text cursor as
-            // it moves (normal typing, cursor-movement escapes, etc.). The
-            // call dedupes against the last position, so idle frames cost
-            // one comparison and nothing else.
-            self.update_ime_cursor_area();
 
             if self.renderer.is_none() {
                 let prepared = tracing::debug_span!("prepare_renderer").in_scope(|| {
@@ -337,7 +316,7 @@ impl RenderHost {
                     // still owns a working software presenter. Leave it in
                     // place instead of taking the session down with us.
                     error!("gpu: initialization failed; continuing with software rendering");
-                    self.run_software_loop();
+                    self.run_software_loop(&startup_release_rx);
                 };
 
                 let _ = self.proxy.send_event(AppEvent::ReleaseStartupSurface);
@@ -375,6 +354,14 @@ impl RenderHost {
                 }
             }
 
+            // Tab actions queued during startup need the initial tab in place.
+            self.drain_render_events();
+            self.drain_child_exit_notifications();
+            self.reload_config_if_requested();
+            if self.should_exit || self.event_rx.is_abandoned() {
+                break;
+            }
+            self.update_ime_cursor_area();
             self.renderer.as_mut().unwrap().advance_background_frame();
             self.render_frame();
 
@@ -390,22 +377,26 @@ impl RenderHost {
         std::process::exit(0);
     }
 
-    /// Service events without a GPU renderer. The window thread keeps
-    /// presenting through its [`StartupPresenter`], so this thread only has to
-    /// drain events, reload config, and track font metrics.
+    /// Manage the sessions while the window thread draws their snapshots.
     ///
     /// Reached either because the `hardware-accelerated` feature is disabled or
     /// because GPU initialization failed before the startup surface was
     /// released. Note that the software presenter draws terminal content,
     /// tab bar, gutter, and command editor only -- overlays such as search,
     /// the command palette, modals, and toasts have no software path.
-    fn run_software_loop(&mut self) -> ! {
+    fn run_software_loop(
+        &mut self,
+        startup_release_rx: &mpsc::Receiver<Vec<Tab>>,
+    ) -> ! {
         // Tell the window thread the presenter is now permanent, so UI it
         // cannot draw degrades instead of waiting to be seen.
         let _ = self.proxy.send_event(AppEvent::GpuRendererUnavailable);
+        let Ok(tabs) = startup_release_rx.recv() else {
+            std::process::exit(0);
+        };
+        self.accept_startup_tabs(tabs);
 
         loop {
-            std::thread::park();
             self.drain_render_events();
             self.drain_child_exit_notifications();
             self.reload_config_if_requested();
@@ -416,6 +407,10 @@ impl RenderHost {
             }
 
             self.update_ime_cursor_area();
+            if let Some(window) = &self.window {
+                window.request_redraw();
+            }
+            std::thread::park();
         }
 
         std::process::exit(0);
@@ -499,7 +494,8 @@ impl RenderHost {
             return Some(FRAME_DURATION.saturating_sub(last_frame_duration));
         }
         let tab = self.active_tab()?;
-        let snap = tab.snapshot_output.output_buffer();
+        let output = tab.snapshot_output.lock();
+        let snap = output.output_buffer();
         let cursor_wait = if snap.cursor.is_some() && snap.cursor_style.blink {
             Some(r#impl::CURSOR_BLINK_HALF_PERIOD.saturating_sub(last_frame_duration))
         } else {
@@ -512,6 +508,16 @@ impl RenderHost {
             .min()
             .map(|delay| delay.saturating_sub(last_frame_duration));
         cursor_wait.into_iter().chain(image_wait).min()
+    }
+
+    fn sync_software_layout(&self) {
+        if self.renderer.is_none() {
+            let _ = self.proxy.send_event(AppEvent::SoftwareLayout {
+                fonts: Box::new(self.font_system.fork()),
+                gutter: self.config.gutter,
+                new_tab_text: self.config.new_tab_text.clone(),
+            });
+        }
     }
 
     // -- Event dispatch -----------------------------------------------------
@@ -559,8 +565,8 @@ impl RenderHost {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let snap = tab.snapshot_output.output_buffer();
-        let Some((cursor_row, cursor_col)) = snap.cursor else {
+        let cursor = tab.snapshot_output.lock().output_buffer().cursor;
+        let Some((cursor_row, cursor_col)) = cursor else {
             return;
         };
 
@@ -766,10 +772,9 @@ impl RenderHost {
         if let Some(renderer) = self.renderer.as_mut() {
             renderer.reset_glyph_atlas();
         }
-        self.sync_input_state();
-        // The compositor will follow up with a Resized event carrying the
-        // new physical dimensions, which triggers handle_resize and
-        // recalculates the grid with the updated cell metrics.
+        self.apply_font_cell_dimensions_to_tabs();
+        self.recalculate_grid_size();
+        self.sync_software_layout();
     }
 
     // -- Resize -------------------------------------------------------------
@@ -873,17 +878,9 @@ impl RenderHost {
         let id = TabId(self.next_tab_id);
         self.next_tab_id += 1;
 
-        let (cols, rows) = if let Some(renderer) = &self.renderer {
-            let (width, height) = self.window_size;
-            let gutter_px = renderer.gutter_width_px(self.font_system.cell_width);
-            let usable_width = width.saturating_sub(gutter_px);
-            let tab_bar_px = self.font_system.cell_height;
-            let usable_height = height.saturating_sub(tab_bar_px);
-            self.font_system
-                .grid_dimensions(usable_width, usable_height)
-        } else {
-            (INITIAL_COLS, INITIAL_ROWS)
-        };
+        let (cols, rows) = self
+            .current_window_grid_size()
+            .unwrap_or((INITIAL_COLS, INITIAL_ROWS));
 
         // The budget comes from the config, never from a neighbouring tab.
         // Reading it off the active tab's visible screen picked up the alt
@@ -920,10 +917,7 @@ impl RenderHost {
         // event rather than by direct handoff.
         let _ = self.proxy.send_event(AppEvent::RegisterInputEndpoint {
             tab_id: id,
-            terminal: session.endpoint.terminal,
-            terminal_thread: session.endpoint.terminal_thread,
-            writer: session.endpoint.writer,
-            recorder: session.endpoint.recorder,
+            endpoint: Box::new(session.endpoint),
         });
 
         self.tabs.push(session.tab);
@@ -1021,8 +1015,8 @@ impl RenderHost {
             self.config.gutter = cfg.gutter;
             if let Some(renderer) = self.renderer.as_mut() {
                 renderer.set_gutter_enabled(cfg.gutter);
-                self.recalculate_grid_size();
             }
+            self.recalculate_grid_size();
             self.sync_input_state();
         }
 
@@ -1060,6 +1054,7 @@ impl RenderHost {
         if status_line_changed {
             self.recalculate_grid_size();
         }
+        self.sync_software_layout();
         if (cfg.opacity - self.config.opacity).abs() > f32::EPSILON {
             warn!(
                 "config: opacity changed ({} → {}); restart to apply",
@@ -1109,11 +1104,11 @@ impl RenderHost {
             .position(|t| t.id == self.active_tab_id)
             .expect("active tab must exist");
         let active_tab_id = self.tabs[active_idx].id;
-        self.tabs[active_idx].snapshot_output.update();
+        self.tabs[active_idx].snapshot_output.lock().update();
         let script_output = self.sync_scripts(active_idx);
         self.sync_window_title(&script_output);
 
-        let mut snap = self.tabs[active_idx].snapshot_output.read().clone();
+        let mut snap = self.tabs[active_idx].snapshot_output.lock().read().clone();
         let suspend_terminal_area = should_suspend_terminal_area(
             active_tab_id,
             self.last_rendered_tab_id,
@@ -1128,6 +1123,7 @@ impl RenderHost {
                 .map(|(idx, t)| {
                     let terminal_title = t
                         .snapshot_output
+                        .lock()
                         .read()
                         .current_title
                         .clone()
@@ -1271,10 +1267,13 @@ impl RenderHost {
         let Some(tab) = self.active_tab() else {
             return;
         };
-        let base = script_output
-            .title
-            .clone()
-            .or_else(|| tab.snapshot_output.output_buffer().current_title.clone());
+        let base = script_output.title.clone().or_else(|| {
+            tab.snapshot_output
+                .lock()
+                .output_buffer()
+                .current_title
+                .clone()
+        });
         let want = if self.tabs.len() > 1 {
             let idx = self
                 .tabs
@@ -1327,6 +1326,7 @@ impl RenderHost {
         ScriptInput {
             tab_title: self.tabs[active_idx]
                 .snapshot_output
+                .lock()
                 .output_buffer()
                 .current_title
                 .clone(),

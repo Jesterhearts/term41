@@ -68,10 +68,7 @@ pub(crate) enum AppEvent {
     },
     RegisterInputEndpoint {
         tab_id: TabId,
-        terminal: Arc<Mutex<Terminal>>,
-        terminal_thread: Arc<OnceLock<Thread>>,
-        writer: PtyWriter,
-        recorder: RecorderControl,
+        endpoint: Box<InputEndpoint>,
     },
     RemoveInputEndpoint(TabId),
     SetActiveInputTab(Option<TabId>),
@@ -88,6 +85,11 @@ pub(crate) enum AppEvent {
     /// The render thread could not initialize a GPU renderer and is staying on
     /// the software path for the rest of the session.
     GpuRendererUnavailable,
+    SoftwareLayout {
+        fonts: Box<font41::FontSystem>,
+        gutter: bool,
+        new_tab_text: SmolStr,
+    },
     DismissRecordingPopup(u64),
     ShowToast(String),
     DismissToast(u64),
@@ -96,7 +98,7 @@ pub(crate) enum AppEvent {
 pub(crate) struct Tab {
     pub(crate) id: TabId,
     pub(crate) terminal: Arc<Mutex<Terminal>>,
-    pub(crate) snapshot_output: TermSnapshotOutput,
+    pub(crate) snapshot_output: Arc<Mutex<TermSnapshotOutput>>,
     pub(crate) pty: Pty,
     pub(crate) window_sync_epoch: u64,
     /// Kept alive for its Drop impl which signals the thread to stop.
@@ -104,6 +106,7 @@ pub(crate) struct Tab {
 }
 
 pub(crate) struct InputEndpoint {
+    pub(crate) snapshot_output: Arc<Mutex<TermSnapshotOutput>>,
     pub(crate) terminal: Arc<Mutex<Terminal>>,
     pub(crate) terminal_thread: Arc<OnceLock<Thread>>,
     pub(crate) writer: PtyWriter,

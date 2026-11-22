@@ -1,6 +1,5 @@
 use std::sync::Arc;
 
-use commands41::CommandEditor;
 use config41::keybindings::Action;
 use winit::application::ApplicationHandler;
 use winit::event::ElementState;
@@ -16,7 +15,6 @@ use winit::window::Window;
 use winit::window::WindowId;
 
 use super::AppEvent;
-use super::InputEndpoint;
 use super::PhysicalModifierState;
 use super::RecordingPopupState;
 use super::WindowHost;
@@ -99,28 +97,28 @@ impl ApplicationHandler<AppEvent> for WindowHost {
             }
             AppEvent::GpuRendererUnavailable => {
                 self.startup.gpu_unavailable = true;
+                if let Some(tx) = self.startup.release_tx.take() {
+                    let _ = tx.send(std::mem::take(&mut self.startup.tabs));
+                }
+            }
+            AppEvent::SoftwareLayout {
+                fonts,
+                gutter,
+                new_tab_text,
+            } => {
+                if let Some(presenter) = &mut self.startup.presenter {
+                    presenter.set_layout(*fonts, gutter);
+                    self.metrics.new_tab_text = new_tab_text;
+                    if let Some(window) = &self.window {
+                        window.request_redraw();
+                    }
+                }
             }
             AppEvent::ApplyTerminalEffects { tab_id, effects } => {
                 apply_terminal_effects(self, tab_id, effects);
             }
-            AppEvent::RegisterInputEndpoint {
-                tab_id,
-                terminal,
-                writer,
-                recorder,
-                terminal_thread,
-            } => {
-                self.input.endpoints.insert(
-                    tab_id,
-                    InputEndpoint {
-                        terminal,
-                        writer,
-                        recorder,
-                        terminal_thread,
-                        command_editor: CommandEditor::new(),
-                        shell_editing: Default::default(),
-                    },
-                );
+            AppEvent::RegisterInputEndpoint { tab_id, endpoint } => {
+                self.input.endpoints.insert(tab_id, *endpoint);
                 if self.input.active_tab == Some(tab_id) {
                     refresh_command_editor_view(self);
                 }

@@ -132,6 +132,7 @@ pub(crate) fn spawn_session(
     terminal.apply_settings(settings::RuntimeSettings::from(config));
 
     let (snapshot_publisher, snapshot_output) = terminal41::terminal_snapshot_buffer(&mut terminal);
+    let snapshot_output = Arc::new(Mutex::new(snapshot_output));
     let terminal = Arc::new(Mutex::new(terminal));
     let recorder = RecorderControl::new();
 
@@ -159,6 +160,7 @@ pub(crate) fn spawn_session(
 
     Ok(Session {
         endpoint: InputEndpoint {
+            snapshot_output: snapshot_output.clone(),
             terminal: terminal.clone(),
             terminal_thread: terminal_thread_handle,
             writer,

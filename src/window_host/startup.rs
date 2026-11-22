@@ -90,39 +90,24 @@ pub(crate) fn active_input_target(input: &mut InputRuntime) -> Option<&mut Input
 }
 
 pub(crate) fn startup_tab_titles(
-    startup: &mut StartupState,
+    input: &InputRuntime,
     render: &RenderRuntime,
-    active_tab: Option<TabId>,
 ) -> Vec<(String, bool)> {
     let tab_order = render.input_state.lock().tab_order.clone();
-    let mut titles: Vec<(String, bool)> = tab_order
+    tab_order
         .iter()
         .filter_map(|tab_id| {
-            let tab = startup.tabs.iter_mut().find(|tab| tab.id == *tab_id)?;
+            let tab = input.endpoints.get(tab_id)?;
             let title = tab
                 .snapshot_output
+                .lock()
                 .read()
                 .current_title
                 .clone()
                 .unwrap_or_else(|| "Shell".to_owned());
-            Some((title, Some(*tab_id) == active_tab))
+            Some((title, Some(*tab_id) == input.active_tab))
         })
-        .collect();
-
-    if titles.is_empty()
-        && let Some(tab_id) = active_tab
-        && let Some(tab) = startup.tabs.iter_mut().find(|tab| tab.id == tab_id)
-    {
-        let title = tab
-            .snapshot_output
-            .read()
-            .current_title
-            .clone()
-            .unwrap_or_else(|| "Shell".to_owned());
-        titles.push((title, true));
-    }
-
-    titles
+        .collect()
 }
 
 pub(crate) fn startup_interaction_snapshot(
@@ -148,12 +133,21 @@ pub(crate) fn present_startup_frame(
     let Some(tab_id) = host.input.active_tab else {
         return false;
     };
-    let Some(active_startup_tab_idx) = host.startup.tabs.iter().position(|tab| tab.id == tab_id)
-    else {
+    let Some(presenter) = host.startup.presenter.as_mut() else {
+        return false;
+    };
+    let size = window.inner_size();
+    if size.width == 0 || size.height == 0 {
+        return false;
+    }
+    if presenter.sync_loaded_fonts() && host.startup.gpu_unavailable {
+        unpark_thread_if_started(&host.render.thread_handle);
+    }
+    let Some(tab) = host.input.endpoints.get(&tab_id) else {
         return false;
     };
 
-    let tab_titles = startup_tab_titles(&mut host.startup, &host.render, host.input.active_tab);
+    let tab_titles = startup_tab_titles(&host.input, &host.render);
     let tabs: Vec<renderer::TabInfo<'_>> = tab_titles
         .iter()
         .map(|(label, active)| renderer::TabInfo {
@@ -161,10 +155,19 @@ pub(crate) fn present_startup_frame(
             active: *active,
         })
         .collect();
-    let active_startup_tab = &mut host.startup.tabs[active_startup_tab_idx];
-    let snap = active_startup_tab.snapshot_output.read().clone();
+    let startup_grid = host
+        .startup
+        .tabs
+        .iter_mut()
+        .find(|tab| tab.id == tab_id)
+        .map(|tab| presenter.fit_startup_tab(tab, size));
+    let snap = tab.snapshot_output.lock().read().clone();
+    if startup_grid.is_some_and(|grid| grid != (snap.viewport_cols, snap.total_rows)) {
+        // The PTY thread requests a redraw when it publishes the resized grid.
+        return false;
+    }
     let visible_images = {
-        let terminal = active_startup_tab.terminal.lock();
+        let terminal = tab.terminal.lock();
         terminal41::view::visible_images(
             terminal.active(),
             terminal.viewport(),
@@ -183,12 +186,10 @@ pub(crate) fn present_startup_frame(
         command_editor_view_for_input_tab(&input_state, tab_id).cloned()
     };
     let maximized = window.is_maximized();
-    let Some(presenter) = host.startup.presenter.as_mut() else {
-        return false;
-    };
 
     let delay = presenter.present(
         window,
+        tab_id,
         snap,
         visible_images,
         &tabs,

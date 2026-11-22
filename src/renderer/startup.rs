@@ -36,6 +36,7 @@ use crate::renderer::TAB_MENU_ITEMS;
 use crate::renderer::TAB_MENU_WIDTH_CELLS;
 use crate::renderer::TabContextMenu;
 use crate::renderer::compute_gutter_width;
+use crate::renderer::grid::resize_tab_to_grid;
 use crate::renderer::gutter_popup_origin;
 use crate::renderer::r#impl::CURSOR_BLINK_HALF_PERIOD;
 use crate::renderer::r#impl::FAILURE;
@@ -58,6 +59,7 @@ use crate::renderer::paint::centered_ink_origin_x;
 use crate::renderer::paint::resolve_painted_cell;
 use crate::renderer::paint::status_line_label_row;
 use crate::renderer::paint::visible_row_cols;
+use crate::window_host::Tab;
 
 type StartupGlyphKey = (usize, u16, u8, bool, Option<font41::DrcsGeometryClass>);
 
@@ -84,6 +86,7 @@ pub(crate) struct StartupPresenter {
     gutter_enabled: bool,
     background: Option<CachedBackground>,
     first_frame: bool,
+    last_tab: Option<crate::window_host::TabId>,
     terminal_rows: Vec<RowSnapshot>,
     terminal_row_generations: Vec<u64>,
 }
@@ -124,14 +127,67 @@ impl StartupPresenter {
             gutter_enabled,
             background: background_path.and_then(|path| load_cached_background(&path)),
             first_frame: true,
+            last_tab: None,
             terminal_rows: Vec::new(),
             terminal_row_generations: Vec::new(),
         })
     }
 
+    pub(crate) fn sync_loaded_fonts(&mut self) -> bool {
+        let changed = self.font_system.sync_loaded_fonts();
+        if changed {
+            self.glyph_cache.clear();
+        }
+        changed
+    }
+
+    /// Before handoff the window thread owns the PTY. Use the same cells for
+    /// the shell and the presenter, even if fonts load while the GPU starts.
+    pub(crate) fn fit_startup_tab(
+        &self,
+        tab: &mut Tab,
+        size: winit::dpi::PhysicalSize<u32>,
+    ) -> (u32, u32) {
+        let fonts = &self.font_system;
+        let gutter = if self.gutter_enabled {
+            compute_gutter_width(fonts.cell_width)
+        } else {
+            0
+        };
+        let (cols, rows) = fonts.grid_dimensions(
+            size.width.saturating_sub(gutter),
+            size.height.saturating_sub(fonts.cell_height),
+        );
+        let mut terminal = tab.terminal.lock();
+        if (terminal.cell_width(), terminal.cell_height()) != (fonts.cell_width, fonts.cell_height)
+        {
+            terminal.set_cell_dimensions(fonts.cell_width, fonts.cell_height);
+        }
+        let current = (
+            terminal.viewport().cols,
+            terminal41::view::total_rows(terminal.active(), terminal.viewport()),
+        );
+        drop(terminal);
+        if current != (cols, rows) {
+            resize_tab_to_grid(tab, cols, rows);
+        }
+        (cols, rows)
+    }
+
+    pub(crate) fn set_layout(
+        &mut self,
+        fonts: FontSystem,
+        gutter: bool,
+    ) {
+        self.font_system = fonts;
+        self.gutter_enabled = gutter;
+        self.glyph_cache.clear();
+    }
+
     pub(crate) fn present(
         &mut self,
         window: &Arc<Window>,
+        tab_id: crate::window_host::TabId,
         mut snap: TermSnapshot,
         visible_images: Vec<VisibleImage>,
         tabs: &[TabInfo<'_>],
@@ -142,9 +198,6 @@ impl StartupPresenter {
         command_editor: Option<&commands41::CommandLineView>,
         maximized: bool,
     ) -> Option<Duration> {
-        if self.font_system.sync_loaded_fonts() {
-            self.glyph_cache.clear();
-        }
         if self.drcs_glyphs.as_ref().is_none_or(|glyphs| {
             !Arc::ptr_eq(glyphs, &snap.drcs_glyphs)
                 && !(glyphs.is_empty() && snap.drcs_glyphs.is_empty())
@@ -172,6 +225,9 @@ impl StartupPresenter {
         let mut layout = startup_frame_layout(&self.font_system, gutter_w, !tabs.is_empty());
         apply_terminal_layout_offsets(&mut layout, &snap);
 
+        if self.last_tab.replace(tab_id) != Some(tab_id) {
+            snap.reset_cached_rows = true;
+        }
         self.apply_terminal_snapshot_rows(&snap);
         snap.rows = self.terminal_rows.clone();
         let frame = build_startup_frame(snap, visible_images, *APP_START_TIME.get().unwrap());
