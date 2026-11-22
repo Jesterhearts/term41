@@ -36,7 +36,7 @@ font41               = { path = "font41" }
 history41            = { path = "history41" }
 hooks41              = { path = "hooks41" }
 icu_properties       = "2.4.0"
-image41              = { path = "image41" }
+image41              = { path = "image41", default-features = false }
 infer                = { version = "0.22.0", default-features = false }
 log                  = "0.4.34"
 nucleo-matcher       = "0.3.1"
