@@ -175,6 +175,10 @@ From a local checkout, use:
 cargo install --path . --locked
 ```
 
+In the current checkout, `--no-default-features` also selects software rendering. To keep GPU
+acceleration without the other default features, install with
+`cargo install --path . --locked --no-default-features --features hardware-accelerated`.
+
 To install the desktop launcher and icon assets for the current user:
 
 ```sh
@@ -193,14 +197,18 @@ scripts/install_desktop_assets.sh --exec "$HOME/.cargo/bin/term41"
 | Feature                | Default | Description                                                                                                       |
 | ---------------------- | ------- | ----------------------------------------------------------------------------------------------------------------- |
 | `ffmpeg`               | on      | Enables GIF/video decode for inline images and animated backgrounds. Requires host `libav*` development packages. |
-| `vulkan`               | on      | Uses Vulkan instead of OpenGL for rendering.                                                                      |
+| `hardware-accelerated` | on      | Uses the GPU renderer. When disabled, rendering stays in software.                                                |
+| `vulkan`               | on      | Enables the Vulkan backend for hardware-accelerated rendering.                                                    |
 | `wayland-data-control` | on      | Enables `zwlr_data_control_manager_v1` clipboard access on Wayland compositors that support it.                   |
 
-If you want a smaller build without ffmpeg, Vulkan, or Wayland data-control:
+To use software rendering and disable the other default features:
 
 ```sh
 cargo build --release --no-default-features
 ```
+
+Software rendering does not support background images. To use OpenGL acceleration with the other
+defaults disabled, add `--features hardware-accelerated` to the build command.
 
 ### Logging
 

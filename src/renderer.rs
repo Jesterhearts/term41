@@ -249,19 +249,11 @@ impl RenderHost {
 
     // -- Main loop ----------------------------------------------------------
 
-    #[cfg_attr(feature = "software-only", allow(unused_variables, unreachable_code))]
     pub fn run(
         &mut self,
         window_rx: mpsc::Receiver<(Arc<Window>, OwnedDisplayHandle)>,
         startup_release_rx: mpsc::Receiver<Vec<Tab>>,
     ) {
-        #[cfg(feature = "software-only")]
-        {
-            info!("software-only rendering mode enabled; GPU features will be disabled");
-            self.run_software_only(window_rx);
-            return;
-        }
-
         let mut frames = 0u64;
         let mut first_frame = true;
 
@@ -287,6 +279,11 @@ impl RenderHost {
         let initial_size = window.inner_size();
         self.window_size = (initial_size.width, initial_size.height);
         self.handle_resize(initial_size.width, initial_size.height);
+
+        if !cfg!(feature = "hardware-accelerated") {
+            info!("hardware acceleration disabled; using software rendering");
+            self.run_software_loop();
+        }
 
         let mut last_frame_time = Instant::now();
 
@@ -397,7 +394,7 @@ impl RenderHost {
     /// presenting through its [`StartupPresenter`], so this thread only has to
     /// drain events, reload config, and track font metrics.
     ///
-    /// Reached either because the `software-only` feature is enabled or
+    /// Reached either because the `hardware-accelerated` feature is disabled or
     /// because GPU initialization failed before the startup surface was
     /// released. Note that the software presenter draws terminal content,
     /// tab bar, gutter, and command editor only -- overlays such as search,
@@ -422,33 +419,6 @@ impl RenderHost {
         }
 
         std::process::exit(0);
-    }
-
-    #[cfg(feature = "software-only")]
-    fn run_software_only(
-        &mut self,
-        window_rx: mpsc::Receiver<(Arc<Window>, OwnedDisplayHandle)>,
-    ) {
-        let (window, _) = match window_rx.recv() {
-            Ok(wd) => wd,
-            Err(_) => return,
-        };
-        self.window = Some(window.clone());
-
-        let scale = self
-            .config
-            .dpi_scale
-            .map(|s| s as f64)
-            .unwrap_or_else(|| window.scale_factor());
-        if scale != 1.0 {
-            self.font_system.set_scale_factor(scale as f32);
-        }
-
-        let initial_size = window.inner_size();
-        self.window_size = (initial_size.width, initial_size.height);
-        self.handle_resize(initial_size.width, initial_size.height);
-
-        self.run_software_loop()
     }
 
     fn drain_render_events(&mut self) {

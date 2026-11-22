@@ -133,15 +133,14 @@ embed-resource = "3.0.12"
 ico            = "0.6.0"
 
 [features]
-default              = ["ffmpeg", "vulkan", "wayland-data-control"]
+default              = ["ffmpeg", "hardware-accelerated", "vulkan", "wayland-data-control"]
 deadlock-detection   = ["parking_lot/deadlock_detection"]
 # Pulls in ffmpeg-next so image protocols can decode formats outside the
 # built-in PNG path (animated GIF is the motivating case). Requires the
 # libav* dev packages on the host; leave off for lightweight builds.
 ffmpeg               = ["image41/ffmpeg"]
-# Software-only rendering mode which doesn't require a GPU or graphics drivers.
-# This does not currently work with background images.
-software-only        = []
+# Use the GPU renderer. Without this feature, keep the software presenter.
+hardware-accelerated = []
 # Adds a hook which tracks Ctrl+C hits in the PTY output stream, allowing us
 # to measure end-to-end latency of Ctrl+C for performance testing. Used only
 # for development.
